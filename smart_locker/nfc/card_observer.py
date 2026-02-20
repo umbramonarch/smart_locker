@@ -8,6 +8,7 @@ The main application thread consumes events from the queue.
 import enum
 import logging
 import queue
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -111,29 +112,52 @@ class LockerCardObserver(CardObserver):
 
     @staticmethod
     def _read_uid(card) -> str | None:
-        """Connect to card and read UID via APDU. Returns hex string or None."""
-        connection = None
-        try:
-            connection = card.createConnection()
-            connection.connect()
-            response, sw1, sw2 = connection.transmit(GET_UID)
-            apdu = APDUResponse.from_raw(response, sw1, sw2)
+        """Connect to card and read UID via APDU with retry logic.
 
-            if apdu.success and len(apdu.data) >= 4:
-                return apdu.uid_hex
-            else:
-                logger.warning("GET_UID failed: %s", apdu)
+        Attempts to read the UID multiple times with small delays to allow
+        the card to stabilize on the reader, enabling quick tap interactions.
+
+        Returns hex string or None.
+        """
+        max_attempts = 3
+        delay_between_attempts = 0.05  # 50ms between retries
+
+        for attempt in range(max_attempts):
+            connection = None
+            try:
+                # Small delay before first read to let card stabilize
+                if attempt == 0:
+                    time.sleep(0.02)  # 20ms initial delay
+
+                connection = card.createConnection()
+                connection.connect()
+                response, sw1, sw2 = connection.transmit(GET_UID)
+                apdu = APDUResponse.from_raw(response, sw1, sw2)
+
+                if apdu.success and len(apdu.data) >= 4:
+                    if attempt > 0:
+                        logger.debug("UID read successful on attempt %d", attempt + 1)
+                    return apdu.uid_hex
+                else:
+                    logger.warning("GET_UID failed on attempt %d: %s", attempt + 1, apdu)
+
+            except CardConnectionException:
+                if attempt < max_attempts - 1:
+                    logger.debug("Card connection failed on attempt %d, retrying...", attempt + 1)
+                else:
+                    logger.warning("Card removed too fast — could not read UID after %d attempts.", max_attempts)
+            except Exception:
+                logger.exception("Unexpected error reading card UID on attempt %d.", attempt + 1)
                 return None
+            finally:
+                if connection is not None:
+                    try:
+                        connection.disconnect()
+                    except Exception:
+                        pass
 
-        except CardConnectionException:
-            logger.warning("Card removed too fast — could not read UID.")
-            return None
-        except Exception:
-            logger.exception("Unexpected error reading card UID.")
-            return None
-        finally:
-            if connection is not None:
-                try:
-                    connection.disconnect()
-                except Exception:
-                    pass
+            # Wait before next attempt
+            if attempt < max_attempts - 1:
+                time.sleep(delay_between_attempts)
+
+        return None

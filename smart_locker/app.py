@@ -107,7 +107,7 @@ class SmartLockerApp:
 
     def _on_card_inserted(self, event: CardEvent) -> None:
         if event.uid is None:
-            print("Could not read card. Please hold card steady on the reader.")
+            print("Could not read card. Please try tapping again.")
             return
 
         with get_session() as db_session:
