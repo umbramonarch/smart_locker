@@ -18,9 +18,13 @@ smart_locker/
 │   └── logging_config.py        # Rotating file + console logging
 ├── smart_locker/
 │   ├── app.py                   # Main entry point (FastAPI server + NFC listener)
-│   ├── api/                     # REST API endpoints (planned)
-│   │   ├── routes.py            # /api/auth, /api/devices, /api/borrow, /api/return
-│   │   └── schemas.py           # Request/response models
+│   ├── api/                     # REST API layer (next to build)
+│   │   ├── routes.py            # POST /api/auth/tap · GET /api/devices · POST /api/borrow · POST /api/return
+│   │   └── schemas.py           # Pydantic request/response models
+│   ├── frontend/                # Touch display web UI ✓ built
+│   │   ├── index.html           # HTML screen structure (6 screens)
+│   │   ├── style.css            # All styling — colors, animations, layout
+│   │   └── app.js               # State machine, API calls, UI behaviour
 │   ├── nfc/                     # NFC reader interface (pyscard + APDU)
 │   │   ├── apdu.py              # APDU command definitions
 │   │   ├── card_observer.py     # Card insert/remove detection
@@ -41,8 +45,6 @@ smart_locker/
 │   └── services/                # Business logic
 │       ├── locker_service.py    # Borrow/return operations (5-device limit, admin overrides)
 │       └── user_service.py      # User enrollment, public/admin views
-├── frontend/                    # Touch display web UI (planned)
-│   └── ...                      # HTML/CSS/JS — dark theme, animations, device photos
 ├── static/
 │   └── devices/                 # Device photos (referenced by image_path in DB)
 ├── scripts/
@@ -50,11 +52,27 @@ smart_locker/
 │   ├── init_db.py               # Create database tables
 │   ├── enroll_card.py           # Enroll a new NFC card user
 │   └── import_devices.py        # Bulk import devices from Excel
-├── tests/                       # Unit tests (52 tests)
+├── tests/                       # Unit tests (52 tests, no hardware needed)
 ├── requirements.txt
 ├── .env.example
-└── GUIDE.md                     # Step-by-step setup and usage guide
+├── GUIDE.md                     # Step-by-step setup and usage guide
+└── README.md
 ```
+
+## Build Status
+
+| Layer | Status | Notes |
+|---|---|---|
+| NFC reader (pyscard) | ✅ Done | Card insert/remove, UID reading, retry logic |
+| Authentication | ✅ Done | HMAC lookup, session lifecycle |
+| Security (AES/HMAC) | ✅ Done | AES-256-GCM encryption, key management |
+| Database & ORM | ✅ Done | SQLAlchemy models, repositories |
+| Business logic | ✅ Done | Borrow/return rules, admin overrides, borrow limit |
+| Unit tests | ✅ Done | 52 tests, all passing, no hardware required |
+| Frontend UI | ✅ Done | 6-screen kiosk UI, animations, demo mode |
+| FastAPI REST API | 🔲 Next | Routes + schemas connecting frontend ↔ backend |
+| NFC → frontend bridge | 🔲 Next | SSE/WebSocket pushing card-tap events to the UI |
+| Kiosk deployment | 🔲 Next | Auto-start, Chromium kiosk mode, Windows service |
 
 ## Quick Start
 
@@ -66,7 +84,8 @@ pip install -r requirements.txt
 python -m scripts.generate_key
 
 # 3. Create .env file with the generated keys
-# (copy output from step 2 into .env)
+Copy-Item .env.example .env
+# then paste the generated keys into .env
 
 # 4. Initialize database
 python -m scripts.init_db
@@ -83,61 +102,61 @@ See **GUIDE.md** for detailed step-by-step instructions.
 ## System Architecture
 
 ```
-┌──────────────────────────────────────────────────────┐
-│            Touch Display (Chromium Kiosk Mode)        │
-│  ┌────────────────────────────────────────────────┐  │
-│  │  Frontend (HTML / CSS / JS)                    │  │
-│  │  Dark premium theme, smooth animations,        │  │
-│  │  device photos, touch-optimized UI             │  │
-│  └──────────────────┬─────────────────────────────┘  │
-│                     │ REST API                        │
-│  ┌──────────────────▼─────────────────────────────┐  │
-│  │  Backend (FastAPI)                             │  │
-│  │  /api/auth/tap · /api/devices · /api/borrow    │  │
-│  │  /api/return · /api/session/end                │  │
-│  └──────┬───────────────────────────┬─────────────┘  │
-│         │                           │                 │
-│  ┌──────▼──────────┐  ┌────────────▼──────────┐      │
-│  │  SQLite (SQLAlchemy)│  │  NFC Reader (ACR1252U)│   │
-│  │  users · devices    │  │  Background listener  │   │
-│  │  transaction_logs   │  │  Tap-and-go auth      │   │
-│  └─────────────────────┘  └───────────────────────┘   │
-└──────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│              Touch Display (Chromium Kiosk Mode)             │
+│  ┌───────────────────────────────────────────────────────┐  │
+│  │  Frontend  (smart_locker/frontend/)                   │  │
+│  │  index.html · style.css · app.js                     │  │
+│  │  Dark premium theme · clip-path animations            │  │
+│  │  6 screens · touch-optimized · Space Grotesk font     │  │
+│  └─────────────────────┬─────────────────────────────────┘  │
+│          REST API       │       SSE / WebSocket              │
+│        (fetch calls)    │    (NFC tap → navigate)            │
+│  ┌──────────────────────▼─────────────────────────────────┐  │
+│  │  FastAPI Backend  (smart_locker/app.py)                │  │
+│  │  POST /api/auth/tap   · GET /api/devices               │  │
+│  │  POST /api/borrow     · POST /api/return               │  │
+│  │  POST /api/session/end · GET /api/session              │  │
+│  │  GET  /api/events  ← SSE stream for NFC events         │  │
+│  └──────┬──────────────────────────┬──────────────────────┘  │
+│         │                          │                          │
+│  ┌──────▼──────────────┐  ┌────────▼──────────────────┐      │
+│  │  SQLite + SQLAlchemy │  │  NFC Reader (ACR1252U)    │      │
+│  │  users · devices     │  │  Background listener       │      │
+│  │  transaction_logs    │  │  Tap → HMAC → auth        │      │
+│  └──────────────────────┘  └───────────────────────────┘      │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-## Touch Display UI (Web-Based)
+## Touch Display UI
 
-The system runs as a kiosk: a FastAPI backend serves a web frontend displayed in a fullscreen browser on the touch display. The NFC reader listens in the background for card taps.
+The system runs as a kiosk: FastAPI serves the frontend as static files, displayed in a fullscreen Chromium browser. The NFC reader listens in the background; card taps push an event to the browser via Server-Sent Events (SSE), which triggers the authentication flow.
 
-**Session model — tap-and-go:** The NFC card is tapped briefly to authenticate (not left on the reader). After authentication, all interaction happens on the touch display. Sessions end via an "End Session" button, inactivity timeout (default 120s), or a new card tap by a different user.
+**Session model — tap-and-go:** The NFC card is tapped briefly to authenticate (not left on the reader). After authentication, all interaction happens on the touch display. Sessions end via the "End Session" button, the 120-second inactivity timeout, or a new card tap.
 
 **Screen flow:**
 
-1. **Idle** — dark screen, "Tap your card to begin"
-2. **Auth failed** — "Card not recognized" (auto-dismisses after 3s)
-3. **Main menu** — "Welcome, [Name]!" with three buttons: **Borrow**, **Return**, **End Session**
-4. **Borrow view** — grid of all devices by locker slot with photos. Available devices are tappable; unavailable devices are greyed out but tappable to see who has them. Borrow limit: 5 devices per user (configurable).
-5. **Return view** — grid of all devices by locker slot. User's borrowed devices are highlighted and tappable to return. Other users' devices are greyed out but tappable to see who has them. Validation prevents returning a device you don't have.
-6. **Device detail** — large photo, name, type, serial, slot, description. Confirm borrow/return or view borrower info.
+1. **Idle** — animated NFC icon, "Tap your card to begin", marquee ticker, live clock
+2. **Auth failed** — red flash, "Card not recognized", auto-dismisses after 3s
+3. **Main menu** — "Welcome, [Name]!" with clip-path text reveal, Borrow / Return / End Session buttons
+4. **Borrow view** — device grid sorted by slot. Available = tappable; borrowed/maintenance = greyed out but tappable (shows borrower info)
+5. **Return view** — same grid. User's items highlighted in cyan; others greyed out
+6. **Device detail** — full-screen overlay, large photo, serial / type / slot, confirm button
 
-**Design:** Dark premium theme with smooth animations and bold typography, optimized for touch interaction. Device cards display photos, names, types, and slot numbers. Frontend design can be prototyped using AI tools (v0.dev, Galileo AI, Bolt.new, Lovable, or Figma) and then implemented to match.
-
-**Rules:**
-- Open-access locker — no physical locks, system is purely for tracking
-- Max 5 borrows per user (configurable via `SMART_LOCKER_MAX_BORROWS`)
-- Only the borrower can return their own device; admins can return on behalf of anyone
-- Admin returns log both the admin and the original borrower in the transaction record
-- Device list (names, serials, types, descriptions, photos) is managed via Excel import
-
-**Current state:** The backend (NFC reading, authentication, device tracking, borrow/return logic, transaction logging) is fully implemented and tested. What remains is the FastAPI API layer and the frontend UI.
+**Design highlights:**
+- Cyan (`#00d4ff`) accent on dark (`#080c10`) background
+- `clip-path: inset()` wipe transitions between every screen — same technique as landonorris.com
+- Space Grotesk display font, Inter body font
+- Staggered device card entrance animations
+- Custom lagged cursor, Web Audio API click sounds, scanline overlay
 
 ## Security Design
 
 - **Two separate 32-byte keys**: one for AES-256-GCM encryption, one for HMAC-SHA256
 - **HMAC for database lookup**: deterministic digest allows indexed O(1) card lookups without decrypting every row
 - **AES-GCM for storage**: random nonce per encryption — same UID produces different ciphertext each time
-- **Admin-only decryption**: only admin users can view raw card UIDs via the admin info API
-- **UID masking**: card UIDs are never shown in full on screen or in log files — only a masked form (e.g. `04**********80`) is displayed
+- **Admin-only decryption**: only admin users can view raw card UIDs
+- **UID masking**: card UIDs are never shown in full on screen or in log files — only a masked form (e.g. `04**********80`)
 
 ## Running Tests
 

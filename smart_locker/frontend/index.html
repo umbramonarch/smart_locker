@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Smart Locker</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700;800&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- Custom cursor -->
+  <div id="cursor"></div>
+  <div id="cursor-ring"></div>
+
+  <!-- ================================================================
+       SCREEN 1 — IDLE
+  ================================================================ -->
+  <div id="screen-idle" class="screen active">
+    <div class="mesh-bg"></div>
+
+    <div class="clock">
+      <div class="clock-time" id="clock-time">00:00</div>
+      <div class="clock-date" id="clock-date">—</div>
+    </div>
+
+    <div class="idle-center">
+      <div class="nfc-wrapper">
+        <div class="nfc-ring-outer"></div>
+        <div class="nfc-ring-mid"></div>
+        <div class="nfc-core">
+          <svg class="nfc-svg" viewBox="0 0 64 64">
+            <path d="M32 22 C39 22 44 27 44 32 C44 37 39 42 32 42" stroke-linecap="round"/>
+            <path d="M32 14 C43 14 52 22 52 32 C52 42 43 50 32 50" stroke-linecap="round"/>
+            <path d="M32 30 C34.8 30 36 31 36 32 C36 33 34.8 34 32 34" stroke-linecap="round"/>
+            <circle cx="24" cy="32" r="5" fill="currentColor" stroke="none" style="color:var(--accent)"/>
+          </svg>
+        </div>
+      </div>
+
+      <h1 class="idle-headline">
+        <span class="reveal-wrap"><span class="reveal-inner">TAP YOUR CARD</span></span>
+      </h1>
+      <p class="idle-sub">
+        <span class="reveal-wrap"><span class="reveal-inner" style="transition-delay:0.22s">to access the equipment locker</span></span>
+      </p>
+    </div>
+
+    <div class="marquee-bar">
+      <div class="marquee-fade-left"></div>
+      <div class="marquee-fade-right"></div>
+      <div class="marquee-track">
+        <span>SMART LOCKER SYSTEM</span><span class="dot">·</span>
+        <span>NFC AUTHENTICATED</span><span class="dot">·</span>
+        <span>OPEN ACCESS</span><span class="dot">·</span>
+        <span>TAP TO BEGIN</span><span class="dot">·</span>
+        <span>EQUIPMENT TRACKING</span><span class="dot">·</span>
+        <!-- duplicate for seamless loop -->
+        <span>SMART LOCKER SYSTEM</span><span class="dot">·</span>
+        <span>NFC AUTHENTICATED</span><span class="dot">·</span>
+        <span>OPEN ACCESS</span><span class="dot">·</span>
+        <span>TAP TO BEGIN</span><span class="dot">·</span>
+        <span>EQUIPMENT TRACKING</span><span class="dot">·</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================================================================
+       SCREEN 2 — AUTH FAILED
+  ================================================================ -->
+  <div id="screen-auth-failed" class="screen">
+    <div class="red-flash"></div>
+    <div class="auth-failed-center">
+      <div class="auth-card">
+        <div class="error-icon-circle">
+          <svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </div>
+        <div class="auth-title">Card Not Recognized</div>
+        <p class="auth-sub">This card is not registered in the system.<br>Please contact an administrator.</p>
+        <div class="progress-track">
+          <div class="progress-fill" id="auth-progress"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================================================================
+       SCREEN 3 — MAIN MENU
+  ================================================================ -->
+  <div id="screen-main-menu" class="screen">
+    <div class="menu-top-bar">
+      <div class="user-badge">
+        <div class="user-avatar" id="user-avatar">?</div>
+        <div>
+          <div class="badge-name" id="badge-name">—</div>
+          <div class="role-pill" id="badge-role">User</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="menu-header">
+      <p class="menu-greeting">
+        <span class="reveal-wrap"><span class="reveal-inner">WELCOME BACK,</span></span>
+      </p>
+      <h1 class="menu-username">
+        <span class="reveal-wrap"><span class="reveal-inner" id="menu-name">—</span></span>
+      </h1>
+    </div>
+
+    <div class="menu-actions">
+      <button class="action-btn primary" id="btn-borrow">
+        <div class="btn-icon">
+          <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12l7-7 7 7"/></svg>
+        </div>
+        <div class="btn-texts">
+          <span class="btn-label">Borrow</span>
+          <span class="btn-desc">Take equipment from the locker</span>
+        </div>
+      </button>
+      <button class="action-btn primary" id="btn-return">
+        <div class="btn-icon">
+          <svg viewBox="0 0 24 24"><path d="M12 19V5M5 12l7 7 7-7"/></svg>
+        </div>
+        <div class="btn-texts">
+          <span class="btn-label">Return</span>
+          <span class="btn-desc">Bring back your equipment</span>
+        </div>
+      </button>
+      <button class="action-btn end-btn" id="btn-end">
+        <div class="btn-icon">
+          <svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </div>
+        <span class="btn-label">End Session</span>
+      </button>
+    </div>
+  </div>
+
+  <!-- ================================================================
+       SCREEN 4 — BORROW
+  ================================================================ -->
+  <div id="screen-borrow" class="screen">
+    <div class="screen-header">
+      <button class="back-btn" data-target="main-menu">
+        <svg viewBox="0 0 24 24"><path d="M19 12H5M12 5l-7 7 7 7"/></svg>
+      </button>
+      <h2 class="screen-title">Borrow Equipment</h2>
+      <span class="screen-badge" id="borrow-badge"></span>
+    </div>
+    <div class="grid-wrapper">
+      <div class="device-grid" id="borrow-grid"></div>
+    </div>
+  </div>
+
+  <!-- ================================================================
+       SCREEN 5 — RETURN
+  ================================================================ -->
+  <div id="screen-return" class="screen">
+    <div class="screen-header">
+      <button class="back-btn" data-target="main-menu">
+        <svg viewBox="0 0 24 24"><path d="M19 12H5M12 5l-7 7 7 7"/></svg>
+      </button>
+      <h2 class="screen-title">Return Equipment</h2>
+      <span class="screen-badge" id="return-badge"></span>
+    </div>
+    <div class="grid-wrapper">
+      <div class="device-grid" id="return-grid"></div>
+    </div>
+  </div>
+
+  <!-- ================================================================
+       OVERLAY — DEVICE DETAIL
+  ================================================================ -->
+  <div id="overlay-device-detail" class="overlay">
+    <div class="detail-img-pane" id="detail-img-pane">
+      <div class="detail-img-placeholder" id="detail-img-placeholder">
+        <svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
+        <div class="detail-img-slot-num" id="detail-img-slot">S01</div>
+      </div>
+    </div>
+    <div class="detail-info-pane">
+      <button class="detail-close" id="detail-close">
+        <svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+      <div class="detail-slot-tag" id="detail-slot-tag">SLOT —</div>
+      <h1 class="detail-name" id="detail-name">—</h1>
+      <div class="detail-meta-box">
+        <div class="detail-meta-row">
+          <span class="meta-label">Type</span>
+          <span class="meta-value" id="detail-type">—</span>
+        </div>
+        <div class="detail-meta-row">
+          <span class="meta-label">Serial</span>
+          <span class="meta-value" id="detail-serial">—</span>
+        </div>
+        <div class="detail-meta-row">
+          <span class="meta-label">Status</span>
+          <span class="meta-value" id="detail-status">—</span>
+        </div>
+      </div>
+      <p class="detail-desc" id="detail-desc"></p>
+      <div class="detail-borrower-row hidden" id="detail-borrower-row">
+        <div class="borrower-icon">
+          <svg viewBox="0 0 24 24"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+        </div>
+        <div>
+          <div class="borrower-label">Currently borrowed by</div>
+          <div class="borrower-name" id="detail-borrower-name">—</div>
+        </div>
+      </div>
+      <button class="confirm-btn" id="confirm-btn">—</button>
+    </div>
+  </div>
+
+  <!-- ================================================================
+       OVERLAY — INACTIVITY WARNING
+  ================================================================ -->
+  <div id="overlay-inactivity" class="overlay" style="display:none">
+    <div class="inactivity-center">
+      <p class="inactivity-label">Session ending in</p>
+      <div class="inactivity-number" id="inactivity-num">10</div>
+      <p class="inactivity-msg">Touch anywhere or tap below to stay active</p>
+      <button class="stay-btn" id="stay-btn">Stay Active</button>
+    </div>
+  </div>
+
+  <!-- Toast notification -->
+  <div id="toast"></div>
+
+  <!-- Debug: simulate NFC tap (remove in production) -->
+  <button id="debug-btn">⚡ Simulate NFC Tap</button>
+
+  <script src="app.js"></script>
+</body>
+</html>
