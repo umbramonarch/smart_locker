@@ -72,7 +72,7 @@ class SessionManager:
         return self._current
 
     def end_session(self) -> None:
-        """End the current session."""
+        """End the current session explicitly (card tap / frontend logout)."""
         if self._current is not None:
             logger.info(
                 "Session ended for %s (duration=%.0fs)",

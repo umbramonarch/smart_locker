@@ -223,15 +223,17 @@ with get_session() as session:
 python -m smart_locker.app
 ```
 
-This starts the FastAPI backend server and the NFC reader listener. The touch display UI is served as a web page and should be opened in a browser running in kiosk mode (see Step 6b).
+This starts the NFC reader listener and the main event loop. Tap your enrolled card to authenticate, tap again to log out.
 
 Expected terminal output:
 ```
 Smart Locker starting...
 NFC reader ready: ACS ACR1252 Dual Reader PICC 0
-Server running at http://localhost:8000
+Smart Locker ready. Tap your card to begin.
 Press Ctrl+C to exit.
 ```
+
+> **Note:** The FastAPI REST API and browser UI serving are not yet wired up. The terminal is the current interface for testing. Once the API layer is built (Stage 9), the browser kiosk UI will be served at `http://localhost:8000`.
 
 ### Step 6b: Launch the Touch Display (Kiosk Browser)
 
@@ -250,8 +252,8 @@ The NFC card is **tapped and removed** — it is not left on the reader. The car
 2. **Interact on touch display** → Borrow devices, return devices, view device info
 3. **Session ends** via one of:
    - **"End Session" button** on the touch display
-   - **Inactivity timeout** (default 120 seconds with no touch interaction)
-   - **New card tap** by a different user (overrides the current session)
+   - **Second card tap** — tap your card again to log out
+   - **Inactivity timeout** — 120 seconds of no touch interaction (silent security backstop)
 
 ### Touch Display Screens
 

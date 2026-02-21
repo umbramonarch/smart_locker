@@ -50,6 +50,7 @@ smart_locker/
 ├── scripts/
 │   ├── generate_key.py          # Generate encryption + HMAC keys
 │   ├── init_db.py               # Create database tables
+│   ├── migrate_db.py            # Add columns to existing DB (run after schema changes)
 │   ├── enroll_card.py           # Enroll a new NFC card user
 │   └── import_devices.py        # Bulk import devices from Excel
 ├── tests/                       # Unit tests (52 tests, no hardware needed)
@@ -156,7 +157,7 @@ The system runs as a kiosk: FastAPI serves the frontend as static files, display
 - **HMAC for database lookup**: deterministic digest allows indexed O(1) card lookups without decrypting every row
 - **AES-GCM for storage**: random nonce per encryption — same UID produces different ciphertext each time
 - **Admin-only decryption**: only admin users can view raw card UIDs
-- **UID masking**: card UIDs are never shown in full on screen or in log files — only a masked form (e.g. `04**********80`)
+- **UID never logged**: card UIDs are never written to log files — events are logged as "Card inserted on \<reader\>" with no UID information. UIDs are masked in enrollment output only (e.g. `04**********80`)
 
 ## Running Tests
 

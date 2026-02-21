@@ -14,20 +14,11 @@ from datetime import datetime, timezone
 
 from smartcard.CardMonitoring import CardObserver
 from smartcard.Exceptions import CardConnectionException
-from smartcard.util import toHexString
 
-from smart_locker.nfc.apdu import GET_UID, APDUResponse
+from smart_locker.nfc.apdu import GET_UID, DISABLE_BUZZER, ENABLE_BUZZER, APDUResponse
 
 logger = logging.getLogger(__name__)
 
-
-def _mask_uid(uid: str | None) -> str:
-    """Mask a UID for safe logging — show first 2 and last 2 chars only."""
-    if uid is None:
-        return "(none)"
-    if len(uid) <= 4:
-        return "****"
-    return uid[:2] + "*" * (len(uid) - 4) + uid[-2:]
 
 
 class CardEventType(enum.Enum):
@@ -84,7 +75,7 @@ class LockerCardObserver(CardObserver):
             self._queue.put(event)
 
             if uid:
-                logger.info("Card inserted: UID=%s on %s", _mask_uid(uid), reader_name)
+                logger.info("Card inserted on %s", reader_name)
             else:
                 logger.warning("Card inserted but UID read failed on %s", reader_name)
 
@@ -107,7 +98,7 @@ class LockerCardObserver(CardObserver):
                 reader_name=reader_name,
             )
             self._queue.put(event)
-            logger.info("Card removed: UID=%s from %s", _mask_uid(self._last_uid), reader_name)
+            logger.info("Card removed from %s", reader_name)
             self._last_uid = None
 
     @staticmethod
@@ -131,6 +122,8 @@ class LockerCardObserver(CardObserver):
 
                 connection = card.createConnection()
                 connection.connect()
+                # Suppress reader buzzer for this card session
+                connection.transmit(DISABLE_BUZZER)
                 response, sw1, sw2 = connection.transmit(GET_UID)
                 apdu = APDUResponse.from_raw(response, sw1, sw2)
 
@@ -151,6 +144,11 @@ class LockerCardObserver(CardObserver):
                 return None
             finally:
                 if connection is not None:
+                    try:
+                        # Restore buzzer so the next card tap will beep
+                        connection.transmit(ENABLE_BUZZER)
+                    except Exception:
+                        pass
                     try:
                         connection.disconnect()
                     except Exception:

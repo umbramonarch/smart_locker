@@ -78,12 +78,8 @@ class SmartLockerApp:
         while self._running:
             event = self._reader.wait_for_event(timeout=1.0)
             if event is None:
-                # Check session timeout
-                if self._session_mgr.has_active_session:
-                    session = self._session_mgr.current_session
-                    if session is None:
-                        # Session expired during check
-                        print("\nSession timed out. Please tap your card again.")
+                # Tick the session manager so expired sessions are cleaned up
+                self._session_mgr.has_active_session
                 continue
 
             if isinstance(event, ReaderEvent):
@@ -110,6 +106,16 @@ class SmartLockerApp:
             print("Could not read card. Please try tapping again.")
             return
 
+        # Second tap while a session is active → log out
+        if self._session_mgr.has_active_session:
+            active_session = self._session_mgr.current_session
+            if active_session is not None:
+                user_name = active_session.user.display_name
+                self._session_mgr.end_session()
+                print(f"\nGoodbye, {user_name}!")
+                print("Tap your card to begin.\n")
+            return
+
         with get_session() as db_session:
             user = self._authenticator.authenticate(db_session, event.uid)
 
@@ -117,7 +123,7 @@ class SmartLockerApp:
                 print("Unknown card. Please contact an administrator to enroll.")
                 return
 
-            session = self._session_mgr.start_session(user)
+            self._session_mgr.start_session(user)
             print(f"\nWelcome, {user.display_name}!")
 
             # Show user's borrowed devices
@@ -134,14 +140,13 @@ class SmartLockerApp:
                 for d in available:
                     print(f"  [{d.id}] {d.name} ({d.device_type})")
 
-            print("\nRemove card to end session.")
+            print("\nTap your card again or wait to time out to end session.")
 
     def _on_card_removed(self, event: CardEvent) -> None:
-        if self._session_mgr.has_active_session:
-            user_name = self._session_mgr.current_session.user.display_name
-            self._session_mgr.end_session()
-            print(f"\nGoodbye, {user_name}!")
-            print("Tap your card to begin.\n")
+        # Card removal does not end the session — the user interacts with
+        # the touch display after tapping. Session ends via timeout or a
+        # second tap (handled in _on_card_inserted).
+        pass
 
 
 def main() -> None:
