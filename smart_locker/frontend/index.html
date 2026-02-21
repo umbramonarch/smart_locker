@@ -19,6 +19,7 @@
        SCREEN 1 — IDLE
   ================================================================ -->
   <div id="screen-idle" class="screen active">
+    <div class="hero-bg"></div>
     <div class="mesh-bg"></div>
 
     <div class="clock">
@@ -31,6 +32,8 @@
         <div class="nfc-ring-outer"></div>
         <div class="nfc-ring-mid"></div>
         <div class="nfc-core">
+          <!-- Ellipse-reveal texture behind the NFC icon -->
+          <div class="nfc-texture-reveal"></div>
           <svg class="nfc-svg" viewBox="0 0 64 64">
             <path d="M32 22 C39 22 44 27 44 32 C44 37 39 42 32 42" stroke-linecap="round"/>
             <path d="M32 14 C43 14 52 22 52 32 C52 42 43 50 32 50" stroke-linecap="round"/>
@@ -111,6 +114,8 @@
 
     <div class="menu-actions">
       <button class="action-btn primary" id="btn-borrow">
+        <div class="btn-reveal-img" style="background-image:url('images/camera.jpg')"></div>
+        <div class="btn-reveal-tint"></div>
         <div class="btn-icon">
           <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12l7-7 7 7"/></svg>
         </div>
@@ -120,6 +125,8 @@
         </div>
       </button>
       <button class="action-btn primary" id="btn-return">
+        <div class="btn-reveal-img" style="background-image:url('images/drone.jpg')"></div>
+        <div class="btn-reveal-tint"></div>
         <div class="btn-icon">
           <svg viewBox="0 0 24 24"><path d="M12 19V5M5 12l7 7 7-7"/></svg>
         </div>
