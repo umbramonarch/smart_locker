@@ -14,10 +14,13 @@ Equipment borrowing/returning system using NFC work cards. Users tap their card 
 ```
 smart_locker/
 ├── config/
-│   ├── settings.py              # Central config (DB path, reader name, timeouts)
+│   ├── settings.py              # Central config (DB path, reader name, timeouts, borrow limit)
 │   └── logging_config.py        # Rotating file + console logging
 ├── smart_locker/
-│   ├── app.py                   # Main entry point
+│   ├── app.py                   # Main entry point (FastAPI server + NFC listener)
+│   ├── api/                     # REST API endpoints (planned)
+│   │   ├── routes.py            # /api/auth, /api/devices, /api/borrow, /api/return
+│   │   └── schemas.py           # Request/response models
 │   ├── nfc/                     # NFC reader interface (pyscard + APDU)
 │   │   ├── apdu.py              # APDU command definitions
 │   │   ├── card_observer.py     # Card insert/remove detection
@@ -36,12 +39,17 @@ smart_locker/
 │   │   ├── engine.py            # SQLAlchemy engine + session factory
 │   │   └── repositories.py      # CRUD operations
 │   └── services/                # Business logic
-│       ├── locker_service.py    # Borrow/return operations
+│       ├── locker_service.py    # Borrow/return operations (5-device limit, admin overrides)
 │       └── user_service.py      # User enrollment, public/admin views
+├── frontend/                    # Touch display web UI (planned)
+│   └── ...                      # HTML/CSS/JS — dark theme, animations, device photos
+├── static/
+│   └── devices/                 # Device photos (referenced by image_path in DB)
 ├── scripts/
 │   ├── generate_key.py          # Generate encryption + HMAC keys
 │   ├── init_db.py               # Create database tables
-│   └── enroll_card.py           # Enroll a new NFC card user
+│   ├── enroll_card.py           # Enroll a new NFC card user
+│   └── import_devices.py        # Bulk import devices from Excel
 ├── tests/                       # Unit tests (48 tests)
 ├── requirements.txt
 ├── .env.example
@@ -72,20 +80,56 @@ python -m smart_locker.app
 
 See **GUIDE.md** for detailed step-by-step instructions.
 
-## Touch Display UI (Planned)
+## System Architecture
 
-The system is designed for a kiosk-style setup with a touch display. The `smart_locker/ui/` package is the designated location for the future graphical interface.
+```
+┌──────────────────────────────────────────────────────┐
+│            Touch Display (Chromium Kiosk Mode)        │
+│  ┌────────────────────────────────────────────────┐  │
+│  │  Frontend (HTML / CSS / JS)                    │  │
+│  │  Dark premium theme, smooth animations,        │  │
+│  │  device photos, touch-optimized UI             │  │
+│  └──────────────────┬─────────────────────────────┘  │
+│                     │ REST API                        │
+│  ┌──────────────────▼─────────────────────────────┐  │
+│  │  Backend (FastAPI)                             │  │
+│  │  /api/auth/tap · /api/devices · /api/borrow    │  │
+│  │  /api/return · /api/session/end                │  │
+│  └──────┬───────────────────────────┬─────────────┘  │
+│         │                           │                 │
+│  ┌──────▼──────────┐  ┌────────────▼──────────┐      │
+│  │  SQLite (SQLAlchemy)│  │  NFC Reader (ACR1252U)│   │
+│  │  users · devices    │  │  Background listener  │   │
+│  │  transaction_logs   │  │  Tap-and-go auth      │   │
+│  └─────────────────────┘  └───────────────────────┘   │
+└──────────────────────────────────────────────────────┘
+```
 
-**Intended user flow:**
+## Touch Display UI (Web-Based)
 
-1. User taps NFC card on the ACR1252U reader
-2. System authenticates and shows a welcome screen on the touch display
-3. Touch display shows two panels:
-   - **Borrow**: list of available devices — tap a device to borrow it
-   - **Return**: list of devices currently borrowed by this user — tap to return
-4. User removes card or session times out after inactivity
+The system runs as a kiosk: a FastAPI backend serves a web frontend displayed in a fullscreen browser on the touch display. The NFC reader listens in the background for card taps.
 
-**Current state:** The backend (NFC reading, authentication, device tracking, borrow/return logic, transaction logging) is fully implemented and tested. The UI layer (`smart_locker/ui/`) is a placeholder ready for a framework such as PyQt6, Kivy, or a local web UI to be integrated. All business logic is in the services layer and can be called directly from any UI.
+**Session model — tap-and-go:** The NFC card is tapped briefly to authenticate (not left on the reader). After authentication, all interaction happens on the touch display. Sessions end via an "End Session" button, inactivity timeout (default 120s), or a new card tap by a different user.
+
+**Screen flow:**
+
+1. **Idle** — dark screen, "Tap your card to begin"
+2. **Auth failed** — "Card not recognized" (auto-dismisses after 3s)
+3. **Main menu** — "Welcome, [Name]!" with three buttons: **Borrow**, **Return**, **End Session**
+4. **Borrow view** — grid of all devices by locker slot with photos. Available devices are tappable; unavailable devices are greyed out but tappable to see who has them. Borrow limit: 5 devices per user (configurable).
+5. **Return view** — grid of all devices by locker slot. User's borrowed devices are highlighted and tappable to return. Other users' devices are greyed out but tappable to see who has them. Validation prevents returning a device you don't have.
+6. **Device detail** — large photo, name, type, serial, slot, description. Confirm borrow/return or view borrower info.
+
+**Design:** Dark premium theme with smooth animations and bold typography, optimized for touch interaction. Device cards display photos, names, types, and slot numbers. Frontend design can be prototyped using AI tools (v0.dev, Galileo AI, Bolt.new, Lovable, or Figma) and then implemented to match.
+
+**Rules:**
+- Open-access locker — no physical locks, system is purely for tracking
+- Max 5 borrows per user (configurable via `SMART_LOCKER_MAX_BORROWS`)
+- Only the borrower can return their own device; admins can return on behalf of anyone
+- Admin returns log both the admin and the original borrower in the transaction record
+- Device list (names, serials, types, descriptions, photos) is managed via Excel import
+
+**Current state:** The backend (NFC reading, authentication, device tracking, borrow/return logic, transaction logging) is fully implemented and tested. What remains is the FastAPI API layer, database schema updates (device descriptions, photos, admin return tracking), and the frontend UI.
 
 ## Security Design
 

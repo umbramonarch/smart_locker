@@ -89,6 +89,7 @@ SMART_LOCKER_HMAC_KEY=xYzAbCdE...==
 SMART_LOCKER_DB_PATH=smart_locker.db
 SMART_LOCKER_READER_NAME=ACR1252
 SMART_LOCKER_SESSION_TIMEOUT=120
+SMART_LOCKER_MAX_BORROWS=5
 ```
 
 **IMPORTANT:** Keep the `.env` file secret. It contains your encryption keys. Never commit it to version control (it's already in `.gitignore`).
@@ -159,11 +160,13 @@ Prepare your `.xlsx` file with at minimum two columns: one for **device name** a
 
 Example Excel layout:
 
-| Device Name       | Serial Number | Type        | Locker |
-|-------------------|---------------|-------------|--------|
-| Multimeter        | SN-001        | measurement | 1      |
-| Oscilloscope      | SN-002        | measurement | 2      |
-| Soldering Station | SN-003        | tool        | 3      |
+| Device Name       | Serial Number | Type        | Locker | Description             | Image         |
+|-------------------|---------------|-------------|--------|-------------------------|---------------|
+| Multimeter        | SN-001        | measurement | 1      | Fluke 87V digital meter | multimeter.jpg|
+| Oscilloscope      | SN-002        | measurement | 2      | Rigol DS1054Z 50MHz     | oscilloscope.jpg|
+| Soldering Station | SN-003        | tool        | 3      | Hakko FX-888D           | soldering.jpg |
+
+The **Description** column provides a short text shown on the touch display when a user taps a device. The **Image** column contains the filename of a device photo stored in the `static/devices/` directory. Both columns are optional — devices without them will display with a placeholder image and no description.
 
 ```powershell
 # First, preview what will be imported (no changes written):
@@ -173,7 +176,7 @@ python -m scripts.import_devices --file "path\to\devices.xlsx" --dry-run
 python -m scripts.import_devices --file "path\to\devices.xlsx"
 ```
 
-The script auto-detects common column names (Name, Device Name, Serial, S/N, Type, Category, Slot, etc.). If your columns have different headers, map them explicitly:
+The script auto-detects common column names (Name, Device Name, Serial, S/N, Type, Category, Slot, Description, Image, Photo, etc.). If your columns have different headers, map them explicitly:
 
 ```powershell
 python -m scripts.import_devices --file devices.xlsx --name-col "Equipment" --serial-col "S/N" --type-col "Category"
@@ -220,33 +223,92 @@ with get_session() as session:
 python -m smart_locker.app
 ```
 
-Expected output:
+This starts the FastAPI backend server and the NFC reader listener. The touch display UI is served as a web page and should be opened in a browser running in kiosk mode (see Step 6b).
+
+Expected terminal output:
 ```
-Smart Locker ready. Tap your card to begin.
+Smart Locker starting...
+NFC reader ready: ACS ACR1252 Dual Reader PICC 0
+Server running at http://localhost:8000
 Press Ctrl+C to exit.
 ```
 
-### Usage Flow
+### Step 6b: Launch the Touch Display (Kiosk Browser)
 
-1. **Tap your card** → System authenticates you and shows your name, borrowed devices, and available devices
-2. **Remove your card** → Session ends with a goodbye message
-3. **Press Ctrl+C** → Shuts down the system
+Open the UI in a fullscreen kiosk browser on the touch display:
 
-Example session:
+```powershell
+# Using Chromium/Chrome in kiosk mode (fullscreen, no address bar):
+chrome --kiosk http://localhost:8000
 ```
-Welcome, anas.alshaer!
-You have 0 borrowed device(s).
 
-3 device(s) available to borrow:
-  [1] Multimeter (measurement)
-  [2] Oscilloscope (measurement)
-  [3] Soldering Station (tool)
+### Session Flow (Tap-and-Go)
 
-Remove card to end session.
+The NFC card is **tapped and removed** — it is not left on the reader. The card's only purpose is to authenticate. After authentication, all interaction happens on the touch display.
 
-Goodbye, anas.alshaer!
-Tap your card to begin.
-```
+1. **Tap your card** → NFC reader reads UID → system authenticates → touch display shows welcome screen
+2. **Interact on touch display** → Borrow devices, return devices, view device info
+3. **Session ends** via one of:
+   - **"End Session" button** on the touch display
+   - **Inactivity timeout** (default 120 seconds with no touch interaction)
+   - **New card tap** by a different user (overrides the current session)
+
+### Touch Display Screens
+
+**Screen A — Idle (no active session)**
+- Dark background, system logo
+- "Tap your card to begin"
+- Subtle ambient animation (glow/pulse)
+
+**Screen B — Authentication Failed**
+- "Card not recognized. Contact an administrator."
+- Auto-returns to Screen A after 3 seconds
+
+**Screen C — Main Menu (after successful tap)**
+- "Welcome, [Name]!" with entrance animation
+- Three large touch buttons:
+  - **Borrow** → Screen D
+  - **Return** → Screen E
+  - **End Session** → logs out, returns to Screen A
+
+**Screen D — Borrow View**
+- Grid of **all devices** organized by locker slot
+- Each device card shows: **photo**, name, type, slot number
+- **Available devices**: full color, tappable → Screen F (detail + confirm borrow)
+- **Unavailable devices** (borrowed by someone): greyed out, tappable → Screen G (shows who has it)
+- **Maintenance devices**: greyed out with maintenance indicator
+- If user has reached the borrow limit (default 5) → warning: "Borrow limit reached (5/5)"
+- Back button → Screen C
+
+**Screen E — Return View**
+- Grid of **all devices** organized by locker slot
+- **Devices borrowed by this user**: highlighted/accented, tappable → Screen H (detail + confirm return)
+- **Devices borrowed by someone else**: greyed out, tappable → Screen G (shows who has it)
+- **Available devices** (already in locker): greyed out, non-actionable
+- **Validation**: If user taps a device that isn't theirs → error: "This device is held by [Name], not you."
+- Back button → Screen C
+
+**Screen F — Borrow Detail + Confirm**
+- Large device photo, name, type, serial number, locker slot, description
+- "Borrow this device?" → **Confirm** / **Cancel**
+- On confirm → success animation → back to Screen D (list refreshes)
+
+**Screen G — Device Info (read-only)**
+- Large device photo, name, type, serial number, locker slot, description
+- "Currently borrowed by: [Name]"
+- **Close** → back to previous screen
+
+**Screen H — Return Detail + Confirm**
+- Large device photo, name, type, serial number, locker slot, description
+- "Return this device to slot [X]?" → **Confirm** / **Cancel**
+- On confirm → success animation → back to Screen E (list refreshes)
+
+### Borrow/Return Rules
+
+- **Borrow limit**: Each user can borrow up to `SMART_LOCKER_MAX_BORROWS` devices (default 5). Configurable in `.env`.
+- **Return ownership**: Only the borrower can return their own device. Admins can return any device on behalf of any user.
+- **Admin returns**: When an admin returns a device on behalf of someone, the transaction log records both the original borrower and the admin who performed the return.
+- **Open-access locker**: There is no physical locking mechanism. The locker is open-access and the system is purely for tracking who has what.
 
 ---
 
@@ -292,12 +354,13 @@ All settings are in `.env` (loaded by `config/settings.py`):
 | `SMART_LOCKER_DB_PATH` | `smart_locker.db` | SQLite database file path |
 | `SMART_LOCKER_READER_NAME` | `ACR1252` | Substring filter for NFC reader name |
 | `SMART_LOCKER_SESSION_TIMEOUT` | `120` | Session inactivity timeout (seconds) |
+| `SMART_LOCKER_MAX_BORROWS` | `5` | Maximum devices a user can borrow at once |
 
 ---
 
 ## What's Implemented vs. What's Next
 
-### Implemented
+### Implemented (Backend)
 - NFC card UID reading (any card type)
 - Card enrollment with encrypted storage
 - User authentication via HMAC lookup
@@ -308,15 +371,44 @@ All settings are in `.env` (loaded by `config/settings.py`):
 - AES-256-GCM encryption of card UIDs
 - UID masking in logs and on screen (never displayed in full)
 - Reader connect/disconnect detection
+- Bulk device import from Excel
 - 48 unit tests
 
+### Next: Database Updates
+- Add `description` column to `devices` table (text from Excel file)
+- Add `image_path` column to `devices` table (device photo filename)
+- Add `performed_by_id` column to `transaction_logs` table (tracks which admin performed a return on behalf of another user — `user_id` = original borrower, `performed_by_id` = admin)
+- Add `SMART_LOCKER_MAX_BORROWS` to settings (configurable borrow limit, default 5)
+
+### Next: Backend API (FastAPI)
+- REST API layer exposing the existing services to the frontend:
+  - `POST /api/auth/tap` — NFC UID → authenticate → start session
+  - `GET /api/devices` — list all devices with status, photos, descriptions
+  - `POST /api/borrow/{device_id}` — borrow a device
+  - `POST /api/return/{device_id}` — return a device
+  - `POST /api/session/end` — end the current session
+  - `GET /api/session` — get current session info (user, borrowed count)
+- NFC reader runs as a background listener, pushes card-tap events to the API
+
+### Next: Touch Display UI (Web-Based)
+- **Architecture**: FastAPI backend serves a modern web frontend; touch display runs a browser in kiosk mode (fullscreen Chromium with `--kiosk` flag)
+- **Design style**: Dark premium theme, smooth animations, bold typography — inspired by modern web design (e.g. landonorris.com). The UI should feel professional and visually polished, not like a generic admin panel.
+- **Screen flow**: Idle → Auth → Main Menu (Borrow / Return / End Session) → Device grid with photos → Detail view with confirm — see Step 6 above for full screen descriptions
+- **Device display**: Each device shown as a card with photo, name, type, and locker slot. Tapping reveals full detail including description. Unavailable devices are greyed out but tappable to see who has them.
+
+### Frontend Design Tools
+
+The frontend design (visual mockups, component layouts, animations) can be created using AI-powered design tools before implementation:
+
+- **v0.dev** (by Vercel) — generates React/Next.js UI components from text prompts. Good for quickly prototyping screen layouts, card grids, and dark-themed interfaces.
+- **Galileo AI** — generates full UI designs from text descriptions. Produces high-fidelity mockups that can be exported and implemented.
+- **Figma + AI plugins** — use Figma for manual design with AI-assisted features (auto-layout, AI-generated assets). Most control over the final look.
+- **Bolt.new** — AI full-stack app generator. Can scaffold a complete frontend with animations and responsive layouts from a prompt.
+- **Lovable** — AI web app builder. Generates polished frontends from descriptions, good for dark-themed dashboards and kiosk UIs.
+
+**Recommended workflow**: Design the screens in one of these tools first → export or screenshot the design → implement the HTML/CSS/JS to match, with the FastAPI backend providing the data.
+
 ### Future (Not Yet Built)
-- **Touch display UI** (`smart_locker/ui/`): The backend is complete — the UI package is a placeholder ready for a graphical framework. Options include:
-  - **PyQt6** — native desktop widgets, good touch support
-  - **Kivy** — designed for touch/multitouch, cross-platform
-  - **Local web UI** — Flask/FastAPI serving HTML to a browser in kiosk mode
-  - The UI would show a welcome screen after card tap, list available/borrowed devices, and let the user tap to borrow or return
-- Borrow/return commands during active session (currently the console app shows info only; the services layer `LockerService.borrow_device()` / `return_device()` is ready to be called from a UI)
-- Device management CLI or web interface
+- Device management admin interface
 - MIFARE sector data reading (APDU commands are defined but not wired into the flow)
 - Multi-reader support
