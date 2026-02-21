@@ -92,11 +92,15 @@ def main() -> None:
     serial_candidates = ["serial", "serial number", "s/n", "sn", "serial no", "serial_number", "serialnumber"]
     type_candidates = ["type", "device type", "category", "device_type", "kind"]
     slot_candidates = ["slot", "locker slot", "locker", "locker_slot", "bay"]
+    desc_candidates = ["description", "desc", "details", "notes"]
+    image_candidates = ["image", "photo", "image_path", "photo_path", "img", "picture", "filename"]
 
     name_idx = _find_column(headers, [args.name_col] if args.name_col else name_candidates)
     serial_idx = _find_column(headers, [args.serial_col] if args.serial_col else serial_candidates)
     type_idx = _find_column(headers, [args.type_col] if args.type_col else type_candidates)
     slot_idx = _find_column(headers, [args.slot_col] if args.slot_col else slot_candidates)
+    desc_idx = _find_column(headers, desc_candidates)
+    image_idx = _find_column(headers, image_candidates)
 
     if name_idx is None:
         print(f"ERROR: Could not find a 'name' column. Headers: {headers}")
@@ -112,6 +116,10 @@ def main() -> None:
         print(f", type='{headers[type_idx]}' (col {type_idx + 1})", end="")
     if slot_idx is not None:
         print(f", slot='{headers[slot_idx]}' (col {slot_idx + 1})", end="")
+    if desc_idx is not None:
+        print(f", description='{headers[desc_idx]}' (col {desc_idx + 1})", end="")
+    if image_idx is not None:
+        print(f", image='{headers[image_idx]}' (col {image_idx + 1})", end="")
     print()
 
     # Parse data rows
@@ -136,11 +144,21 @@ def main() -> None:
             except (ValueError, TypeError):
                 pass
 
+        description = None
+        if desc_idx is not None and row[desc_idx]:
+            description = str(row[desc_idx]).strip()
+
+        image_path = None
+        if image_idx is not None and row[image_idx]:
+            image_path = str(row[image_idx]).strip()
+
         devices.append({
             "name": name,
             "serial_number": serial,
             "device_type": device_type,
             "locker_slot": locker_slot,
+            "description": description,
+            "image_path": image_path,
             "row": row_num,
         })
 
@@ -186,6 +204,8 @@ def main() -> None:
                     device_type=d["device_type"],
                     serial_number=d["serial_number"],
                     locker_slot=d["locker_slot"],
+                    description=d["description"],
+                    image_path=d["image_path"],
                 )
                 existing_serials.add(d["serial_number"])
                 imported += 1

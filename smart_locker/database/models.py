@@ -68,7 +68,7 @@ class User(Base):
         back_populates="current_borrower"
     )
     transactions: Mapped[list["TransactionLog"]] = relationship(
-        back_populates="user"
+        back_populates="user", foreign_keys="[TransactionLog.user_id]"
     )
 
     __table_args__ = (Index("ix_users_uid_hmac", "uid_hmac"),)
@@ -84,6 +84,8 @@ class Device(Base):
         String(100), nullable=False, unique=True
     )
     locker_slot: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    image_path: Mapped[str | None] = mapped_column(String(255), nullable=True)
     status: Mapped[DeviceStatus] = mapped_column(
         Enum(DeviceStatus), nullable=False, default=DeviceStatus.AVAILABLE
     )
@@ -121,7 +123,14 @@ class TransactionLog(Base):
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # For admin returns: the admin who performed the return on behalf of the borrower
+    performed_by_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("users.id"), nullable=True
+    )
 
     # Relationships
-    user: Mapped[User] = relationship(back_populates="transactions")
+    user: Mapped[User] = relationship(
+        back_populates="transactions", foreign_keys=[user_id]
+    )
+    performed_by: Mapped[User | None] = relationship(foreign_keys=[performed_by_id])
     device: Mapped[Device] = relationship(back_populates="transactions")

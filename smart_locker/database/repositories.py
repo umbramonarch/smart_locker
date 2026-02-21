@@ -3,7 +3,7 @@
 import logging
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from smart_locker.database.models import (
@@ -90,18 +90,30 @@ class DeviceRepository:
         session.flush()
 
     @staticmethod
+    def count_borrowed_by_user(session: Session, user_id: int) -> int:
+        stmt = select(func.count()).select_from(Device).where(
+            Device.status == DeviceStatus.BORROWED,
+            Device.current_borrower_id == user_id,
+        )
+        return session.execute(stmt).scalar_one()
+
+    @staticmethod
     def create(
         session: Session,
         name: str,
         device_type: str,
         serial_number: str,
         locker_slot: int | None = None,
+        description: str | None = None,
+        image_path: str | None = None,
     ) -> Device:
         device = Device(
             name=name,
             device_type=device_type,
             serial_number=serial_number,
             locker_slot=locker_slot,
+            description=description,
+            image_path=image_path,
         )
         session.add(device)
         session.flush()
@@ -141,16 +153,23 @@ class TransactionRepository:
         user_id: int,
         device_id: int,
         notes: str | None = None,
+        performed_by_id: int | None = None,
     ) -> TransactionLog:
         txn = TransactionLog(
             user_id=user_id,
             device_id=device_id,
             transaction_type=TransactionType.RETURN,
             notes=notes,
+            performed_by_id=performed_by_id,
         )
         session.add(txn)
         session.flush()
-        logger.info("Logged RETURN: user=%d device=%d", user_id, device_id)
+        if performed_by_id is not None:
+            logger.info(
+                "Logged RETURN: user=%d device=%d (admin=%d)", user_id, device_id, performed_by_id
+            )
+        else:
+            logger.info("Logged RETURN: user=%d device=%d", user_id, device_id)
         return txn
 
     @staticmethod

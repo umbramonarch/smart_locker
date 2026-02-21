@@ -20,6 +20,9 @@ CARD_POLL_INTERVAL_MS = 500
 # Session
 SESSION_TIMEOUT_SECONDS = int(os.getenv("SMART_LOCKER_SESSION_TIMEOUT", "120"))
 
+# Borrow limit
+MAX_BORROWS = int(os.getenv("SMART_LOCKER_MAX_BORROWS", "5"))
+
 # Security — keys loaded via key_manager, not directly here
 ENC_KEY_ENV_VAR = "SMART_LOCKER_ENC_KEY"
 HMAC_KEY_ENV_VAR = "SMART_LOCKER_HMAC_KEY"

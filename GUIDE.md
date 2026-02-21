@@ -317,7 +317,7 @@ The NFC card is **tapped and removed** — it is not left on the reader. The car
 Tests run without any NFC hardware — they use in-memory SQLite and mock data.
 
 ```powershell
-# Run all 48 tests
+# Run all 52 tests
 python -m pytest tests/ -v
 
 # Run a specific test file
@@ -371,14 +371,12 @@ All settings are in `.env` (loaded by `config/settings.py`):
 - AES-256-GCM encryption of card UIDs
 - UID masking in logs and on screen (never displayed in full)
 - Reader connect/disconnect detection
-- Bulk device import from Excel
-- 48 unit tests
-
-### Next: Database Updates
-- Add `description` column to `devices` table (text from Excel file)
-- Add `image_path` column to `devices` table (device photo filename)
-- Add `performed_by_id` column to `transaction_logs` table (tracks which admin performed a return on behalf of another user — `user_id` = original borrower, `performed_by_id` = admin)
-- Add `SMART_LOCKER_MAX_BORROWS` to settings (configurable borrow limit, default 5)
+- Bulk device import from Excel (including `description` and `image_path` columns)
+- Borrow limit enforcement — rejects borrow when user is at the limit (`SMART_LOCKER_MAX_BORROWS`, default 5)
+- Admin return — admins can return any device on behalf of its borrower; transaction logs both `user_id` (original borrower) and `performed_by_id` (admin)
+- `devices` table: `description` (text shown on detail screen) and `image_path` (photo filename) columns
+- `transaction_logs` table: `performed_by_id` column for admin-return tracking
+- 52 unit tests
 
 ### Next: Backend API (FastAPI)
 - REST API layer exposing the existing services to the frontend:

@@ -3,8 +3,8 @@
 import pytest
 
 from smart_locker.auth.session_manager import SessionManager
-from smart_locker.database.models import DeviceStatus, User, UserRole
-from smart_locker.database.repositories import DeviceRepository, UserRepository
+from smart_locker.database.models import DeviceStatus, TransactionType, User, UserRole
+from smart_locker.database.repositories import DeviceRepository, TransactionRepository, UserRepository
 from smart_locker.security.encryption import encrypt, decrypt
 from smart_locker.security.hashing import compute_uid_hmac
 from smart_locker.services.locker_service import LockerService
@@ -55,11 +55,35 @@ class TestLockerService:
         result = LockerService.return_device(db_session, session, device.id)
         assert result is False
 
-    def test_return_wrong_user_fails(self, db_session, enc_key, hmac_key):
-        user1, device, session1 = self._setup(db_session, enc_key, hmac_key)
-        LockerService.borrow_device(db_session, session1, device.id)
+    def test_borrow_limit_enforced(self, db_session, enc_key, hmac_key, monkeypatch):
+        monkeypatch.setenv("SMART_LOCKER_MAX_BORROWS", "2")
+        import config.settings as settings
+        monkeypatch.setattr(settings, "MAX_BORROWS", 2)
+        import smart_locker.services.locker_service as svc_module
+        monkeypatch.setattr(svc_module, "MAX_BORROWS", 2)
 
-        # Create second user
+        user, device1, session = self._setup(db_session, enc_key, hmac_key)
+        device2 = DeviceRepository.create(db_session, name="Scope", device_type="measurement", serial_number="SN002")
+        device3 = DeviceRepository.create(db_session, name="PSU", device_type="power", serial_number="SN003")
+        db_session.flush()
+
+        assert LockerService.borrow_device(db_session, session, device1.id) is True
+        assert LockerService.borrow_device(db_session, session, device2.id) is True
+        # Third borrow should be rejected — limit is 2
+        assert LockerService.borrow_device(db_session, session, device3.id) is False
+        assert device3.status == DeviceStatus.AVAILABLE
+
+    def test_borrow_limit_does_not_affect_other_users(self, db_session, enc_key, hmac_key, monkeypatch):
+        monkeypatch.setenv("SMART_LOCKER_MAX_BORROWS", "1")
+        import smart_locker.services.locker_service as svc_module
+        monkeypatch.setattr(svc_module, "MAX_BORROWS", 1)
+
+        user1, device1, session1 = self._setup(db_session, enc_key, hmac_key)
+        device2 = DeviceRepository.create(db_session, name="Scope", device_type="measurement", serial_number="SN002")
+        db_session.flush()
+
+        assert LockerService.borrow_device(db_session, session1, device1.id) is True
+
         user2 = UserRepository.create(
             db_session,
             display_name="Bob",
@@ -67,11 +91,67 @@ class TestLockerService:
             encrypted_card_uid=encrypt("BBBBBBBB", enc_key),
         )
         db_session.flush()
-        mgr = SessionManager(timeout_seconds=60)
-        session2 = mgr.start_session(user2)
+        from smart_locker.auth.session_manager import SessionManager
+        session2 = SessionManager(timeout_seconds=60).start_session(user2)
+
+        # Bob has 0 borrows — should succeed even though Alice is at her limit
+        assert LockerService.borrow_device(db_session, session2, device2.id) is True
+
+    def test_return_wrong_user_fails(self, db_session, enc_key, hmac_key):
+        user1, device, session1 = self._setup(db_session, enc_key, hmac_key)
+        LockerService.borrow_device(db_session, session1, device.id)
+
+        user2 = UserRepository.create(
+            db_session,
+            display_name="Bob",
+            uid_hmac=compute_uid_hmac("BBBBBBBB", hmac_key),
+            encrypted_card_uid=encrypt("BBBBBBBB", enc_key),
+        )
+        db_session.flush()
+        session2 = SessionManager(timeout_seconds=60).start_session(user2)
 
         result = LockerService.return_device(db_session, session2, device.id)
         assert result is False
+
+    def test_admin_can_return_on_behalf_of_user(self, db_session, enc_key, hmac_key):
+        user, device, user_session = self._setup(db_session, enc_key, hmac_key)
+        LockerService.borrow_device(db_session, user_session, device.id)
+
+        admin = UserRepository.create(
+            db_session,
+            display_name="Admin",
+            uid_hmac=compute_uid_hmac("ADMINUID", hmac_key),
+            encrypted_card_uid=encrypt("ADMINUID", enc_key),
+            role="admin",
+        )
+        db_session.flush()
+        admin_session = SessionManager(timeout_seconds=60).start_session(admin)
+
+        result = LockerService.return_device(db_session, admin_session, device.id)
+        assert result is True
+        assert device.status == DeviceStatus.AVAILABLE
+        assert device.current_borrower_id is None
+
+    def test_admin_return_logs_both_borrower_and_admin(self, db_session, enc_key, hmac_key):
+        user, device, user_session = self._setup(db_session, enc_key, hmac_key)
+        LockerService.borrow_device(db_session, user_session, device.id)
+
+        admin = UserRepository.create(
+            db_session,
+            display_name="Admin",
+            uid_hmac=compute_uid_hmac("ADMINUID", hmac_key),
+            encrypted_card_uid=encrypt("ADMINUID", enc_key),
+            role="admin",
+        )
+        db_session.flush()
+        admin_session = SessionManager(timeout_seconds=60).start_session(admin)
+
+        LockerService.return_device(db_session, admin_session, device.id)
+
+        history = TransactionRepository.get_device_history(db_session, device.id)
+        return_txn = next(t for t in history if t.transaction_type == TransactionType.RETURN)
+        assert return_txn.user_id == user.id           # original borrower
+        assert return_txn.performed_by_id == admin.id  # admin who acted
 
 
 class TestUserService:

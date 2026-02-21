@@ -50,7 +50,7 @@ smart_locker/
 │   ├── init_db.py               # Create database tables
 │   ├── enroll_card.py           # Enroll a new NFC card user
 │   └── import_devices.py        # Bulk import devices from Excel
-├── tests/                       # Unit tests (48 tests)
+├── tests/                       # Unit tests (52 tests)
 ├── requirements.txt
 ├── .env.example
 └── GUIDE.md                     # Step-by-step setup and usage guide
@@ -129,7 +129,7 @@ The system runs as a kiosk: a FastAPI backend serves a web frontend displayed in
 - Admin returns log both the admin and the original borrower in the transaction record
 - Device list (names, serials, types, descriptions, photos) is managed via Excel import
 
-**Current state:** The backend (NFC reading, authentication, device tracking, borrow/return logic, transaction logging) is fully implemented and tested. What remains is the FastAPI API layer, database schema updates (device descriptions, photos, admin return tracking), and the frontend UI.
+**Current state:** The backend (NFC reading, authentication, device tracking, borrow/return logic, transaction logging) is fully implemented and tested. What remains is the FastAPI API layer and the frontend UI.
 
 ## Security Design
 
@@ -145,4 +145,4 @@ The system runs as a kiosk: a FastAPI backend serves a web frontend displayed in
 python -m pytest tests/ -v
 ```
 
-All 48 tests run without NFC hardware (in-memory SQLite, no reader needed).
+All 52 tests run without NFC hardware (in-memory SQLite, no reader needed).

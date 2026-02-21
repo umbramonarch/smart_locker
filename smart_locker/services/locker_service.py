@@ -4,8 +4,9 @@ import logging
 
 from sqlalchemy.orm import Session
 
+from config.settings import MAX_BORROWS
 from smart_locker.auth.session_manager import UserSession
-from smart_locker.database.models import DeviceStatus
+from smart_locker.database.models import DeviceStatus, UserRole
 from smart_locker.database.repositories import DeviceRepository, TransactionRepository
 
 logger = logging.getLogger(__name__)
@@ -36,9 +37,21 @@ class LockerService:
             logger.warning("Borrow attempted with expired session.")
             return False
 
+        user = user_session.user
+
         device = DeviceRepository.find_by_id(db_session, device_id)
         if device is None:
             logger.warning("Borrow failed: device %d not found.", device_id)
+            return False
+
+        borrowed_count = DeviceRepository.count_borrowed_by_user(db_session, user.id)
+        if borrowed_count >= MAX_BORROWS:
+            logger.warning(
+                "Borrow failed: %s has reached the borrow limit (%d/%d).",
+                user.display_name,
+                borrowed_count,
+                MAX_BORROWS,
+            )
             return False
 
         if device.status != DeviceStatus.AVAILABLE:
@@ -49,8 +62,6 @@ class LockerService:
                 device.status.value,
             )
             return False
-
-        user = user_session.user
         DeviceRepository.borrow(db_session, device, user.id)
         TransactionRepository.log_borrow(db_session, user.id, device_id, notes)
         user_session.touch()
@@ -100,13 +111,34 @@ class LockerService:
 
         user = user_session.user
         if device.current_borrower_id != user.id:
-            logger.warning(
-                "Return failed: device %d is borrowed by user %d, not %d.",
-                device_id,
-                device.current_borrower_id,
-                user.id,
+            if user.role != UserRole.ADMIN:
+                logger.warning(
+                    "Return failed: device %d is borrowed by user %d, not %d.",
+                    device_id,
+                    device.current_borrower_id,
+                    user.id,
+                )
+                return False
+
+            # Admin returning on behalf of the original borrower
+            original_borrower_id = device.current_borrower_id
+            DeviceRepository.return_device(db_session, device)
+            TransactionRepository.log_return(
+                db_session,
+                user_id=original_borrower_id,
+                device_id=device_id,
+                notes=notes,
+                performed_by_id=user.id,
             )
-            return False
+            user_session.touch()
+            logger.info(
+                "Admin %s returned %s (device=%d) on behalf of user %d",
+                user.display_name,
+                device.name,
+                device_id,
+                original_borrower_id,
+            )
+            return True
 
         DeviceRepository.return_device(db_session, device)
         TransactionRepository.log_return(db_session, user.id, device_id, notes)
