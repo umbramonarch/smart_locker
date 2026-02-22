@@ -33,7 +33,7 @@ You should see `Status: Running`.
 ## Step 1: Set Up the Virtual Environment
 
 ```powershell
-cd "D:\Python Projects\smart_locker"
+cd path\to\smart_locker
 
 # Create virtual environment (if not already created)
 python -m venv venv

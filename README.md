@@ -17,14 +17,12 @@ smart_locker/
 │   ├── settings.py              # Central config (DB path, reader name, timeouts, borrow limit)
 │   └── logging_config.py        # Rotating file + console logging
 ├── smart_locker/
-│   ├── app.py                   # Main entry point (FastAPI server + NFC listener)
-│   ├── api/                     # REST API layer (next to build)
-│   │   ├── routes.py            # POST /api/auth/tap · GET /api/devices · POST /api/borrow · POST /api/return
-│   │   └── schemas.py           # Pydantic request/response models
-│   ├── frontend/                # Touch display web UI ✓ built
+│   ├── app.py                   # Main entry point: starts NFC reader threads + main event loop
+│   ├── frontend/                # Touch display web UI
 │   │   ├── index.html           # HTML screen structure (6 screens)
 │   │   ├── style.css            # All styling — colors, animations, layout
-│   │   └── app.js               # State machine, API calls, UI behaviour
+│   │   ├── app.js               # State machine, API stubs, UI behaviour (demo mode included)
+│   │   └── images/              # Device placeholder photos
 │   ├── nfc/                     # NFC reader interface (pyscard + APDU)
 │   │   ├── apdu.py              # APDU command definitions
 │   │   ├── card_observer.py     # Card insert/remove detection
@@ -45,8 +43,6 @@ smart_locker/
 │   └── services/                # Business logic
 │       ├── locker_service.py    # Borrow/return operations (5-device limit, admin overrides)
 │       └── user_service.py      # User enrollment, public/admin views
-├── static/
-│   └── devices/                 # Device photos (referenced by image_path in DB)
 ├── scripts/
 │   ├── generate_key.py          # Generate encryption + HMAC keys
 │   ├── init_db.py               # Create database tables
