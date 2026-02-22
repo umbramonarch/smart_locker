@@ -12,7 +12,7 @@ const S = {
   cdTimer:    null,
   cdSeconds:  120,      // matches SESSION_TIMEOUT_SECONDS in settings.py
   cdWarnAt:   10,       // show warning when N seconds remain
-  lastClickX: null,     // Enhancement C: track click origin for circle reveal
+  lastClickX: null,     // track click origin for circle reveal
   lastClickY: null,
 };
 
@@ -74,10 +74,14 @@ async function apiEndSession() {
    Track last click position; set CSS custom properties on the
    target screen so the circle expands from the click origin.
 ============================================================ */
-document.addEventListener('click', e => {
-  S.lastClickX = e.clientX;
-  S.lastClickY = e.clientY;
-});
+// Capture click origin so the circle reveal expands from where you tap.
+// pointerdown fires earliest and works on touch + mouse.
+['pointerdown', 'click'].forEach(evt =>
+  document.addEventListener(evt, e => {
+    S.lastClickX = e.clientX;
+    S.lastClickY = e.clientY;
+  })
+);
 
 function getEl(id) {
   return document.getElementById('screen-' + id)
@@ -103,31 +107,44 @@ function navigate(toId) {
   const toIsOverlay   = toEl.classList.contains('overlay');
   const fromIsOverlay = fromEl && fromEl.classList.contains('overlay');
 
-  // Set circle reveal origin on screen transitions
-  if (!toIsOverlay) setRevealOrigin(toEl);
+  if (toIsOverlay) {
+    // Overlays use the polygon wipe — open immediately
+    toEl.style.display = '';
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      toEl.classList.add('visible');
+      triggerSplitText(toEl);
+    }));
+  } else {
+    // Set the circle origin on the entering screen, then reveal it
+    setRevealOrigin(toEl);
+    toEl.style.display = '';
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      toEl.classList.add('active');
+      triggerSplitText(toEl);
+    }));
 
-  // Reveal the target (double rAF ensures the CSS transition fires)
-  toEl.style.display = '';
-  requestAnimationFrame(() => requestAnimationFrame(() => {
-    toIsOverlay ? toEl.classList.add('visible') : toEl.classList.add('active');
-    // Enhancement E: trigger split-text animations on the new screen
-    triggerSplitText(toEl);
-  }));
-
-  // Exit the current screen (skip when opening an overlay on top of it)
-  if (!toIsOverlay && fromEl && !fromIsOverlay) {
-    if (!toIsOverlay) setRevealOrigin(fromEl);
-    fromEl.classList.add('exit');
-    setTimeout(() => fromEl.classList.remove('active', 'exit'), 560);
+    // Collapse the exiting screen toward the click point.
+    // The reflow between setRevealOrigin and adding .exit is critical:
+    // it forces the browser to commit the new origin position at 150%
+    // (no visual change) BEFORE the radius transition to 0% begins.
+    // Without it, both the position and radius animate simultaneously.
+    if (fromEl && !fromIsOverlay) {
+      setRevealOrigin(fromEl);
+      void fromEl.offsetHeight;          // force reflow — lock in new origin
+      fromEl.classList.add('exit');
+      setTimeout(() => fromEl.classList.remove('active', 'exit'), 1300);
+    }
   }
 
   // Close an overlay when navigating back to a regular screen
   if (fromIsOverlay && !toIsOverlay) {
-    fromEl.classList.add('hidden-up');
+    const isDetail = fromEl.id === 'overlay-device-detail';
+    const hideCls  = isDetail ? 'hidden-right' : 'hidden-left';
+    fromEl.classList.add(hideCls);
     setTimeout(() => {
-      fromEl.classList.remove('visible', 'hidden-up');
+      fromEl.classList.remove('visible', hideCls);
       fromEl.style.display = 'none';
-    }, 510);
+    }, 710);
   }
 
   S.screen = toId;
@@ -256,11 +273,11 @@ function dismissInactivity() {
   clearInterval(S.cdTimer);
   const overlay = document.getElementById('overlay-inactivity');
   if (!overlay.classList.contains('visible')) return;
-  overlay.classList.add('hidden-up');
+  overlay.classList.add('hidden-left');
   setTimeout(() => {
-    overlay.classList.remove('visible', 'hidden-up');
+    overlay.classList.remove('visible', 'hidden-left');
     overlay.style.display = 'none';
-  }, 510);
+  }, 710);
   if (S.prevScreen && S.screen !== S.prevScreen) S.screen = S.prevScreen;
   armIdle();
 }
@@ -350,7 +367,49 @@ function buildGrid(gridId, devices, mode) {
   const grid   = document.getElementById(gridId);
   grid.innerHTML = '';
 
+  // Disconnect previous observer if any
+  if (grid._scrollObs) { grid._scrollObs.disconnect(); grid._scrollObs = null; }
+
   const sorted = [...devices].sort((a, b) => (a.locker_slot || 99) - (b.locker_slot || 99));
+
+  // IntersectionObserver: cards animate in/out as they scroll into view
+  const scrollRoot = grid.closest('.grid-wrapper');
+  const cardObserver = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        entry.target.classList.add('in');
+        entry.target.classList.remove('out-up');
+      } else {
+        // Card scrolled out of view — determine direction
+        if (entry.boundingClientRect.top < entry.rootBounds.top) {
+          entry.target.classList.add('out-up');
+          entry.target.classList.remove('in');
+        } else {
+          entry.target.classList.remove('in', 'out-up');
+        }
+      }
+    });
+  }, { root: scrollRoot, threshold: 0.15, rootMargin: '40px 0px' });
+
+  // Scroll parallax: shift card images based on scroll position
+  const parallaxCards = [];
+  function onGridScroll() {
+    const wrapRect = scrollRoot.getBoundingClientRect();
+    const centerY = wrapRect.top + wrapRect.height / 2;
+    for (const { card, img } of parallaxCards) {
+      const cardRect = card.getBoundingClientRect();
+      const cardCenterY = cardRect.top + cardRect.height / 2;
+      // Normalized offset: -1 (top) to +1 (bottom) relative to viewport center
+      const offset = (cardCenterY - centerY) / (wrapRect.height / 2);
+      const yShift = offset * -14; // max ±14px vertical shift
+      img.style.transform = `scale(1.12) translateY(${yShift}px)`;
+    }
+    grid._rafId = null;
+  }
+  scrollRoot.addEventListener('scroll', () => {
+    if (!grid._rafId) grid._rafId = requestAnimationFrame(onGridScroll);
+  }, { passive: true });
+  grid._scrollObs = cardObserver;
 
   sorted.forEach((dev, i) => {
     const avail = dev.status === 'available';
@@ -379,6 +438,13 @@ function buildGrid(gridId, devices, mode) {
                <svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
                <span>${slotLabel}</span>
              </div>`}
+        ${dev.image_path ? `
+        <div class="card-hover-reveal">
+          <div class="card-hover-reveal-img" style="background-image:url('${dev.image_path}')"></div>
+          <div class="card-hover-icon">
+            <svg viewBox="0 0 24 24"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
+          </div>
+        </div>` : ''}
         <div class="card-slot">${slotLabel}</div>
         <div class="card-status ${statusCls}">${statusTxt}</div>
       </div>
@@ -388,26 +454,34 @@ function buildGrid(gridId, devices, mode) {
       </div>
     `;
 
-    // Enhancement B: staggered entrance (base delay ensures first card transitions)
-    setTimeout(() => card.classList.add('in'), 80 + i * 75);
+    // Observe card for scroll-triggered entrance
+    cardObserver.observe(card);
 
-    // Enhancement D: image parallax on hover
+    // Track for scroll parallax
     const cardImg = card.querySelector('.card-image img');
+    if (cardImg) parallaxCards.push({ card, img: cardImg });
+
+    // Mouse parallax on hover (layered on top of scroll parallax)
     if (cardImg) {
       card.addEventListener('mousemove', e => {
         const rect = card.getBoundingClientRect();
         const x = (e.clientX - rect.left) / rect.width - 0.5;
         const y = (e.clientY - rect.top) / rect.height - 0.5;
-        cardImg.style.transform = `scale(1.08) translate(${x * -12}px, ${y * -12}px)`;
+        cardImg.style.transform = `scale(1.15) translate(${x * -14}px, ${y * -14}px)`;
       });
       card.addEventListener('mouseleave', () => {
+        // Restore to scroll-parallax transform
         cardImg.style.transform = '';
+        if (!grid._rafId) grid._rafId = requestAnimationFrame(onGridScroll);
       });
     }
 
     card.addEventListener('click', () => { clickSound(); openDetail(dev, mode); });
     grid.appendChild(card);
   });
+
+  // Trigger initial parallax positioning
+  requestAnimationFrame(onGridScroll);
 }
 
 /* ============================================================
@@ -473,11 +547,11 @@ function openDetail(dev, mode) {
 
 function closeDetail() {
   const overlay = document.getElementById('overlay-device-detail');
-  overlay.classList.add('hidden-up');
+  overlay.classList.add('hidden-right');
   setTimeout(() => {
-    overlay.classList.remove('visible', 'hidden-up');
+    overlay.classList.remove('visible', 'hidden-right');
     overlay.style.display = 'none';
-  }, 510);
+  }, 710);
   S.screen = S.prevScreen || (S.mode === 'return' ? 'return' : 'borrow');
 }
 
