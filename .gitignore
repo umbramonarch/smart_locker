@@ -17,3 +17,4 @@ venv/
 .mypy_cache/
 logs
 docs/Smart Locker Notes/
+smart_locker/frontend/PROMPTING_GUIDE.md
