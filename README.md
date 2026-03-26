@@ -182,17 +182,21 @@ The system stores a barcode value per device. The planned barcode scanner workfl
 ## Updating Device Images & Descriptions
 
 ```powershell
-# List all devices:
+# List all devices (shows locker slot, PM number, current image status):
 python -m scripts.update_device --list
 
-# Set image and description:
+# Auto-match: name photos by PM number (PM-001.jpg, PM-002.png, etc.),
+# place them in smart_locker/frontend/images/, then run:
+python -m scripts.update_device --auto
+
+# Set image and description for a single device:
 python -m scripts.update_device --pm PM-042 --image oscilloscope.jpg --description "4-ch 500MHz scope"
 
 # Batch update from file:
 python -m scripts.update_device --batch updates.txt
 ```
 
-Place device photos in `smart_locker/frontend/images/`. The script auto-syncs changes to the Excel file.
+Place device photos in `smart_locker/frontend/images/`. Name them by PM number for `--auto` matching. The script auto-syncs changes to the Excel file.
 
 ## Running Tests
 

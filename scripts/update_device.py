@@ -15,6 +15,9 @@ Usage:
 
     # Batch update from a CSV-like format (PM, field, value per line):
     python -m scripts.update_device --batch updates.txt
+
+    # Auto-match: scan images/ folder and link photos named by PM number:
+    python -m scripts.update_device --auto
 """
 
 import argparse
@@ -47,12 +50,13 @@ def list_devices() -> None:
             print("No devices in database.")
             return
 
-        print(f"\n{'PM':<15} {'Name':<35} {'Image':<20} {'Description'}")
-        print(f"{'---':<15} {'---':<35} {'---':<20} {'---'}")
+        print(f"\n{'Slot':<6} {'PM':<15} {'Name':<35} {'Image':<20} {'Description'}")
+        print(f"{'---':<6} {'---':<15} {'---':<35} {'---':<20} {'---'}")
         for d in devices:
+            slot = str(d.locker_slot) if d.locker_slot is not None else "-"
             img = d.image_path or "-"
             desc = (d.description[:40] + "...") if d.description and len(d.description) > 40 else (d.description or "-")
-            print(f"{d.pm_number:<15} {d.name[:34]:<35} {img[:19]:<20} {desc}")
+            print(f"{slot:<6} {d.pm_number:<15} {d.name[:34]:<35} {img[:19]:<20} {desc}")
         print(f"\n{len(devices)} device(s) total.")
 
 
@@ -123,6 +127,61 @@ def batch_update(batch_file: str) -> None:
         update_device(pm, updates)
 
 
+def auto_match_images() -> None:
+    """Scan frontend/images/ for files named by PM number and link them automatically.
+
+    Matches filenames like PM-001.jpg, PM-002.png, pm-003.webp (case-insensitive).
+    """
+    images_dir = Path(__file__).resolve().parent.parent / "smart_locker" / "frontend" / "images"
+    if not images_dir.exists():
+        print(f"ERROR: Images directory not found: {images_dir}")
+        return
+
+    image_extensions = {".jpg", ".jpeg", ".png", ".webp"}
+    image_files = [
+        f for f in images_dir.iterdir()
+        if f.is_file() and f.suffix.lower() in image_extensions
+    ]
+
+    if not image_files:
+        print(f"No image files found in {images_dir}")
+        return
+
+    init_db()
+    with get_session() as session:
+        devices = session.execute(select(Device)).scalars().all()
+        pm_to_device = {d.pm_number.lower(): d for d in devices if d.pm_number}
+
+    # Match files to PM numbers
+    matched = []
+    unmatched = []
+    for img_file in sorted(image_files):
+        stem = img_file.stem.lower()  # e.g. "pm-001"
+        if stem in pm_to_device:
+            matched.append((pm_to_device[stem].pm_number, img_file.name))
+        else:
+            unmatched.append(img_file.name)
+
+    if not matched:
+        print("No images matched any PM numbers.")
+        print(f"  Found {len(image_files)} image(s), but none matched device PM numbers.")
+        print("  Tip: name photos by PM number, e.g. PM-001.jpg, PM-002.png")
+        return
+
+    print(f"\nFound {len(matched)} match(es):\n")
+    for pm, filename in matched:
+        print(f"  {pm} <- {filename}")
+
+    if unmatched:
+        print(f"\n  {len(unmatched)} unmatched file(s): {', '.join(unmatched)}")
+
+    print()
+    for pm, filename in matched:
+        update_device(pm, {"image_path": f"images/{filename}"})
+
+    print(f"\nDone. {len(matched)} device(s) updated.")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Update device fields by PM number.")
     parser.add_argument("--pm", help="PM number of the device to update")
@@ -132,6 +191,7 @@ def main() -> None:
     parser.add_argument("--value", help="Value to set (used with --field)")
     parser.add_argument("--list", action="store_true", help="List all devices")
     parser.add_argument("--batch", help="Batch update from a text file (PM field value per line)")
+    parser.add_argument("--auto", action="store_true", help="Auto-match images named by PM number (e.g. PM-001.jpg)")
     args = parser.parse_args()
 
     setup_logging()
@@ -142,6 +202,10 @@ def main() -> None:
 
     if args.batch:
         batch_update(args.batch)
+        return
+
+    if args.auto:
+        auto_match_images()
         return
 
     if not args.pm:

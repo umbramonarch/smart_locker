@@ -223,14 +223,47 @@ with get_session() as session:
 
 After importing devices, you can add images and descriptions using the update script.
 
-**1. Place your photos** in `smart_locker/frontend/images/`. Use dark-background product-style photos for best results on the kiosk UI. Supported formats: `.jpg`, `.png`, `.webp`.
-
-**2. Update each device:**
+**1. Take photos and name them by PM number.** Run `--list` first to see which PM number is in which locker slot:
 
 ```powershell
-# See all devices and their current image/description status:
 python -m scripts.update_device --list
+```
 
+Output:
+```
+Slot   PM              Name                                Image                Description
+---    ---             ---                                 ---                  ---
+1      PM-001          PM-001 Keysight DSOX3054T           -                    -
+2      PM-002          PM-002 Rohde & Schwarz HMC8043      -                    -
+3      PM-003          PM-003 Fluke 87V                    -                    -
+```
+
+At the locker, take a photo of each device and **name the file by its PM number**: `PM-001.jpg`, `PM-002.jpg`, etc. Supported formats: `.jpg`, `.png`, `.webp`.
+
+**2. Place photos** in `smart_locker/frontend/images/`.
+
+**3. Auto-match** — the easiest way. Scans the `images/` folder, finds files named by PM number, and links them automatically:
+
+```powershell
+python -m scripts.update_device --auto
+```
+
+Output:
+```
+Found 3 match(es):
+
+  PM-001 <- PM-001.jpg
+  PM-002 <- PM-002.jpg
+  PM-003 <- PM-003.jpg
+
+  image_path: 'None' -> 'images/PM-001.jpg'
+Updated: PM-001 (PM-001 Keysight DSOX3054T)
+...
+```
+
+**4. Manual update** — for setting descriptions or updating individual devices:
+
+```powershell
 # Set image and description for a single device:
 python -m scripts.update_device --pm PM-042 --image oscilloscope.jpg --description "4-channel 500MHz digital oscilloscope"
 
@@ -243,15 +276,13 @@ python -m scripts.update_device --pm PM-042 --field manufacturer --value "Keysig
 
 The `--image` flag auto-prepends `images/` if you only provide a filename. Changes are immediately synced to the Excel file.
 
-**3. Batch update** — for updating many devices at once, create a text file with one update per line:
+**5. Batch update** — for updating many devices at once, create a text file with one update per line:
 
 ```
 # updates.txt — format: PM_NUMBER field value
-PM-001 image_path images/oscilloscope.jpg
 PM-001 description 4-channel 500MHz digital oscilloscope
-PM-002 image_path images/power_supply.jpg
 PM-002 description Triple-output programmable DC power supply
-PM-003 image_path images/multimeter.jpg
+PM-003 description True-RMS industrial multimeter
 ```
 
 Then run:
