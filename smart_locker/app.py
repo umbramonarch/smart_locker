@@ -1,10 +1,12 @@
 """Smart Locker application entry point.
 
-Wires together NFC reader, authentication, session management, and services.
-Main loop: wait_for_card() → authenticate → start session → card removed → end session.
+Two modes:
+  - Web server (default): FastAPI + uvicorn serving the kiosk UI with NFC bridge.
+  - CLI mode (--cli): Original blocking main loop for console-only operation.
 
 Usage:
-    python -m smart_locker.app
+    python -m smart_locker.app          # Web server on http://localhost:8000
+    python -m smart_locker.app --cli    # Console-only NFC loop
 """
 
 import logging
@@ -16,10 +18,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from config.logging_config import setup_logging
-from config.settings import SESSION_TIMEOUT_SECONDS
+from config.settings import EXCEL_SYNC_PATH, SESSION_TIMEOUT_SECONDS
 from smart_locker.auth.authenticator import Authenticator
 from smart_locker.auth.session_manager import SessionManager
-from smart_locker.database.engine import get_session, init_db
+from smart_locker.database.engine import get_engine, get_session, init_db
 from smart_locker.database.repositories import DeviceRepository
 from smart_locker.nfc.card_observer import CardEvent, CardEventType
 from smart_locker.nfc.exceptions import NFCError
@@ -44,6 +46,9 @@ class SmartLockerApp:
         """Start the application main loop."""
         setup_logging()
         init_db()
+
+        from smart_locker.sync.excel_sync import register_auto_sync
+        register_auto_sync(get_engine(), EXCEL_SYNC_PATH)
 
         logger.info("Smart Locker starting...")
 
@@ -150,9 +155,31 @@ class SmartLockerApp:
 
 
 def main() -> None:
+    """Legacy CLI mode — blocking NFC loop with console output."""
     app = SmartLockerApp()
     app.run()
 
 
+def run_server() -> None:
+    """Web server mode — FastAPI + uvicorn with NFC bridge."""
+    import uvicorn
+
+    from config.settings import API_HOST, API_PORT
+    from smart_locker.api.server import create_app
+
+    setup_logging()
+    init_db()
+
+    from smart_locker.sync.excel_sync import register_auto_sync
+    register_auto_sync(get_engine(), EXCEL_SYNC_PATH)
+
+    app = create_app()
+    logger.info("Starting Smart Locker web server on %s:%d", API_HOST, API_PORT)
+    uvicorn.run(app, host=API_HOST, port=API_PORT)
+
+
 if __name__ == "__main__":
-    main()
+    if "--cli" in sys.argv:
+        main()
+    else:
+        run_server()

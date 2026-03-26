@@ -14,14 +14,18 @@ Equipment borrowing/returning system using NFC work cards. Users tap their card 
 ```
 smart_locker/
 ├── config/
-│   ├── settings.py              # Central config (DB path, reader name, timeouts, borrow limit)
+│   ├── settings.py              # Central config (DB path, reader name, timeouts, Excel sync path)
 │   └── logging_config.py        # Rotating file + console logging
 ├── smart_locker/
-│   ├── app.py                   # Main entry point: starts NFC reader threads + main event loop
+│   ├── app.py                   # Entry point: web server (FastAPI + uvicorn) or CLI mode
+│   ├── api/                     # FastAPI REST API
+│   │   ├── routes.py            # Session, device, borrow/return endpoints + SSE stream
+│   │   ├── server.py            # FastAPI app factory + static file serving
+│   │   └── app_context.py       # Shared app context (session manager, SSE queue)
 │   ├── frontend/                # Touch display web UI
 │   │   ├── index.html           # HTML screen structure (6 screens)
 │   │   ├── style.css            # All styling — colors, animations, layout
-│   │   ├── app.js               # State machine, API stubs, UI behaviour (demo mode included)
+│   │   ├── app.js               # State machine, API calls, UI behaviour (demo mode included)
 │   │   └── images/              # Device placeholder photos
 │   ├── nfc/                     # NFC reader interface (pyscard + APDU)
 │   │   ├── apdu.py              # APDU command definitions
@@ -40,16 +44,19 @@ smart_locker/
 │   │   ├── models.py            # ORM models (User, Device, TransactionLog)
 │   │   ├── engine.py            # SQLAlchemy engine + session factory
 │   │   └── repositories.py      # CRUD operations
-│   └── services/                # Business logic
-│       ├── locker_service.py    # Borrow/return operations (5-device limit, admin overrides)
-│       └── user_service.py      # User enrollment, public/admin views
+│   ├── services/                # Business logic
+│   │   ├── locker_service.py    # Borrow/return operations (5-device limit, admin overrides)
+│   │   └── user_service.py      # User enrollment, public/admin views
+│   └── sync/                    # Data synchronization
+│       └── excel_sync.py        # Auto-export DB to Excel on every change
 ├── scripts/
 │   ├── generate_key.py          # Generate encryption + HMAC keys
 │   ├── init_db.py               # Create database tables
 │   ├── migrate_db.py            # Add columns to existing DB (run after schema changes)
 │   ├── enroll_card.py           # Enroll a new NFC card user
-│   └── import_devices.py        # Bulk import devices from Excel
-├── tests/                       # Unit tests (52 tests, no hardware needed)
+│   ├── import_devices.py        # Bulk import devices from Excel (German + English headers)
+│   └── update_device.py        # Update device fields (image, description, etc.) by PM number
+├── tests/                       # Unit tests (73 tests, no hardware needed)
 ├── requirements.txt
 ├── .env.example
 ├── GUIDE.md                     # Step-by-step setup and usage guide
@@ -63,13 +70,16 @@ smart_locker/
 | NFC reader (pyscard) | ✅ Done | Card insert/remove, UID reading, retry logic |
 | Authentication | ✅ Done | HMAC lookup, session lifecycle |
 | Security (AES/HMAC) | ✅ Done | AES-256-GCM encryption, key management |
-| Database & ORM | ✅ Done | SQLAlchemy models, repositories |
+| Database & ORM | ✅ Done | SQLAlchemy models, repositories, extended device schema |
 | Business logic | ✅ Done | Borrow/return rules, admin overrides, borrow limit |
-| Unit tests | ✅ Done | 52 tests, all passing, no hardware required |
+| FastAPI REST API | ✅ Done | Session, device, borrow/return endpoints + SSE stream |
+| Excel auto-sync | ✅ Done | DB changes auto-export to .xlsx (Devices + Transactions sheets) |
+| Device import | ✅ Done | German + English Excel headers, PM-based dedup, schrank auto-numbering |
+| Unit tests | ✅ Done | 73 tests, all passing, no hardware required |
 | Frontend UI | ✅ Done | 6-screen kiosk UI, animations, demo mode |
-| FastAPI REST API | 🔲 Next | Routes + schemas connecting frontend ↔ backend |
-| NFC → frontend bridge | 🔲 Next | SSE/WebSocket pushing card-tap events to the UI |
-| Kiosk deployment | 🔲 Next | Auto-start, Chromium kiosk mode, Windows service |
+| Barcode scanner | 🔲 Planned | Barcode values stored per device. USB scanner will emulate keyboard input to identify devices in shared lockers. |
+| Calibration alerts | 🔲 Future | Calibration dates stored; notification system not yet built |
+| Kiosk deployment | 🔲 Future | Auto-start, Chromium kiosk mode, Windows service |
 
 ## Quick Start
 
@@ -121,7 +131,12 @@ See **GUIDE.md** for detailed step-by-step instructions.
 │  │  SQLite + SQLAlchemy │  │  NFC Reader (ACR1252U)    │      │
 │  │  users · devices     │  │  Background listener       │      │
 │  │  transaction_logs    │  │  Tap → HMAC → auth        │      │
-│  └──────────────────────┘  └───────────────────────────┘      │
+│  └──────┬───────────────┘  └───────────────────────────┘      │
+│         │ auto-sync on change                                   │
+│  ┌──────▼───────────────────────────────────────────────┐      │
+│  │  Excel Export  (smart_locker_data.xlsx)               │      │
+│  │  Devices sheet · Transactions sheet                   │      │
+│  └──────────────────────────────────────────────────────┘      │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -155,10 +170,34 @@ The system runs as a kiosk: FastAPI serves the frontend as static files, display
 - **Admin-only decryption**: only admin users can view raw card UIDs
 - **UID never logged**: card UIDs are never written to log files — events are logged as "Card inserted on \<reader\>" with no UID information. UIDs are masked in enrollment output only (e.g. `04**********80`)
 
+## Barcode Scanner Plan
+
+The system stores a barcode value per device. The planned barcode scanner workflow:
+
+- **Shared lockers**: Multiple devices of the same type (e.g., 5 current probes) share one locker. The barcode identifies the specific device.
+- **Hardware**: USB barcode scanner (keyboard emulation) connected to the kiosk PC.
+- **Flow**: NFC authenticate → select Borrow/Return → scan device barcode → system matches `devices.barcode` → completes transaction.
+- **Implementation**: Barcode input listener in `app.js` (detects rapid keystrokes ending in Enter) + `GET /api/devices/barcode/{barcode}` endpoint.
+
+## Updating Device Images & Descriptions
+
+```powershell
+# List all devices:
+python -m scripts.update_device --list
+
+# Set image and description:
+python -m scripts.update_device --pm PM-042 --image oscilloscope.jpg --description "4-ch 500MHz scope"
+
+# Batch update from file:
+python -m scripts.update_device --batch updates.txt
+```
+
+Place device photos in `smart_locker/frontend/images/`. The script auto-syncs changes to the Excel file.
+
 ## Running Tests
 
 ```powershell
 python -m pytest tests/ -v
 ```
 
-All 52 tests run without NFC hardware (in-memory SQLite, no reader needed).
+All 73 tests run without NFC hardware (in-memory SQLite, no reader needed).

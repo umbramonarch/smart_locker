@@ -34,6 +34,11 @@ def migrate() -> None:
         ("devices", "locker_slot", "INTEGER"),
         ("devices", "description", "TEXT"),
         ("devices", "image_path", "VARCHAR(255)"),
+        ("devices", "pm_number", "VARCHAR(50)"),
+        ("devices", "manufacturer", "VARCHAR(100)"),
+        ("devices", "model", "VARCHAR(100)"),
+        ("devices", "barcode", "VARCHAR(100)"),
+        ("devices", "calibration_due", "DATE"),
     ]
 
     for table, column, col_type in migrations:

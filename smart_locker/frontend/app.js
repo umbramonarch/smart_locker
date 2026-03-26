@@ -1,6 +1,8 @@
 /* ============================================================
    STATE — single source of truth for the UI
 ============================================================ */
+const USE_DEMO = false; // true = demo data, false = real API + SSE
+
 const S = {
   screen:     'idle',   // current screen id
   user:       null,     // { id, name, role }
@@ -27,46 +29,61 @@ const DEMO_USERS = [
 let demoUserIdx = 0;
 
 const DEMO_DEVICES = [
-  { id:1, name:'Canon EOS R5',      device_type:'Camera',         serial_number:'CNR5-001',        locker_slot:1, description:'Full-frame mirrorless camera. Handle with care. Return with battery charged.',                    image_path:'images/camera.jpg',         status:'available',   borrower_name:null      },
-  { id:2, name:'DJI Mavic 3',       device_type:'Drone',          serial_number:'DJI-M3-042',      locker_slot:2, description:'Professional drone with 4/3 CMOS sensor. Requires signed certification form to borrow.',         image_path:'images/drone.jpg',          status:'borrowed',    borrower_name:'Sarah K.' },
-  { id:3, name:'Rode VideoMic Pro', device_type:'Microphone',     serial_number:'RVM-P-007',       locker_slot:3, description:'Directional condenser microphone. Include dead-cat windshield when filming outdoors.',             image_path:'images/microphone.jpg',     status:'available',   borrower_name:null      },
-  { id:4, name:'MacBook Pro 16"',   device_type:'Laptop',         serial_number:'MBP16-2024-03',   locker_slot:4, description:'M3 Max · 64 GB RAM. Adobe CC, DaVinci Resolve, and Final Cut Pro installed.',                     image_path:'images/laptop.jpg',         status:'available',   borrower_name:null      },
-  { id:5, name:'Godox SL-60W',      device_type:'Studio Light',   serial_number:'GOD-SL60-011',    locker_slot:5, description:'LED video light · 60 W daylight. Includes softbox and C-stand adapter.',                         image_path:'images/studio_light.jpg',   status:'borrowed',    borrower_name:'You'     },
-  { id:6, name:'Zoom H6 Recorder',  device_type:'Audio Recorder', serial_number:'ZMH6-099',        locker_slot:6, description:'Portable 6-track recorder. 32 GB SD card included. Batteries not provided.',                       image_path:'images/audio_recorder.jpg', status:'available',   borrower_name:null      },
-  { id:7, name:'iPad Pro 12.9"',    device_type:'Tablet',         serial_number:'IPD-PRO-2024-08', locker_slot:7, description:'Includes Apple Pencil 2 and Magic Keyboard. Configured for field monitoring.',                    image_path:'images/tablet.jpg',         status:'available',   borrower_name:null      },
-  { id:8, name:'Manfrotto 504X',    device_type:'Tripod',         serial_number:'MFT-504X-002',    locker_slot:8, description:'Professional fluid-head video tripod. 12 kg payload. Inspect head lock before each use.',          image_path:'images/tripod.jpg',         status:'maintenance', borrower_name:null      },
+  { id:1, pm_number:'PM-001', name:'PM-001 Keysight DSOX3054T',  device_type:'Oscilloscope',   serial_number:'MY12345678',  manufacturer:'Keysight',       model:'DSOX3054T',   barcode:'490001', locker_slot:1,  description:null, image_path:null, calibration_due:'2026-09-15', status:'available',   borrower_name:null       },
+  { id:2, pm_number:'PM-002', name:'PM-002 Rohde & Schwarz HMC8043', device_type:'Power Supply', serial_number:'RS-HMC-042', manufacturer:'Rohde & Schwarz', model:'HMC8043',    barcode:'490002', locker_slot:2,  description:null, image_path:null, calibration_due:'2026-11-01', status:'borrowed',    borrower_name:'Sarah K.' },
+  { id:3, pm_number:'PM-003', name:'PM-003 Fluke 87V',           device_type:'Multimeter',     serial_number:'FL-87V-007',  manufacturer:'Fluke',          model:'87V',         barcode:'490003', locker_slot:3,  description:null, image_path:null, calibration_due:'2026-06-30', status:'available',   borrower_name:null       },
+  { id:4, pm_number:'PM-004', name:'PM-004 Keysight 34465A',     device_type:'Multimeter',     serial_number:'MY98765432',  manufacturer:'Keysight',       model:'34465A',      barcode:'490004', locker_slot:4,  description:null, image_path:null, calibration_due:null,         status:'available',   borrower_name:null       },
+  { id:5, pm_number:'PM-005', name:'PM-005 Fluke i400s',         device_type:'Current Probe',  serial_number:null,          manufacturer:'Fluke',          model:'i400s',       barcode:'490005', locker_slot:5,  description:null, image_path:null, calibration_due:'2027-01-15', status:'borrowed',    borrower_name:'You'      },
+  { id:6, pm_number:'PM-006', name:'PM-006 Tektronix TBS2104X',  device_type:'Oscilloscope',   serial_number:'TEK-TBS-099', manufacturer:'Tektronix',      model:'TBS2104X',    barcode:'490006', locker_slot:6,  description:null, image_path:null, calibration_due:'2026-08-20', status:'available',   borrower_name:null       },
+  { id:7, pm_number:'PM-007', name:'PM-007 Hioki DT4282',        device_type:'Multimeter',     serial_number:null,          manufacturer:'Hioki',          model:'DT4282',      barcode:'490007', locker_slot:7,  description:null, image_path:null, calibration_due:null,         status:'available',   borrower_name:null       },
+  { id:8, pm_number:'PM-008', name:'PM-008 Megger MIT485/2',     device_type:'Insulation Tester', serial_number:'MEG-485-002', manufacturer:'Megger',      model:'MIT485/2',    barcode:'490008', locker_slot:8,  description:null, image_path:null, calibration_due:'2026-12-01', status:'maintenance', borrower_name:null       },
 ];
 
 /* ============================================================
-   API STUBS
+   API — real fetch() calls with demo fallback
 ============================================================ */
 async function apiAuthTap(uid_hmac) {
-  await sleep(380);
-  const user = DEMO_USERS[demoUserIdx++ % DEMO_USERS.length];
-  return { success: true, user };
+  if (USE_DEMO) {
+    await sleep(380);
+    const user = DEMO_USERS[demoUserIdx++ % DEMO_USERS.length];
+    return { success: true, user };
+  }
+  // In live mode, auth comes via SSE — this is only called in demo mode
+  return { success: false };
 }
 
 async function apiGetDevices() {
-  await sleep(280);
-  return DEMO_DEVICES;
+  if (USE_DEMO) { await sleep(280); return DEMO_DEVICES; }
+  const res = await fetch('/api/devices');
+  if (!res.ok) return [];
+  return await res.json();
 }
 
 async function apiBorrow(device_id) {
-  await sleep(480);
-  const d = S.devices.find(x => x.id === device_id);
-  if (d) { d.status = 'borrowed'; d.borrower_name = 'You'; }
-  return { success: true, message: `${d?.name ?? 'Device'} borrowed.` };
+  if (USE_DEMO) {
+    await sleep(480);
+    const d = S.devices.find(x => x.id === device_id);
+    if (d) { d.status = 'borrowed'; d.borrower_name = 'You'; }
+    return { success: true, message: `${d?.name ?? 'Device'} borrowed.` };
+  }
+  const res = await fetch(`/api/devices/${device_id}/borrow`, { method: 'POST' });
+  return await res.json();
 }
 
 async function apiReturn(device_id) {
-  await sleep(480);
-  const d = S.devices.find(x => x.id === device_id);
-  if (d) { d.status = 'available'; d.borrower_name = null; }
-  return { success: true, message: `${d?.name ?? 'Device'} returned.` };
+  if (USE_DEMO) {
+    await sleep(480);
+    const d = S.devices.find(x => x.id === device_id);
+    if (d) { d.status = 'available'; d.borrower_name = null; }
+    return { success: true, message: `${d?.name ?? 'Device'} returned.` };
+  }
+  const res = await fetch(`/api/devices/${device_id}/return`, { method: 'POST' });
+  return await res.json();
 }
 
 async function apiEndSession() {
-  await sleep(200);
+  if (USE_DEMO) { await sleep(200); return; }
+  await fetch('/api/session/end', { method: 'POST' }).catch(() => {});
 }
 
 /* ============================================================
@@ -283,7 +300,12 @@ function dismissInactivity() {
 }
 
 ['click', 'touchstart', 'keydown'].forEach(evt =>
-  document.addEventListener(evt, () => { if (S.screen !== 'idle') armIdle(); })
+  document.addEventListener(evt, () => {
+    if (S.screen === 'idle') return;
+    armIdle();
+    // Ping backend to reset server-side inactivity timer
+    if (!USE_DEMO && S.user) fetch('/api/session/touch', { method: 'POST' }).catch(() => {});
+  })
 );
 
 /* ============================================================
@@ -314,11 +336,11 @@ function showAuthFailed() {
   setTimeout(() => navigate('idle'), 3100);
 }
 
-async function endSession(fromTimeout = false) {
+async function endSession(fromTimeout = false, fromSSE = false) {
   clearTimeout(S.idleTimer);
   clearInterval(S.cdTimer);
   dismissInactivity();
-  await apiEndSession();
+  if (!fromSSE) await apiEndSession();
   S.user     = null;
   S.devices  = [];
   S.selected = null;
@@ -704,3 +726,62 @@ initSplitText();
 
 // Enhancement D: magnetic hover on action buttons
 initMagneticHover();
+
+/* ============================================================
+   SSE — real-time events from backend (live mode only)
+============================================================ */
+function connectSSE() {
+  const source = new EventSource('/api/events');
+
+  source.addEventListener('auth_success', e => {
+    const data = JSON.parse(e.data);
+    S.user = data.user;
+    fillMainMenu(data.user);
+    navigate('main-menu');
+    armIdle();
+  });
+
+  source.addEventListener('auth_failed', () => {
+    showAuthFailed();
+  });
+
+  source.addEventListener('session_ended', () => {
+    endSession(false, true);
+  });
+
+  source.addEventListener('session_timeout', () => {
+    endSession(true, true);
+  });
+
+  source.addEventListener('reader_disconnected', () => {
+    showToast('NFC reader disconnected', 'error');
+  });
+
+  source.addEventListener('reader_connected', () => {
+    showToast('NFC reader reconnected', 'success');
+  });
+
+  source.onerror = () => {
+    source.close();
+    setTimeout(connectSSE, 3000);
+  };
+}
+
+// On page load: check if a session is already active (handles browser refresh)
+async function checkExistingSession() {
+  try {
+    const res = await fetch('/api/session');
+    const data = await res.json();
+    if (data.active && data.user) {
+      S.user = data.user;
+      fillMainMenu(data.user);
+      navigate('main-menu');
+      armIdle();
+    }
+  } catch (_) { /* server not reachable — stay on idle */ }
+}
+
+if (!USE_DEMO) {
+  connectSSE();
+  checkExistingSession();
+}

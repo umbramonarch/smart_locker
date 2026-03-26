@@ -1,5 +1,7 @@
 """Tests for the database module: models, repositories."""
 
+from datetime import date
+
 import pytest
 
 from smart_locker.database.models import DeviceStatus, TransactionType, UserRole
@@ -63,12 +65,14 @@ class TestDeviceRepository:
             db_session,
             name="Multimeter",
             device_type="measurement",
+            pm_number="PM-001",
             serial_number="SN001",
             locker_slot=1,
         )
         found = DeviceRepository.find_by_id(db_session, device.id)
         assert found is not None
         assert found.name == "Multimeter"
+        assert found.pm_number == "PM-001"
         assert found.status == DeviceStatus.AVAILABLE
 
     def test_borrow_and_return(self, db_session, enc_key, hmac_key):
@@ -79,7 +83,8 @@ class TestDeviceRepository:
             encrypted_card_uid=encrypt("AAAA", enc_key),
         )
         device = DeviceRepository.create(
-            db_session, name="Scope", device_type="measurement", serial_number="SN002"
+            db_session, name="Scope", device_type="measurement",
+            pm_number="PM-002", serial_number="SN002",
         )
         db_session.flush()
 
@@ -99,10 +104,10 @@ class TestDeviceRepository:
 
     def test_get_available_devices(self, db_session):
         d1 = DeviceRepository.create(
-            db_session, name="D1", device_type="t", serial_number="S1"
+            db_session, name="D1", device_type="t", pm_number="PM-D1", serial_number="S1",
         )
         d2 = DeviceRepository.create(
-            db_session, name="D2", device_type="t", serial_number="S2"
+            db_session, name="D2", device_type="t", pm_number="PM-D2", serial_number="S2",
         )
         db_session.flush()
 
@@ -114,6 +119,39 @@ class TestDeviceRepository:
         available = DeviceRepository.get_available_devices(db_session)
         assert len(available) == 1
 
+    def test_create_device_with_extended_fields(self, db_session):
+        device = DeviceRepository.create(
+            db_session,
+            name="PM-042 Keysight DSOX3054T",
+            device_type="Oscilloscope",
+            pm_number="PM-042",
+            serial_number="MY12345678",
+            locker_slot=3,
+            description="4-channel 500MHz oscilloscope",
+            manufacturer="Keysight",
+            model="DSOX3054T",
+            barcode="4900123456789",
+            calibration_due=date(2026, 9, 15),
+        )
+        found = DeviceRepository.find_by_id(db_session, device.id)
+        assert found.pm_number == "PM-042"
+        assert found.manufacturer == "Keysight"
+        assert found.model == "DSOX3054T"
+        assert found.barcode == "4900123456789"
+        assert found.calibration_due == date(2026, 9, 15)
+        assert found.serial_number == "MY12345678"
+
+    def test_create_device_without_serial(self, db_session):
+        device = DeviceRepository.create(
+            db_session,
+            name="PM-099 Fluke",
+            device_type="Multimeter",
+            pm_number="PM-099",
+        )
+        found = DeviceRepository.find_by_id(db_session, device.id)
+        assert found.pm_number == "PM-099"
+        assert found.serial_number is None
+
 
 class TestTransactionRepository:
     def test_log_borrow_and_return(self, db_session, enc_key, hmac_key):
@@ -124,7 +162,7 @@ class TestTransactionRepository:
             encrypted_card_uid=encrypt("AAAA", enc_key),
         )
         device = DeviceRepository.create(
-            db_session, name="D1", device_type="t", serial_number="S1"
+            db_session, name="D1", device_type="t", pm_number="PM-T1", serial_number="S1",
         )
         db_session.flush()
 

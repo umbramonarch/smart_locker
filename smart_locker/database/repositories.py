@@ -1,7 +1,7 @@
 """Data access layer — repository pattern for database CRUD operations."""
 
 import logging
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -102,22 +102,32 @@ class DeviceRepository:
         session: Session,
         name: str,
         device_type: str,
-        serial_number: str,
+        pm_number: str,
+        serial_number: str | None = None,
         locker_slot: int | None = None,
         description: str | None = None,
         image_path: str | None = None,
+        manufacturer: str | None = None,
+        model: str | None = None,
+        barcode: str | None = None,
+        calibration_due: date | None = None,
     ) -> Device:
         device = Device(
             name=name,
             device_type=device_type,
+            pm_number=pm_number,
             serial_number=serial_number,
             locker_slot=locker_slot,
             description=description,
             image_path=image_path,
+            manufacturer=manufacturer,
+            model=model,
+            barcode=barcode,
+            calibration_due=calibration_due,
         )
         session.add(device)
         session.flush()
-        logger.info("Created device: %s (id=%d)", name, device.id)
+        logger.info("Created device: %s (id=%d, pm=%s)", name, device.id, pm_number)
         return device
 
     @staticmethod

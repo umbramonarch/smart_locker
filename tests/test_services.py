@@ -21,7 +21,8 @@ class TestLockerService:
             encrypted_card_uid=encrypt(uid, enc_key),
         )
         device = DeviceRepository.create(
-            db_session, name="Multimeter", device_type="measurement", serial_number="SN001"
+            db_session, name="Multimeter", device_type="measurement",
+            pm_number="PM-001", serial_number="SN001",
         )
         db_session.flush()
 
@@ -63,8 +64,8 @@ class TestLockerService:
         monkeypatch.setattr(svc_module, "MAX_BORROWS", 2)
 
         user, device1, session = self._setup(db_session, enc_key, hmac_key)
-        device2 = DeviceRepository.create(db_session, name="Scope", device_type="measurement", serial_number="SN002")
-        device3 = DeviceRepository.create(db_session, name="PSU", device_type="power", serial_number="SN003")
+        device2 = DeviceRepository.create(db_session, name="Scope", device_type="measurement", pm_number="PM-002", serial_number="SN002")
+        device3 = DeviceRepository.create(db_session, name="PSU", device_type="power", pm_number="PM-003", serial_number="SN003")
         db_session.flush()
 
         assert LockerService.borrow_device(db_session, session, device1.id) is True
@@ -79,7 +80,7 @@ class TestLockerService:
         monkeypatch.setattr(svc_module, "MAX_BORROWS", 1)
 
         user1, device1, session1 = self._setup(db_session, enc_key, hmac_key)
-        device2 = DeviceRepository.create(db_session, name="Scope", device_type="measurement", serial_number="SN002")
+        device2 = DeviceRepository.create(db_session, name="Scope", device_type="measurement", pm_number="PM-002", serial_number="SN002")
         db_session.flush()
 
         assert LockerService.borrow_device(db_session, session1, device1.id) is True

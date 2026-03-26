@@ -154,19 +154,27 @@ python -m scripts.enroll_card --name "Colleague Name" --role user
 
 ## Step 5: Add Devices to the System
 
-### Option A: Bulk Import from Excel (recommended for 500+ devices)
+### Option A: Bulk Import from Excel (recommended)
 
-Prepare your `.xlsx` file with at minimum two columns: one for **device name** and one for **serial number**. Optionally include **device type** and **locker slot** columns.
+Prepare your `.xlsx` file with at minimum a **PM/equipment number** column. The script auto-detects both German and English column headers.
 
-Example Excel layout:
+**Supported columns (auto-detected):**
 
-| Device Name       | Serial Number | Type        | Locker | Description             | Image          |
-|-------------------|---------------|-------------|--------|-------------------------|----------------|
-| Multimeter        | SN-001        | measurement | 1      | Fluke 87V digital meter | multimeter.jpg |
-| Oscilloscope      | SN-002        | measurement | 2      | Rigol DS1054Z 50MHz     | oscilloscope.jpg |
-| Soldering Station | SN-003        | tool        | 3      | Hakko FX-888D           | soldering.jpg  |
+| Excel Column | German Name | Maps To | Required? |
+|---|---|---|---|
+| Equipment | Equipment | `pm_number` | **Yes** — primary device identifier |
+| Category | Kategorie | `device_type` | No (defaults to "general") |
+| Description | Beschreibung | `description` | No |
+| Manufacturer | Hersteller | `manufacturer` | No |
+| Type designation | Typbezeichnung | `model` | No |
+| Serial number | Hersteller-serialnummer | `serial_number` | No |
+| Barcode | Barcode | `barcode` | No |
+| Locker placement | Platz Messmittelschrank | `locker_slot` | No |
+| Calibration date | Datum der nächsten Kalibrierung | `calibration_due` | No |
 
-The **Description** column provides a short text shown on the touch display when a user taps a device. The **Image** column contains the filename of a device photo stored in the `static/devices/` directory. Both columns are optional — devices without them will display with a placeholder image and no description.
+**Name auto-composition:** If no dedicated "name" column exists, the device name is composed as `"{PM number} {Manufacturer} {Model}"` (e.g., "PM-042 Keysight DSOX3054T").
+
+**Locker slot auto-numbering:** Devices with "schrank*" values (e.g., "schrank1") are auto-numbered 1 through N in spreadsheet order.
 
 ```powershell
 # First, preview what will be imported (no changes written):
@@ -176,17 +184,13 @@ python -m scripts.import_devices --file "path\to\devices.xlsx" --dry-run
 python -m scripts.import_devices --file "path\to\devices.xlsx"
 ```
 
-The script auto-detects common column names (Name, Device Name, Serial, S/N, Type, Category, Slot, Description, Image, Photo, etc.). If your columns have different headers, map them explicitly:
+The script prints the detected column mapping before importing. If auto-detection picks the wrong column, override it explicitly:
 
 ```powershell
-python -m scripts.import_devices --file devices.xlsx --name-col "Equipment" --serial-col "S/N" --type-col "Category"
+python -m scripts.import_devices --file devices.xlsx --pm-col "Equipment" --type-col "Kategorie" --manufacturer-col "Hersteller"
 ```
 
-If your sheet has no type column, set a default for all devices:
-
-```powershell
-python -m scripts.import_devices --file devices.xlsx --default-type "equipment"
-```
+All available overrides: `--pm-col`, `--name-col`, `--serial-col`, `--type-col`, `--slot-col`, `--manufacturer-col`, `--model-col`, `--barcode-col`, `--calibration-col`.
 
 To read a specific sheet (default is the first sheet):
 
@@ -194,7 +198,7 @@ To read a specific sheet (default is the first sheet):
 python -m scripts.import_devices --file devices.xlsx --sheet "Inventory"
 ```
 
-Duplicates are automatically skipped (by serial number), so it's safe to re-run the import if you add new rows to the Excel file.
+Duplicates are automatically skipped (by PM number), so it's safe to re-run the import if you add new rows to the Excel file. After import, the data is automatically exported to `smart_locker_data.xlsx`.
 
 ### Option B: Add a few devices manually
 
@@ -209,10 +213,51 @@ from smart_locker.database.repositories import DeviceRepository
 
 init_db()
 with get_session() as session:
-    DeviceRepository.create(session, name='Multimeter', device_type='measurement', serial_number='SN-001', locker_slot=1)
-    DeviceRepository.create(session, name='Oscilloscope', device_type='measurement', serial_number='SN-002', locker_slot=2)
+    DeviceRepository.create(session, name='PM-001 Fluke 87V', device_type='Multimeter', pm_number='PM-001', serial_number='SN-001', manufacturer='Fluke', model='87V', locker_slot=1)
+    DeviceRepository.create(session, name='PM-002 Rigol DS1054Z', device_type='Oscilloscope', pm_number='PM-002', serial_number='SN-002', manufacturer='Rigol', model='DS1054Z', locker_slot=2)
     print('Devices added successfully.')
 "
+```
+
+### Step 5c: Add Device Images and Descriptions
+
+After importing devices, you can add images and descriptions using the update script.
+
+**1. Place your photos** in `smart_locker/frontend/images/`. Use dark-background product-style photos for best results on the kiosk UI. Supported formats: `.jpg`, `.png`, `.webp`.
+
+**2. Update each device:**
+
+```powershell
+# See all devices and their current image/description status:
+python -m scripts.update_device --list
+
+# Set image and description for a single device:
+python -m scripts.update_device --pm PM-042 --image oscilloscope.jpg --description "4-channel 500MHz digital oscilloscope"
+
+# Set just the image:
+python -m scripts.update_device --pm PM-042 --image oscilloscope.jpg
+
+# Set any field:
+python -m scripts.update_device --pm PM-042 --field manufacturer --value "Keysight"
+```
+
+The `--image` flag auto-prepends `images/` if you only provide a filename. Changes are immediately synced to the Excel file.
+
+**3. Batch update** — for updating many devices at once, create a text file with one update per line:
+
+```
+# updates.txt — format: PM_NUMBER field value
+PM-001 image_path images/oscilloscope.jpg
+PM-001 description 4-channel 500MHz digital oscilloscope
+PM-002 image_path images/power_supply.jpg
+PM-002 description Triple-output programmable DC power supply
+PM-003 image_path images/multimeter.jpg
+```
+
+Then run:
+
+```powershell
+python -m scripts.update_device --batch updates.txt
 ```
 
 ---
@@ -233,7 +278,7 @@ Smart Locker ready. Tap your card to begin.
 Press Ctrl+C to exit.
 ```
 
-> **Note:** The FastAPI REST API and browser UI serving are not yet wired up. The terminal is the current interface for testing. Once the API layer is built (Stage 9), the browser kiosk UI will be served at `http://localhost:8000`.
+> **Note:** By default, the system starts in web server mode — FastAPI serves the kiosk UI at `http://localhost:8000`. Use `python -m smart_locker.app --cli` for the terminal-only NFC loop (no web UI).
 
 ### Step 6b: Launch the Touch Display (Kiosk Browser)
 
@@ -307,7 +352,7 @@ The NFC card is **tapped and removed** — it is not left on the reader. The car
 Tests run without any NFC hardware — they use in-memory SQLite and mock data.
 
 ```powershell
-# Run all 52 tests
+# Run all 73 tests
 python -m pytest tests/ -v
 
 # Run a specific test file
@@ -333,6 +378,25 @@ Get-Content logs\smart_locker.log -Wait
 
 ---
 
+## Step 9: Excel Data File
+
+The system automatically exports all device and transaction data to an Excel file (`smart_locker_data.xlsx` by default) every time the database changes. This happens automatically — no manual steps needed.
+
+**Two sheets:**
+- **Devices** — PM Number, Name, Type, Manufacturer, Model, Serial, Barcode, Locker Slot, Status, Current Borrower, Description, Calibration Due
+- **Transactions** — Date, User, Device, Borrow/Return, Performed By (admin), Notes
+
+The file is regenerated on:
+- App startup
+- Every borrow or return
+- After a bulk device import
+
+If the file is open in Excel when a sync happens, the system logs a warning and retries on the next change. Close the file to allow the sync to proceed.
+
+To change the output path, set `SMART_LOCKER_EXCEL_PATH` in your `.env`.
+
+---
+
 ## Configuration Reference
 
 All settings are in `.env` (loaded by `config/settings.py`):
@@ -345,6 +409,9 @@ All settings are in `.env` (loaded by `config/settings.py`):
 | `SMART_LOCKER_READER_NAME` | `ACR1252` | Substring filter for NFC reader name |
 | `SMART_LOCKER_SESSION_TIMEOUT` | `120` | Session inactivity timeout (seconds) |
 | `SMART_LOCKER_MAX_BORROWS` | `5` | Maximum devices a user can borrow at once |
+| `SMART_LOCKER_EXCEL_PATH` | `smart_locker_data.xlsx` | Auto-synced Excel export file |
+| `SMART_LOCKER_API_HOST` | `0.0.0.0` | FastAPI server bind address |
+| `SMART_LOCKER_API_PORT` | `8000` | FastAPI server port |
 
 ---
 
@@ -356,14 +423,16 @@ All settings are in `.env` (loaded by `config/settings.py`):
 - Card enrollment with AES-256-GCM encrypted storage
 - User authentication via HMAC-SHA256 card fingerprint lookup
 - Session management with inactivity timeout
-- Device tracking (available / borrowed / maintenance states)
+- Device tracking with extended schema (PM number, manufacturer, model, barcode, calibration date, locker slot, status)
 - Transaction logging (borrow / return, with admin-return attribution)
 - Admin vs. regular user roles with permission enforcement
 - Borrow limit enforcement (default 5 devices per user, configurable)
 - UID masking in logs and on screen (never displayed in full)
 - Reader connect/disconnect detection and retry logic
-- Bulk device import from Excel (name, serial, type, slot, description, image)
-- 52 unit tests — all passing, no NFC hardware required
+- Bulk device import from Excel with German column auto-detection (Equipment, Hersteller, Typbezeichnung, Kategorie, etc.)
+- Automatic Excel sync — database changes export to `smart_locker_data.xlsx` in real-time (Devices + Transactions sheets)
+- FastAPI REST API with SSE event stream for NFC → browser bridge
+- 73 unit tests — all passing, no NFC hardware required
 
 ### ✅ Built — Frontend UI
 
@@ -593,118 +662,68 @@ User taps "BORROW"
 
 ---
 
-## Stage 9 — FastAPI REST API Layer (Next to Build)
+## Stage 9 — FastAPI REST API Layer (Built)
 
-The backend services are fully implemented. What's missing is the HTTP layer that lets the frontend call them.
+The REST API is implemented in `smart_locker/api/routes.py` with SSE event stream for NFC bridge.
 
-**Files to create:** `smart_locker/api/routes.py` · `smart_locker/api/schemas.py`
-
-### Endpoints to implement
+### Endpoints
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/api/auth/tap` | Receive `uid_hmac` from NFC listener, authenticate, start session. Returns `{ user: { id, name, role } }` |
-| `GET` | `/api/devices` | Return all devices with status and current borrower name. Returns array of device objects |
-| `POST` | `/api/borrow` | Borrow a device for the current session user. Body: `{ device_id }` |
-| `POST` | `/api/return` | Return a device. Body: `{ device_id }`. Admins can return any device |
-| `POST` | `/api/session/end` | End the current session, clear session state |
-| `GET` | `/api/session` | Return current session info: user, borrow count, time remaining |
-| `GET` | `/api/events` | SSE stream — pushes `card-tap` events to the frontend when NFC detects a card |
+| `GET` | `/api/session` | Check current session state |
+| `POST` | `/api/session/end` | End the current session |
+| `POST` | `/api/session/touch` | Reset the inactivity timer |
+| `GET` | `/api/devices` | List all devices with status, borrower, and extended metadata |
+| `POST` | `/api/devices/{id}/borrow` | Borrow a device |
+| `POST` | `/api/devices/{id}/return` | Return a device (admins can return on behalf) |
+| `GET` | `/api/events` | SSE stream — pushes card-tap, auth, and session events to the browser |
 
-### How to connect app.js to the real API
+### Device response fields
 
-In `smart_locker/frontend/app.js`, each API function has the real `fetch()` call commented out directly above the demo code. Once the routes exist:
+`GET /api/devices` returns an array with these fields per device:
 
-1. Open `app.js`
-2. Find the function (e.g. `apiGetDevices`)
-3. Uncomment the `fetch()` block
-4. Delete the `await sleep(...)` and demo return below it
-
-Example — `apiGetDevices` before and after:
-
-```js
-// BEFORE (demo mode):
-async function apiGetDevices() {
-  await sleep(280);
-  return DEMO_DEVICES;
-}
-
-// AFTER (real API):
-async function apiGetDevices() {
-  const res = await fetch('/api/devices');
-  return res.json();
+```json
+{
+  "id": 1,
+  "pm_number": "PM-042",
+  "name": "PM-042 Keysight DSOX3054T",
+  "device_type": "Oscilloscope",
+  "serial_number": "MY12345678",
+  "manufacturer": "Keysight",
+  "model": "DSOX3054T",
+  "barcode": "4900123456789",
+  "locker_slot": 3,
+  "description": "4-channel 500MHz oscilloscope",
+  "image_path": null,
+  "calibration_due": "2026-09-15",
+  "status": "available",
+  "borrower_name": null
 }
 ```
 
-### Session storage
-
-The FastAPI API needs to hold the active session in memory between requests. The existing `UserSession` and `SessionManager` classes in `smart_locker/auth/session_manager.py` handle this — the API routes just need to call into them.
-
 ---
 
-## Stage 10 — NFC → Frontend Event Bridge
+## Stage 10 — NFC → Frontend Event Bridge (Built)
 
-The NFC reader runs as a background thread. When a card is tapped, the frontend needs to know immediately so it can trigger the auth flow. The recommended approach is **Server-Sent Events (SSE)**.
+The SSE event stream is implemented at `GET /api/events`. The NFC reader pushes events to an `asyncio.Queue` shared via the app context, and the SSE endpoint streams them to the browser.
 
-### How it works
+### Event flow
 
 ```
 NFC card tap
     ↓
-Background NFC listener thread detects card
-    ↓
-Computes uid_hmac from card UID
-    ↓
-Pushes event to an internal asyncio queue
+Background NFC listener thread detects card → queues event
     ↓
 GET /api/events  (SSE stream, browser is subscribed)
     ↓
-Frontend receives { type: "card-tap", uid_hmac: "..." }
-    ↓
-app.js calls apiAuthTap(uid_hmac) → POST /api/auth/tap
-    ↓
-Navigate to main-menu screen
+Frontend receives event → triggers auth flow / session update
 ```
-
-### Frontend change needed in app.js
-
-Replace the debug-button-only tap handler with an SSE subscriber:
-
-```js
-// Connect to the NFC event stream on page load
-const eventSource = new EventSource('/api/events');
-eventSource.addEventListener('card-tap', e => {
-  const { uid_hmac } = JSON.parse(e.data);
-  handleTap(uid_hmac);   // existing function, just pass the real hmac
-});
-```
-
-The `handleTap` function in `app.js` already accepts `uid_hmac` as an argument and calls `apiAuthTap(uid_hmac)` — no other changes needed in the frontend.
 
 ---
 
-## Stage 11 — Static File Serving (FastAPI)
+## Stage 11 — Static File Serving (Built)
 
-The frontend files need to be served by FastAPI so the browser can load them at `http://localhost:8000`.
-
-Add to `smart_locker/app.py`:
-
-```python
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
-
-# Serve frontend files
-app.mount("/static", StaticFiles(directory="smart_locker/static"), name="static")
-
-@app.get("/")
-def serve_frontend():
-    return FileResponse("smart_locker/frontend/index.html")
-
-# Serve style.css and app.js from the frontend folder
-app.mount("/", StaticFiles(directory="smart_locker/frontend"), name="frontend")
-```
-
-After this, opening `http://localhost:8000` in the browser loads the kiosk UI automatically.
+FastAPI serves the frontend at `http://localhost:8000`. The `create_app()` factory in `smart_locker/api/server.py` mounts static files and serves `index.html` at the root.
 
 ---
 
@@ -760,9 +779,45 @@ TabletPC.cpl
 
 ---
 
-## Future Improvements (Not Yet Planned)
+## Barcode Scanner Plan
 
-- **Admin web panel** — browser-based interface for managing users, devices, and viewing transaction history without database access
+The system stores a `barcode` value per device (imported from the "Barcode" column in the device Excel). This enables a future barcode scanner workflow for shared lockers.
+
+### The Problem
+
+Right now, 20 lockers hold 20 devices — one device per locker. But some device types have multiple units (e.g., 5 current probes). Using 5 lockers for 5 identical probes is wasteful. Instead, one locker can hold all probes, and a barcode scanner identifies which specific probe is being taken or returned.
+
+### Planned Workflow
+
+```
+1. User taps NFC card → authenticated
+2. User selects "Borrow" on touch display
+3. User opens shared locker, picks up a device
+4. User scans the device's barcode sticker with the USB scanner
+5. System looks up devices.barcode → identifies the exact device
+6. Borrow is recorded for that specific device
+```
+
+Same flow for returns: scan the barcode to identify which device is being put back.
+
+### Implementation Steps
+
+1. **Hardware**: USB barcode scanner plugged into the kiosk PC. Most scanners emulate a keyboard — they type the barcode digits followed by Enter.
+2. **Frontend (`app.js`)**: Add a barcode input listener that detects rapid sequential keystrokes ending in Enter (the scanner's keyboard emulation pattern). Distinguish scanner input from regular keyboard typing by timing threshold (~50ms between characters).
+3. **API**: Add a `GET /api/devices/barcode/{barcode}` endpoint that looks up a device by its barcode value.
+4. **UI flow**: When a barcode is scanned during an active session in borrow/return mode, auto-open the device detail overlay for that device and prompt to confirm.
+
+### What's Already in Place
+
+- `devices.barcode` column stores barcode values (imported from Excel)
+- The API `GET /api/devices` response includes the `barcode` field
+- The Excel auto-sync exports barcode values
+
+---
+
+## Future Improvements (Not Yet Planned)
+- **Calibration date notifications** — calibration dates are stored; a notification system can alert when devices are due for recalibration
+- **Admin web panel** — browser-based interface for managing users, devices, and viewing transaction history
 - **MIFARE sector data reading** — APDU commands are already defined in `nfc/apdu.py` but not wired into the auth flow
 - **Multi-reader support** — currently only the first matching reader is used
 - **Email / webhook notifications** — alert admins when a device is overdue or a borrow limit is hit

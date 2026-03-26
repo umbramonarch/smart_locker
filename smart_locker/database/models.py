@@ -1,10 +1,11 @@
 """SQLAlchemy 2.0 ORM models for the Smart Locker system."""
 
 import enum
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from sqlalchemy import (
     Boolean,
+    Date,
     DateTime,
     Enum,
     ForeignKey,
@@ -78,14 +79,19 @@ class Device(Base):
     __tablename__ = "devices"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    pm_number: Mapped[str] = mapped_column(String(50), nullable=False, unique=True)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     device_type: Mapped[str] = mapped_column(String(50), nullable=False)
-    serial_number: Mapped[str] = mapped_column(
-        String(100), nullable=False, unique=True
+    serial_number: Mapped[str | None] = mapped_column(
+        String(100), nullable=True, unique=True
     )
+    manufacturer: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    model: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    barcode: Mapped[str | None] = mapped_column(String(100), nullable=True)
     locker_slot: Mapped[int | None] = mapped_column(Integer, nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     image_path: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    calibration_due: Mapped[date | None] = mapped_column(Date, nullable=True)
     status: Mapped[DeviceStatus] = mapped_column(
         Enum(DeviceStatus), nullable=False, default=DeviceStatus.AVAILABLE
     )
