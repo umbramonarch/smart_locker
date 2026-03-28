@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 import smart_locker.api.app_context as ctx_module
 from smart_locker.auth.session_manager import UserSession
 from smart_locker.database.engine import get_session_factory
-from smart_locker.database.models import DeviceStatus
+from smart_locker.database.models import DeviceStatus, UserRole
 from smart_locker.database.repositories import DeviceRepository
 from smart_locker.services.locker_service import LockerService
 
@@ -180,3 +180,30 @@ def return_device(
     if success:
         return {"success": True, "message": f"{device_name} returned."}
     return {"success": False, "message": f"Could not return {device_name}."}
+
+
+# --- Admin Endpoints --------------------------------------------------------
+
+@router.post("/api/admin/sync-source")
+def trigger_source_sync(
+    user_session: UserSession = Depends(require_session),
+):
+    """Manually trigger source Excel import (admin only)."""
+    if user_session.user.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Admin access required.")
+
+    from config.settings import SOURCE_EXCEL_PATH
+    if not SOURCE_EXCEL_PATH:
+        raise HTTPException(status_code=400, detail="Source Excel path not configured.")
+
+    from smart_locker.database.engine import get_engine
+    from smart_locker.sync.source_import import import_from_source_excel
+
+    result = import_from_source_excel(get_engine(), SOURCE_EXCEL_PATH)
+    return {
+        "success": True,
+        "imported": result.imported,
+        "updated": result.updated,
+        "unchanged": result.unchanged,
+        "errors": result.errors,
+    }

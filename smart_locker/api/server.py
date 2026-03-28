@@ -24,6 +24,8 @@ async def lifespan(app: FastAPI):
     logger.info("Smart Locker API started.")
     yield
     await ctx.context.stop()
+    from smart_locker.sync.scheduler import stop_scheduler
+    stop_scheduler()
     logger.info("Smart Locker API stopped.")
 
 

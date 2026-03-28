@@ -18,7 +18,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from config.logging_config import setup_logging
-from config.settings import EXCEL_SYNC_PATH, SESSION_TIMEOUT_SECONDS
+from config.settings import (
+    EXCEL_SYNC_PATH,
+    SESSION_TIMEOUT_SECONDS,
+    SOURCE_EXCEL_PATH,
+    SOURCE_SYNC_HOUR,
+    SOURCE_SYNC_MINUTE,
+)
 from smart_locker.auth.authenticator import Authenticator
 from smart_locker.auth.session_manager import SessionManager
 from smart_locker.database.engine import get_engine, get_session, init_db
@@ -49,6 +55,10 @@ class SmartLockerApp:
 
         from smart_locker.sync.excel_sync import register_auto_sync
         register_auto_sync(get_engine(), EXCEL_SYNC_PATH)
+
+        if SOURCE_EXCEL_PATH:
+            from smart_locker.sync.scheduler import start_scheduler
+            start_scheduler(get_engine(), SOURCE_EXCEL_PATH, SOURCE_SYNC_HOUR, SOURCE_SYNC_MINUTE)
 
         logger.info("Smart Locker starting...")
 
@@ -172,6 +182,10 @@ def run_server() -> None:
 
     from smart_locker.sync.excel_sync import register_auto_sync
     register_auto_sync(get_engine(), EXCEL_SYNC_PATH)
+
+    if SOURCE_EXCEL_PATH:
+        from smart_locker.sync.scheduler import start_scheduler
+        start_scheduler(get_engine(), SOURCE_EXCEL_PATH, SOURCE_SYNC_HOUR, SOURCE_SYNC_MINUTE)
 
     app = create_app()
     logger.info("Starting Smart Locker web server on %s:%d", API_HOST, API_PORT)

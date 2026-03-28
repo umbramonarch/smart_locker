@@ -13,7 +13,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from sqlalchemy import event, select
 from sqlalchemy.orm import Session
 
-from smart_locker.database.models import Device, TransactionLog
+from smart_locker.database.models import Device, TransactionLog, User
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +118,35 @@ def export_to_excel(engine=None, output_path: str | Path | None = None) -> None:
                 max_len = max(max_len, len(val))
             ws2.column_dimensions[col_letter].width = min(max_len + 3, 40)
 
+        # --- Users sheet ---
+        users = session.execute(
+            select(User).order_by(User.display_name)
+        ).scalars().all()
+
+        ws3 = wb.create_sheet("Users")
+        user_headers = ["ID", "Display Name", "Role", "Active", "Registered At"]
+        ws3.append(user_headers)
+        for cell in ws3[1]:
+            cell.font = header_font
+            cell.fill = header_fill
+
+        for u in users:
+            ws3.append([
+                u.id,
+                u.display_name,
+                u.role.value,
+                "Yes" if u.is_active else "No",
+                u.created_at.strftime("%Y-%m-%d %H:%M:%S") if u.created_at else "",
+            ])
+
+        for col in ws3.columns:
+            max_len = 0
+            col_letter = col[0].column_letter
+            for cell in col:
+                val = str(cell.value) if cell.value is not None else ""
+                max_len = max(max_len, len(val))
+            ws3.column_dimensions[col_letter].width = min(max_len + 3, 40)
+
         # Write file
         try:
             wb.save(path)
@@ -144,7 +173,7 @@ def register_auto_sync(engine, output_path: str | Path) -> None:
     def _mark_sync_needed(session, flush_context):
         """Flag the session if any relevant model was modified."""
         for obj in list(session.new) + list(session.dirty) + list(session.deleted):
-            if isinstance(obj, (Device, TransactionLog)):
+            if isinstance(obj, (Device, TransactionLog, User)):
                 session.info["_excel_sync"] = True
                 return
 

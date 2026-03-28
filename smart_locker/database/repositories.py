@@ -131,6 +131,35 @@ class DeviceRepository:
         return device
 
     @staticmethod
+    def find_by_pm(session: Session, pm_number: str) -> Device | None:
+        """Look up a device by its PM number."""
+        stmt = select(Device).where(Device.pm_number == pm_number)
+        return session.execute(stmt).scalar_one_or_none()
+
+    @staticmethod
+    def update_metadata(session: Session, device: Device, **kwargs) -> bool:
+        """Update source-managed metadata fields on a device.
+
+        Only updates fields that differ from the current value.
+        Returns True if any field was changed.
+        """
+        ALLOWED = {
+            "name", "device_type", "serial_number", "manufacturer",
+            "model", "barcode", "calibration_due",
+        }
+        changed = False
+        for key, value in kwargs.items():
+            if key not in ALLOWED:
+                continue
+            if getattr(device, key) != value:
+                setattr(device, key, value)
+                changed = True
+        if changed:
+            session.flush()
+            logger.info("Updated device metadata: %s (pm=%s)", device.name, device.pm_number)
+        return changed
+
+    @staticmethod
     def list_all(session: Session) -> list[Device]:
         stmt = select(Device).order_by(Device.name)
         return list(session.execute(stmt).scalars().all())

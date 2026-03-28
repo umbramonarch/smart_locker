@@ -32,6 +32,14 @@ EXCEL_SYNC_PATH = os.getenv(
     "SMART_LOCKER_EXCEL_PATH", str(BASE_DIR / "smart_locker_data.xlsx")
 )
 
+# Source Excel — company device master list (imported daily)
+# Leave empty to disable automatic import
+SOURCE_EXCEL_PATH = os.getenv("SMART_LOCKER_SOURCE_EXCEL_PATH", "")
+
+# Daily source import schedule (24h format)
+SOURCE_SYNC_HOUR = int(os.getenv("SMART_LOCKER_SOURCE_SYNC_HOUR", "6"))
+SOURCE_SYNC_MINUTE = int(os.getenv("SMART_LOCKER_SOURCE_SYNC_MINUTE", "0"))
+
 # Security — keys loaded via key_manager, not directly here
 ENC_KEY_ENV_VAR = "SMART_LOCKER_ENC_KEY"
 HMAC_KEY_ENV_VAR = "SMART_LOCKER_HMAC_KEY"
