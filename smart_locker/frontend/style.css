@@ -347,7 +347,7 @@ body::after {
   z-index: 2;
 }
 
-/* Scrolling marquee ticker at bottom */
+/* Scrolling marquee ticker at bottom (landonorris.com-style seamless loop) */
 .marquee-bar {
   position: absolute;
   bottom: 0; left: 0; right: 0;
@@ -368,6 +368,7 @@ body::after {
 .marquee-fade-left  { left: 0;  background: linear-gradient(to right, var(--bg), transparent); }
 .marquee-fade-right { right: 0; background: linear-gradient(to left,  var(--bg), transparent); }
 .marquee-track {
+  flex: 0 0 auto;
   display: flex;
   white-space: nowrap;
   animation: marquee-scroll 28s linear infinite;
@@ -384,8 +385,8 @@ body::after {
 }
 .marquee-track span.dot { color: var(--accent); padding: 0 0.5rem; }
 @keyframes marquee-scroll {
-  0%   { transform: translateX(0); }
-  100% { transform: translateX(-50%); }
+  from { transform: translateX(0); }
+  to   { transform: translateX(-100%); }
 }
 
 /* ============================================================

@@ -692,6 +692,35 @@ function initMagneticHover() {
 }
 
 /* ============================================================
+   SEAMLESS MARQUEE — clone track to fill any viewport width
+============================================================ */
+function initMarquee() {
+  const bar = document.querySelector('.marquee-bar');
+  if (!bar) return;
+  const original = bar.querySelector('.marquee-track');
+  if (!original) return;
+
+  function populate() {
+    // Remove previous clones
+    bar.querySelectorAll('.marquee-track[aria-hidden]').forEach(c => c.remove());
+    // Measure one copy vs the container
+    const trackW = original.offsetWidth;
+    const barW   = bar.offsetWidth;
+    if (!trackW) return;
+    // Need enough copies so content >= barW + trackW (one scrolling out + rest filling)
+    const copies = Math.ceil(barW / trackW) + 1;
+    for (let i = 0; i < copies; i++) {
+      const clone = original.cloneNode(true);
+      clone.setAttribute('aria-hidden', 'true');
+      bar.appendChild(clone);
+    }
+  }
+
+  populate();
+  window.addEventListener('resize', populate);
+}
+
+/* ============================================================
    REGISTRATION FLOW
 ============================================================ */
 let registerCountdownTimer = null;
@@ -959,6 +988,9 @@ initSplitText();
 
 // Enhancement D: magnetic hover on action buttons
 initMagneticHover();
+
+// Seamless marquee: clone tracks to fill any viewport width
+initMarquee();
 
 /* ============================================================
    SSE — real-time events from backend (live mode only)
