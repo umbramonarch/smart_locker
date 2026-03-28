@@ -314,6 +314,69 @@
     </div>
   </div>
 
+  <!-- ================================================================
+       OVERLAY — ADMIN PANEL (hidden, triggered by 5x clock tap)
+  ================================================================ -->
+  <div id="overlay-admin" class="overlay" style="display:none">
+    <div class="admin-panel">
+      <div class="admin-header">
+        <div class="admin-badge">
+          <svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+          <span>ADMIN MODE</span>
+        </div>
+        <button class="admin-close" id="admin-close">
+          <svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+
+      <div class="admin-grid">
+        <button class="admin-action-btn" id="admin-goto-borrow">
+          <div class="admin-btn-icon">
+            <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12l7-7 7 7"/></svg>
+          </div>
+          <div class="admin-btn-text">
+            <span class="admin-btn-label">Borrow Screen</span>
+            <span class="admin-btn-desc">Browse available equipment</span>
+          </div>
+        </button>
+
+        <button class="admin-action-btn" id="admin-goto-return">
+          <div class="admin-btn-icon">
+            <svg viewBox="0 0 24 24"><path d="M12 19V5M5 12l7 7 7-7"/></svg>
+          </div>
+          <div class="admin-btn-text">
+            <span class="admin-btn-label">Return Screen</span>
+            <span class="admin-btn-desc">View borrowed equipment</span>
+          </div>
+        </button>
+
+        <button class="admin-action-btn" id="admin-sync-source">
+          <div class="admin-btn-icon sync-icon">
+            <svg viewBox="0 0 24 24"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>
+          </div>
+          <div class="admin-btn-text">
+            <span class="admin-btn-label">Sync Source</span>
+            <span class="admin-btn-desc">Import devices from OneDrive</span>
+          </div>
+        </button>
+
+        <button class="admin-action-btn danger" id="admin-end-session">
+          <div class="admin-btn-icon danger-icon">
+            <svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
+          </div>
+          <div class="admin-btn-text">
+            <span class="admin-btn-label">End Session</span>
+            <span class="admin-btn-desc">Return to idle screen</span>
+          </div>
+        </button>
+      </div>
+
+      <div class="admin-footer">
+        <span class="admin-footer-hint">5× tap clock to toggle</span>
+      </div>
+    </div>
+  </div>
+
   <!-- Toast notification -->
   <div id="toast"></div>
 

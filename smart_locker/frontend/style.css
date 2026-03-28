@@ -167,7 +167,9 @@ body::after {
   right: 2.5rem;
   text-align: right;
   z-index: 5;
-  pointer-events: none;
+  pointer-events: auto;
+  cursor: default;
+  padding: 0.5rem;
 }
 .clock-time {
   font-family: var(--font-display);
@@ -1497,6 +1499,190 @@ body::after {
 .nfc-wrapper-sm .nfc-ring-mid   { width: 145px; height: 145px; }
 .nfc-wrapper-sm .nfc-core        { width: 110px; height: 110px; }
 .nfc-wrapper-sm .nfc-svg         { width: 50px; height: 50px; }
+
+/* ============================================================
+   OVERLAY — ADMIN PANEL
+============================================================ */
+#overlay-admin {
+  background: rgba(8,12,16,0.92);
+  backdrop-filter: blur(20px);
+  z-index: 55;
+  align-items: center;
+  justify-content: center;
+}
+
+.admin-panel {
+  width: 90%;
+  max-width: 560px;
+  display: flex;
+  flex-direction: column;
+  gap: 2rem;
+}
+
+.admin-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.admin-badge {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.45rem 1.1rem 0.45rem 0.65rem;
+  background: rgba(245,158,11,0.08);
+  border: 1px solid rgba(245,158,11,0.25);
+  border-radius: 999px;
+}
+.admin-badge svg {
+  width: 18px;
+  height: 18px;
+  stroke: var(--warning);
+  fill: none;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.admin-badge span {
+  font-family: var(--font-display);
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  color: var(--warning);
+}
+
+.admin-close {
+  width: 42px;
+  height: 42px;
+  border-radius: 11px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.2s, transform 0.2s var(--ease);
+}
+.admin-close:hover  { background: var(--surface-3); transform: scale(1.06); }
+.admin-close:active { transform: scale(0.94); }
+.admin-close svg {
+  width: 16px;
+  height: 16px;
+  stroke: var(--text-muted);
+  fill: none;
+  stroke-width: 2.2;
+  stroke-linecap: round;
+}
+
+.admin-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.9rem;
+}
+
+.admin-action-btn {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 1.2rem 1.3rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  cursor: pointer;
+  text-align: left;
+  transition:
+    transform 0.3s var(--ease-smooth),
+    border-color 0.3s var(--ease-smooth),
+    box-shadow 0.3s var(--ease-smooth),
+    background 0.3s var(--ease-smooth);
+  /* Staggered entrance */
+  opacity: 0;
+  transform: translateY(16px);
+}
+.overlay.visible .admin-action-btn {
+  opacity: 1;
+  transform: translateY(0);
+  transition-delay: calc(var(--i, 0) * 0.07s + 0.15s);
+}
+.admin-action-btn:nth-child(1) { --i: 0; }
+.admin-action-btn:nth-child(2) { --i: 1; }
+.admin-action-btn:nth-child(3) { --i: 2; }
+.admin-action-btn:nth-child(4) { --i: 3; }
+
+.admin-action-btn:hover {
+  border-color: rgba(245,158,11,0.3);
+  box-shadow: 0 8px 28px rgba(245,158,11,0.08);
+  transform: translateY(-2px);
+}
+.admin-action-btn:active { transform: scale(0.97); }
+
+.admin-action-btn.danger:hover {
+  border-color: rgba(239,68,68,0.3);
+  box-shadow: 0 8px 28px rgba(239,68,68,0.08);
+}
+
+.admin-btn-icon {
+  width: 42px;
+  height: 42px;
+  border-radius: 11px;
+  background: rgba(245,158,11,0.08);
+  border: 1px solid rgba(245,158,11,0.2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.admin-btn-icon svg {
+  width: 20px;
+  height: 20px;
+  stroke: var(--warning);
+  fill: none;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.admin-btn-icon.danger-icon {
+  background: var(--danger-dim);
+  border-color: rgba(239,68,68,0.25);
+}
+.admin-btn-icon.danger-icon svg { stroke: var(--danger); }
+
+.admin-btn-icon.sync-icon svg {
+  animation: none;
+}
+.admin-action-btn:hover .sync-icon svg {
+  animation: admin-spin 1.2s var(--ease-smooth) infinite;
+}
+@keyframes admin-spin {
+  0%   { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+.admin-btn-text { display: flex; flex-direction: column; gap: 0.15rem; }
+.admin-btn-label {
+  font-family: var(--font-display);
+  font-size: 0.92rem;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: 0.02em;
+}
+.admin-btn-desc {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+
+.admin-footer {
+  display: flex;
+  justify-content: center;
+}
+.admin-footer-hint {
+  font-size: 0.65rem;
+  font-weight: 500;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  opacity: 0.5;
+}
 
 /* ============================================================
    UTILITY

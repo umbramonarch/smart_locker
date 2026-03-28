@@ -782,6 +782,110 @@ function handleRegistrationFailed(data) {
 }
 
 /* ============================================================
+   HIDDEN ADMIN PANEL — 5× tap on clock area within 3 seconds
+============================================================ */
+const adminTaps = [];
+const ADMIN_TAP_COUNT = 5;
+const ADMIN_TAP_WINDOW = 3000; // ms
+let adminSessionActive = false;
+
+function checkAdminTapSequence() {
+  const now = Date.now();
+  adminTaps.push(now);
+  // Keep only taps within the time window
+  while (adminTaps.length > 0 && (now - adminTaps[0]) > ADMIN_TAP_WINDOW) {
+    adminTaps.shift();
+  }
+  if (adminTaps.length >= ADMIN_TAP_COUNT) {
+    adminTaps.length = 0;
+    toggleAdminPanel();
+  }
+}
+
+function toggleAdminPanel() {
+  const overlay = document.getElementById('overlay-admin');
+  if (overlay.classList.contains('visible')) {
+    closeAdminPanel();
+  } else {
+    openAdminPanel();
+  }
+}
+
+function openAdminPanel() {
+  clickSound();
+  const overlay = document.getElementById('overlay-admin');
+  overlay.style.display = '';
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    overlay.classList.add('visible');
+  }));
+}
+
+function closeAdminPanel() {
+  const overlay = document.getElementById('overlay-admin');
+  overlay.classList.add('hidden-left');
+  setTimeout(() => {
+    overlay.classList.remove('visible', 'hidden-left');
+    overlay.style.display = 'none';
+  }, 710);
+}
+
+function adminStartSession() {
+  // Create a synthetic admin user context so borrow/return screens work
+  adminSessionActive = true;
+  S.user = { id: 0, name: 'Admin', role: 'admin' };
+  fillMainMenu(S.user);
+}
+
+async function adminGotoBorrow() {
+  closeAdminPanel();
+  adminStartSession();
+  await sleep(300);
+  navigate('main-menu');
+  await sleep(200);
+  openBorrow();
+  armIdle();
+}
+
+async function adminGotoReturn() {
+  closeAdminPanel();
+  adminStartSession();
+  await sleep(300);
+  navigate('main-menu');
+  await sleep(200);
+  openReturn();
+  armIdle();
+}
+
+async function adminSyncSource() {
+  const btn = document.getElementById('admin-sync-source');
+  const label = btn.querySelector('.admin-btn-label');
+  const origText = label.textContent;
+  label.textContent = 'Syncing…';
+  btn.style.pointerEvents = 'none';
+
+  try {
+    const res = await fetch('/api/admin/sync-source', { method: 'POST' });
+    const data = await res.json();
+    if (res.ok) {
+      showToast(`Synced: ${data.imported} new, ${data.updated} updated`, 'success');
+    } else {
+      showToast(data.detail || 'Sync failed', 'error');
+    }
+  } catch (_) {
+    showToast('Sync request failed', 'error');
+  }
+
+  label.textContent = origText;
+  btn.style.pointerEvents = '';
+}
+
+function adminEndSession() {
+  closeAdminPanel();
+  adminSessionActive = false;
+  endSession();
+}
+
+/* ============================================================
    AUDIO CLICK FEEDBACK
 ============================================================ */
 function clickSound() {
@@ -828,6 +932,18 @@ regInput.addEventListener('keydown', e => {
   if (e.key === 'Enter' && regInput.value.trim()) { clickSound(); submitRegistrationName(); }
 });
 
+// Admin panel — secret clock tap zone (5× tap within 3s)
+document.querySelector('.clock').addEventListener('click', e => {
+  e.stopPropagation();
+  checkAdminTapSequence();
+});
+
+document.getElementById('admin-close').addEventListener('click', () => { clickSound(); closeAdminPanel(); });
+document.getElementById('admin-goto-borrow').addEventListener('click', () => { clickSound(); adminGotoBorrow(); });
+document.getElementById('admin-goto-return').addEventListener('click', () => { clickSound(); adminGotoReturn(); });
+document.getElementById('admin-sync-source').addEventListener('click', () => { clickSound(); adminSyncSource(); });
+document.getElementById('admin-end-session').addEventListener('click', () => { clickSound(); adminEndSession(); });
+
 /* ============================================================
    INIT
 ============================================================ */
@@ -836,6 +952,7 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 // Overlays start hidden so they don't briefly flash on page load
 document.getElementById('overlay-inactivity').style.display    = 'none';
 document.getElementById('overlay-device-detail').style.display = 'none';
+document.getElementById('overlay-admin').style.display         = 'none';
 
 // Enhancement E: split text on initial page load
 initSplitText();
