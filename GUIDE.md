@@ -478,7 +478,7 @@ All settings are in `.env` (loaded by `config/settings.py`):
 - Custom cursor with lagged ring follower
 - Web Audio API click sounds (no audio files)
 - Demo mode with sample data — fully testable without a backend
-- API stubs ready to connect to the FastAPI routes (each is one uncomment away)
+- Fully connected to the FastAPI REST API (session, devices, borrow/return, SSE events)
 
 ---
 
@@ -684,12 +684,6 @@ User taps "BORROW"
 | Change the borrow count display | `app.js` | `borrow-badge` |
 | Connect to the real API | `app.js` | `apiAuthTap`, `apiGetDevices`, `apiBorrow`, `apiReturn` |
 | Change the inactivity timeout | `app.js` | `cdSeconds: 120` in the `S` object |
-
----
-
-### The `ui/` Folder
-
-`smart_locker/smart_locker/ui/` contains only an empty `__init__.py` — it is a leftover placeholder from early project setup. The entire UI lives in `smart_locker/frontend/`. The `ui/` folder does nothing and can be safely ignored.
 
 ---
 
