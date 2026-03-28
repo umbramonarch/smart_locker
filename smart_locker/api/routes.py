@@ -6,9 +6,11 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 import smart_locker.api.app_context as ctx_module
+from smart_locker.api.app_context import PendingRegistration
 from smart_locker.auth.session_manager import UserSession
 from smart_locker.database.engine import get_session_factory
 from smart_locker.database.models import DeviceStatus, UserRole
@@ -180,6 +182,39 @@ def return_device(
     if success:
         return {"success": True, "message": f"{device_name} returned."}
     return {"success": False, "message": f"Could not return {device_name}."}
+
+
+# --- Registration Endpoints -------------------------------------------------
+
+class RegisterRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+
+
+@router.post("/api/register")
+def start_registration(body: RegisterRequest):
+    """Begin self-registration: store name, await NFC card tap."""
+    if ctx_module.context is None:
+        raise HTTPException(status_code=503, detail="System not ready.")
+
+    if ctx_module.context.session_mgr.has_active_session:
+        raise HTTPException(status_code=409, detail="A session is active. End it first.")
+
+    ctx_module.context.pending_registration = PendingRegistration(
+        display_name=body.name.strip(),
+    )
+    logger.info("Registration started for '%s'. Awaiting card tap.", body.name.strip())
+    return {"success": True, "message": "Tap your NFC card to complete registration."}
+
+
+@router.post("/api/register/cancel")
+def cancel_registration():
+    """Cancel a pending self-registration."""
+    if ctx_module.context is None:
+        raise HTTPException(status_code=503, detail="System not ready.")
+
+    was_pending = ctx_module.context.pending_registration is not None
+    ctx_module.context.pending_registration = None
+    return {"success": True, "cancelled": was_pending}
 
 
 # --- Admin Endpoints --------------------------------------------------------

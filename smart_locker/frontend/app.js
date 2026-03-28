@@ -86,6 +86,24 @@ async function apiEndSession() {
   await fetch('/api/session/end', { method: 'POST' }).catch(() => {});
 }
 
+async function apiStartRegistration(name) {
+  if (USE_DEMO) {
+    await sleep(400);
+    return { success: true };
+  }
+  const res = await fetch('/api/register', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  });
+  return await res.json();
+}
+
+async function apiCancelRegistration() {
+  if (USE_DEMO) return;
+  await fetch('/api/register/cancel', { method: 'POST' }).catch(() => {});
+}
+
 /* ============================================================
    Enhancement C: CIRCLE REVEAL NAVIGATION
    Track last click position; set CSS custom properties on the
@@ -674,6 +692,96 @@ function initMagneticHover() {
 }
 
 /* ============================================================
+   REGISTRATION FLOW
+============================================================ */
+let registerCountdownTimer = null;
+
+function showRegisterStep(stepId) {
+  document.querySelectorAll('.register-step').forEach(el => el.classList.add('hidden'));
+  const step = document.getElementById(stepId);
+  if (step) {
+    step.classList.remove('hidden');
+    // Re-trigger entrance animation
+    step.style.animation = 'none';
+    void step.offsetHeight;
+    step.style.animation = '';
+  }
+}
+
+function openRegister() {
+  // Reset state
+  document.getElementById('register-name').value = '';
+  document.getElementById('register-next-btn').disabled = true;
+  showRegisterStep('register-step-name');
+  clearInterval(registerCountdownTimer);
+  navigate('register');
+  // Focus the input after the transition
+  setTimeout(() => document.getElementById('register-name').focus(), 800);
+}
+
+async function submitRegistrationName() {
+  const nameInput = document.getElementById('register-name');
+  const name = nameInput.value.trim();
+  if (!name) return;
+
+  const btn = document.getElementById('register-next-btn');
+  btn.disabled = true;
+
+  document.getElementById('register-confirm-name').textContent = name;
+  showRegisterStep('register-step-tap');
+
+  // Start countdown
+  let secs = 60;
+  const cdEl = document.getElementById('register-countdown');
+  cdEl.textContent = secs + 's';
+  registerCountdownTimer = setInterval(() => {
+    secs--;
+    cdEl.textContent = secs + 's';
+    if (secs <= 0) {
+      clearInterval(registerCountdownTimer);
+      showRegisterStep('register-step-error');
+      document.getElementById('register-error-msg').textContent =
+        'Registration timed out. Please try again.';
+      setTimeout(() => navigate('idle'), 3500);
+    }
+  }, 1000);
+
+  // Tell backend to await next NFC tap for registration
+  const result = await apiStartRegistration(name);
+  if (!result.success) {
+    clearInterval(registerCountdownTimer);
+    showRegisterStep('register-step-error');
+    document.getElementById('register-error-msg').textContent =
+      result.detail || result.message || 'Could not start registration.';
+    setTimeout(() => navigate('idle'), 3500);
+  }
+}
+
+function cancelRegistration() {
+  clearInterval(registerCountdownTimer);
+  apiCancelRegistration();
+  navigate('idle');
+}
+
+function handleRegistrationSuccess(data) {
+  clearInterval(registerCountdownTimer);
+  if (S.screen !== 'register') return;
+  showRegisterStep('register-step-success');
+  document.getElementById('register-success-msg').textContent =
+    `Welcome, ${data.user.name}! You can now tap your card to log in.`;
+  setTimeout(() => navigate('idle'), 4000);
+}
+
+function handleRegistrationFailed(data) {
+  clearInterval(registerCountdownTimer);
+  if (S.screen !== 'register') return;
+  showRegisterStep('register-step-error');
+  document.getElementById('register-error-msg').textContent =
+    data.reason || 'Registration failed. Please try again.';
+  setTimeout(() => navigate('idle'), 4000);
+}
+
+/* ============================================================
    AUDIO CLICK FEEDBACK
 ============================================================ */
 function clickSound() {
@@ -706,6 +814,19 @@ document.querySelectorAll('.back-btn').forEach(btn =>
 document.getElementById('detail-close').addEventListener('click',  () => { clickSound(); closeDetail();      });
 document.getElementById('confirm-btn').addEventListener('click',   () => { clickSound(); confirmAction();    });
 document.getElementById('stay-btn').addEventListener('click',      () => { clickSound(); dismissInactivity(); });
+
+// Registration
+document.getElementById('idle-register-link').addEventListener('click', () => { clickSound(); openRegister(); });
+document.getElementById('register-cancel-btn').addEventListener('click', () => { clickSound(); cancelRegistration(); });
+document.getElementById('register-next-btn').addEventListener('click', () => { clickSound(); submitRegistrationName(); });
+
+const regInput = document.getElementById('register-name');
+regInput.addEventListener('input', () => {
+  document.getElementById('register-next-btn').disabled = !regInput.value.trim();
+});
+regInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && regInput.value.trim()) { clickSound(); submitRegistrationName(); }
+});
 
 /* ============================================================
    INIT
@@ -754,6 +875,16 @@ function connectSSE() {
 
   source.addEventListener('reader_connected', () => {
     showToast('NFC reader reconnected', 'success');
+  });
+
+  source.addEventListener('registration_success', e => {
+    const data = JSON.parse(e.data);
+    handleRegistrationSuccess(data);
+  });
+
+  source.addEventListener('registration_failed', e => {
+    const data = JSON.parse(e.data);
+    handleRegistrationFailed(data);
   });
 
   source.onerror = () => {

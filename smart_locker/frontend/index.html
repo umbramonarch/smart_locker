@@ -51,6 +51,12 @@
       </p>
     </div>
 
+    <button class="idle-register-link" id="idle-register-link">
+      <span class="register-link-line"></span>
+      <span>New here? <strong>Register your card</strong></span>
+      <span class="register-link-line"></span>
+    </button>
+
     <div class="marquee-bar">
       <div class="marquee-fade-left"></div>
       <div class="marquee-fade-right"></div>
@@ -68,6 +74,82 @@
         <span>EQUIPMENT TRACKING</span><span class="dot">·</span>
       </div>
     </div>
+  </div>
+
+  <!-- ================================================================
+       SCREEN — REGISTRATION
+  ================================================================ -->
+  <div id="screen-register" class="screen">
+    <div class="hero-bg"></div>
+    <div class="mesh-bg"></div>
+
+    <div class="register-center">
+      <!-- Step 1: Name entry -->
+      <div class="register-step" id="register-step-name">
+        <div class="register-icon-circle">
+          <svg viewBox="0 0 24 24"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/><path d="M16 3l2 2 4-4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </div>
+        <h1 class="register-title">
+          <span class="reveal-wrap"><span class="reveal-inner">REGISTER</span></span>
+        </h1>
+        <p class="register-sub">
+          <span class="reveal-wrap"><span class="reveal-inner" style="transition-delay:0.22s">Enter your name to get started</span></span>
+        </p>
+        <div class="register-input-group">
+          <input type="text" id="register-name" class="register-input" placeholder="Your full name" maxlength="100" autocomplete="off" spellcheck="false">
+          <div class="register-input-glow"></div>
+        </div>
+        <button class="register-next-btn" id="register-next-btn" disabled>
+          <span>Continue</span>
+          <svg viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+        </button>
+      </div>
+
+      <!-- Step 2: Awaiting NFC tap -->
+      <div class="register-step hidden" id="register-step-tap">
+        <div class="nfc-wrapper nfc-wrapper-sm">
+          <div class="nfc-ring-outer"></div>
+          <div class="nfc-ring-mid"></div>
+          <div class="nfc-core">
+            <div class="nfc-texture-reveal"></div>
+            <svg class="nfc-svg" viewBox="0 0 64 64">
+              <path d="M32 22 C39 22 44 27 44 32 C44 37 39 42 32 42" stroke-linecap="round"/>
+              <path d="M32 14 C43 14 52 22 52 32 C52 42 43 50 32 50" stroke-linecap="round"/>
+              <path d="M32 30 C34.8 30 36 31 36 32 C36 33 34.8 34 32 34" stroke-linecap="round"/>
+              <circle cx="24" cy="32" r="5" fill="currentColor" stroke="none" style="color:var(--accent)"/>
+            </svg>
+          </div>
+        </div>
+        <h1 class="register-title register-title-sm">TAP YOUR CARD</h1>
+        <p class="register-sub">
+          Registering as <strong id="register-confirm-name">—</strong>
+        </p>
+        <div class="register-countdown" id="register-countdown">60s</div>
+      </div>
+
+      <!-- Step 3: Success -->
+      <div class="register-step hidden" id="register-step-success">
+        <div class="register-icon-circle success-circle">
+          <svg viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5"/></svg>
+        </div>
+        <h1 class="register-title register-title-success">REGISTERED</h1>
+        <p class="register-sub" id="register-success-msg">Welcome! You can now tap your card to log in.</p>
+      </div>
+
+      <!-- Step 3b: Error -->
+      <div class="register-step hidden" id="register-step-error">
+        <div class="register-icon-circle error-circle">
+          <svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </div>
+        <h1 class="register-title register-title-error">FAILED</h1>
+        <p class="register-sub" id="register-error-msg">Something went wrong.</p>
+      </div>
+    </div>
+
+    <button class="register-cancel-btn" id="register-cancel-btn">
+      <svg viewBox="0 0 24 24"><path d="M19 12H5M12 5l-7 7 7 7"/></svg>
+      <span>Cancel</span>
+    </button>
   </div>
 
   <!-- ================================================================
