@@ -707,11 +707,6 @@ document.getElementById('detail-close').addEventListener('click',  () => { click
 document.getElementById('confirm-btn').addEventListener('click',   () => { clickSound(); confirmAction();    });
 document.getElementById('stay-btn').addEventListener('click',      () => { clickSound(); dismissInactivity(); });
 
-document.getElementById('debug-btn').addEventListener('click', () => {
-  if (S.screen === 'idle') handleTap();
-  else                     endSession();
-});
-
 /* ============================================================
    INIT
 ============================================================ */

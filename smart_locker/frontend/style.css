@@ -1207,26 +1207,6 @@ body::after {
 #toast.toast-error   { border-color: rgba(239,68,68,0.4); color: var(--danger); }
 
 /* ============================================================
-   DEBUG BUTTON — remove in production
-============================================================ */
-#debug-btn {
-  position: fixed;
-  bottom: 1.5rem; left: 1.5rem;
-  padding: 0.55rem 1rem;
-  background: rgba(255,255,255,0.04);
-  border: 1px solid rgba(255,255,255,0.09);
-  border-radius: 9px;
-  color: var(--text-muted);
-  font-size: 0.72rem;
-  font-weight: 600;
-  cursor: pointer;
-  z-index: 9990;
-  transition: background 0.2s;
-  font-family: var(--font-body);
-}
-#debug-btn:hover { background: rgba(255,255,255,0.09); }
-
-/* ============================================================
    UTILITY
 ============================================================ */
 .hidden { display: none !important; }
