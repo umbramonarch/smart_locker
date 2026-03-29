@@ -1,4 +1,11 @@
-"""Tests for smart_locker.sync.source_import."""
+"""
+File: test_source_import.py
+Description: Tests for the source Excel import module. Validates column
+             auto-detection, schrank filtering, device insert/update logic,
+             metadata-only updates, and date parsing from German Excel formats.
+Project: smart_locker/tests
+Notes: Run with: python -m pytest tests/test_source_import.py -v
+"""
 
 import tempfile
 from pathlib import Path
@@ -28,38 +35,49 @@ def _create_test_excel(rows: list[list], sheet_name: str = "Sheet1") -> Path:
 
 
 class TestFindColumn:
+    """Tests for column auto-detection from Excel headers."""
     def test_exact_match(self):
+        """Verify exact lowercase match finds the correct column index."""
         assert find_column(["Name", "PM", "Serial"], ["pm"]) == 1
 
     def test_case_insensitive(self):
+        """Verify header matching is case-insensitive."""
         assert find_column(["NAME", "Equipment", "Serial"], ["equipment"]) == 1
 
     def test_not_found(self):
+        """Verify None is returned when no candidate matches any header."""
         assert find_column(["Name", "Serial"], ["pm"]) is None
 
     def test_multiple_candidates(self):
+        """Verify the first matching candidate from the list is returned."""
         assert find_column(["Hersteller", "Model"], ["manufacturer", "hersteller"]) == 0
 
 
 class TestParseDate:
+    """Tests for date parsing from German and ISO Excel formats."""
     def test_none(self):
+        """Verify None input returns None."""
         assert parse_date(None) is None
 
     def test_german_format(self):
+        """Verify DD.MM.YYYY German date format is parsed correctly."""
         d = parse_date("15.03.2025")
         assert d is not None
         assert d.year == 2025 and d.month == 3 and d.day == 15
 
     def test_iso_format(self):
+        """Verify YYYY-MM-DD ISO date format is parsed correctly."""
         d = parse_date("2025-03-15")
         assert d is not None
         assert d.year == 2025
 
     def test_empty_string(self):
+        """Verify empty string returns None."""
         assert parse_date("") is None
 
 
 class TestImportFromSourceExcel:
+    """Tests for the full source Excel import pipeline — insert, update, skip, dry-run."""
     def test_import_new_devices(self, db_session):
         """New schrank devices are inserted into the database."""
         path = _create_test_excel([

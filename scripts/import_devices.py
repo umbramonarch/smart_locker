@@ -1,19 +1,13 @@
-"""Bulk device import from Excel (.xlsx) files.
-
-Reads devices from an Excel sheet and inserts/updates them in the database,
-skipping non-locker devices (only "schrank" slot values are imported).
-
-Usage:
-    python -m scripts.import_devices --file devices.xlsx
-
-    # With custom column mapping (if your headers differ):
-    python -m scripts.import_devices --file devices.xlsx --pm-col "Equipment" --serial-col "S/N"
-
-    # Specify which sheet to read (default: first sheet):
-    python -m scripts.import_devices --file devices.xlsx --sheet "Sheet2"
-
-    # Dry run — preview what would be imported without writing to DB:
-    python -m scripts.import_devices --file devices.xlsx --dry-run
+"""
+File: import_devices.py
+Description: Bulk device import from Excel (.xlsx) files. Reads devices from
+             an Excel sheet and inserts/updates them in the database, skipping
+             non-locker devices (only "schrank" slot values are imported).
+             Supports German and English column headers with auto-detection.
+Project: smart_locker/scripts
+Notes: Usage: python -m scripts.import_devices --file devices.xlsx [--dry-run]
+       Column headers can be overridden via CLI flags (--pm-col, --serial-col,
+       --manufacturer-col, etc.). Duplicates are skipped by PM number.
 """
 
 import argparse
@@ -33,6 +27,15 @@ from smart_locker.sync.source_import import (
 
 
 def main() -> None:
+    """Parse CLI arguments and run a bulk device import from an Excel file.
+
+    Reads an Excel file, auto-detects column headers (German or English),
+    filters to locker-assigned ("schrank") devices, and inserts or updates
+    them in the database. Supports dry-run mode and column override flags.
+
+    Returns:
+        None. Import summary is printed to stdout.
+    """
     parser = argparse.ArgumentParser(
         description="Bulk import devices from an Excel file."
     )
@@ -87,7 +90,7 @@ def main() -> None:
         sheet_name=args.sheet,
         dry_run=args.dry_run,
         default_type=args.default_type,
-        column_overrides=overrides or None,
+        column_overrides=overrides or None,  # Pass None if no overrides to use defaults
     )
 
     if args.dry_run:

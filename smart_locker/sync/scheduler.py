@@ -1,7 +1,12 @@
-"""Scheduled tasks — daily source Excel import.
-
-Uses APScheduler's BackgroundScheduler to run periodic imports
-without blocking the main application thread.
+"""
+File: scheduler.py
+Description: Scheduled tasks — daily source Excel import from the company device
+             master list. Uses APScheduler's BackgroundScheduler to run periodic
+             imports without blocking the main application thread.
+Project: smart_locker/sync
+Notes: Schedule defaults to 6:00 AM daily, configurable via
+       SMART_LOCKER_SOURCE_SYNC_HOUR and SMART_LOCKER_SOURCE_SYNC_MINUTE.
+       Disabled when SMART_LOCKER_SOURCE_EXCEL_PATH is empty.
 """
 
 import logging
@@ -12,11 +17,23 @@ from apscheduler.triggers.cron import CronTrigger
 
 logger = logging.getLogger(__name__)
 
+# Module-level singleton — set by start_scheduler(), cleared by stop_scheduler()
 _scheduler: BackgroundScheduler | None = None
 
 
 def _run_source_import(engine, source_path: str | Path) -> None:
-    """Execute the source Excel import (called by scheduler)."""
+    """Execute the source Excel import (called by the APScheduler job).
+
+    Validates that the source file exists, then delegates to
+    ``import_from_source_excel``. Logs the result summary or any errors.
+
+    Args:
+        engine: SQLAlchemy Engine for database operations.
+        source_path: Path to the company source Excel file on disk.
+
+    Returns:
+        None. Results are logged.
+    """
     from smart_locker.sync.source_import import import_from_source_excel
 
     path = Path(source_path)
@@ -62,14 +79,21 @@ def start_scheduler(
         args=[engine, source_path],
         id="source_excel_import",
         name="Daily source Excel import",
-        misfire_grace_time=3600,
+        misfire_grace_time=3600,  # 1 hour — tolerate delayed execution (e.g. system wake from sleep)
     )
     _scheduler.start()
     logger.info("Scheduler started: source Excel import at %02d:%02d daily.", hour, minute)
 
 
 def stop_scheduler() -> None:
-    """Shut down the scheduler gracefully."""
+    """Shut down the scheduler gracefully.
+
+    Stops the APScheduler ``BackgroundScheduler`` without waiting for
+    running jobs to complete, and clears the module-level singleton.
+
+    Returns:
+        None.
+    """
     global _scheduler
     if _scheduler is not None:
         _scheduler.shutdown(wait=False)

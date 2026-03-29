@@ -1,9 +1,11 @@
-"""Manually trigger source Excel import.
-
-Usage:
-    python -m scripts.sync_source                      # uses SMART_LOCKER_SOURCE_EXCEL_PATH
-    python -m scripts.sync_source --file path/to/file   # explicit path
-    python -m scripts.sync_source --dry-run             # preview without writing
+"""
+File: sync_source.py
+Description: Manually trigger source Excel import from the company device
+             master list. Inserts new devices and updates metadata on existing
+             ones, filtering to locker-assigned ("schrank") devices only.
+Project: smart_locker/scripts
+Notes: Usage: python -m scripts.sync_source [--file path] [--dry-run]
+       Defaults to SMART_LOCKER_SOURCE_EXCEL_PATH from .env if --file is omitted.
 """
 
 import argparse
@@ -19,6 +21,15 @@ from smart_locker.sync.source_import import import_from_source_excel
 
 
 def main() -> None:
+    """Parse CLI arguments and trigger a source Excel import.
+
+    Reads the company device master list (from ``--file`` or the
+    ``SMART_LOCKER_SOURCE_EXCEL_PATH`` env var), inserts new locker devices,
+    and updates metadata on existing ones. Supports dry-run preview.
+
+    Returns:
+        None. Import summary is printed to stdout.
+    """
     parser = argparse.ArgumentParser(description="Import new devices from source Excel.")
     parser.add_argument("--file", default=None, help="Path to source Excel (default: from env)")
     parser.add_argument("--sheet", default=None, help="Sheet name (default: first sheet)")

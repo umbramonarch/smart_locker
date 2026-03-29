@@ -1,9 +1,11 @@
-"""Card enrollment utility.
-
-Reads a card UID from the NFC reader and enrolls a new user.
-
-Usage:
-    python -m scripts.enroll_card --name "John Doe" [--role admin]
+"""
+File: enroll_card.py
+Description: Card enrollment utility. Reads a card UID from the NFC reader
+             and enrolls a new user with encrypted UID storage and HMAC
+             fingerprint for future authentication lookups.
+Project: smart_locker/scripts
+Notes: Usage: python -m scripts.enroll_card --name "John Doe" [--role admin]
+       Requires physical NFC reader. Card UID is masked in output.
 """
 
 import argparse
@@ -23,6 +25,16 @@ from smart_locker.services.user_service import UserService
 
 
 def main() -> None:
+    """Enroll a new NFC card by reading its UID and creating a user record.
+
+    Parses CLI arguments for user name and role, waits up to 30 seconds for
+    a card tap on the NFC reader, then encrypts the card UID (AES-256-GCM)
+    and stores its HMAC fingerprint for future authentication lookups.
+    The raw UID is masked in console output for security.
+
+    Returns:
+        None. Enrollment result is printed to stdout.
+    """
     parser = argparse.ArgumentParser(description="Enroll a new NFC card user.")
     parser.add_argument("--name", required=True, help="User display name")
     parser.add_argument(
@@ -68,6 +80,7 @@ def main() -> None:
             print("Could not read card UID. Hold card steady and try again.")
             return
 
+        # Mask UID for console display — show only first 2 and last 2 hex chars
         masked = event.uid[:2] + "*" * (len(event.uid) - 4) + event.uid[-2:]
         print(f"Card detected (UID: {masked})")
 

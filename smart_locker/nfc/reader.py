@@ -1,7 +1,12 @@
-"""High-level NFCReader class.
-
-Wires together CardMonitor, ReaderMonitor, and observers.
-Provides blocking and non-blocking interfaces for the main application.
+"""
+File: reader.py
+Description: High-level NFCReader class that wires together pyscard's
+             CardMonitor, ReaderMonitor, and custom observers. Provides
+             blocking and non-blocking event interfaces for the application.
+Project: smart_locker/nfc
+Notes: Requires the Windows Smart Card (PC/SC) service to be running. Raises
+       PCSCServiceError if the service is stopped and ReaderNotFoundError if
+       no matching reader is detected.
 """
 
 import logging
@@ -39,7 +44,13 @@ Event = Union[CardEvent, ReaderEvent]
 
 
 class NFCReader:
-    """High-level NFC reader interface with event-driven card detection."""
+    """High-level NFC reader interface with event-driven card detection.
+
+    Wires together pyscard's CardMonitor and ReaderMonitor with custom
+    observer classes (LockerCardObserver, LockerReaderObserver). Events from
+    both monitors are unified into a single thread-safe queue, providing
+    blocking and non-blocking access for the application layer.
+    """
 
     def __init__(self, reader_filter: str | None = None) -> None:
         self._reader_filter = reader_filter or READER_NAME_FILTER
@@ -139,6 +150,7 @@ class NFCReader:
 
     @property
     def is_running(self) -> bool:
+        """Whether the NFC reader is currently monitoring for card events."""
         return self._running
 
     @staticmethod

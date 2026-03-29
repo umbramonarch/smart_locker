@@ -1,9 +1,14 @@
-"""Source Excel import — reads the company device master list and syncs to DB.
-
-Extracts new devices and updates metadata on existing ones. Only devices
-assigned to a locker (slot column starting with "schrank") are imported.
-
-Can be called programmatically (by the scheduler) or via CLI scripts.
+"""
+File: source_import.py
+Description: Source Excel import — reads the company device master list and syncs
+             to the database. Inserts new devices and updates metadata on existing
+             ones. Only devices with a slot column starting with "schrank" are
+             imported. Supports both German and English column headers.
+Project: smart_locker/sync
+Notes: Can be called programmatically (by the scheduler), via CLI
+       ('python -m scripts.sync_source'), or via the admin API endpoint
+       (POST /api/admin/sync-source). Status, borrower, slot, image, and
+       description fields are never overwritten on existing devices.
 """
 
 import logging
@@ -72,7 +77,12 @@ CALIBRATION_CANDIDATES = [
 
 @dataclass
 class ImportResult:
-    """Summary of a source import run."""
+    """Summary of a source import run with per-category counts.
+
+    Tracks how many devices were newly imported, updated with changed
+    metadata, left unchanged, skipped (non-locker), or errored during
+    the import process.
+    """
     imported: int = 0
     updated: int = 0
     unchanged: int = 0
@@ -86,7 +96,19 @@ class ImportResult:
 # ---------------------------------------------------------------------------
 
 def find_column(headers: list[str], candidates: list[str]) -> int | None:
-    """Find a column index by trying multiple possible header names (case-insensitive)."""
+    """Find a column index by trying multiple possible header names (case-insensitive).
+
+    Iterates over the header row and returns the index of the first header
+    whose stripped, lowercased text matches any of the candidate names.
+
+    Args:
+        headers: List of column header strings from the Excel file.
+        candidates: Possible header names to match against (e.g. German
+                    and English variants).
+
+    Returns:
+        Zero-based column index if found, or None if no match.
+    """
     lower_candidates = [c.lower() for c in candidates]
     for i, header in enumerate(headers):
         if header and header.strip().lower() in lower_candidates:
@@ -95,7 +117,17 @@ def find_column(headers: list[str], candidates: list[str]) -> int | None:
 
 
 def parse_date(value) -> date | None:
-    """Parse a date from an Excel cell value (datetime object or string)."""
+    """Parse a date from an Excel cell value (datetime object or string).
+
+    Handles native ``datetime``/``date`` objects (common in openpyxl) and
+    string values in DD.MM.YYYY, YYYY-MM-DD, or DD/MM/YYYY format.
+
+    Args:
+        value: Cell value from openpyxl — may be datetime, date, str, or None.
+
+    Returns:
+        A ``date`` object, or None if the value is empty or unparseable.
+    """
     if value is None:
         return None
     if isinstance(value, date) and not isinstance(value, datetime):
@@ -117,7 +149,20 @@ def _detect_columns(
     headers: list[str],
     overrides: dict[str, str] | None = None,
 ) -> dict[str, int | None]:
-    """Detect column indices from headers, with optional manual overrides."""
+    """Detect column indices from headers, with optional manual overrides.
+
+    For each field (pm, name, serial, type, slot, etc.), tries to match the
+    override value first (if provided), then falls back to the predefined
+    candidate lists for auto-detection.
+
+    Args:
+        headers: List of column header strings from the Excel file.
+        overrides: Optional mapping of field names to explicit header strings
+                   (e.g. ``{"pm": "Equipment Nr"}``).
+
+    Returns:
+        Dict mapping field names to their detected column index (or None).
+    """
     ov = overrides or {}
     return {
         "pm":           find_column(headers, [ov["pm"]] if ov.get("pm") else PM_CANDIDATES),
@@ -135,7 +180,16 @@ def _detect_columns(
 
 
 def _cell_str(row, idx: int | None) -> str | None:
-    """Read a cell as a stripped string, or None."""
+    """Read a cell as a stripped string, or None.
+
+    Args:
+        row: A tuple of cell values from openpyxl (one row of data).
+        idx: Column index to read, or None to skip.
+
+    Returns:
+        The cell value as a stripped string, or None if the index is None,
+        the cell is None, or the stripped string is empty.
+    """
     if idx is None or row[idx] is None:
         return None
     val = str(row[idx]).strip()

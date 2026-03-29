@@ -1,4 +1,11 @@
-"""Tests for the Users sheet in Excel auto-sync."""
+"""
+File: test_excel_sync_users.py
+Description: Tests for the Users sheet in the Excel auto-sync output. Verifies
+             that user data (display name, role, active status, registration date)
+             is correctly exported to the Users sheet of smart_locker_data.xlsx.
+Project: smart_locker/tests
+Notes: Run with: python -m pytest tests/test_excel_sync_users.py -v
+"""
 
 import tempfile
 from pathlib import Path
@@ -12,6 +19,7 @@ from smart_locker.sync.excel_sync import export_to_excel
 
 
 class TestUsersSheet:
+    """Tests for the Users sheet in the Excel auto-sync output."""
     def test_export_includes_users_sheet(self, db_session):
         """Excel export contains a Users sheet with registered users."""
         UserRepository.create(

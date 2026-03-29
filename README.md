@@ -56,7 +56,7 @@ smart_locker/
 │   ├── enroll_card.py           # Enroll a new NFC card user
 │   ├── import_devices.py        # Bulk import devices from Excel (German + English headers)
 │   └── update_device.py        # Update device fields (image, description, etc.) by PM number
-├── tests/                       # Unit tests (73 tests, no hardware needed)
+├── tests/                       # Unit tests (91 tests, no hardware needed)
 ├── requirements.txt
 ├── .env.example
 ├── GUIDE.md                     # Step-by-step setup and usage guide
@@ -75,7 +75,7 @@ smart_locker/
 | FastAPI REST API | ✅ Done | Session, device, borrow/return endpoints + SSE stream |
 | Excel auto-sync | ✅ Done | DB changes auto-export to .xlsx (Devices + Transactions sheets) |
 | Device import | ✅ Done | German + English Excel headers, PM-based dedup, schrank auto-numbering |
-| Unit tests | ✅ Done | 73 tests, all passing, no hardware required |
+| Unit tests | ✅ Done | 91 tests, all passing, no hardware required |
 | Frontend UI | ✅ Done | 6-screen kiosk UI, animations, demo mode |
 | Barcode scanner | 🔲 Planned | Barcode values stored per device. USB scanner will emulate keyboard input to identify devices in shared lockers. |
 | Calibration alerts | 🔲 Future | Calibration dates stored; notification system not yet built |
@@ -204,4 +204,4 @@ Place device photos in `smart_locker/frontend/images/`. Name them by PM number f
 python -m pytest tests/ -v
 ```
 
-All 73 tests run without NFC hardware (in-memory SQLite, no reader needed).
+All 91 tests run without NFC hardware (in-memory SQLite, no reader needed).

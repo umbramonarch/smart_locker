@@ -1,6 +1,11 @@
-"""AES-256-GCM encryption/decryption for card UIDs.
-
-Storage format: nonce (12 bytes) || ciphertext || GCM tag (16 bytes), base64-encoded.
+"""
+File: encryption.py
+Description: AES-256-GCM encryption and decryption for card UIDs. Each encrypt
+             call generates a random 12-byte nonce, so the same plaintext
+             produces different ciphertext every time.
+Project: smart_locker/security
+Notes: Storage format is base64(nonce || ciphertext || GCM tag). Only admins
+       should call decrypt — regular auth uses HMAC lookup instead.
 """
 
 import base64

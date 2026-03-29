@@ -1,23 +1,14 @@
-"""Update fields on an existing device by PM number.
-
-Usage:
-    # Set image and description for a device:
-    python -m scripts.update_device --pm PM-042 --image oscilloscope.jpg --description "4-ch 500MHz digital oscilloscope"
-
-    # Set just the image:
-    python -m scripts.update_device --pm PM-042 --image oscilloscope.jpg
-
-    # Set any field:
-    python -m scripts.update_device --pm PM-042 --field manufacturer --value "Keysight"
-
-    # List all devices (to see PM numbers):
-    python -m scripts.update_device --list
-
-    # Batch update from a CSV-like format (PM, field, value per line):
-    python -m scripts.update_device --batch updates.txt
-
-    # Auto-match: scan images/ folder and link photos named by PM number:
-    python -m scripts.update_device --auto
+"""
+File: update_device.py
+Description: Update device fields (image, description, or any column) by PM
+             number. Supports single-device updates, batch updates from a text
+             file, auto-matching photos by PM-numbered filenames, and listing
+             all devices with their current status.
+Project: smart_locker/scripts
+Notes: Usage: python -m scripts.update_device --list | --auto |
+       --pm PM-042 --image photo.jpg --description "..." |
+       --batch updates.txt
+       Changes are automatically synced to the output Excel file.
 """
 
 import argparse
@@ -32,6 +23,7 @@ from smart_locker.database.models import Device
 from sqlalchemy import select
 
 
+# Device columns that can be modified via this script (excludes status, borrower, etc.)
 UPDATABLE_FIELDS = {
     "name", "device_type", "serial_number", "manufacturer", "model",
     "barcode", "locker_slot", "description", "image_path", "calibration_due",
@@ -39,7 +31,14 @@ UPDATABLE_FIELDS = {
 
 
 def list_devices() -> None:
-    """Print all devices with key fields."""
+    """Print a formatted table of all devices with key fields.
+
+    Queries all devices ordered by locker slot and name, then prints a
+    table showing slot, PM number, name, image path, and description.
+
+    Returns:
+        None. Device table is printed to stdout.
+    """
     init_db()
     with get_session() as session:
         devices = session.execute(
@@ -61,7 +60,19 @@ def list_devices() -> None:
 
 
 def update_device(pm_number: str, updates: dict) -> None:
-    """Update a single device by PM number."""
+    """Update a single device's fields by PM number.
+
+    Looks up the device, applies each field update (skipping non-updatable
+    fields), flushes to the database, and triggers an Excel sync export.
+
+    Args:
+        pm_number: The PM number identifying the device (e.g. ``"PM-042"``).
+        updates: Mapping of field names to new values
+                 (e.g. ``{"image_path": "images/osc.jpg"}``).
+
+    Returns:
+        None. Progress is printed to stdout.
+    """
     init_db()
     with get_session() as session:
         device = session.execute(
@@ -78,6 +89,7 @@ def update_device(pm_number: str, updates: dict) -> None:
                 continue
 
             if field == "locker_slot":
+                # locker_slot is an INTEGER column — cast string input to int
                 value = int(value) if value else None
 
             old_val = getattr(device, field)
@@ -96,12 +108,23 @@ def update_device(pm_number: str, updates: dict) -> None:
 
 
 def batch_update(batch_file: str) -> None:
-    """Read updates from a file. Each line: PM_NUMBER field value
+    """Read device updates from a text file and apply them in bulk.
 
-    Example file content:
+    Each non-empty, non-comment line must follow the format
+    ``PM_NUMBER field_name value``. Lines are grouped by PM number so
+    multiple fields for the same device are applied in a single update.
+
+    Example file content::
+
         PM-001 image_path oscilloscope.jpg
         PM-001 description 4-channel 500MHz digital oscilloscope
         PM-002 image_path power_supply.jpg
+
+    Args:
+        batch_file: Path to the text file containing update lines.
+
+    Returns:
+        None. Progress is printed to stdout per device.
     """
     file_path = Path(batch_file)
     if not file_path.exists():
@@ -130,7 +153,12 @@ def batch_update(batch_file: str) -> None:
 def auto_match_images() -> None:
     """Scan frontend/images/ for files named by PM number and link them automatically.
 
-    Matches filenames like PM-001.jpg, PM-002.png, pm-003.webp (case-insensitive).
+    Iterates over image files in the frontend images directory, matches each
+    filename stem (case-insensitive) against device PM numbers in the database,
+    and sets ``image_path`` for every match. Supports .jpg, .jpeg, .png, .webp.
+
+    Returns:
+        None. Matched/unmatched counts and per-device updates are printed to stdout.
     """
     images_dir = Path(__file__).resolve().parent.parent / "smart_locker" / "frontend" / "images"
     if not images_dir.exists():
@@ -183,6 +211,16 @@ def auto_match_images() -> None:
 
 
 def main() -> None:
+    """Parse CLI arguments and dispatch to the appropriate update action.
+
+    Supports four modes: ``--list`` (show all devices), ``--batch`` (bulk
+    update from file), ``--auto`` (auto-match images by PM number), or
+    single-device update via ``--pm`` with ``--image``/``--description``/
+    ``--field``+``--value``.
+
+    Returns:
+        None.
+    """
     parser = argparse.ArgumentParser(description="Update device fields by PM number.")
     parser.add_argument("--pm", help="PM number of the device to update")
     parser.add_argument("--image", help="Set image_path (filename in frontend/images/)")

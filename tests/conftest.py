@@ -1,4 +1,12 @@
-"""Shared test fixtures."""
+"""
+File: conftest.py
+Description: Shared pytest fixtures for the Smart Locker test suite. Provides
+             deterministic test keys, in-memory SQLite sessions, and reusable
+             encryption/HMAC key fixtures.
+Project: smart_locker/tests
+Notes: All tests use in-memory SQLite — no disk database or NFC hardware needed.
+       The _set_test_keys fixture runs automatically for every test.
+"""
 
 import os
 import base64
@@ -35,9 +43,11 @@ def db_session():
 
 @pytest.fixture()
 def enc_key():
+    """Provide a deterministic 32-byte AES encryption key for tests."""
     return b"\x01" * 32
 
 
 @pytest.fixture()
 def hmac_key():
+    """Provide a deterministic 32-byte HMAC key for tests."""
     return b"\x02" * 32

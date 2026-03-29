@@ -1,4 +1,11 @@
-"""Tests for the security module: encryption, hashing, key generation."""
+"""
+File: test_security.py
+Description: Tests for the security module — AES-256-GCM encryption/decryption,
+             HMAC-SHA256 hashing, and key generation/validation. Verifies
+             round-trip encrypt/decrypt, nonce uniqueness, and HMAC determinism.
+Project: smart_locker/tests
+Notes: Run with: python -m pytest tests/test_security.py -v
+"""
 
 import base64
 import os
@@ -10,6 +17,7 @@ from smart_locker.security.hashing import compute_uid_hmac
 
 
 class TestEncryption:
+    """Tests for AES-256-GCM encryption — round-trip, nonce uniqueness, key binding, AAD."""
     def test_encrypt_decrypt_roundtrip(self, enc_key):
         plaintext = "A1B2C3D4E5F6"
         token = encrypt(plaintext, enc_key)
@@ -53,6 +61,7 @@ class TestEncryption:
 
 
 class TestHashing:
+    """Tests for HMAC-SHA256 hashing — determinism, format, key sensitivity, case normalization."""
     def test_hmac_deterministic(self, hmac_key):
         uid = "A1B2C3D4"
         digest1 = compute_uid_hmac(uid, hmac_key)

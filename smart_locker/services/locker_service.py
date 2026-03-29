@@ -1,4 +1,12 @@
-"""Borrow/return business logic for the Smart Locker system."""
+"""
+File: locker_service.py
+Description: Borrow/return business logic for the Smart Locker system. Enforces
+             per-user borrow limits, device availability checks, ownership rules,
+             and admin return-on-behalf capability with full transaction logging.
+Project: smart_locker/services
+Notes: The borrow limit is configured via MAX_BORROWS in config/settings.py
+       (default 5). Admins can return any device on behalf of the original borrower.
+"""
 
 import logging
 
@@ -13,7 +21,13 @@ logger = logging.getLogger(__name__)
 
 
 class LockerService:
-    """Handles device borrow and return operations."""
+    """Business logic for device borrow and return operations.
+
+    Enforces per-user borrow limits (MAX_BORROWS from config), device
+    availability checks, ownership rules for returns, and admin
+    return-on-behalf capability. All operations are logged to the
+    transaction audit trail.
+    """
 
     @staticmethod
     def borrow_device(
@@ -154,8 +168,25 @@ class LockerService:
 
     @staticmethod
     def get_available_devices(db_session: Session) -> list:
+        """Return all devices with AVAILABLE status.
+
+        Args:
+            db_session: Active database session.
+
+        Returns:
+            List of available Device objects.
+        """
         return DeviceRepository.get_available_devices(db_session)
 
     @staticmethod
     def get_user_borrowed_devices(db_session: Session, user_id: int) -> list:
+        """Return all devices currently borrowed by a specific user.
+
+        Args:
+            db_session: Active database session.
+            user_id: ID of the borrower.
+
+        Returns:
+            List of Device objects borrowed by the user.
+        """
         return DeviceRepository.get_borrowed_by_user(db_session, user_id)

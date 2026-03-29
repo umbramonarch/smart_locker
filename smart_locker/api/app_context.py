@@ -1,8 +1,12 @@
-"""Shared application state for the API layer.
-
-Bridges the NFC reader (pyscard background threads) with the async ASGI
-server by polling the reader's sync queue via asyncio.to_thread and pushing
-typed events into an asyncio.Queue consumed by the SSE endpoint.
+"""
+File: app_context.py
+Description: Shared application state for the API layer. Bridges the NFC reader
+             (pyscard background threads) with the async ASGI server by polling
+             the reader's sync queue via asyncio.to_thread and pushing typed
+             events into an asyncio.Queue consumed by the SSE endpoint.
+Project: smart_locker/api
+Notes: The module-level singleton 'context' is initialized by server.py's
+       lifespan handler. Also manages pending self-registration state.
 """
 
 import asyncio
@@ -15,23 +19,36 @@ from config.settings import SESSION_TIMEOUT_SECONDS
 
 logger = logging.getLogger(__name__)
 
+# How long a self-registration attempt remains valid before the user must restart
 REGISTRATION_TIMEOUT_SECONDS = 60
 
 
 @dataclass
 class PendingRegistration:
-    """Holds state for a user self-registration awaiting NFC card tap."""
+    """Holds state for a user self-registration awaiting an NFC card tap.
+
+    Created when a user submits their name on the registration screen. The
+    registration is valid for ``REGISTRATION_TIMEOUT_SECONDS`` (60s) — if no
+    card is tapped before then, the attempt expires and the user must retry.
+    """
 
     display_name: str
     created_at: float = field(default_factory=time.monotonic)
 
     @property
     def is_expired(self) -> bool:
+        """Whether the registration window has elapsed without a card tap."""
         return (time.monotonic() - self.created_at) > REGISTRATION_TIMEOUT_SECONDS
 
 
 class AppContext:
-    """Singleton holding NFC reader, authenticator, session manager, and SSE queue."""
+    """Shared application state bridging NFC hardware with the async API layer.
+
+    Holds the NFC reader, authenticator, session manager, SSE event queue,
+    and pending registration state. A background asyncio task polls the
+    reader's synchronous event queue via ``asyncio.to_thread`` and pushes
+    typed events into the async SSE queue consumed by the browser.
+    """
 
     def __init__(self) -> None:
         # Defer NFC/crypto imports so the module can be imported without pyscard
@@ -48,7 +65,15 @@ class AppContext:
         self.pending_registration: PendingRegistration | None = None
 
     async def start(self) -> None:
-        """Start NFC reader and launch the bridge task."""
+        """Start NFC reader and launch the bridge task.
+
+        Attempts to connect to the NFC reader. If the reader is unavailable,
+        the system falls back to API-only mode (no card events). On success,
+        launches the ``_nfc_bridge_loop`` as a background asyncio task.
+
+        Returns:
+            None.
+        """
         from smart_locker.nfc.exceptions import NFCError
 
         try:
@@ -63,7 +88,14 @@ class AppContext:
             self._bridge_task = asyncio.create_task(self._nfc_bridge_loop())
 
     async def stop(self) -> None:
-        """Stop the bridge task and NFC reader."""
+        """Stop the bridge task and NFC reader.
+
+        Cancels the background bridge task (if running), waits for it to
+        finish, and then stops the NFC reader hardware.
+
+        Returns:
+            None.
+        """
         if self._bridge_task is not None:
             self._bridge_task.cancel()
             try:
@@ -76,7 +108,16 @@ class AppContext:
             self.reader.stop()
 
     async def _nfc_bridge_loop(self) -> None:
-        """Poll NFC events and push SSE events to the browser."""
+        """Poll NFC events and push SSE events to the browser.
+
+        Runs indefinitely as a background asyncio task. On each iteration,
+        checks for session timeout transitions, then polls the NFC reader's
+        synchronous queue via ``asyncio.to_thread`` and dispatches card/reader
+        events as SSE messages to the frontend.
+
+        Returns:
+            None. Runs until cancelled.
+        """
         from smart_locker.nfc.card_observer import CardEvent, CardEventType
         from smart_locker.nfc.reader_observer import ReaderEvent, ReaderEventType
         from smart_locker.database.engine import get_session
@@ -156,7 +197,19 @@ class AppContext:
                     await self.sse_queue.put({"event": "reader_connected"})
 
     async def _handle_registration_tap(self, uid: str, get_session) -> None:
-        """Enroll a new user when a card is tapped during pending registration."""
+        """Enroll a new user when a card is tapped during pending registration.
+
+        Validates that the registration has not expired and the card is not
+        already enrolled, then creates the user record and pushes a success
+        or failure SSE event to the frontend.
+
+        Args:
+            uid: Hex-encoded card UID from the NFC reader.
+            get_session: Callable returning a SQLAlchemy session context manager.
+
+        Returns:
+            None. Result is pushed to the SSE queue.
+        """
         from smart_locker.security.key_manager import key_manager
         from smart_locker.services.user_service import UserService
 

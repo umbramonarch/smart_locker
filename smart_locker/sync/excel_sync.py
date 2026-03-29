@@ -1,8 +1,13 @@
-"""Automatic Excel sync — exports device and transaction data on every DB change.
-
-Registers SQLAlchemy event listeners so the Excel file stays in sync with the
-database without manual intervention. The export is triggered after any commit
-that modifies Device or TransactionLog rows.
+"""
+File: excel_sync.py
+Description: Automatic Excel sync — exports device, transaction, and user data
+             on every database change. Registers SQLAlchemy after_flush and
+             after_commit event listeners so the Excel file stays in sync
+             without manual intervention.
+Project: smart_locker/sync
+Notes: If the output file is locked (open in Excel), the sync logs a warning
+       and retries on the next commit. Three sheets are exported: Devices,
+       Transactions, and Users.
 """
 
 import logging
@@ -17,16 +22,28 @@ from smart_locker.database.models import Device, TransactionLog, User
 
 logger = logging.getLogger(__name__)
 
-# Module-level references set by register_auto_sync()
-_engine_ref = None
-_sync_path: Path | None = None
+# Module-level references set by register_auto_sync() — used by the event
+# listeners to call export_to_excel() without passing engine/path each time
+_engine_ref = None          # SQLAlchemy Engine instance
+_sync_path: Path | None = None  # Absolute path to the output Excel file
 
 
 def export_to_excel(engine=None, output_path: str | Path | None = None) -> None:
-    """Export current device and transaction data to an Excel file.
+    """Export current device, transaction, and user data to an Excel file.
 
-    Can be called standalone (with explicit engine/path) or will use
-    the module-level references set by register_auto_sync().
+    Generates a three-sheet workbook (Devices, Transactions, Users) with
+    styled headers and auto-sized columns. Can be called standalone with
+    explicit engine/path, or uses the module-level references set by
+    ``register_auto_sync()``.
+
+    Args:
+        engine: SQLAlchemy Engine to query data from. Falls back to the
+                module-level ``_engine_ref`` if None.
+        output_path: Destination file path. Falls back to the module-level
+                     ``_sync_path`` if None.
+
+    Returns:
+        None. The Excel file is written to disk.
     """
     eng = engine or _engine_ref
     path = Path(output_path) if output_path else _sync_path
@@ -87,6 +104,7 @@ def export_to_excel(engine=None, output_path: str | Path | None = None) -> None:
             for cell in col:
                 val = str(cell.value) if cell.value is not None else ""
                 max_len = max(max_len, len(val))
+            # +3 for padding, capped at 40 to prevent overly wide columns
             ws.column_dimensions[col_letter].width = min(max_len + 3, 40)
 
         # --- Transactions sheet ---
@@ -171,7 +189,15 @@ def register_auto_sync(engine, output_path: str | Path) -> None:
 
     @event.listens_for(Session, "after_flush")
     def _mark_sync_needed(session, flush_context):
-        """Flag the session if any relevant model was modified."""
+        """Flag the session if any relevant model was modified.
+
+        Args:
+            session: The SQLAlchemy session that just flushed.
+            flush_context: Flush context provided by the event system.
+
+        Returns:
+            None. Sets ``session.info["_excel_sync"]`` to True if relevant.
+        """
         for obj in list(session.new) + list(session.dirty) + list(session.deleted):
             if isinstance(obj, (Device, TransactionLog, User)):
                 session.info["_excel_sync"] = True
@@ -179,7 +205,14 @@ def register_auto_sync(engine, output_path: str | Path) -> None:
 
     @event.listens_for(Session, "after_commit")
     def _sync_on_commit(session):
-        """Export to Excel if the commit included relevant changes."""
+        """Export to Excel if the commit included relevant changes.
+
+        Args:
+            session: The SQLAlchemy session that just committed.
+
+        Returns:
+            None. Triggers ``export_to_excel()`` if flagged by ``_mark_sync_needed``.
+        """
         if session.info.pop("_excel_sync", False):
             try:
                 export_to_excel()

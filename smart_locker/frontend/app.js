@@ -1,3 +1,14 @@
+/**
+ * @fileoverview Client-side state machine for the kiosk touch UI. Manages screen
+ *               transitions, API communication, SSE event handling, and user
+ *               interaction flow across idle, auth, menu, borrow, return, detail,
+ *               registration, and admin screens.
+ * @project smart_locker/frontend
+ * @description Includes demo mode with mock data, landonorris.com-inspired
+ *              animations (circle reveals, character-split text, magnetic hover,
+ *              image parallax), inactivity countdown, and self-registration flow.
+ */
+
 /* ============================================================
    STATE — single source of truth for the UI
 ============================================================ */
@@ -26,6 +37,7 @@ const DEMO_USERS = [
   { id: 2, name: 'Jamie Lee',    role: 'user'  },
   { id: 3, name: 'Morgan Chen',  role: 'user'  },
 ];
+/** @type {number} Index into DEMO_USERS, cycles on each simulated card tap */
 let demoUserIdx = 0;
 
 const DEMO_DEVICES = [
@@ -42,9 +54,15 @@ const DEMO_DEVICES = [
 /* ============================================================
    API — real fetch() calls with demo fallback
 ============================================================ */
+/**
+ * Authenticate a user by NFC card tap. In demo mode, cycles through demo users.
+ * In live mode, auth is handled via SSE, so this only applies to demo.
+ * @param {string} uid_hmac - The HMAC hash of the card UID.
+ * @returns {Promise<Object>} Result with success boolean and optional user object.
+ */
 async function apiAuthTap(uid_hmac) {
   if (USE_DEMO) {
-    await sleep(380);
+    await sleep(380); // simulate network latency
     const user = DEMO_USERS[demoUserIdx++ % DEMO_USERS.length];
     return { success: true, user };
   }
@@ -52,16 +70,25 @@ async function apiAuthTap(uid_hmac) {
   return { success: false };
 }
 
+/**
+ * Fetch all devices from the API. Returns demo data when in demo mode.
+ * @returns {Promise<Array<Object>>} Array of device objects, or empty array on error.
+ */
 async function apiGetDevices() {
-  if (USE_DEMO) { await sleep(280); return DEMO_DEVICES; }
+  if (USE_DEMO) { await sleep(280); return DEMO_DEVICES; } // simulate fetch latency
   const res = await fetch('/api/devices');
   if (!res.ok) return [];
   return await res.json();
 }
 
+/**
+ * Borrow a device by ID. In demo mode, updates the local device status directly.
+ * @param {number} device_id - The database ID of the device to borrow.
+ * @returns {Promise<Object>} Result with success boolean and message string.
+ */
 async function apiBorrow(device_id) {
   if (USE_DEMO) {
-    await sleep(480);
+    await sleep(480); // simulate borrow API round-trip
     const d = S.devices.find(x => x.id === device_id);
     if (d) { d.status = 'borrowed'; d.borrower_name = 'You'; }
     return { success: true, message: `${d?.name ?? 'Device'} borrowed.` };
@@ -70,9 +97,14 @@ async function apiBorrow(device_id) {
   return await res.json();
 }
 
+/**
+ * Return a borrowed device by ID. In demo mode, resets the local device status.
+ * @param {number} device_id - The database ID of the device to return.
+ * @returns {Promise<Object>} Result with success boolean and message string.
+ */
 async function apiReturn(device_id) {
   if (USE_DEMO) {
-    await sleep(480);
+    await sleep(480); // simulate return API round-trip
     const d = S.devices.find(x => x.id === device_id);
     if (d) { d.status = 'available'; d.borrower_name = null; }
     return { success: true, message: `${d?.name ?? 'Device'} returned.` };
@@ -81,14 +113,24 @@ async function apiReturn(device_id) {
   return await res.json();
 }
 
+/**
+ * End the current user session. Calls the backend session-end endpoint in live mode.
+ * @returns {Promise<void>}
+ */
 async function apiEndSession() {
-  if (USE_DEMO) { await sleep(200); return; }
+  if (USE_DEMO) { await sleep(200); return; } // simulate session end
   await fetch('/api/session/end', { method: 'POST' }).catch(() => {});
 }
 
+/**
+ * Start the user self-registration flow by sending the user's name to the backend.
+ * The backend then waits for the next NFC tap to associate a card with that name.
+ * @param {string} name - The display name the new user entered.
+ * @returns {Promise<Object>} Result with success boolean and optional error detail.
+ */
 async function apiStartRegistration(name) {
   if (USE_DEMO) {
-    await sleep(400);
+    await sleep(400); // simulate registration API round-trip
     return { success: true };
   }
   const res = await fetch('/api/register', {
@@ -99,6 +141,10 @@ async function apiStartRegistration(name) {
   return await res.json();
 }
 
+/**
+ * Cancel an in-progress registration request on the backend.
+ * @returns {Promise<void>}
+ */
 async function apiCancelRegistration() {
   if (USE_DEMO) return;
   await fetch('/api/register/cancel', { method: 'POST' }).catch(() => {});
@@ -118,11 +164,22 @@ async function apiCancelRegistration() {
   })
 );
 
+/**
+ * Get a screen or overlay element by its logical ID. Checks for both
+ * 'screen-{id}' and 'overlay-{id}' element IDs.
+ * @param {string} id - The logical screen/overlay identifier (e.g., 'idle', 'device-detail').
+ * @returns {HTMLElement|null} The matching DOM element, or null if not found.
+ */
 function getEl(id) {
   return document.getElementById('screen-' + id)
       || document.getElementById('overlay-' + id);
 }
 
+/**
+ * Set CSS custom properties --reveal-x and --reveal-y on an element so the
+ * circle-reveal clip-path animation expands from the last click position.
+ * @param {HTMLElement} el - The screen element to set reveal origin on.
+ */
 function setRevealOrigin(el) {
   if (S.lastClickX != null) {
     const xPct = ((S.lastClickX / window.innerWidth) * 100).toFixed(1) + '%';
@@ -132,6 +189,12 @@ function setRevealOrigin(el) {
   }
 }
 
+/**
+ * Navigate to a different screen or overlay using circle-reveal (screens) or
+ * polygon-wipe (overlays) transitions. Handles exit animations on the outgoing
+ * screen and entrance animations on the incoming one.
+ * @param {string} toId - The logical ID of the target screen or overlay.
+ */
 function navigate(toId) {
   if (S.screen === toId) return;
 
@@ -167,7 +230,7 @@ function navigate(toId) {
       setRevealOrigin(fromEl);
       void fromEl.offsetHeight;          // force reflow — lock in new origin
       fromEl.classList.add('exit');
-      setTimeout(() => fromEl.classList.remove('active', 'exit'), 1300);
+      setTimeout(() => fromEl.classList.remove('active', 'exit'), 1300); // matches CSS --t-reveal (1.3s) transition
     }
   }
 
@@ -190,6 +253,11 @@ function navigate(toId) {
    Splits text content into individual characters, each wrapped
    in a span with a stagger delay. Re-splits on content change.
 ============================================================ */
+/**
+ * Split an element's text content into individual character spans for staggered
+ * entrance animations. Each span gets a CSS custom property --i for delay calculation.
+ * @param {HTMLElement} el - The element whose text content will be split into characters.
+ */
 function splitTextIntoChars(el) {
   const text = el.textContent;
   if (!text.trim()) return;
@@ -204,12 +272,20 @@ function splitTextIntoChars(el) {
   });
 }
 
+/**
+ * Trigger split-text entrance animations on a screen element. The .active class
+ * on the parent screen activates the CSS animation via .screen.active .split-char.
+ * @param {HTMLElement} screenEl - The screen element that was just navigated to.
+ */
 function triggerSplitText(screenEl) {
   // The .active class on the parent screen triggers the CSS animation
   // via .screen.active .split-char selector
 }
 
-// Initialize split text on page load for idle screen elements
+/**
+ * Initialize character-split text on the idle screen elements at page load.
+ * Splits the headline ("TAP YOUR CARD") and subtitle into individual character spans.
+ */
 function initSplitText() {
   // Idle headline: "TAP YOUR CARD"
   const idleHeadline = document.querySelector('.idle-headline .reveal-inner');
@@ -220,7 +296,10 @@ function initSplitText() {
   if (idleSub) splitTextIntoChars(idleSub);
 }
 
-// Split menu text when navigating to main-menu (called after content is set)
+/**
+ * Split the main menu greeting and username text into individual character spans
+ * for entrance animations. Called after dynamic content is set in fillMainMenu().
+ */
 function splitMenuText() {
   const greeting = document.querySelector('.menu-greeting .reveal-inner');
   if (greeting) splitTextIntoChars(greeting);
@@ -232,6 +311,12 @@ function splitMenuText() {
    Enhancement F: SLOT-MACHINE NUMBER TRANSITIONS
    Wraps each digit in a container that slides out/in when changed.
 ============================================================ */
+/**
+ * Update a numeric display with slot-machine style digit transitions. Each digit
+ * slides up when its value changes. Initializes the digit DOM structure on first call.
+ * @param {HTMLElement} el - The container element for the slot-machine number display.
+ * @param {number} newValue - The new numeric value to display.
+ */
 function updateSlotNumber(el, newValue) {
   const newStr = String(newValue);
   const oldStr = el.dataset.slotValue || '';
@@ -261,7 +346,7 @@ function updateSlotNumber(el, newValue) {
         inner.classList.remove('slide-up');
         void inner.offsetWidth; // force reflow
         inner.classList.add('slide-up');
-        setTimeout(() => { inner.textContent = ch; }, 175);
+        setTimeout(() => { inner.textContent = ch; }, 175); // halfway through the slide-up CSS transition
       }
     }
   });
@@ -270,6 +355,10 @@ function updateSlotNumber(el, newValue) {
 /* ============================================================
    CLOCK
 ============================================================ */
+/**
+ * Update the clock display with the current time (HH:MM) and date (e.g., "SAT, MAR 28").
+ * Called once per second via setInterval.
+ */
 function tickClock() {
   const now = new Date();
   document.getElementById('clock-time').textContent =
@@ -283,12 +372,21 @@ setInterval(tickClock, 1000);
 /* ============================================================
    INACTIVITY TIMER — with slot-machine countdown
 ============================================================ */
+/**
+ * Arm (or re-arm) the inactivity timer. After (cdSeconds - cdWarnAt) seconds of
+ * no user interaction, the inactivity countdown overlay will appear. Resets on
+ * every click, touch, or keydown event.
+ */
 function armIdle() {
   clearTimeout(S.idleTimer);
   if (S.screen === 'idle') return;
   S.idleTimer = setTimeout(showInactivity, (S.cdSeconds - S.cdWarnAt) * 1000);
 }
 
+/**
+ * Display the inactivity countdown overlay with a slot-machine countdown timer.
+ * When the countdown reaches zero, the session ends automatically.
+ */
 function showInactivity() {
   S.prevScreen = S.screen;
   const overlay = document.getElementById('overlay-inactivity');
@@ -304,6 +402,10 @@ function showInactivity() {
   }, 1000);
 }
 
+/**
+ * Dismiss the inactivity countdown overlay and re-arm the idle timer.
+ * Called when the user clicks "Stay" or interacts during the countdown.
+ */
 function dismissInactivity() {
   clearInterval(S.cdTimer);
   const overlay = document.getElementById('overlay-inactivity');
@@ -329,6 +431,11 @@ function dismissInactivity() {
 /* ============================================================
    AUTH
 ============================================================ */
+/**
+ * Handle an NFC card tap event in demo mode. Authenticates the user and navigates
+ * to the main menu on success, or shows the auth-failed screen on failure.
+ * @returns {Promise<void>}
+ */
 async function handleTap() {
   if (S.screen !== 'idle') return;
   const result = await apiAuthTap('DEMO_UID_HMAC');
@@ -342,6 +449,10 @@ async function handleTap() {
   armIdle();
 }
 
+/**
+ * Show the authentication failed screen with an animated progress bar that
+ * counts down over 3 seconds before automatically returning to the idle screen.
+ */
 function showAuthFailed() {
   navigate('auth-failed');
   const bar = document.getElementById('auth-progress');
@@ -354,6 +465,14 @@ function showAuthFailed() {
   setTimeout(() => navigate('idle'), 3100);
 }
 
+/**
+ * End the current user session, clear all state, dismiss overlays, and return
+ * to the idle screen. Notifies the backend unless the end was triggered by SSE.
+ * @param {boolean} [fromTimeout=false] - True if the session ended due to inactivity timeout.
+ * @param {boolean} [fromSSE=false] - True if the session end was triggered by an SSE event
+ *   (skip backend call to avoid circular notification).
+ * @returns {Promise<void>}
+ */
 async function endSession(fromTimeout = false, fromSSE = false) {
   clearTimeout(S.idleTimer);
   clearInterval(S.cdTimer);
@@ -368,6 +487,14 @@ async function endSession(fromTimeout = false, fromSSE = false) {
 /* ============================================================
    MAIN MENU
 ============================================================ */
+/**
+ * Populate the main menu screen with the authenticated user's information,
+ * including greeting, avatar initials, name badge, and role pill.
+ * @param {Object} user - The authenticated user object.
+ * @param {number} user.id - User database ID.
+ * @param {string} user.name - User's full display name.
+ * @param {string} user.role - User role ('admin' or 'user').
+ */
 function fillMainMenu(user) {
   const first = user.name.split(' ')[0].toUpperCase();
   document.getElementById('menu-name').textContent    = first;
@@ -384,15 +511,26 @@ function fillMainMenu(user) {
 /* ============================================================
    DEVICE GRID — borrow and return screens
 ============================================================ */
+/**
+ * Open the borrow screen, fetch the current device list from the API, update
+ * the borrow count badge, and build the device card grid.
+ * @returns {Promise<void>}
+ */
 async function openBorrow() {
   navigate('borrow');
   const devices = await apiGetDevices();
   S.devices = devices;
   const myCount = devices.filter(d => d.borrower_name === 'You').length;
+  // 5 = MAX_BORROWS default from config.settings (must match server setting)
   document.getElementById('borrow-badge').textContent = `${myCount} / 5 borrowed`;
   buildGrid('borrow-grid', devices, 'borrow');
 }
 
+/**
+ * Open the return screen, fetch the current device list from the API, update
+ * the return count badge, and build the device card grid.
+ * @returns {Promise<void>}
+ */
 async function openReturn() {
   navigate('return');
   const devices = await apiGetDevices();
@@ -403,6 +541,14 @@ async function openReturn() {
   buildGrid('return-grid', devices, 'return');
 }
 
+/**
+ * Build the device card grid for either borrow or return mode. Creates card DOM
+ * elements sorted by locker slot, sets up IntersectionObserver for scroll-triggered
+ * entrance animations, scroll parallax on card images, and mouse hover parallax.
+ * @param {string} gridId - The DOM ID of the grid container element.
+ * @param {Array<Object>} devices - Array of device objects from the API.
+ * @param {string} mode - Either 'borrow' or 'return', controls card styling and behavior.
+ */
 function buildGrid(gridId, devices, mode) {
   const grid   = document.getElementById(gridId);
   grid.innerHTML = '';
@@ -410,6 +556,7 @@ function buildGrid(gridId, devices, mode) {
   // Disconnect previous observer if any
   if (grid._scrollObs) { grid._scrollObs.disconnect(); grid._scrollObs = null; }
 
+  // Sort by locker slot number; 99 is a fallback for devices without a slot assignment
   const sorted = [...devices].sort((a, b) => (a.locker_slot || 99) - (b.locker_slot || 99));
 
   // IntersectionObserver: cards animate in/out as they scroll into view
@@ -429,10 +576,14 @@ function buildGrid(gridId, devices, mode) {
         }
       }
     });
-  }, { root: scrollRoot, threshold: 0.15, rootMargin: '40px 0px' });
+  }, { root: scrollRoot, threshold: 0.15, rootMargin: '40px 0px' }); // 15% visible triggers animation; 40px buffer for smooth entry
 
   // Scroll parallax: shift card images based on scroll position
   const parallaxCards = [];
+  /**
+   * Recalculate scroll-based parallax offsets for all card images in the grid.
+   * Shifts each image vertically based on its distance from the viewport center.
+   */
   function onGridScroll() {
     const wrapRect = scrollRoot.getBoundingClientRect();
     const centerY = wrapRect.top + wrapRect.height / 2;
@@ -507,7 +658,7 @@ function buildGrid(gridId, devices, mode) {
         const rect = card.getBoundingClientRect();
         const x = (e.clientX - rect.left) / rect.width - 0.5;
         const y = (e.clientY - rect.top) / rect.height - 0.5;
-        cardImg.style.transform = `scale(1.15) translate(${x * -14}px, ${y * -14}px)`;
+        cardImg.style.transform = `scale(1.15) translate(${x * -14}px, ${y * -14}px)`; // ±14px parallax shift opposite to cursor
       });
       card.addEventListener('mouseleave', () => {
         // Restore to scroll-parallax transform
@@ -527,6 +678,13 @@ function buildGrid(gridId, devices, mode) {
 /* ============================================================
    DEVICE DETAIL OVERLAY
 ============================================================ */
+/**
+ * Open the device detail overlay with full information about a device. Populates
+ * all detail fields (name, type, serial, image, status, description) and configures
+ * the confirm button based on device availability and current mode.
+ * @param {Object} dev - The device object to display details for.
+ * @param {string} mode - Either 'borrow' or 'return', determines confirm button behavior.
+ */
 function openDetail(dev, mode) {
   S.selected   = dev;
   S.mode       = mode;
@@ -585,6 +743,10 @@ function openDetail(dev, mode) {
   navigate('device-detail');
 }
 
+/**
+ * Close the device detail overlay with a slide-right exit animation and restore
+ * the previous screen (borrow or return grid).
+ */
 function closeDetail() {
   const overlay = document.getElementById('overlay-device-detail');
   overlay.classList.add('hidden-right');
@@ -595,6 +757,11 @@ function closeDetail() {
   S.screen = S.prevScreen || (S.mode === 'return' ? 'return' : 'borrow');
 }
 
+/**
+ * Execute the borrow or return action for the currently selected device. Disables
+ * the button during the request, shows a toast with the result, then refreshes the grid.
+ * @returns {Promise<void>}
+ */
 async function confirmAction() {
   const btn = document.getElementById('confirm-btn');
   if (btn.classList.contains('disabled')) return;
@@ -617,13 +784,20 @@ async function confirmAction() {
 /* ============================================================
    TOAST NOTIFICATION
 ============================================================ */
+/** @type {number|undefined} Timeout handle for auto-hiding the active toast */
 let toastTimer;
+/**
+ * Display a temporary toast notification message at the bottom of the screen.
+ * Automatically hides after 3.2 seconds. Consecutive calls reset the timer.
+ * @param {string} msg - The message text to display.
+ * @param {string} [type=''] - Optional CSS modifier class ('success' or 'error').
+ */
 function showToast(msg, type = '') {
   const el = document.getElementById('toast');
   clearTimeout(toastTimer);
   el.textContent = msg;
   el.className = `show${type ? ' toast-' + type : ''}`;
-  toastTimer = setTimeout(() => { el.className = ''; }, 3200);
+  toastTimer = setTimeout(() => { el.className = ''; }, 3200); // 3.2s display duration
 }
 
 /* ============================================================
@@ -649,8 +823,12 @@ document.addEventListener('mousemove', e => {
   }
 });
 
+/**
+ * Animate the cursor ring to follow the cursor dot with an eased lag.
+ * Runs as a self-invoking requestAnimationFrame loop.
+ */
 (function animRing() {
-  rx += (mx - rx) * 0.13;
+  rx += (mx - rx) * 0.13; // 0.13 = easing factor — lower values increase lag
   ry += (my - ry) * 0.13;
   cursorRing.style.left = rx + 'px';
   cursorRing.style.top  = ry + 'px';
@@ -661,6 +839,11 @@ document.addEventListener('mousemove', e => {
    Enhancement D: MAGNETIC HOVER on action buttons
    Buttons subtly shift toward the cursor position on hover.
 ============================================================ */
+/**
+ * Initialize magnetic hover effect on action buttons, back buttons, close buttons,
+ * stay button, and confirm button. Buttons subtly shift toward the cursor on hover,
+ * clamped to +/-4px on action buttons to prevent overlap with neighbors.
+ */
 function initMagneticHover() {
   document.querySelectorAll('.action-btn').forEach(btn => {
     btn.addEventListener('mousemove', e => {
@@ -668,7 +851,7 @@ function initMagneticHover() {
       const x = e.clientX - rect.left - rect.width / 2;
       const y = e.clientY - rect.top - rect.height / 2;
       // Clamp to ±4px so adjacent buttons never overlap
-      const tx = Math.max(-4, Math.min(4, x * 0.04));
+      const tx = Math.max(-4, Math.min(4, x * 0.04)); // 0.04 sensitivity, ±4px max shift
       const ty = Math.max(-4, Math.min(4, y * 0.04));
       btn.style.transform = `translate(${tx}px, ${ty}px) scale(1.01)`;
     });
@@ -683,7 +866,7 @@ function initMagneticHover() {
       const rect = btn.getBoundingClientRect();
       const x = e.clientX - rect.left - rect.width / 2;
       const y = e.clientY - rect.top - rect.height / 2;
-      btn.style.transform = `translate(${x * 0.18}px, ${y * 0.18}px)`;
+      btn.style.transform = `translate(${x * 0.18}px, ${y * 0.18}px)`; // 0.18 = stronger magnetic effect for standalone buttons
     });
     btn.addEventListener('mouseleave', () => {
       btn.style.transform = '';
@@ -694,12 +877,21 @@ function initMagneticHover() {
 /* ============================================================
    SEAMLESS MARQUEE — clone track to fill any viewport width
 ============================================================ */
+/**
+ * Initialize the seamless infinite marquee by cloning the track element enough
+ * times to fill the viewport width plus one extra copy for seamless looping.
+ * Re-populates on window resize.
+ */
 function initMarquee() {
   const bar = document.querySelector('.marquee-bar');
   if (!bar) return;
   const original = bar.querySelector('.marquee-track');
   if (!original) return;
 
+  /**
+   * Calculate and create the necessary number of track clones to ensure seamless
+   * scrolling across the current viewport width. Removes previous clones first.
+   */
   function populate() {
     // Remove previous clones
     bar.querySelectorAll('.marquee-track[aria-hidden]').forEach(c => c.remove());
@@ -723,8 +915,14 @@ function initMarquee() {
 /* ============================================================
    REGISTRATION FLOW
 ============================================================ */
+/** @type {number|null} Interval handle for the registration countdown timer (60s) */
 let registerCountdownTimer = null;
 
+/**
+ * Show a specific step in the registration flow, hiding all other steps.
+ * Re-triggers the CSS entrance animation on the revealed step.
+ * @param {string} stepId - The DOM ID of the registration step element to show.
+ */
 function showRegisterStep(stepId) {
   document.querySelectorAll('.register-step').forEach(el => el.classList.add('hidden'));
   const step = document.getElementById(stepId);
@@ -737,6 +935,10 @@ function showRegisterStep(stepId) {
   }
 }
 
+/**
+ * Open the user self-registration screen. Resets the name input and countdown
+ * state, navigates to the register screen, and focuses the name input field.
+ */
 function openRegister() {
   // Reset state
   document.getElementById('register-name').value = '';
@@ -748,6 +950,12 @@ function openRegister() {
   setTimeout(() => document.getElementById('register-name').focus(), 800);
 }
 
+/**
+ * Submit the registration name and advance to the "tap your card" step. Starts
+ * a 60-second countdown timer and tells the backend to await the next NFC tap.
+ * On timeout or backend error, shows the error step and returns to idle.
+ * @returns {Promise<void>}
+ */
 async function submitRegistrationName() {
   const nameInput = document.getElementById('register-name');
   const name = nameInput.value.trim();
@@ -760,7 +968,7 @@ async function submitRegistrationName() {
   showRegisterStep('register-step-tap');
 
   // Start countdown
-  let secs = 60;
+  let secs = 60; // must match REGISTRATION_TIMEOUT_SECONDS in app_context.py
   const cdEl = document.getElementById('register-countdown');
   cdEl.textContent = secs + 's';
   registerCountdownTimer = setInterval(() => {
@@ -786,12 +994,23 @@ async function submitRegistrationName() {
   }
 }
 
+/**
+ * Cancel the in-progress registration flow, stop the countdown timer,
+ * notify the backend, and navigate back to the idle screen.
+ */
 function cancelRegistration() {
   clearInterval(registerCountdownTimer);
   apiCancelRegistration();
   navigate('idle');
 }
 
+/**
+ * Handle a successful registration SSE event. Shows the success step with a
+ * welcome message and automatically returns to idle after 4 seconds.
+ * @param {Object} data - The SSE event data containing the new user info.
+ * @param {Object} data.user - The newly registered user object.
+ * @param {string} data.user.name - The registered user's display name.
+ */
 function handleRegistrationSuccess(data) {
   clearInterval(registerCountdownTimer);
   if (S.screen !== 'register') return;
@@ -801,6 +1020,12 @@ function handleRegistrationSuccess(data) {
   setTimeout(() => navigate('idle'), 4000);
 }
 
+/**
+ * Handle a failed registration SSE event. Shows the error step with the failure
+ * reason and automatically returns to idle after 4 seconds.
+ * @param {Object} data - The SSE event data containing the failure reason.
+ * @param {string} [data.reason] - Human-readable failure reason string.
+ */
 function handleRegistrationFailed(data) {
   clearInterval(registerCountdownTimer);
   if (S.screen !== 'register') return;
@@ -818,6 +1043,10 @@ const ADMIN_TAP_COUNT = 5;
 const ADMIN_TAP_WINDOW = 3000; // ms
 let adminSessionActive = false;
 
+/**
+ * Record a tap on the clock area and check if the admin tap sequence (5 taps
+ * within 3 seconds) has been completed. Opens the admin panel on success.
+ */
 function checkAdminTapSequence() {
   const now = Date.now();
   adminTaps.push(now);
@@ -831,6 +1060,9 @@ function checkAdminTapSequence() {
   }
 }
 
+/**
+ * Toggle the admin panel overlay between open and closed states.
+ */
 function toggleAdminPanel() {
   const overlay = document.getElementById('overlay-admin');
   if (overlay.classList.contains('visible')) {
@@ -840,6 +1072,10 @@ function toggleAdminPanel() {
   }
 }
 
+/**
+ * Open the admin panel overlay with a polygon-wipe entrance animation.
+ * Plays a click sound on activation.
+ */
 function openAdminPanel() {
   clickSound();
   const overlay = document.getElementById('overlay-admin');
@@ -849,6 +1085,9 @@ function openAdminPanel() {
   }));
 }
 
+/**
+ * Close the admin panel overlay with a slide-left exit animation.
+ */
 function closeAdminPanel() {
   const overlay = document.getElementById('overlay-admin');
   overlay.classList.add('hidden-left');
@@ -858,6 +1097,10 @@ function closeAdminPanel() {
   }, 710);
 }
 
+/**
+ * Create a synthetic admin user session so admin panel actions (borrow/return)
+ * have a valid user context. Sets the global state and fills the main menu.
+ */
 function adminStartSession() {
   // Create a synthetic admin user context so borrow/return screens work
   adminSessionActive = true;
@@ -865,26 +1108,41 @@ function adminStartSession() {
   fillMainMenu(S.user);
 }
 
+/**
+ * Admin shortcut: close the admin panel, start an admin session, navigate to
+ * the main menu, and then open the borrow screen.
+ * @returns {Promise<void>}
+ */
 async function adminGotoBorrow() {
   closeAdminPanel();
   adminStartSession();
-  await sleep(300);
+  await sleep(300); // wait for panel close animation
   navigate('main-menu');
-  await sleep(200);
+  await sleep(200); // wait for circle-reveal transition
   openBorrow();
   armIdle();
 }
 
+/**
+ * Admin shortcut: close the admin panel, start an admin session, navigate to
+ * the main menu, and then open the return screen.
+ * @returns {Promise<void>}
+ */
 async function adminGotoReturn() {
   closeAdminPanel();
   adminStartSession();
-  await sleep(300);
+  await sleep(300); // wait for panel close animation
   navigate('main-menu');
-  await sleep(200);
+  await sleep(200); // wait for circle-reveal transition
   openReturn();
   armIdle();
 }
 
+/**
+ * Trigger a manual source Excel sync from the admin panel. Updates the button
+ * label to "Syncing..." during the request and shows a toast with the result.
+ * @returns {Promise<void>}
+ */
 async function adminSyncSource() {
   const btn = document.getElementById('admin-sync-source');
   const label = btn.querySelector('.admin-btn-label');
@@ -908,6 +1166,10 @@ async function adminSyncSource() {
   btn.style.pointerEvents = '';
 }
 
+/**
+ * End the admin session from the admin panel. Closes the panel, clears the
+ * admin session flag, and calls the standard session end flow.
+ */
 function adminEndSession() {
   closeAdminPanel();
   adminSessionActive = false;
@@ -917,6 +1179,11 @@ function adminEndSession() {
 /* ============================================================
    AUDIO CLICK FEEDBACK
 ============================================================ */
+/**
+ * Play a short click/tap audio feedback sound using the Web Audio API.
+ * Creates a brief oscillator sweep from 900Hz to 420Hz over 70ms.
+ * Silently ignored if audio is not available.
+ */
 function clickSound() {
   try {
     const ctx = new (window.AudioContext || window.webkitAudioContext)();
@@ -976,6 +1243,12 @@ document.getElementById('admin-end-session').addEventListener('click', () => { c
 /* ============================================================
    INIT
 ============================================================ */
+/**
+ * Return a Promise that resolves after the specified delay. Utility for
+ * simulating async delays in demo mode and sequencing UI transitions.
+ * @param {number} ms - Delay in milliseconds.
+ * @returns {Promise<void>} Resolves after the delay.
+ */
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 // Overlays start hidden so they don't briefly flash on page load
@@ -995,6 +1268,12 @@ initMarquee();
 /* ============================================================
    SSE — real-time events from backend (live mode only)
 ============================================================ */
+/**
+ * Establish a Server-Sent Events connection to the backend for real-time
+ * push notifications. Handles auth success/failure, session end/timeout,
+ * reader connect/disconnect, and registration success/failure events.
+ * Automatically reconnects after 3 seconds on connection error.
+ */
 function connectSSE() {
   const source = new EventSource('/api/events');
 
@@ -1038,11 +1317,15 @@ function connectSSE() {
 
   source.onerror = () => {
     source.close();
-    setTimeout(connectSSE, 3000);
+    setTimeout(connectSSE, 3000); // 3s delay before reconnecting after SSE error
   };
 }
 
-// On page load: check if a session is already active (handles browser refresh)
+/**
+ * Check if a user session is already active on the backend (handles browser refresh).
+ * If an active session exists, restores the UI to the main menu for that user.
+ * @returns {Promise<void>}
+ */
 async function checkExistingSession() {
   try {
     const res = await fetch('/api/session');

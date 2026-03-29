@@ -1,7 +1,11 @@
-"""SQLAlchemy engine and session factory.
-
-Uses SQLite with WAL mode for read concurrency. Provides a scoped_session
-for thread safety (NFC monitor runs on a background thread).
+"""
+File: engine.py
+Description: SQLAlchemy engine and session factory. Uses SQLite with WAL journal
+             mode for read concurrency and provides a scoped_session for thread
+             safety (NFC monitor runs on a background thread).
+Project: smart_locker/database
+Notes: The engine and session factory are module-level singletons. Use
+       reset_engine() in tests to tear down between test cases.
 """
 
 import logging
@@ -16,6 +20,7 @@ from smart_locker.database.models import Base
 
 logger = logging.getLogger(__name__)
 
+# Module-level singletons — lazily created by get_engine() / get_session_factory()
 _engine = None
 _session_factory = None
 

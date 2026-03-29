@@ -383,7 +383,7 @@ The NFC card is **tapped and removed** — it is not left on the reader. The car
 Tests run without any NFC hardware — they use in-memory SQLite and mock data.
 
 ```powershell
-# Run all 73 tests
+# Run all 91 tests
 python -m pytest tests/ -v
 
 # Run a specific test file
@@ -463,7 +463,7 @@ All settings are in `.env` (loaded by `config/settings.py`):
 - Bulk device import from Excel with German column auto-detection (Equipment, Hersteller, Typbezeichnung, Kategorie, etc.)
 - Automatic Excel sync — database changes export to `smart_locker_data.xlsx` in real-time (Devices + Transactions sheets)
 - FastAPI REST API with SSE event stream for NFC → browser bridge
-- 73 unit tests — all passing, no NFC hardware required
+- 91 unit tests — all passing, no NFC hardware required
 
 ### ✅ Built — Frontend UI
 

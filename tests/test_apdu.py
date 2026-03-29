@@ -1,4 +1,11 @@
-"""Tests for APDU command construction and response parsing."""
+"""
+File: test_apdu.py
+Description: Tests for APDU command construction and response parsing. Validates
+             GET_UID, LOAD KEY, AUTHENTICATE, READ BINARY command byte sequences
+             and APDUResponse status word interpretation.
+Project: smart_locker/tests
+Notes: Run with: python -m pytest tests/test_apdu.py -v
+"""
 
 from smart_locker.nfc.apdu import (
     APDUResponse,
@@ -11,6 +18,7 @@ from smart_locker.nfc.apdu import (
 
 
 class TestAPDUCommands:
+    """Tests for APDU command byte sequence construction (GET_UID, LOAD KEY, etc.)."""
     def test_get_uid_format(self):
         assert GET_UID == [0xFF, 0xCA, 0x00, 0x00, 0x00]
         assert len(GET_UID) == 5
@@ -48,6 +56,7 @@ class TestAPDUCommands:
 
 
 class TestAPDUResponse:
+    """Tests for APDUResponse parsing, status word checks, and UID formatting."""
     def test_success_response(self):
         resp = APDUResponse.from_raw([0xA1, 0xB2, 0xC3, 0xD4], 0x90, 0x00)
         assert resp.success is True

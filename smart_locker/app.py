@@ -1,12 +1,11 @@
-"""Smart Locker application entry point.
-
-Two modes:
-  - Web server (default): FastAPI + uvicorn serving the kiosk UI with NFC bridge.
-  - CLI mode (--cli): Original blocking main loop for console-only operation.
-
-Usage:
-    python -m smart_locker.app          # Web server on http://localhost:8000
-    python -m smart_locker.app --cli    # Console-only NFC loop
+"""
+File: app.py
+Description: Application entry point for the Smart Locker system. Supports two
+             modes: a FastAPI + uvicorn web server (default) serving the kiosk UI
+             with NFC bridge, and a CLI mode for console-only NFC operation.
+Project: smart_locker
+Notes: Run via 'python -m smart_locker.app' (web server on port 8000) or
+       'python -m smart_locker.app --cli' (console-only NFC loop).
 """
 
 import logging
@@ -40,7 +39,13 @@ logger = logging.getLogger(__name__)
 
 
 class SmartLockerApp:
-    """Main application orchestrator."""
+    """Main application orchestrator for CLI mode.
+
+    Initializes the NFC reader, authenticator, and session manager, then
+    runs a blocking event loop that processes card and reader events from
+    the console. Used when the system is started with ``--cli`` flag
+    instead of the default FastAPI web server mode.
+    """
 
     def __init__(self) -> None:
         self._reader = NFCReader()
@@ -49,7 +54,15 @@ class SmartLockerApp:
         self._running = False
 
     def run(self) -> None:
-        """Start the application main loop."""
+        """Start the application main loop.
+
+        Initializes logging, the database, Excel sync, and the optional
+        daily source import scheduler, then starts the NFC reader and
+        enters a blocking event loop until Ctrl+C is pressed.
+
+        Returns:
+            None.
+        """
         setup_logging()
         init_db()
 
@@ -73,8 +86,9 @@ class SmartLockerApp:
 
         self._running = True
 
-        # Handle Ctrl+C
+        # Handle Ctrl+C — set _running to False so _main_loop exits gracefully
         def _signal_handler(sig, frame):
+            """Signal handler for SIGINT that triggers a graceful shutdown."""
             logger.info("Shutdown signal received.")
             self._running = False
 
@@ -90,6 +104,16 @@ class SmartLockerApp:
             logger.info("Smart Locker stopped.")
 
     def _main_loop(self) -> None:
+        """Poll for NFC events and dispatch to appropriate handlers.
+
+        Blocks until ``self._running`` is set to False (via SIGINT).
+        On each iteration, waits up to 1 second for an event from the NFC
+        reader queue. If no event arrives, the session manager is ticked
+        so expired sessions are cleaned up.
+
+        Returns:
+            None.
+        """
         while self._running:
             event = self._reader.wait_for_event(timeout=1.0)
             if event is None:
@@ -103,6 +127,17 @@ class SmartLockerApp:
                 self._handle_card_event(event)
 
     def _handle_reader_event(self, event: ReaderEvent) -> None:
+        """Handle NFC reader connect/disconnect events.
+
+        On disconnect, warns the user and ends any active session for safety.
+        On reconnect, prints a confirmation message.
+
+        Args:
+            event: The reader connect/disconnect event.
+
+        Returns:
+            None.
+        """
         if event.event_type == ReaderEventType.DISCONNECTED:
             print("\nWARNING: NFC reader disconnected!")
             if self._session_mgr.has_active_session:
@@ -111,12 +146,33 @@ class SmartLockerApp:
             print("NFC reader reconnected.")
 
     def _handle_card_event(self, event: CardEvent) -> None:
+        """Route card insert/remove events to the appropriate handler.
+
+        Args:
+            event: The card inserted/removed event from the NFC reader.
+
+        Returns:
+            None.
+        """
         if event.event_type == CardEventType.INSERTED:
             self._on_card_inserted(event)
         elif event.event_type == CardEventType.REMOVED:
             self._on_card_removed(event)
 
     def _on_card_inserted(self, event: CardEvent) -> None:
+        """Authenticate user on card insert, or end session on second tap.
+
+        If no session is active, the card UID is authenticated via HMAC lookup
+        and a new session is started. If a session is already active, a second
+        tap ends the session (logout). Displays borrowed and available devices
+        after successful authentication.
+
+        Args:
+            event: The card-inserted event containing the card UID.
+
+        Returns:
+            None.
+        """
         if event.uid is None:
             print("Could not read card. Please try tapping again.")
             return
@@ -158,6 +214,14 @@ class SmartLockerApp:
             print("\nTap your card again or wait to time out to end session.")
 
     def _on_card_removed(self, event: CardEvent) -> None:
+        """Handle card removal (no-op — session persists on touch display).
+
+        Args:
+            event: The card-removed event (unused — removal is intentionally ignored).
+
+        Returns:
+            None.
+        """
         # Card removal does not end the session — the user interacts with
         # the touch display after tapping. Session ends via timeout or a
         # second tap (handled in _on_card_inserted).
@@ -165,13 +229,28 @@ class SmartLockerApp:
 
 
 def main() -> None:
-    """Legacy CLI mode — blocking NFC loop with console output."""
+    """Legacy CLI mode — blocking NFC loop with console output.
+
+    Creates a ``SmartLockerApp`` instance and starts the blocking event loop.
+    Used when the application is started with the ``--cli`` flag.
+
+    Returns:
+        None.
+    """
     app = SmartLockerApp()
     app.run()
 
 
 def run_server() -> None:
-    """Web server mode — FastAPI + uvicorn with NFC bridge."""
+    """Web server mode — FastAPI + uvicorn with NFC bridge.
+
+    Initializes logging, the database, Excel sync, and the optional daily
+    source import scheduler, then creates and runs the FastAPI application
+    with uvicorn. This is the default mode when running the application.
+
+    Returns:
+        None.
+    """
     import uvicorn
 
     from config.settings import API_HOST, API_PORT

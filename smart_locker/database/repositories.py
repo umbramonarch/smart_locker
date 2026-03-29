@@ -1,4 +1,12 @@
-"""Data access layer — repository pattern for database CRUD operations."""
+"""
+File: repositories.py
+Description: Data access layer using the repository pattern. Provides CRUD
+             operations for User, Device, and TransactionLog models with
+             SQLAlchemy query construction and flush-based persistence.
+Project: smart_locker/database
+Notes: All write operations call session.flush() to assign IDs immediately
+       but leave final commit/rollback to the caller or context manager.
+"""
 
 import logging
 from datetime import date, datetime, timezone
@@ -18,7 +26,11 @@ logger = logging.getLogger(__name__)
 
 
 class UserRepository:
-    """CRUD operations for users."""
+    """Data access layer for User entities.
+
+    Provides indexed HMAC-based card lookup, primary key lookup, user
+    creation with flush-based ID assignment, and listing.
+    """
 
     @staticmethod
     def find_by_uid_hmac(session: Session, uid_hmac: str) -> User | None:
@@ -28,6 +40,15 @@ class UserRepository:
 
     @staticmethod
     def find_by_id(session: Session, user_id: int) -> User | None:
+        """Look up a user by primary key.
+
+        Args:
+            session: Active database session.
+            user_id: User's primary key ID.
+
+        Returns:
+            User object or None if not found.
+        """
         return session.get(User, user_id)
 
     @staticmethod
@@ -38,6 +59,18 @@ class UserRepository:
         encrypted_card_uid: str,
         role: str = "user",
     ) -> User:
+        """Create and persist a new user.
+
+        Args:
+            session: Active database session.
+            display_name: User's display name.
+            uid_hmac: HMAC-SHA256 digest of the card UID.
+            encrypted_card_uid: AES-256-GCM encrypted card UID.
+            role: User role — "user" or "admin".
+
+        Returns:
+            Created User object with assigned ID.
+        """
         from smart_locker.database.models import UserRole
 
         user = User(
@@ -53,24 +86,63 @@ class UserRepository:
 
     @staticmethod
     def list_all(session: Session) -> list[User]:
+        """Return all users ordered by display name.
+
+        Args:
+            session: Active database session.
+
+        Returns:
+            List of all User objects.
+        """
         stmt = select(User).order_by(User.display_name)
         return list(session.execute(stmt).scalars().all())
 
 
 class DeviceRepository:
-    """CRUD operations for devices."""
+    """Data access layer for Device entities.
+
+    Provides lookup by ID and PM number, availability and borrower queries,
+    borrow/return state transitions, metadata updates from source imports,
+    and device creation with full field support.
+    """
 
     @staticmethod
     def find_by_id(session: Session, device_id: int) -> Device | None:
+        """Look up a device by primary key.
+
+        Args:
+            session: Active database session.
+            device_id: Device's primary key ID.
+
+        Returns:
+            Device object or None if not found.
+        """
         return session.get(Device, device_id)
 
     @staticmethod
     def get_available_devices(session: Session) -> list[Device]:
+        """Return all devices with AVAILABLE status.
+
+        Args:
+            session: Active database session.
+
+        Returns:
+            List of available Device objects.
+        """
         stmt = select(Device).where(Device.status == DeviceStatus.AVAILABLE)
         return list(session.execute(stmt).scalars().all())
 
     @staticmethod
     def get_borrowed_by_user(session: Session, user_id: int) -> list[Device]:
+        """Return all devices currently borrowed by a specific user.
+
+        Args:
+            session: Active database session.
+            user_id: ID of the borrower.
+
+        Returns:
+            List of Device objects borrowed by the user.
+        """
         stmt = select(Device).where(
             Device.status == DeviceStatus.BORROWED,
             Device.current_borrower_id == user_id,
@@ -79,18 +151,40 @@ class DeviceRepository:
 
     @staticmethod
     def borrow(session: Session, device: Device, user_id: int) -> None:
+        """Mark a device as borrowed by the given user.
+
+        Args:
+            session: Active database session.
+            device: Device object to borrow.
+            user_id: ID of the borrowing user.
+        """
         device.status = DeviceStatus.BORROWED
         device.current_borrower_id = user_id
         session.flush()
 
     @staticmethod
     def return_device(session: Session, device: Device) -> None:
+        """Mark a device as available and clear the borrower.
+
+        Args:
+            session: Active database session.
+            device: Device object to return.
+        """
         device.status = DeviceStatus.AVAILABLE
         device.current_borrower_id = None
         session.flush()
 
     @staticmethod
     def count_borrowed_by_user(session: Session, user_id: int) -> int:
+        """Count how many devices a user currently has borrowed.
+
+        Args:
+            session: Active database session.
+            user_id: ID of the user.
+
+        Returns:
+            Number of devices currently borrowed by the user.
+        """
         stmt = select(func.count()).select_from(Device).where(
             Device.status == DeviceStatus.BORROWED,
             Device.current_borrower_id == user_id,
@@ -112,6 +206,25 @@ class DeviceRepository:
         barcode: str | None = None,
         calibration_due: date | None = None,
     ) -> Device:
+        """Create and persist a new device.
+
+        Args:
+            session: Active database session.
+            name: Display name for the device.
+            device_type: Category (e.g., "Oscilloscope", "Multimeter").
+            pm_number: Unique PM/equipment number (business key).
+            serial_number: Manufacturer serial number (optional, unique).
+            locker_slot: Physical locker slot number (optional).
+            description: Short description of the device (optional).
+            image_path: Path to device photo relative to frontend/images/ (optional).
+            manufacturer: Device manufacturer name (optional).
+            model: Model/type designation (optional).
+            barcode: Barcode value for future scanner integration (optional).
+            calibration_due: Next calibration date (optional).
+
+        Returns:
+            Created Device object with assigned ID.
+        """
         device = Device(
             name=name,
             device_type=device_type,
@@ -132,7 +245,15 @@ class DeviceRepository:
 
     @staticmethod
     def find_by_pm(session: Session, pm_number: str) -> Device | None:
-        """Look up a device by its PM number."""
+        """Look up a device by its PM number (unique business key).
+
+        Args:
+            session: Active database session.
+            pm_number: Company equipment/PM number string.
+
+        Returns:
+            Device object or None if not found.
+        """
         stmt = select(Device).where(Device.pm_number == pm_number)
         return session.execute(stmt).scalar_one_or_none()
 
@@ -140,9 +261,19 @@ class DeviceRepository:
     def update_metadata(session: Session, device: Device, **kwargs) -> bool:
         """Update source-managed metadata fields on a device.
 
-        Only updates fields that differ from the current value.
-        Returns True if any field was changed.
+        Only updates fields that differ from the current value. Restricted
+        to the ALLOWED set — status, borrower, slot, image, and description
+        are never overwritten by source imports.
+
+        Args:
+            session: Active database session.
+            device: Device object to update.
+            **kwargs: Field name/value pairs to update.
+
+        Returns:
+            True if any field was changed, False if all values matched.
         """
+        # Fields that the source import is allowed to modify
         ALLOWED = {
             "name", "device_type", "serial_number", "manufacturer",
             "model", "barcode", "calibration_due",
@@ -161,12 +292,24 @@ class DeviceRepository:
 
     @staticmethod
     def list_all(session: Session) -> list[Device]:
+        """Return all devices ordered by name.
+
+        Args:
+            session: Active database session.
+
+        Returns:
+            List of all Device objects.
+        """
         stmt = select(Device).order_by(Device.name)
         return list(session.execute(stmt).scalars().all())
 
 
 class TransactionRepository:
-    """CRUD operations for transaction logs."""
+    """Data access layer for TransactionLog audit records.
+
+    Provides borrow/return logging with optional admin-on-behalf tracking,
+    and history queries by user or device with descending timestamp order.
+    """
 
     @staticmethod
     def log_borrow(
@@ -175,6 +318,17 @@ class TransactionRepository:
         device_id: int,
         notes: str | None = None,
     ) -> TransactionLog:
+        """Record a borrow transaction.
+
+        Args:
+            session: Active database session.
+            user_id: ID of the borrowing user.
+            device_id: ID of the borrowed device.
+            notes: Optional notes for the transaction.
+
+        Returns:
+            Created TransactionLog entry.
+        """
         txn = TransactionLog(
             user_id=user_id,
             device_id=device_id,
@@ -194,6 +348,19 @@ class TransactionRepository:
         notes: str | None = None,
         performed_by_id: int | None = None,
     ) -> TransactionLog:
+        """Record a return transaction, optionally with admin performer.
+
+        Args:
+            session: Active database session.
+            user_id: ID of the original borrower.
+            device_id: ID of the returned device.
+            notes: Optional notes for the transaction.
+            performed_by_id: ID of the admin who performed the return on
+                behalf of the borrower (None if self-return).
+
+        Returns:
+            Created TransactionLog entry.
+        """
         txn = TransactionLog(
             user_id=user_id,
             device_id=device_id,
@@ -215,6 +382,15 @@ class TransactionRepository:
     def get_user_history(
         session: Session, user_id: int
     ) -> list[TransactionLog]:
+        """Return all transactions for a user, most recent first.
+
+        Args:
+            session: Active database session.
+            user_id: ID of the user.
+
+        Returns:
+            List of TransactionLog entries ordered by timestamp descending.
+        """
         stmt = (
             select(TransactionLog)
             .where(TransactionLog.user_id == user_id)
@@ -226,6 +402,15 @@ class TransactionRepository:
     def get_device_history(
         session: Session, device_id: int
     ) -> list[TransactionLog]:
+        """Return all transactions for a device, most recent first.
+
+        Args:
+            session: Active database session.
+            device_id: ID of the device.
+
+        Returns:
+            List of TransactionLog entries ordered by timestamp descending.
+        """
         stmt = (
             select(TransactionLog)
             .where(TransactionLog.device_id == device_id)

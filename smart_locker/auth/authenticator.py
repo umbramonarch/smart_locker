@@ -1,11 +1,11 @@
-"""Card UID to user lookup via HMAC.
-
-Flow:
-1. Receive raw UID hex string from NFC reader
-2. Compute HMAC-SHA256(uid, hmac_key) → deterministic digest
-3. Query UserRepository.find_by_uid_hmac(digest) — indexed O(1) lookup
-4. Check user.is_active
-5. Return User or None
+"""
+File: authenticator.py
+Description: Card UID to user lookup via HMAC-SHA256. Receives a raw UID hex
+             string from the NFC reader, computes a deterministic HMAC digest,
+             performs an indexed O(1) database lookup, and checks user status.
+Project: smart_locker/auth
+Notes: The HMAC key is injected at construction time from key_manager. The raw
+       card UID is never logged or stored in plaintext.
 """
 
 import logging
@@ -20,7 +20,13 @@ logger = logging.getLogger(__name__)
 
 
 class Authenticator:
-    """Authenticates users by their NFC card UID."""
+    """Authenticates kiosk users by their NFC card UID.
+
+    Computes a deterministic HMAC-SHA256 digest of the raw UID hex string
+    and performs an indexed O(1) database lookup on the ``users.uid_hmac``
+    column. No decryption is needed during authentication — only the HMAC
+    key is required.
+    """
 
     def __init__(self, hmac_key: bytes) -> None:
         self._hmac_key = hmac_key

@@ -1,4 +1,12 @@
-"""FastAPI application factory and lifespan management."""
+"""
+File: server.py
+Description: FastAPI application factory and lifespan management. Builds the
+             FastAPI app, mounts API routes and static frontend files, and
+             manages NFC reader startup/shutdown via the async lifespan context.
+Project: smart_locker/api
+Notes: The frontend is served from smart_locker/frontend/ as static files with
+       index.html at the root. API routes take priority over static file paths.
+"""
 
 import logging
 from contextlib import asynccontextmanager
@@ -13,12 +21,24 @@ from smart_locker.api.routes import router
 
 logger = logging.getLogger(__name__)
 
+# Absolute path to the static frontend directory (index.html, style.css, app.js)
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Start NFC reader + bridge on startup, stop on shutdown."""
+    """Manage application lifecycle — start NFC reader on startup, stop on shutdown.
+
+    Creates the shared ``AppContext`` singleton, starts the NFC bridge loop,
+    and yields control to uvicorn. On shutdown, stops the NFC reader and
+    the APScheduler source-sync scheduler.
+
+    Args:
+        app: The FastAPI application instance (provided by the framework).
+
+    Yields:
+        None. Control is held by uvicorn between startup and shutdown.
+    """
     ctx.context = AppContext()
     await ctx.context.start()
     logger.info("Smart Locker API started.")
@@ -30,7 +50,15 @@ async def lifespan(app: FastAPI):
 
 
 def create_app() -> FastAPI:
-    """Build the FastAPI application."""
+    """Build and configure the FastAPI application.
+
+    Registers the API router (``/api/*``) and mounts the static frontend
+    directory at ``/`` with ``html=True`` so that ``index.html`` is served
+    at the root path.
+
+    Returns:
+        FastAPI: The configured application instance ready for uvicorn.
+    """
     app = FastAPI(title="Smart Locker", lifespan=lifespan)
 
     # API routes first (so /api/* takes priority over static files)

@@ -1,7 +1,11 @@
-"""HMAC-SHA256 for deterministic card UID fingerprinting.
-
-Used as an indexed DB lookup column. Unlike AES-GCM (random nonce per encrypt),
-HMAC is deterministic — same input always produces the same digest.
+"""
+File: hashing.py
+Description: HMAC-SHA256 for deterministic card UID fingerprinting. Produces a
+             stable digest used as an indexed database lookup column, unlike
+             AES-GCM which is non-deterministic due to random nonces.
+Project: smart_locker/security
+Notes: The UID is uppercased and stripped before hashing to ensure consistent
+       digests regardless of input formatting.
 """
 
 import hmac

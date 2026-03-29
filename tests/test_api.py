@@ -1,4 +1,11 @@
-"""Tests for the REST API layer."""
+"""
+File: test_api.py
+Description: Tests for the REST API layer — session management, device listing,
+             borrow/return endpoints, user registration, admin source sync, and
+             SSE event stream. Uses FastAPI's TestClient with mocked NFC context.
+Project: smart_locker/tests
+Notes: Run with: python -m pytest tests/test_api.py -v
+"""
 
 import asyncio
 from unittest.mock import MagicMock
@@ -155,8 +162,10 @@ def client(_db_setup, mock_context, db_session):
 # ---------------------------------------------------------------------------
 
 class TestSessionEndpoints:
+    """Tests for session management API — get status, end session, touch."""
 
     def test_get_session_no_active(self, client):
+        """Verify GET /api/session returns active=False when no session exists."""
         resp = client.get("/api/session")
         assert resp.status_code == 200
         data = resp.json()
@@ -164,6 +173,7 @@ class TestSessionEndpoints:
         assert data["user"] is None
 
     def test_get_session_active(self, client, mock_context, test_user):
+        """Verify GET /api/session returns user data when a session is active."""
         mock_context.session_mgr.start_session(test_user)
         resp = client.get("/api/session")
         assert resp.status_code == 200
@@ -174,6 +184,7 @@ class TestSessionEndpoints:
         assert data["user"]["role"] == "user"
 
     def test_end_session(self, client, mock_context, test_user):
+        """Verify POST /api/session/end terminates the active session."""
         mock_context.session_mgr.start_session(test_user)
         resp = client.post("/api/session/end")
         assert resp.status_code == 200
@@ -181,16 +192,19 @@ class TestSessionEndpoints:
         assert not mock_context.session_mgr.has_active_session
 
     def test_end_session_no_active(self, client):
+        """Verify POST /api/session/end returns 401 when no session exists."""
         resp = client.post("/api/session/end")
         assert resp.status_code == 401
 
     def test_touch_session(self, client, mock_context, test_user):
+        """Verify POST /api/session/touch succeeds when a session is active."""
         mock_context.session_mgr.start_session(test_user)
         resp = client.post("/api/session/touch")
         assert resp.status_code == 200
         assert resp.json()["success"] is True
 
     def test_touch_session_no_active(self, client):
+        """Verify POST /api/session/touch returns 401 when no session exists."""
         resp = client.post("/api/session/touch")
         assert resp.status_code == 401
 
@@ -200,12 +214,15 @@ class TestSessionEndpoints:
 # ---------------------------------------------------------------------------
 
 class TestDeviceEndpoints:
+    """Tests for device listing API — auth required, borrower name resolution."""
 
     def test_list_devices_no_session(self, client):
+        """Verify GET /api/devices returns 401 when no session exists."""
         resp = client.get("/api/devices")
         assert resp.status_code == 401
 
     def test_list_devices(self, client, mock_context, test_user, test_devices):
+        """Verify GET /api/devices returns all devices with correct fields and shape."""
         mock_context.session_mgr.start_session(test_user)
         resp = client.get("/api/devices")
         assert resp.status_code == 200
@@ -263,8 +280,10 @@ class TestDeviceEndpoints:
 # ---------------------------------------------------------------------------
 
 class TestBorrowReturn:
+    """Tests for borrow/return API — success, auth, ownership, and admin override."""
 
     def test_borrow_success(self, client, mock_context, test_user, test_devices):
+        """Verify POST /api/devices/{id}/borrow succeeds for an available device."""
         mock_context.session_mgr.start_session(test_user)
         resp = client.post(f"/api/devices/{test_devices[0].id}/borrow")
         assert resp.status_code == 200
@@ -273,6 +292,7 @@ class TestBorrowReturn:
         assert "Camera" in data["message"]
 
     def test_borrow_no_session(self, client, test_devices):
+        """Verify borrow returns 401 when no session exists."""
         resp = client.post(f"/api/devices/{test_devices[0].id}/borrow")
         assert resp.status_code == 401
 
@@ -300,6 +320,7 @@ class TestBorrowReturn:
     def test_return_success(
         self, client, mock_context, test_user, test_devices, db_session
     ):
+        """Verify POST /api/devices/{id}/return succeeds after borrowing."""
         mock_context.session_mgr.start_session(test_user)
         user_session = mock_context.session_mgr.current_session
         LockerService.borrow_device(db_session, user_session, test_devices[0].id)
@@ -311,6 +332,7 @@ class TestBorrowReturn:
         assert "Camera" in data["message"]
 
     def test_return_no_session(self, client, test_devices):
+        """Verify return returns 401 when no session exists."""
         resp = client.post(f"/api/devices/{test_devices[0].id}/return")
         assert resp.status_code == 401
 

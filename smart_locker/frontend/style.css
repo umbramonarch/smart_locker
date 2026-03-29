@@ -1,3 +1,15 @@
+/**
+ * File: style.css
+ * Description: Dark-theme kiosk stylesheet with landonorris.com-inspired animations.
+ *              Circle-reveal page transitions, diagonal wipe overlays, ellipse-reveal
+ *              images, character-split text, slot-machine number animations, magnetic
+ *              hover, image parallax, and cursor glow effects.
+ * Project: smart_locker/frontend
+ * Notes: Uses Space Grotesk (display) and Inter (body) from Google Fonts.
+ *        Custom properties in :root control the full color theme. Designed for
+ *        a fullscreen kiosk touch display at 1920x1080.
+ */
+
 /* ============================================================
    CUSTOM PROPERTIES
    Change colors here to retheme the entire UI.

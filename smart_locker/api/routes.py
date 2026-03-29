@@ -1,4 +1,13 @@
-"""REST API endpoints and SSE event stream for the Smart Locker kiosk."""
+"""
+File: routes.py
+Description: REST API endpoints and SSE event stream for the Smart Locker kiosk.
+             Provides session management, device listing, borrow/return operations,
+             user self-registration, and admin-only source sync endpoints.
+Project: smart_locker/api
+Notes: All device/session endpoints require an active kiosk session enforced by
+       the require_session dependency. SSE stream at /api/events pushes NFC and
+       session events to the browser.
+"""
 
 import asyncio
 import json
@@ -25,7 +34,15 @@ router = APIRouter()
 # --- Dependencies -----------------------------------------------------------
 
 def get_db() -> Session:
-    """Yield a database session for the request, with auto-commit/rollback."""
+    """Yield a database session for the request, with auto-commit/rollback.
+
+    FastAPI dependency that provides a scoped SQLAlchemy session.
+    Commits on success, rolls back on exception, and removes the
+    scoped session on completion.
+
+    Yields:
+        Session: An active SQLAlchemy database session.
+    """
     factory = get_session_factory()
     session = factory()
     try:
@@ -39,7 +56,18 @@ def get_db() -> Session:
 
 
 def require_session() -> UserSession:
-    """Require an active kiosk session. Returns the UserSession or 401."""
+    """Require an active kiosk session, refreshing the inactivity timer.
+
+    FastAPI dependency that checks for an active session and returns it.
+    Automatically calls ``touch()`` to reset the inactivity timer on
+    every request that uses this dependency.
+
+    Returns:
+        UserSession: The currently active kiosk session.
+
+    Raises:
+        HTTPException: 401 if no session is active.
+    """
     if ctx_module.context is None or not ctx_module.context.session_mgr.has_active_session:
         raise HTTPException(status_code=401, detail="No active session.")
     session = ctx_module.context.session_mgr.current_session
@@ -53,9 +81,18 @@ def require_session() -> UserSession:
 
 @router.get("/api/events")
 async def sse_events():
-    """Server-Sent Events stream for NFC and session events."""
+    """Server-Sent Events stream for NFC and session events.
+
+    Returns an SSE ``StreamingResponse`` that forwards events from the
+    application's async queue to the browser. Sends a keepalive comment
+    every 15 seconds to prevent proxy/browser timeout.
+
+    Returns:
+        StreamingResponse: An SSE text/event-stream response.
+    """
 
     async def event_generator():
+        """Yield SSE-formatted events from the application queue."""
         while True:
             try:
                 data = await asyncio.wait_for(ctx_module.context.sse_queue.get(), timeout=15.0)
@@ -72,7 +109,12 @@ async def sse_events():
 
 @router.get("/api/session")
 def get_session_status():
-    """Check current session state (used on page load to restore state)."""
+    """Check current session state (used on page load to restore state).
+
+    Returns:
+        dict: ``{"active": bool, "user": dict|None}`` with user id, name,
+              and role if a session is active.
+    """
     if ctx_module.context is None or not ctx_module.context.session_mgr.has_active_session:
         return {"active": False, "user": None}
     session = ctx_module.context.session_mgr.current_session
@@ -91,7 +133,17 @@ def get_session_status():
 
 @router.post("/api/session/end")
 def end_session(user_session: UserSession = Depends(require_session)):
-    """End the current session (End Session button)."""
+    """End the current session (End Session button).
+
+    Terminates the active session and pushes a ``session_ended`` SSE event
+    so that all connected clients are notified.
+
+    Args:
+        user_session: The active session (injected by ``require_session``).
+
+    Returns:
+        dict: ``{"success": True}``.
+    """
     ctx_module.context.session_mgr.end_session()
     # Push SSE event so other tabs / SSE listeners know
     try:
@@ -105,7 +157,17 @@ def end_session(user_session: UserSession = Depends(require_session)):
 
 @router.post("/api/session/touch")
 def touch_session(user_session: UserSession = Depends(require_session)):
-    """Reset the inactivity timer (called on any UI interaction)."""
+    """Reset the inactivity timer (called on any UI interaction).
+
+    The ``require_session`` dependency already calls ``touch()`` — this
+    endpoint exists so the frontend can explicitly ping the session.
+
+    Args:
+        user_session: The active session (injected by ``require_session``).
+
+    Returns:
+        dict: ``{"success": True}``.
+    """
     # touch() already called by require_session dependency
     return {"success": True}
 
@@ -117,7 +179,18 @@ def list_devices(
     db: Session = Depends(get_db),
     user_session: UserSession = Depends(require_session),
 ):
-    """List all devices with borrower info for the kiosk UI."""
+    """List all devices with borrower info for the kiosk UI.
+
+    Returns a flat list of device dicts with status and borrower name.
+    The current user's own borrowed devices show ``"You"`` as the borrower.
+
+    Args:
+        db: Database session (injected by ``get_db``).
+        user_session: The active session (injected by ``require_session``).
+
+    Returns:
+        list[dict]: One dict per device with id, name, status, borrower_name, etc.
+    """
     devices = DeviceRepository.list_all(db)
     current_user_id = user_session.user.id
     result = []
@@ -156,7 +229,19 @@ def borrow_device(
     db: Session = Depends(get_db),
     user_session: UserSession = Depends(require_session),
 ):
-    """Borrow a device."""
+    """Borrow a device by ID.
+
+    Delegates to ``LockerService.borrow_device`` which enforces the per-user
+    borrow limit and device availability constraints.
+
+    Args:
+        device_id: Primary key of the device to borrow.
+        db: Database session (injected by ``get_db``).
+        user_session: The active session (injected by ``require_session``).
+
+    Returns:
+        dict: ``{"success": bool, "message": str}``.
+    """
     device = DeviceRepository.find_by_id(db, device_id)
     device_name = device.name if device else f"Device {device_id}"
 
@@ -173,7 +258,19 @@ def return_device(
     db: Session = Depends(get_db),
     user_session: UserSession = Depends(require_session),
 ):
-    """Return a device."""
+    """Return a device by ID.
+
+    Delegates to ``LockerService.return_device`` which checks borrower
+    ownership (admins may return on behalf of other users).
+
+    Args:
+        device_id: Primary key of the device to return.
+        db: Database session (injected by ``get_db``).
+        user_session: The active session (injected by ``require_session``).
+
+    Returns:
+        dict: ``{"success": bool, "message": str}``.
+    """
     device = DeviceRepository.find_by_id(db, device_id)
     device_name = device.name if device else f"Device {device_id}"
 
@@ -187,12 +284,30 @@ def return_device(
 # --- Registration Endpoints -------------------------------------------------
 
 class RegisterRequest(BaseModel):
+    """Request body for the self-registration endpoint.
+
+    Validates that the display name is between 1 and 100 characters.
+    """
+
     name: str = Field(..., min_length=1, max_length=100)
 
 
 @router.post("/api/register")
 def start_registration(body: RegisterRequest):
-    """Begin self-registration: store name, await NFC card tap."""
+    """Begin self-registration: store name, await NFC card tap.
+
+    Creates a ``PendingRegistration`` that the NFC bridge loop will
+    detect on the next card tap. Rejects requests if a session is active.
+
+    Args:
+        body: Request body with the user's display name.
+
+    Returns:
+        dict: ``{"success": True, "message": str}``.
+
+    Raises:
+        HTTPException: 503 if system not ready, 409 if session active.
+    """
     if ctx_module.context is None:
         raise HTTPException(status_code=503, detail="System not ready.")
 
@@ -208,7 +323,18 @@ def start_registration(body: RegisterRequest):
 
 @router.post("/api/register/cancel")
 def cancel_registration():
-    """Cancel a pending self-registration."""
+    """Cancel a pending self-registration.
+
+    Clears the pending registration state so the next card tap will not
+    trigger enrollment.
+
+    Returns:
+        dict: ``{"success": True, "cancelled": bool}`` — ``cancelled`` is
+              True if a registration was actually pending.
+
+    Raises:
+        HTTPException: 503 if system not ready.
+    """
     if ctx_module.context is None:
         raise HTTPException(status_code=503, detail="System not ready.")
 
@@ -223,7 +349,21 @@ def cancel_registration():
 def trigger_source_sync(
     user_session: UserSession = Depends(require_session),
 ):
-    """Manually trigger source Excel import (admin only)."""
+    """Manually trigger source Excel import (admin only).
+
+    Reads the company device master list and inserts/updates devices in
+    the database. Only users with ADMIN role may invoke this.
+
+    Args:
+        user_session: The active session (injected by ``require_session``).
+
+    Returns:
+        dict: Import summary with ``imported``, ``updated``, ``unchanged``,
+              and ``errors`` counts.
+
+    Raises:
+        HTTPException: 403 if not admin, 400 if source path not configured.
+    """
     if user_session.user.role != UserRole.ADMIN:
         raise HTTPException(status_code=403, detail="Admin access required.")
 

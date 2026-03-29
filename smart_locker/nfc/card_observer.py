@@ -1,8 +1,13 @@
-"""Event-driven card insert/remove detection.
-
-Implements pyscard's CardObserver interface. When a card is inserted,
-reads the UID via a fast APDU command and posts a CardEvent to a queue.
-The main application thread consumes events from the queue.
+"""
+File: card_observer.py
+Description: Event-driven card insert/remove detection. Implements pyscard's
+             CardObserver interface to read the card UID via a fast APDU command
+             on insert and post CardEvent objects to a queue consumed by the
+             main application thread.
+Project: smart_locker/nfc
+Notes: UID read includes retry logic (3 attempts with 50ms delay) to handle
+       quick tap-and-go interactions. The reader buzzer is suppressed during
+       card reads and restored afterward.
 """
 
 import enum
@@ -22,16 +27,23 @@ logger = logging.getLogger(__name__)
 
 
 class CardEventType(enum.Enum):
+    """Type of physical card interaction detected by the NFC reader."""
+
     INSERTED = "inserted"
     REMOVED = "removed"
 
 
 @dataclass
 class CardEvent:
-    """Represents a card insert or remove event."""
+    """Represents a card insert or remove event detected by the NFC reader.
+
+    On insert, the observer attempts to read the card UID via APDU. If the
+    read succeeds, ``uid`` contains the hex string; if the card was removed
+    too fast, ``uid`` is None.
+    """
 
     event_type: CardEventType
-    uid: str | None = None  # Hex string, None if read failed
+    uid: str | None = None  # Hex UID string, or None if read failed
     reader_name: str = ""
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -56,6 +68,12 @@ class LockerCardObserver(CardObserver):
         self._last_uid: str | None = None
 
     def update(self, observable, actions) -> None:
+        """Handle card insert/remove notifications from pyscard's CardMonitor.
+
+        Args:
+            observable: The CardMonitor instance.
+            actions: Tuple of (added_cards, removed_cards) lists.
+        """
         added_cards, removed_cards = actions
 
         for card in added_cards:
@@ -127,6 +145,7 @@ class LockerCardObserver(CardObserver):
                 response, sw1, sw2 = connection.transmit(GET_UID)
                 apdu = APDUResponse.from_raw(response, sw1, sw2)
 
+                # Minimum 4 bytes for a valid UID (MIFARE Ultralight = 7, Classic = 4)
                 if apdu.success and len(apdu.data) >= 4:
                     if attempt > 0:
                         logger.debug("UID read successful on attempt %d", attempt + 1)

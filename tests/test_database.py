@@ -1,4 +1,11 @@
-"""Tests for the database module: models, repositories."""
+"""
+File: test_database.py
+Description: Tests for the database module — ORM models and repository CRUD
+             operations. Validates user creation, device creation with extended
+             schema, borrowing/returning state transitions, and transaction logging.
+Project: smart_locker/tests
+Notes: Run with: python -m pytest tests/test_database.py -v
+"""
 
 from datetime import date
 
@@ -15,6 +22,7 @@ from smart_locker.security.hashing import compute_uid_hmac
 
 
 class TestUserRepository:
+    """Tests for UserRepository CRUD — creation, HMAC lookup, and listing."""
     def test_create_and_find_by_id(self, db_session, enc_key, hmac_key):
         uid = "A1B2C3D4"
         user = UserRepository.create(
@@ -60,6 +68,7 @@ class TestUserRepository:
 
 
 class TestDeviceRepository:
+    """Tests for DeviceRepository CRUD — creation, borrow/return state, and extended fields."""
     def test_create_and_find(self, db_session):
         device = DeviceRepository.create(
             db_session,
@@ -154,6 +163,7 @@ class TestDeviceRepository:
 
 
 class TestTransactionRepository:
+    """Tests for TransactionRepository — borrow/return logging and history queries."""
     def test_log_borrow_and_return(self, db_session, enc_key, hmac_key):
         user = UserRepository.create(
             db_session,

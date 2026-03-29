@@ -1,7 +1,13 @@
-"""APDU command constants and response parsing for ACR1252U NFC reader.
-
-All commands use the PC/SC pseudo-APDU interface (CLA=0xFF).
-GET_UID works with all card types: MIFARE Classic, Ultralight, NTAG, DESFire, etc.
+"""
+File: apdu.py
+Description: APDU command constants and response parsing for the ACR1252U NFC
+             reader. Defines GET_UID, buzzer control, firmware query, and MIFARE
+             Classic read commands, all using the PC/SC pseudo-APDU interface
+             (CLA=0xFF).
+Project: smart_locker/nfc
+Notes: GET_UID works with all card types (MIFARE Classic, Ultralight, NTAG,
+       DESFire, etc.). MIFARE sector commands are defined but not yet wired
+       into the auth flow.
 """
 
 from dataclasses import dataclass
@@ -66,7 +72,12 @@ SW_FUNCTION_NOT_SUPPORTED = (0x6A, 0x81)
 
 @dataclass
 class APDUResponse:
-    """Parsed APDU response with data and status words."""
+    """Parsed response from an APDU command sent to the NFC reader.
+
+    Wraps the raw byte response and the two status word bytes (SW1, SW2)
+    returned by the card. Provides convenience properties to check success,
+    format the UID, and display the status code.
+    """
 
     data: bytes
     sw1: int
@@ -74,10 +85,21 @@ class APDUResponse:
 
     @classmethod
     def from_raw(cls, response: list[int], sw1: int, sw2: int) -> "APDUResponse":
+        """Construct an APDUResponse from pyscard's raw transmit output.
+
+        Args:
+            response: Data bytes returned by the card.
+            sw1: First status word byte.
+            sw2: Second status word byte.
+
+        Returns:
+            Parsed APDUResponse instance.
+        """
         return cls(data=bytes(response), sw1=sw1, sw2=sw2)
 
     @property
     def success(self) -> bool:
+        """Whether the command completed successfully (SW1=0x90, SW2=0x00)."""
         return self.sw1 == 0x90 and self.sw2 == 0x00
 
     @property
@@ -87,6 +109,7 @@ class APDUResponse:
 
     @property
     def status_hex(self) -> str:
+        """Format the status words as a 4-character hex string (e.g. '9000')."""
         return f"{self.sw1:02X}{self.sw2:02X}"
 
     def __repr__(self) -> str:
