@@ -56,9 +56,12 @@ class SmartLockerApp:
     def run(self) -> None:
         """Start the application main loop.
 
-        Initializes logging, the database, Excel sync, and the optional
-        daily source import scheduler, then starts the NFC reader and
-        enters a blocking event loop until Ctrl+C is pressed.
+        Initializes logging, the database, and Excel auto-sync listeners.
+        If a source Excel path is configured, runs an immediate import on
+        startup (so the database is current before the first user interaction),
+        starts a file watcher for live source changes, and schedules a daily
+        cron import as a safety net. Then starts the NFC reader and enters
+        a blocking event loop until Ctrl+C is pressed.
 
         Returns:
             None.
@@ -244,9 +247,12 @@ def main() -> None:
 def run_server() -> None:
     """Web server mode — FastAPI + uvicorn with NFC bridge.
 
-    Initializes logging, the database, Excel sync, and the optional daily
-    source import scheduler, then creates and runs the FastAPI application
-    with uvicorn. This is the default mode when running the application.
+    Initializes logging, the database, and Excel auto-sync listeners.
+    If a source Excel path is configured, runs an immediate import on
+    startup (so the database is current before the first request),
+    starts a file watcher for live source changes, and schedules a daily
+    cron import as a safety net. Then creates and runs the FastAPI
+    application with uvicorn. This is the default mode.
 
     Returns:
         None.

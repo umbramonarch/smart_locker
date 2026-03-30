@@ -12,6 +12,8 @@ Notes: Can be called programmatically (by the scheduler), via CLI
 """
 
 import logging
+import shutil
+import tempfile
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
@@ -235,21 +237,48 @@ def import_from_source_excel(
         return result
 
     logger.info("Reading source Excel: %s", path)
-    wb = load_workbook(path, read_only=True, data_only=True)
 
-    if sheet_name:
-        if sheet_name not in wb.sheetnames:
-            result.errors = 1
-            result.error_details.append(f"Sheet '{sheet_name}' not found. Available: {wb.sheetnames}")
-            wb.close()
-            return result
-        ws = wb[sheet_name]
-    else:
-        ws = wb.active
+    # Copy to a temp file before reading so the import succeeds even when
+    # the source file is open in Excel (Windows holds a lock on open files).
+    tmp_fd, tmp_path_str = tempfile.mkstemp(suffix=".xlsx")
+    tmp_path = Path(tmp_path_str)
+    try:
+        shutil.copy2(path, tmp_path)
+    except PermissionError:
+        logger.warning(
+            "Source Excel at %s is locked — cannot copy for reading.", path
+        )
+        result.errors = 1
+        result.error_details.append(f"Source file locked: {path}")
+        tmp_path.unlink(missing_ok=True)
+        return result
+    finally:
+        # Close the file descriptor opened by mkstemp; the file itself
+        # persists on disk for openpyxl to read.
+        import os
+        os.close(tmp_fd)
 
-    # Read all rows
-    rows = list(ws.iter_rows(values_only=True))
-    wb.close()
+    try:
+        wb = load_workbook(tmp_path, read_only=True, data_only=True)
+
+        if sheet_name:
+            if sheet_name not in wb.sheetnames:
+                result.errors = 1
+                result.error_details.append(
+                    f"Sheet '{sheet_name}' not found. Available: {wb.sheetnames}"
+                )
+                wb.close()
+                return result
+            ws = wb[sheet_name]
+        else:
+            ws = wb.active
+
+        # Read all rows
+        rows = list(ws.iter_rows(values_only=True))
+        wb.close()
+    finally:
+        # Always clean up the temporary copy
+        tmp_path.unlink(missing_ok=True)
 
     if len(rows) < 2:
         logger.warning("Source Excel has no data rows.")
