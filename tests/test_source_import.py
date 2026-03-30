@@ -13,7 +13,8 @@ from pathlib import Path
 import pytest
 from openpyxl import Workbook
 
-from smart_locker.database.repositories import DeviceRepository
+from smart_locker.database.models import DeviceStatus
+from smart_locker.database.repositories import DeviceRepository, UserRepository
 from smart_locker.sync.source_import import (
     ImportResult,
     find_column,
@@ -207,5 +208,147 @@ class TestImportFromSourceExcel:
             assert device.serial_number == "SN-12345"
             assert device.barcode == "BC-001"
             assert device.device_type == "Oscilloscope"
+        finally:
+            path.unlink(missing_ok=True)
+
+
+class TestLocationColumn:
+    """Tests for the 'Aktueller Einsatzort' column — device location and borrower detection."""
+
+    def test_schrank_location_sets_available(self, db_session):
+        """Device with 'Schrank' in location column is imported as AVAILABLE."""
+        path = _create_test_excel([
+            ["Equipment", "Hersteller", "Typbezeichnung",
+             "Platz Messmittelschrank", "Aktueller Einsatzort"],
+            ["PM-001", "Fluke", "87V", "Schrank 1", "Messmittelschrank"],
+        ])
+        try:
+            from smart_locker.database.engine import get_engine
+            result = import_from_source_excel(get_engine(), path)
+            assert result.imported == 1
+
+            device = DeviceRepository.find_by_pm(db_session, "PM-001")
+            assert device.status == DeviceStatus.AVAILABLE
+            assert device.current_borrower_id is None
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_name_in_location_sets_borrowed(self, db_session):
+        """Device with a person's name in location column is imported as BORROWED."""
+        path = _create_test_excel([
+            ["Equipment", "Hersteller", "Typbezeichnung",
+             "Platz Messmittelschrank", "Aktueller Einsatzort"],
+            ["PM-001", "Fluke", "87V", "Schrank 1", "Max Müller"],
+        ])
+        try:
+            from smart_locker.database.engine import get_engine
+            result = import_from_source_excel(get_engine(), path)
+            assert result.imported == 1
+
+            device = DeviceRepository.find_by_pm(db_session, "PM-001")
+            assert device.status == DeviceStatus.BORROWED
+            # Borrower not in our system — no linked user
+            assert device.current_borrower_id is None
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_known_borrower_linked(self, db_session):
+        """When the borrower name matches a registered user, the device is linked."""
+        UserRepository.create(
+            db_session,
+            encrypted_card_uid="dummy_enc_aabb",
+            uid_hmac="aabb" * 16,
+            display_name="Max Müller",
+            role="user",
+        )
+        db_session.commit()
+
+        path = _create_test_excel([
+            ["Equipment", "Hersteller", "Typbezeichnung",
+             "Platz Messmittelschrank", "Aktueller Einsatzort"],
+            ["PM-001", "Fluke", "87V", "Schrank 1", "Max Müller"],
+        ])
+        try:
+            from smart_locker.database.engine import get_engine
+            result = import_from_source_excel(get_engine(), path)
+            assert result.imported == 1
+
+            device = DeviceRepository.find_by_pm(db_session, "PM-001")
+            assert device.status == DeviceStatus.BORROWED
+            assert device.current_borrower_id is not None
+
+            user = UserRepository.find_by_display_name(db_session, "Max Müller")
+            assert device.current_borrower_id == user.id
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_no_location_column_defaults_available(self, db_session):
+        """Without a location column, devices default to AVAILABLE."""
+        path = _create_test_excel([
+            ["Equipment", "Hersteller", "Typbezeichnung", "Platz Messmittelschrank"],
+            ["PM-001", "Fluke", "87V", "Schrank 1"],
+        ])
+        try:
+            from smart_locker.database.engine import get_engine
+            result = import_from_source_excel(get_engine(), path)
+            assert result.imported == 1
+
+            device = DeviceRepository.find_by_pm(db_session, "PM-001")
+            assert device.status == DeviceStatus.AVAILABLE
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_update_existing_device_status(self, db_session):
+        """Re-importing with a changed location updates an existing device's status."""
+        # Create an AVAILABLE device
+        DeviceRepository.create(
+            db_session,
+            name="PM-001 Fluke 87V",
+            device_type="general",
+            pm_number="PM-001",
+            manufacturer="Fluke",
+            model="87V",
+        )
+        db_session.commit()
+
+        # Import with a person's name in location → should become BORROWED
+        path = _create_test_excel([
+            ["Equipment", "Hersteller", "Typbezeichnung",
+             "Platz Messmittelschrank", "Aktueller Einsatzort"],
+            ["PM-001", "Fluke", "87V", "Schrank 1", "Anna Schmidt"],
+        ])
+        try:
+            from smart_locker.database.engine import get_engine
+            result = import_from_source_excel(get_engine(), path)
+            assert result.updated == 1
+
+            device = DeviceRepository.find_by_pm(db_session, "PM-001")
+            assert device.status == DeviceStatus.BORROWED
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_borrower_lookup_case_insensitive(self, db_session):
+        """Borrower name matching is case-insensitive."""
+        UserRepository.create(
+            db_session,
+            encrypted_card_uid="dummy_enc_ccdd",
+            uid_hmac="ccdd" * 16,
+            display_name="Anna Schmidt",
+            role="user",
+        )
+        db_session.commit()
+
+        path = _create_test_excel([
+            ["Equipment", "Hersteller", "Typbezeichnung",
+             "Platz Messmittelschrank", "Aktueller Einsatzort"],
+            ["PM-001", "Fluke", "87V", "Schrank 1", "anna schmidt"],
+        ])
+        try:
+            from smart_locker.database.engine import get_engine
+            result = import_from_source_excel(get_engine(), path)
+            assert result.imported == 1
+
+            device = DeviceRepository.find_by_pm(db_session, "PM-001")
+            assert device.current_borrower_id is not None
         finally:
             path.unlink(missing_ok=True)
