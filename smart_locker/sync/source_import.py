@@ -37,8 +37,8 @@ NAME_CANDIDATES = [
 ]
 SERIAL_CANDIDATES = [
     "serial", "serial number", "s/n", "sn", "serial no", "serial_number",
-    "serialnumber", "hersteller-serialnummer", "herstellerseriennummer",
-    "seriennummer",
+    "serialnumber", "hersteller-serialnummer", "hersteller-seriennummer",
+    "herstellerseriennummer", "seriennummer",
 ]
 TYPE_CANDIDATES = [
     "type", "device type", "category", "device_type", "kind", "kategorie",
@@ -299,12 +299,15 @@ def import_from_source_excel(
         model_val = _cell_str(row, cols["model"])
 
         if compose_name:
-            name_parts = [pm_number]
+            # Compose name from manufacturer and model only — PM number is a
+            # separate identifier and should not appear in the display name.
+            name_parts = []
             if manufacturer:
                 name_parts.append(manufacturer)
             if model_val:
                 name_parts.append(model_val)
-            name = " ".join(name_parts)
+            # Fall back to PM number only if neither manufacturer nor model exists
+            name = " ".join(name_parts) if name_parts else pm_number
         else:
             name = _cell_str(row, cols["name"]) or pm_number
 

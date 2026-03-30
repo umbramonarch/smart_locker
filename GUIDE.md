@@ -213,8 +213,8 @@ from smart_locker.database.repositories import DeviceRepository
 
 init_db()
 with get_session() as session:
-    DeviceRepository.create(session, name='PM-001 Fluke 87V', device_type='Multimeter', pm_number='PM-001', serial_number='SN-001', manufacturer='Fluke', model='87V', locker_slot=1)
-    DeviceRepository.create(session, name='PM-002 Rigol DS1054Z', device_type='Oscilloscope', pm_number='PM-002', serial_number='SN-002', manufacturer='Rigol', model='DS1054Z', locker_slot=2)
+    DeviceRepository.create(session, name='Fluke 87V', device_type='Multimeter', pm_number='PM-001', serial_number='SN-001', manufacturer='Fluke', model='87V', locker_slot=1)
+    DeviceRepository.create(session, name='Rigol DS1054Z', device_type='Oscilloscope', pm_number='PM-002', serial_number='SN-002', manufacturer='Rigol', model='DS1054Z', locker_slot=2)
     print('Devices added successfully.')
 "
 ```
