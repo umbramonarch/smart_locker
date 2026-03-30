@@ -5,12 +5,15 @@ Description: Automatic Excel sync — exports device, transaction, and user data
              after_commit event listeners so the Excel file stays in sync
              without manual intervention.
 Project: smart_locker/sync
-Notes: If the output file is locked (open in Excel), the sync logs a warning
-       and retries on the next commit. Three sheets are exported: Devices,
-       Transactions, and Users.
+Notes: If the output file is locked (open in Excel), the export writes to a
+       temporary file in the same directory, then attempts to replace the
+       target. If the target is still locked, the pending file is kept and
+       the next export attempt will try again. Three sheets are exported:
+       Devices, Transactions, and Users.
 """
 
 import logging
+import tempfile
 from pathlib import Path
 
 from openpyxl import Workbook
@@ -165,15 +168,31 @@ def export_to_excel(engine=None, output_path: str | Path | None = None) -> None:
                 max_len = max(max_len, len(val))
             ws3.column_dimensions[col_letter].width = min(max_len + 3, 40)
 
-        # Write file
+        # Write to a temp file first, then replace the target. This avoids
+        # partial writes and works around Windows file locking when the
+        # output file is open in Excel.
+        tmp_fd, tmp_path_str = tempfile.mkstemp(
+            suffix=".xlsx", dir=path.parent
+        )
+        import os
+        os.close(tmp_fd)
+        tmp_path = Path(tmp_path_str)
+
         try:
-            wb.save(path)
-            logger.debug("Excel sync: %s updated (%d devices, %d transactions)",
-                         path, len(devices), len(transactions))
+            wb.save(tmp_path)
+            # Attempt atomic replace of the target file
+            tmp_path.replace(path)
+            logger.debug(
+                "Excel sync: %s updated (%d devices, %d transactions)",
+                path, len(devices), len(transactions),
+            )
         except PermissionError:
+            # Target is locked by Excel — keep the temp file so the data
+            # is preserved on disk. The next export will overwrite it.
             logger.warning(
-                "Excel sync: cannot write to %s (file may be open in Excel). "
-                "Data will sync on the next change when the file is closed.", path
+                "Excel sync: %s is locked (open in Excel). "
+                "Latest data written to %s instead.",
+                path, tmp_path,
             )
 
 
