@@ -291,6 +291,23 @@ class DeviceRepository:
         return changed
 
     @staticmethod
+    def find_by_model(session: Session, model: str) -> list[Device]:
+        """Find all devices matching a model/Typbezeichnung (case-insensitive).
+
+        Used by the photo watcher to assign one image to every device that
+        shares the same model string (e.g. all "87V" units).
+
+        Args:
+            session: Active database session.
+            model: Model string to match (compared case-insensitively).
+
+        Returns:
+            List of matching Device objects (may be empty).
+        """
+        stmt = select(Device).where(func.lower(Device.model) == model.strip().lower())
+        return list(session.execute(stmt).scalars().all())
+
+    @staticmethod
     def list_all(session: Session) -> list[Device]:
         """Return all devices ordered by name.
 
