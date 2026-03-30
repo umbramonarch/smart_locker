@@ -122,7 +122,7 @@ class TestImportFromSourceExcel:
         """Existing devices with identical data are counted as unchanged."""
         DeviceRepository.create(
             db_session,
-            name="PM-001 Fluke 87V",
+            name="Fluke 87V",
             device_type="general",
             pm_number="PM-001",
             manufacturer="Fluke",
@@ -146,7 +146,7 @@ class TestImportFromSourceExcel:
         """Existing devices get metadata updated when source data changes."""
         DeviceRepository.create(
             db_session,
-            name="PM-001 Fluke 87V",
+            name="Fluke 87V",
             device_type="general",
             pm_number="PM-001",
             manufacturer="Fluke",
