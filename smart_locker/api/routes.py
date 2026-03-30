@@ -22,7 +22,8 @@ import smart_locker.api.app_context as ctx_module
 from smart_locker.api.app_context import PendingRegistration
 from smart_locker.auth.session_manager import UserSession
 from smart_locker.database.engine import get_session_factory
-from smart_locker.database.models import DeviceStatus, UserRole
+from sqlalchemy import select
+from smart_locker.database.models import DeviceStatus, User, UserRole
 from smart_locker.database.repositories import DeviceRepository
 from smart_locker.services.locker_service import LockerService
 
@@ -344,6 +345,60 @@ def cancel_registration():
 
 
 # --- Admin Endpoints --------------------------------------------------------
+
+@router.post("/api/admin/session")
+def start_admin_session(db: Session = Depends(get_db)):
+    """Start a backend session for the admin panel (triggered by 5x clock tap).
+
+    The hidden admin panel on the kiosk UI allows physical-access admin control
+    without an NFC card. This endpoint finds the first active admin user in the
+    database and creates a real backend session so that subsequent API calls
+    (borrow, return, sync, etc.) pass the ``require_session`` check.
+
+    Unlike NFC-based authentication, this bypasses card tap — security relies on
+    physical kiosk access and the hidden 5-tap gesture.
+
+    Args:
+        db: Active database session (injected by ``get_db``).
+
+    Returns:
+        dict: ``{"success": True, "user": {"id", "name", "role"}}`` with the
+              admin user whose session was created.
+
+    Raises:
+        HTTPException: 503 if system not ready, 404 if no active admin users
+                       exist in the database.
+    """
+    if ctx_module.context is None:
+        raise HTTPException(status_code=503, detail="System not ready.")
+
+    # Find the first active admin user in the database
+    stmt = (
+        select(User)
+        .where(User.role == UserRole.ADMIN, User.is_active.is_(True))
+        .order_by(User.id)
+        .limit(1)
+    )
+    admin_user = db.execute(stmt).scalars().first()
+    if admin_user is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No active admin users found. Enroll an admin card first.",
+        )
+
+    # Create a real backend session so require_session passes on future calls
+    ctx_module.context.session_mgr.start_session(admin_user)
+    logger.info("Admin panel session started for %s (id=%d)", admin_user.display_name, admin_user.id)
+
+    return {
+        "success": True,
+        "user": {
+            "id": admin_user.id,
+            "name": admin_user.display_name,
+            "role": admin_user.role.value,
+        },
+    }
+
 
 @router.post("/api/admin/sync-source")
 def trigger_source_sync(

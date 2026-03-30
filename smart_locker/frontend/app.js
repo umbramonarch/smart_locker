@@ -1098,24 +1098,52 @@ function closeAdminPanel() {
 }
 
 /**
- * Create a synthetic admin user session so admin panel actions (borrow/return)
- * have a valid user context. Sets the global state and fills the main menu.
+ * Start a real backend admin session via POST /api/admin/session. The backend
+ * finds the first active admin user in the database and creates a server-side
+ * session so that subsequent API calls (borrow, return, sync) pass the
+ * require_session check. Falls back to a demo-mode synthetic user when
+ * USE_DEMO is true.
+ * @returns {Promise<boolean>} True if the admin session was created, false on failure.
  */
-function adminStartSession() {
-  // Create a synthetic admin user context so borrow/return screens work
-  adminSessionActive = true;
-  S.user = { id: 0, name: 'Admin', role: 'admin' };
-  fillMainMenu(S.user);
+async function adminStartSession() {
+  if (USE_DEMO) {
+    // Demo mode — no backend, use synthetic admin user
+    adminSessionActive = true;
+    S.user = { id: 0, name: 'Admin', role: 'admin' };
+    fillMainMenu(S.user);
+    return true;
+  }
+
+  try {
+    const res = await fetch('/api/admin/session', { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) {
+      // Backend rejected — show error and stay on current screen
+      showToast(data.detail || 'Admin session failed', 'error');
+      return false;
+    }
+    // Backend created a real session — store user and update UI
+    adminSessionActive = true;
+    S.user = data.user;
+    fillMainMenu(S.user);
+    return true;
+  } catch (_) {
+    showToast('Could not reach server', 'error');
+    return false;
+  }
 }
 
 /**
- * Admin shortcut: close the admin panel, start an admin session, navigate to
- * the main menu, and then open the borrow screen.
+ * Admin shortcut: close the admin panel, start a real backend admin session,
+ * navigate to the main menu, and then open the borrow screen. If the backend
+ * session creation fails (e.g. no admin users enrolled), the panel closes but
+ * navigation is aborted so the user stays on the current screen.
  * @returns {Promise<void>}
  */
 async function adminGotoBorrow() {
   closeAdminPanel();
-  adminStartSession();
+  const ok = await adminStartSession();
+  if (!ok) return; // session creation failed — stay on current screen
   await sleep(300); // wait for panel close animation
   navigate('main-menu');
   await sleep(200); // wait for circle-reveal transition
@@ -1124,13 +1152,16 @@ async function adminGotoBorrow() {
 }
 
 /**
- * Admin shortcut: close the admin panel, start an admin session, navigate to
- * the main menu, and then open the return screen.
+ * Admin shortcut: close the admin panel, start a real backend admin session,
+ * navigate to the main menu, and then open the return screen. If the backend
+ * session creation fails (e.g. no admin users enrolled), the panel closes but
+ * navigation is aborted so the user stays on the current screen.
  * @returns {Promise<void>}
  */
 async function adminGotoReturn() {
   closeAdminPanel();
-  adminStartSession();
+  const ok = await adminStartSession();
+  if (!ok) return; // session creation failed — stay on current screen
   await sleep(300); // wait for panel close animation
   navigate('main-menu');
   await sleep(200); // wait for circle-reveal transition
