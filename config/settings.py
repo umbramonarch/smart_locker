@@ -57,6 +57,14 @@ SOURCE_EXCEL_PATH = os.getenv("SMART_LOCKER_SOURCE_EXCEL_PATH", "")
 SOURCE_SYNC_HOUR = int(os.getenv("SMART_LOCKER_SOURCE_SYNC_HOUR", "6"))
 SOURCE_SYNC_MINUTE = int(os.getenv("SMART_LOCKER_SOURCE_SYNC_MINUTE", "0"))
 
+# --- Photo import ---
+# Input folder for device photos — filenames must match the device model/Typbezeichnung
+# (e.g., "87V.jpg" applies to all devices with model "87V"). Leave empty to disable.
+PHOTO_INPUT_PATH = os.getenv("SMART_LOCKER_PHOTO_INPUT_PATH", "")
+
+# Destination directory inside the frontend static files where photos are served from
+PHOTO_SERVE_DIR = BASE_DIR / "smart_locker" / "frontend" / "images"
+
 # --- Security ---
 # Environment variable names for the two cryptographic keys (actual keys loaded by key_manager)
 ENC_KEY_ENV_VAR = "SMART_LOCKER_ENC_KEY"

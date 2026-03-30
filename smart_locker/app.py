@@ -19,6 +19,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from config.logging_config import setup_logging
 from config.settings import (
     EXCEL_SYNC_PATH,
+    PHOTO_INPUT_PATH,
+    PHOTO_SERVE_DIR,
     SESSION_TIMEOUT_SECONDS,
     SOURCE_EXCEL_PATH,
     SOURCE_SYNC_HOUR,
@@ -75,6 +77,10 @@ class SmartLockerApp:
         if SOURCE_EXCEL_PATH:
             from smart_locker.sync.scheduler import start_scheduler
             start_scheduler(get_engine(), SOURCE_EXCEL_PATH, SOURCE_SYNC_HOUR, SOURCE_SYNC_MINUTE)
+
+        if PHOTO_INPUT_PATH:
+            from smart_locker.sync.photo_watcher import start_photo_watcher
+            start_photo_watcher(get_engine(), PHOTO_INPUT_PATH, PHOTO_SERVE_DIR)
 
         logger.info("Smart Locker starting...")
 
@@ -271,6 +277,10 @@ def run_server() -> None:
     if SOURCE_EXCEL_PATH:
         from smart_locker.sync.scheduler import start_scheduler
         start_scheduler(get_engine(), SOURCE_EXCEL_PATH, SOURCE_SYNC_HOUR, SOURCE_SYNC_MINUTE)
+
+    if PHOTO_INPUT_PATH:
+        from smart_locker.sync.photo_watcher import start_photo_watcher
+        start_photo_watcher(get_engine(), PHOTO_INPUT_PATH, PHOTO_SERVE_DIR)
 
     app = create_app()
     logger.info("Starting Smart Locker web server on %s:%d", API_HOST, API_PORT)
