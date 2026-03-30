@@ -85,6 +85,23 @@ class UserRepository:
         return user
 
     @staticmethod
+    def find_by_display_name(session: Session, name: str) -> User | None:
+        """Case-insensitive lookup by display name.
+
+        Used by the source import to match borrower names from the
+        "Aktueller Einsatzort" column to registered users.
+
+        Args:
+            session: Active database session.
+            name: Display name to search for (compared case-insensitively).
+
+        Returns:
+            User object or None if no match.
+        """
+        stmt = select(User).where(func.lower(User.display_name) == name.strip().lower())
+        return session.execute(stmt).scalar_one_or_none()
+
+    @staticmethod
     def list_all(session: Session) -> list[User]:
         """Return all users ordered by display name.
 
@@ -205,6 +222,8 @@ class DeviceRepository:
         model: str | None = None,
         barcode: str | None = None,
         calibration_due: date | None = None,
+        status: str | None = None,
+        current_borrower_id: int | None = None,
     ) -> Device:
         """Create and persist a new device.
 
@@ -221,6 +240,10 @@ class DeviceRepository:
             model: Model/type designation (optional).
             barcode: Barcode value for future scanner integration (optional).
             calibration_due: Next calibration date (optional).
+            status: Device status string (AVAILABLE, BORROWED, MAINTENANCE).
+                Defaults to AVAILABLE if not provided.
+            current_borrower_id: User ID of the current borrower when importing
+                a device that is already checked out (optional).
 
         Returns:
             Created Device object with assigned ID.
@@ -238,6 +261,12 @@ class DeviceRepository:
             barcode=barcode,
             calibration_due=calibration_due,
         )
+        # Apply optional status and borrower (used by source import when
+        # the "Aktueller Einsatzort" column indicates a device is checked out)
+        if status is not None:
+            device.status = DeviceStatus(status)
+        if current_borrower_id is not None:
+            device.current_borrower_id = current_borrower_id
         session.add(device)
         session.flush()
         logger.info("Created device: %s (id=%d, pm=%s)", name, device.id, pm_number)
@@ -262,8 +291,10 @@ class DeviceRepository:
         """Update source-managed metadata fields on a device.
 
         Only updates fields that differ from the current value. Restricted
-        to the ALLOWED set — status, borrower, slot, image, and description
-        are never overwritten by source imports.
+        to the ALLOWED set — slot, image, and description are never
+        overwritten by source imports. Status and current_borrower_id ARE
+        updated because the source Excel "Aktueller Einsatzort" column is
+        the authoritative record of who has the device.
 
         Args:
             session: Active database session.
@@ -277,6 +308,7 @@ class DeviceRepository:
         ALLOWED = {
             "name", "device_type", "serial_number", "manufacturer",
             "model", "barcode", "calibration_due",
+            "status", "current_borrower_id",
         }
         changed = False
         for key, value in kwargs.items():

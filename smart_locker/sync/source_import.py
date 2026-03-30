@@ -21,7 +21,7 @@ from pathlib import Path
 from openpyxl import load_workbook
 from sqlalchemy.orm import Session
 
-from smart_locker.database.models import Device
+from smart_locker.database.models import Device, DeviceStatus
 from smart_locker.database.repositories import DeviceRepository
 
 logger = logging.getLogger(__name__)
@@ -70,6 +70,10 @@ CALIBRATION_CANDIDATES = [
     "datum der nächsten kalibrierung", "datum der nachsten kalibrierung",
     "datum der n\u00e4chsten kalibrierung",
     "nächste kalibrierung", "kalibrierung", "kalibrierdatum",
+]
+LOCATION_CANDIDATES = [
+    "aktueller einsatzort", "einsatzort", "current location", "location",
+    "standort", "aktueller standort", "current deployment",
 ]
 
 
@@ -178,6 +182,7 @@ def _detect_columns(
         "model":        find_column(headers, [ov["model"]] if ov.get("model") else MODEL_CANDIDATES),
         "barcode":      find_column(headers, [ov["barcode"]] if ov.get("barcode") else BARCODE_CANDIDATES),
         "calibration":  find_column(headers, [ov["calibration"]] if ov.get("calibration") else CALIBRATION_CANDIDATES),
+        "location":     find_column(headers, [ov["location"]] if ov.get("location") else LOCATION_CANDIDATES),
     }
 
 
@@ -356,6 +361,18 @@ def import_from_source_excel(
         if cols["calibration"] is not None:
             calibration_due = parse_date(row[cols["calibration"]])
 
+        # Determine device location from "Aktueller Einsatzort" column.
+        # If the value contains "schrank" the device is physically in the
+        # locker (AVAILABLE); any other non-empty value is a person's name,
+        # meaning that person currently has the device (BORROWED).
+        location_raw = _cell_str(row, cols["location"])
+        if location_raw and "schrank" not in location_raw.lower():
+            borrower_name = location_raw
+            device_status = DeviceStatus.BORROWED.value
+        else:
+            borrower_name = None
+            device_status = DeviceStatus.AVAILABLE.value
+
         parsed_devices.append({
             "pm_number": pm_number,
             "name": name,
@@ -368,6 +385,8 @@ def import_from_source_excel(
             "model": model_val,
             "barcode": barcode,
             "calibration_due": calibration_due,
+            "borrower_name": borrower_name,
+            "device_status": device_status,
         })
 
     logger.info(
@@ -380,11 +399,30 @@ def import_from_source_excel(
 
     # --- Import to database ---
     from smart_locker.database.engine import get_session
+    from smart_locker.database.repositories import UserRepository
     from smart_locker.sync.excel_sync import export_to_excel
 
     with get_session() as session:
         for d in parsed_devices:
             try:
+                # Resolve the borrower name (from "Aktueller Einsatzort")
+                # to a user ID.  If the name doesn't match any registered
+                # user, the device is still marked BORROWED but without a
+                # linked borrower so the kiosk UI reflects that it is not
+                # physically in the locker.
+                borrower_id = None
+                if d["borrower_name"]:
+                    user = UserRepository.find_by_display_name(
+                        session, d["borrower_name"]
+                    )
+                    if user is not None:
+                        borrower_id = user.id
+                    else:
+                        logger.warning(
+                            "Borrower '%s' for PM %s not found in user database.",
+                            d["borrower_name"], d["pm_number"],
+                        )
+
                 existing = DeviceRepository.find_by_pm(session, d["pm_number"])
                 if existing is None:
                     # New device — insert
@@ -401,10 +439,12 @@ def import_from_source_excel(
                         model=d["model"],
                         barcode=d["barcode"],
                         calibration_due=d["calibration_due"],
+                        status=d["device_status"],
+                        current_borrower_id=borrower_id,
                     )
                     result.imported += 1
                 else:
-                    # Existing device — update metadata only
+                    # Existing device — update metadata and location status
                     changed = DeviceRepository.update_metadata(
                         session,
                         existing,
@@ -415,6 +455,8 @@ def import_from_source_excel(
                         model=d["model"],
                         barcode=d["barcode"],
                         calibration_due=d["calibration_due"],
+                        status=DeviceStatus(d["device_status"]),
+                        current_borrower_id=borrower_id,
                     )
                     if changed:
                         result.updated += 1
