@@ -1413,6 +1413,126 @@ body::after {
   width: 80%;
 }
 
+/* Search input with magnifying glass icon */
+.register-search-group {
+  position: relative;
+  width: 100%;
+  max-width: 420px;
+}
+.register-search-icon {
+  position: absolute;
+  left: 1.2rem;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 20px;
+  height: 20px;
+  color: var(--text-muted);
+  pointer-events: none;
+  z-index: 1;
+  transition: color 0.3s var(--ease-smooth);
+}
+.register-search-input {
+  padding-left: 3.2rem;
+  text-align: left;
+}
+.register-search-input:focus ~ .register-search-icon,
+.register-search-group:focus-within .register-search-icon {
+  color: var(--accent);
+}
+
+/* Scrollable name list container */
+.register-name-list {
+  width: 100%;
+  max-width: 420px;
+  max-height: 340px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: rgba(15, 19, 24, 0.6);
+  mask-image: linear-gradient(to bottom, transparent 0%, black 3%, black 97%, transparent 100%);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, black 3%, black 97%, transparent 100%);
+}
+.register-name-list::-webkit-scrollbar {
+  width: 5px;
+}
+.register-name-list::-webkit-scrollbar-thumb {
+  background: var(--surface-3);
+  border-radius: 999px;
+}
+.register-name-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Individual name item — button styled as selectable card */
+.name-item {
+  display: block;
+  width: 100%;
+  padding: 14px 20px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 1rem;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.25s var(--ease-smooth),
+              background 0.25s var(--ease-smooth),
+              box-shadow 0.25s var(--ease-smooth),
+              transform 0.2s var(--ease-smooth),
+              opacity 0.5s var(--ease-smooth);
+  opacity: 0;
+  transform: translateY(12px);
+  flex-shrink: 0;
+}
+.name-item.in {
+  opacity: 1;
+  transform: translateY(0);
+}
+.name-item:hover {
+  border-color: var(--border-accent);
+  background: var(--surface-2);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 16px rgba(0, 212, 255, 0.06);
+}
+.name-item.selected {
+  border-color: var(--accent);
+  background: var(--accent-dim);
+  box-shadow: 0 0 0 2px rgba(0, 212, 255, 0.18), 0 6px 20px rgba(0, 212, 255, 0.10);
+}
+.name-item.selected:hover {
+  border-color: var(--accent);
+}
+
+/* "No results" hint text below the name list */
+.register-hint {
+  font-family: var(--font-body);
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  text-align: center;
+  margin-top: 0.5rem;
+  line-height: 1.5;
+}
+
+/* Admin manual registration icon — warning-tinted */
+.admin-register-icon {
+  border-color: var(--warning) !important;
+  color: var(--warning) !important;
+}
+.admin-register-icon svg {
+  stroke: var(--warning);
+}
+
+/* Admin panel register button icon */
+.register-icon {
+  border-color: var(--accent);
+}
+
 /* Continue button */
 .register-next-btn {
   display: flex;
@@ -1589,7 +1709,7 @@ body::after {
 
 .admin-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
   gap: 0.9rem;
 }
 

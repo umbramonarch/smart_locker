@@ -1,8 +1,10 @@
 """
 File: test_api.py
 Description: Tests for the REST API layer — session management, device listing,
-             borrow/return endpoints, user registration, admin source sync, and
-             SSE event stream. Uses FastAPI's TestClient with mocked NFC context.
+             borrow/return endpoints, user self-registration (with registrant
+             validation), admin manual registration, registrant list retrieval,
+             admin source sync, and SSE event stream. Uses FastAPI's TestClient
+             with mocked NFC context.
 Project: smart_locker/tests
 Notes: Run with: python -m pytest tests/test_api.py -v
 """
@@ -17,7 +19,7 @@ from smart_locker.api.routes import router, get_db, require_session
 from smart_locker.auth.session_manager import SessionManager, UserSession
 from smart_locker.database.engine import get_session_factory, init_db, reset_engine
 from smart_locker.database.models import DeviceStatus, UserRole
-from smart_locker.database.repositories import DeviceRepository, UserRepository
+from smart_locker.database.repositories import DeviceRepository, RegistrantRepository, UserRepository
 from smart_locker.services.locker_service import LockerService
 
 import smart_locker.api.app_context as ctx_module
@@ -372,3 +374,89 @@ class TestBorrowReturn:
         resp = client.post(f"/api/devices/{test_devices[0].id}/return")
         data = resp.json()
         assert data["success"] is True
+
+
+# ---------------------------------------------------------------------------
+# Registration & Registrant Endpoint Tests
+# ---------------------------------------------------------------------------
+
+class TestRegistrantEndpoints:
+    """Tests for the registrant list and registration validation API endpoints."""
+
+    def test_get_registrants_empty(self, client):
+        """GET /api/registrants returns empty list when no registrants exist."""
+        resp = client.get("/api/registrants")
+        assert resp.status_code == 200
+        assert resp.json()["names"] == []
+
+    def test_get_registrants_returns_names(self, client, db_session):
+        """GET /api/registrants returns names from the registrants table."""
+        RegistrantRepository.add_names(db_session, {"Max Müller", "Anna Schmidt"})
+        db_session.commit()
+
+        resp = client.get("/api/registrants")
+        assert resp.status_code == 200
+        names = resp.json()["names"]
+        assert "Max Müller" in names
+        assert "Anna Schmidt" in names
+
+    def test_get_registrants_excludes_registered_users(self, client, db_session):
+        """GET /api/registrants excludes names that already have a User record."""
+        RegistrantRepository.add_names(db_session, {"Max Müller", "Anna Schmidt"})
+        # "Max Müller" is already registered as a user
+        UserRepository.create(
+            db_session,
+            display_name="Max Müller",
+            uid_hmac="mmhash" * 10 + "mmmm",
+            encrypted_card_uid="encrypted_mm",
+        )
+        db_session.commit()
+
+        resp = client.get("/api/registrants")
+        names = resp.json()["names"]
+        # Max Müller should be excluded, Anna Schmidt should remain
+        assert "Max Müller" not in names
+        assert "Anna Schmidt" in names
+
+    def test_register_validates_against_registrants(self, client, db_session, mock_context):
+        """POST /api/register rejects names not in the registrants list."""
+        # No registrants exist — any name should be rejected
+        mock_context.pending_registration = None
+        resp = client.post("/api/register", json={"name": "Unknown Person"})
+        assert resp.status_code == 403
+        assert "approved list" in resp.json()["detail"].lower()
+
+    def test_register_accepts_approved_name(self, client, db_session, mock_context):
+        """POST /api/register accepts a name that exists in the registrants list."""
+        RegistrantRepository.add_names(db_session, {"Max Müller"})
+        db_session.commit()
+        mock_context.pending_registration = None
+
+        resp = client.post("/api/register", json={"name": "Max Müller"})
+        assert resp.status_code == 200
+        assert resp.json()["success"] is True
+
+    def test_admin_register_accepts_any_name(
+        self, client, db_session, mock_context, admin_user
+    ):
+        """POST /api/admin/register accepts any name without registrant validation."""
+        mock_context.session_mgr.start_session(admin_user)
+        mock_context.pending_registration = None
+
+        resp = client.post("/api/admin/register", json={"name": "Not In List"})
+        assert resp.status_code == 200
+        assert resp.json()["success"] is True
+
+    def test_admin_register_rejects_non_admin(
+        self, client, db_session, mock_context, test_user
+    ):
+        """POST /api/admin/register rejects non-admin users."""
+        mock_context.session_mgr.start_session(test_user)
+
+        resp = client.post("/api/admin/register", json={"name": "Someone"})
+        assert resp.status_code == 403
+
+    def test_admin_register_requires_session(self, client, mock_context):
+        """POST /api/admin/register requires an active session."""
+        resp = client.post("/api/admin/register", json={"name": "Someone"})
+        assert resp.status_code == 401

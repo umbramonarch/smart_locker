@@ -1,9 +1,11 @@
 """
 File: migrate_db.py
-Description: Database migration script. Adds columns introduced after the
-             initial schema (locker_slot, description, image_path, pm_number,
-             manufacturer, model, barcode, calibration_due). Safe to run
-             multiple times — skips columns that already exist.
+Description: Database migration script. Adds columns and tables introduced after
+             the initial schema. Handles column additions (locker_slot,
+             description, image_path, pm_number, manufacturer, model, barcode,
+             calibration_due) and table creation (registrants for self-service
+             registration name list). Safe to run multiple times — skips
+             columns and tables that already exist.
 Project: smart_locker/scripts
 Notes: Usage: python -m scripts.migrate_db
        Uses raw SQLite PRAGMA introspection, not SQLAlchemy Alembic.
@@ -34,6 +36,25 @@ def _column_exists(cursor: sqlite3.Cursor, table: str, column: str) -> bool:
     """
     cursor.execute(f"PRAGMA table_info({table})")
     return any(row[1] == column for row in cursor.fetchall())
+
+
+def _table_exists(cursor: sqlite3.Cursor, table_name: str) -> bool:
+    """Check whether a table already exists in the SQLite database.
+
+    Queries the ``sqlite_master`` system table for a matching table name.
+
+    Args:
+        cursor: An open SQLite cursor.
+        table_name: Name of the table to look for.
+
+    Returns:
+        True if the table exists, False otherwise.
+    """
+    cursor.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+        (table_name,),
+    )
+    return cursor.fetchone() is not None
 
 
 def migrate() -> None:
@@ -68,6 +89,19 @@ def migrate() -> None:
         else:
             cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
             print(f"  ADD   {table}.{column} {col_type}")
+
+    # --- Table creation: registrants (self-service registration name list) ---
+    if _table_exists(cur, "registrants"):
+        print("  SKIP  registrants table (already exists)")
+    else:
+        cur.execute("""
+            CREATE TABLE registrants (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                display_name VARCHAR(100) NOT NULL UNIQUE,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        print("  CREATE registrants table")
 
     con.commit()
     con.close()

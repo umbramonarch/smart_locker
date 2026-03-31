@@ -2,7 +2,9 @@
 File: test_source_import.py
 Description: Tests for the source Excel import module. Validates column
              auto-detection, schrank filtering, device insert/update logic,
-             metadata-only updates, and date parsing from German Excel formats.
+             metadata-only updates, date parsing from German Excel formats,
+             and registrant name extraction from the "Aktueller Einsatzort"
+             column for the self-service registration name list.
 Project: smart_locker/tests
 Notes: Run with: python -m pytest tests/test_source_import.py -v
 """
@@ -14,7 +16,7 @@ import pytest
 from openpyxl import Workbook
 
 from smart_locker.database.models import DeviceStatus
-from smart_locker.database.repositories import DeviceRepository, UserRepository
+from smart_locker.database.repositories import DeviceRepository, RegistrantRepository, UserRepository
 from smart_locker.sync.source_import import (
     ImportResult,
     find_column,
@@ -350,5 +352,129 @@ class TestLocationColumn:
 
             device = DeviceRepository.find_by_pm(db_session, "PM-001")
             assert device.current_borrower_id is not None
+        finally:
+            path.unlink(missing_ok=True)
+
+
+class TestRegistrantExtraction:
+    """Tests for registrant name extraction from the 'Aktueller Einsatzort' column.
+
+    During source import, unique person names (non-schrank values) from the
+    location column across ALL rows are added to the registrants table for
+    use in the self-service registration name list.
+    """
+
+    def test_names_extracted_from_all_rows(self, db_session):
+        """Person names are extracted from ALL rows, not just schrank-filtered ones."""
+        path = _create_test_excel([
+            ["Equipment", "Hersteller", "Typbezeichnung",
+             "Platz Messmittelschrank", "Aktueller Einsatzort"],
+            # Schrank device with person name
+            ["PM-001", "Fluke", "87V", "Schrank 1", "Max Müller"],
+            # Non-schrank device (skipped for device import but name still extracted)
+            ["PM-002", "Keysight", "34465A", "Labor 3", "Anna Schmidt"],
+            # Another schrank device with schrank location (not a person name)
+            ["PM-003", "Tektronix", "TBS2104X", "Schrank 2", "Messmittelschrank"],
+        ])
+        try:
+            from smart_locker.database.engine import get_engine
+            result = import_from_source_excel(get_engine(), path)
+
+            # Both person names should be in registrants, schrank value should not
+            assert result.registrants_added == 2
+            registrants = RegistrantRepository.get_all(db_session)
+            names = [r.display_name for r in registrants]
+            assert "Max Müller" in names
+            assert "Anna Schmidt" in names
+            assert "Messmittelschrank" not in names
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_duplicate_names_deduplicated(self, db_session):
+        """Duplicate names in the Excel are stored only once in registrants."""
+        path = _create_test_excel([
+            ["Equipment", "Hersteller", "Typbezeichnung",
+             "Platz Messmittelschrank", "Aktueller Einsatzort"],
+            ["PM-001", "Fluke", "87V", "Schrank 1", "Max Müller"],
+            ["PM-002", "Keysight", "34465A", "Schrank 2", "Max Müller"],
+            ["PM-003", "Tektronix", "TBS2104X", "Schrank 3", "Anna Schmidt"],
+        ])
+        try:
+            from smart_locker.database.engine import get_engine
+            result = import_from_source_excel(get_engine(), path)
+
+            # Only 2 unique names, not 3
+            assert result.registrants_added == 2
+            registrants = RegistrantRepository.get_all(db_session)
+            assert len(registrants) == 2
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_registrant_sync_additive(self, db_session):
+        """Subsequent imports add new names but keep existing ones."""
+        # First import with two names
+        path1 = _create_test_excel([
+            ["Equipment", "Platz Messmittelschrank", "Aktueller Einsatzort"],
+            ["PM-001", "Schrank 1", "Max Müller"],
+            ["PM-002", "Schrank 2", "Anna Schmidt"],
+        ])
+        try:
+            from smart_locker.database.engine import get_engine
+            result1 = import_from_source_excel(get_engine(), path1)
+            assert result1.registrants_added == 2
+        finally:
+            path1.unlink(missing_ok=True)
+
+        # Second import with one new name and one existing
+        path2 = _create_test_excel([
+            ["Equipment", "Platz Messmittelschrank", "Aktueller Einsatzort"],
+            ["PM-003", "Schrank 3", "Anna Schmidt"],
+            ["PM-004", "Schrank 4", "Lisa Weber"],
+        ])
+        try:
+            result2 = import_from_source_excel(get_engine(), path2)
+            # Only Lisa Weber is new; Anna Schmidt already exists
+            assert result2.registrants_added == 1
+
+            registrants = RegistrantRepository.get_all(db_session)
+            names = [r.display_name for r in registrants]
+            assert len(names) == 3
+            assert "Max Müller" in names
+            assert "Anna Schmidt" in names
+            assert "Lisa Weber" in names
+        finally:
+            path2.unlink(missing_ok=True)
+
+    def test_schrank_values_excluded(self, db_session):
+        """Values containing 'schrank' are not treated as person names."""
+        path = _create_test_excel([
+            ["Equipment", "Platz Messmittelschrank", "Aktueller Einsatzort"],
+            ["PM-001", "Schrank 1", "Messmittelschrank"],
+            ["PM-002", "Schrank 2", "Schrank A"],
+            ["PM-003", "Schrank 3", "Max Müller"],
+        ])
+        try:
+            from smart_locker.database.engine import get_engine
+            result = import_from_source_excel(get_engine(), path)
+
+            # Only "Max Müller" should be added (schrank values excluded)
+            assert result.registrants_added == 1
+            registrant = RegistrantRepository.find_by_name(db_session, "Max Müller")
+            assert registrant is not None
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_no_location_column_no_registrants(self, db_session):
+        """Without a location column, no registrant names are extracted."""
+        path = _create_test_excel([
+            ["Equipment", "Hersteller", "Platz Messmittelschrank"],
+            ["PM-001", "Fluke", "Schrank 1"],
+        ])
+        try:
+            from smart_locker.database.engine import get_engine
+            result = import_from_source_excel(get_engine(), path)
+            assert result.registrants_added == 0
+            registrants = RegistrantRepository.get_all(db_session)
+            assert len(registrants) == 0
         finally:
             path.unlink(missing_ok=True)

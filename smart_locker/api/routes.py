@@ -2,11 +2,14 @@
 File: routes.py
 Description: REST API endpoints and SSE event stream for the Smart Locker kiosk.
              Provides session management, device listing, borrow/return operations,
-             user self-registration, and admin-only source sync endpoints.
+             user self-registration (with registrant name validation), admin-only
+             manual registration, registrant list retrieval, and source sync
+             endpoints.
 Project: smart_locker/api
 Notes: All device/session endpoints require an active kiosk session enforced by
        the require_session dependency. SSE stream at /api/events pushes NFC and
-       session events to the browser.
+       session events to the browser. Self-registration validates against the
+       approved registrants list; admin registration bypasses this check.
 """
 
 import asyncio
@@ -24,7 +27,7 @@ from smart_locker.auth.session_manager import UserSession
 from smart_locker.database.engine import get_session_factory
 from sqlalchemy import select
 from smart_locker.database.models import DeviceStatus, User, UserRole
-from smart_locker.database.repositories import DeviceRepository
+from smart_locker.database.repositories import DeviceRepository, RegistrantRepository
 from smart_locker.services.locker_service import LockerService
 
 logger = logging.getLogger(__name__)
@@ -294,26 +297,39 @@ class RegisterRequest(BaseModel):
 
 
 @router.post("/api/register")
-def start_registration(body: RegisterRequest):
-    """Begin self-registration: store name, await NFC card tap.
+def start_registration(body: RegisterRequest, db: Session = Depends(get_db)):
+    """Begin self-registration: validate name against approved list, await NFC tap.
 
-    Creates a ``PendingRegistration`` that the NFC bridge loop will
-    detect on the next card tap. Rejects requests if a session is active.
+    The submitted name must exist in the ``registrants`` table (populated from
+    the "Aktueller Einsatzort" column during source Excel import). If the name
+    is not found, the request is rejected with 403 — the user must contact an
+    admin for manual registration. Creates a ``PendingRegistration`` that the
+    NFC bridge loop will detect on the next card tap.
 
     Args:
         body: Request body with the user's display name.
+        db: Active database session (injected by ``get_db``).
 
     Returns:
         dict: ``{"success": True, "message": str}``.
 
     Raises:
-        HTTPException: 503 if system not ready, 409 if session active.
+        HTTPException: 503 if system not ready, 409 if session active,
+                       403 if name not in approved registrants list.
     """
     if ctx_module.context is None:
         raise HTTPException(status_code=503, detail="System not ready.")
 
     if ctx_module.context.session_mgr.has_active_session:
         raise HTTPException(status_code=409, detail="A session is active. End it first.")
+
+    # Validate name against the approved registrants list
+    registrant = RegistrantRepository.find_by_name(db, body.name.strip())
+    if registrant is None:
+        raise HTTPException(
+            status_code=403,
+            detail="Name not found in approved list. Contact an admin for manual registration.",
+        )
 
     ctx_module.context.pending_registration = PendingRegistration(
         display_name=body.name.strip(),
@@ -342,6 +358,43 @@ def cancel_registration():
     was_pending = ctx_module.context.pending_registration is not None
     ctx_module.context.pending_registration = None
     return {"success": True, "cancelled": was_pending}
+
+
+@router.get("/api/registrants")
+def get_registrants(db: Session = Depends(get_db)):
+    """Return the list of approved names available for self-registration.
+
+    Reads the ``registrants`` table (populated from the "Aktueller Einsatzort"
+    column during source Excel import) and filters out names that already have
+    an active User record — those people are already registered and do not need
+    to appear in the selection list. No session required; this is a public
+    endpoint called from the idle/registration screen.
+
+    Args:
+        db: Active database session (injected by ``get_db``).
+
+    Returns:
+        dict: ``{"names": list[str]}`` — alphabetically sorted list of names
+              that have not yet registered.
+    """
+    registrants = RegistrantRepository.get_all(db)
+
+    # Build a set of names already registered (case-insensitive) so they can
+    # be excluded from the list shown to new users.
+    registered_lower = {
+        name.lower()
+        for name in db.execute(
+            select(User.display_name).where(User.is_active.is_(True))
+        ).scalars()
+    }
+
+    # Filter out already-registered names and return the rest sorted
+    names = [
+        r.display_name
+        for r in registrants
+        if r.display_name.lower() not in registered_lower
+    ]
+    return {"names": names}
 
 
 # --- Admin Endpoints --------------------------------------------------------
@@ -398,6 +451,49 @@ def start_admin_session(db: Session = Depends(get_db)):
             "role": admin_user.role.value,
         },
     }
+
+
+@router.post("/api/admin/register")
+def start_admin_registration(
+    body: RegisterRequest,
+    user_session: UserSession = Depends(require_session),
+):
+    """Begin admin-initiated manual registration for a user.
+
+    Unlike the self-service ``POST /api/register``, this endpoint does NOT
+    validate the name against the registrants table — the admin can register
+    anyone with any name. It also does NOT reject the request when a session
+    is active (the admin is already logged in). The NFC bridge loop will
+    enroll the next card tap as a new user with the provided name.
+
+    Use case: when someone's name is not in the source Excel and they
+    cannot self-register, an admin uses the "Register User" button in the
+    admin panel to manually enroll them.
+
+    Args:
+        body: Request body with the user's display name.
+        user_session: The active admin session (injected by ``require_session``).
+
+    Returns:
+        dict: ``{"success": True, "message": str}``.
+
+    Raises:
+        HTTPException: 503 if system not ready, 403 if caller is not admin.
+    """
+    if ctx_module.context is None:
+        raise HTTPException(status_code=503, detail="System not ready.")
+
+    if user_session.user.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Admin access required.")
+
+    ctx_module.context.pending_registration = PendingRegistration(
+        display_name=body.name.strip(),
+    )
+    logger.info(
+        "Admin-initiated registration for '%s' by admin %s. Awaiting card tap.",
+        body.name.strip(), user_session.user.display_name,
+    )
+    return {"success": True, "message": "Tap the new user's NFC card to complete registration."}
 
 
 @router.post("/api/admin/sync-source")

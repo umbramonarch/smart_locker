@@ -1,8 +1,10 @@
 """
 File: repositories.py
 Description: Data access layer using the repository pattern. Provides CRUD
-             operations for User, Device, and TransactionLog models with
-             SQLAlchemy query construction and flush-based persistence.
+             operations for User, Device, TransactionLog, and Registrant
+             models with SQLAlchemy query construction and flush-based
+             persistence. The RegistrantRepository manages the list of
+             approved names for self-service NFC card registration.
 Project: smart_locker/database
 Notes: All write operations call session.flush() to assign IDs immediately
        but leave final commit/rollback to the caller or context manager.
@@ -17,6 +19,7 @@ from sqlalchemy.orm import Session
 from smart_locker.database.models import (
     Device,
     DeviceStatus,
+    Registrant,
     TransactionLog,
     TransactionType,
     User,
@@ -466,3 +469,89 @@ class TransactionRepository:
             .order_by(TransactionLog.timestamp.desc())
         )
         return list(session.execute(stmt).scalars().all())
+
+
+class RegistrantRepository:
+    """Data access layer for Registrant entities.
+
+    Manages the approved-names list used by the self-service registration
+    screen. Names originate from the "Aktueller Einsatzort" column of the
+    company source Excel and are synced into the ``registrants`` table
+    during each source import. The repository provides methods for
+    retrieving the sorted name list, bulk-adding new names (skipping
+    duplicates), and case-insensitive name lookup for validation.
+    """
+
+    @staticmethod
+    def get_all(session: Session) -> list[Registrant]:
+        """Return all registrant names sorted alphabetically.
+
+        Used by the ``GET /api/registrants`` endpoint to populate the
+        self-service registration name list on the kiosk UI.
+
+        Args:
+            session: Active database session.
+
+        Returns:
+            List of Registrant objects ordered by display_name ascending.
+        """
+        stmt = select(Registrant).order_by(Registrant.display_name)
+        return list(session.execute(stmt).scalars().all())
+
+    @staticmethod
+    def add_names(session: Session, names: set[str]) -> int:
+        """Bulk-add new registrant names, skipping any that already exist.
+
+        Performs a case-insensitive check for each name against the existing
+        registrants table. Only names not already present are inserted. This
+        makes the operation safe to call repeatedly (idempotent) — successive
+        source imports will not create duplicate rows.
+
+        Args:
+            session: Active database session.
+            names: Set of person name strings to add.
+
+        Returns:
+            Number of newly inserted registrant names.
+        """
+        # Fetch existing names once for efficient deduplication
+        existing = {
+            r.display_name.lower()
+            for r in session.execute(select(Registrant)).scalars().all()
+        }
+
+        added = 0
+        for name in sorted(names):
+            # Skip names that are empty or already exist (case-insensitive)
+            stripped = name.strip()
+            if not stripped or stripped.lower() in existing:
+                continue
+            session.add(Registrant(display_name=stripped))
+            existing.add(stripped.lower())
+            added += 1
+
+        if added > 0:
+            session.flush()
+            logger.info("Added %d new registrant name(s).", added)
+
+        return added
+
+    @staticmethod
+    def find_by_name(session: Session, name: str) -> Registrant | None:
+        """Case-insensitive lookup of a registrant by display name.
+
+        Used by the ``POST /api/register`` endpoint to validate that the
+        selected name exists in the approved registrants list before
+        allowing self-service registration.
+
+        Args:
+            session: Active database session.
+            name: Display name to search for (compared case-insensitively).
+
+        Returns:
+            Registrant object or None if no match.
+        """
+        stmt = select(Registrant).where(
+            func.lower(Registrant.display_name) == name.strip().lower()
+        )
+        return session.execute(stmt).scalar_one_or_none()

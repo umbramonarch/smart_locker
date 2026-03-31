@@ -87,7 +87,7 @@
     <div class="mesh-bg"></div>
 
     <div class="register-center">
-      <!-- Step 1: Name entry -->
+      <!-- Step 1: Name selection (self-service) -->
       <div class="register-step" id="register-step-name">
         <div class="register-icon-circle">
           <svg viewBox="0 0 24 24"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/><path d="M16 3l2 2 4-4" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -96,13 +96,39 @@
           <span class="reveal-wrap"><span class="reveal-inner">REGISTER</span></span>
         </h1>
         <p class="register-sub">
-          <span class="reveal-wrap"><span class="reveal-inner" style="transition-delay:0.22s">Enter your name to get started</span></span>
+          <span class="reveal-wrap"><span class="reveal-inner" style="transition-delay:0.22s">Select your name to get started</span></span>
         </p>
-        <div class="register-input-group">
-          <input type="text" id="register-name" class="register-input" placeholder="Your full name" maxlength="100" autocomplete="off" spellcheck="false">
+        <div class="register-search-group">
+          <svg class="register-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+          <input type="text" id="register-search" class="register-input register-search-input" placeholder="Search your name..." autocomplete="off" spellcheck="false">
           <div class="register-input-glow"></div>
         </div>
+        <div class="register-name-list" id="register-name-list">
+          <!-- Populated dynamically by JS from GET /api/registrants -->
+        </div>
+        <p class="register-hint" id="register-no-results" style="display:none">No matches found. Contact an admin for manual registration.</p>
         <button class="register-next-btn" id="register-next-btn" disabled>
+          <span>Continue</span>
+          <svg viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+        </button>
+      </div>
+
+      <!-- Step 1b: Admin manual name entry -->
+      <div class="register-step hidden" id="register-step-name-admin">
+        <div class="register-icon-circle admin-register-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="8.5" cy="7" r="4"/><path d="M20 8v6M23 11h-6"/></svg>
+        </div>
+        <h1 class="register-title">
+          <span class="reveal-wrap"><span class="reveal-inner">MANUAL REGISTER</span></span>
+        </h1>
+        <p class="register-sub">
+          <span class="reveal-wrap"><span class="reveal-inner" style="transition-delay:0.22s">Enter the user's full name</span></span>
+        </p>
+        <div class="register-input-group">
+          <input type="text" id="register-name-admin" class="register-input" placeholder="Full name" maxlength="100" autocomplete="off" spellcheck="false">
+          <div class="register-input-glow"></div>
+        </div>
+        <button class="register-next-btn" id="register-next-btn-admin" disabled>
           <span>Continue</span>
           <svg viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
         </button>
@@ -360,6 +386,16 @@
           <div class="admin-btn-text">
             <span class="admin-btn-label">Sync Source</span>
             <span class="admin-btn-desc">Import devices from OneDrive</span>
+          </div>
+        </button>
+
+        <button class="admin-action-btn" id="admin-register-user">
+          <div class="admin-btn-icon register-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="8.5" cy="7" r="4"/><path d="M20 8v6M23 11h-6"/></svg>
+          </div>
+          <div class="admin-btn-text">
+            <span class="admin-btn-label">Register User</span>
+            <span class="admin-btn-desc">Manual card enrollment</span>
           </div>
         </button>
 

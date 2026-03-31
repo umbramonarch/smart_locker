@@ -27,7 +27,11 @@ const S = {
   cdWarnAt:   10,       // show warning when N seconds remain
   lastClickX: null,     // track click origin for circle reveal
   lastClickY: null,
+  adminRegistration: false, // true when admin-initiated manual registration is in progress
 };
+
+/** @type {string|null} Currently selected registrant name from the name list */
+let selectedRegistrantName = null;
 
 /* ============================================================
    DEMO DATA — remove when real API is connected
@@ -49,6 +53,13 @@ const DEMO_DEVICES = [
   { id:6, pm_number:'PM-006', name:'PM-006 Tektronix TBS2104X',  device_type:'Oscilloscope',   serial_number:'TEK-TBS-099', manufacturer:'Tektronix',      model:'TBS2104X',    barcode:'490006', locker_slot:6,  description:null, image_path:null, calibration_due:'2026-08-20', status:'available',   borrower_name:null       },
   { id:7, pm_number:'PM-007', name:'PM-007 Hioki DT4282',        device_type:'Multimeter',     serial_number:null,          manufacturer:'Hioki',          model:'DT4282',      barcode:'490007', locker_slot:7,  description:null, image_path:null, calibration_due:null,         status:'available',   borrower_name:null       },
   { id:8, pm_number:'PM-008', name:'PM-008 Megger MIT485/2',     device_type:'Insulation Tester', serial_number:'MEG-485-002', manufacturer:'Megger',      model:'MIT485/2',    barcode:'490008', locker_slot:8,  description:null, image_path:null, calibration_due:'2026-12-01', status:'maintenance', borrower_name:null       },
+];
+
+/** @type {string[]} Demo registrant names for testing the name list without backend */
+const DEMO_REGISTRANTS = [
+  'Alice Bauer', 'Bob Fischer', 'Clara Hoffmann', 'David Klein',
+  'Eva Meier', 'Felix Schneider', 'Greta Weber', 'Hans Richter',
+  'Irene Schwarz', 'Jan Lehmann', 'Katrin Braun', 'Lars Werner',
 ];
 
 /* ============================================================
@@ -148,6 +159,47 @@ async function apiStartRegistration(name) {
 async function apiCancelRegistration() {
   if (USE_DEMO) return;
   await fetch('/api/register/cancel', { method: 'POST' }).catch(() => {});
+}
+
+/**
+ * Fetch the list of approved registrant names from the backend. These names
+ * come from the "Aktueller Einsatzort" column in the source Excel and are
+ * stored in the registrants table. Already-registered users are excluded.
+ * @returns {Promise<string[]>} Alphabetically sorted array of available names.
+ */
+async function apiGetRegistrants() {
+  if (USE_DEMO) {
+    await sleep(300); // simulate API latency
+    return DEMO_REGISTRANTS;
+  }
+  try {
+    const res = await fetch('/api/registrants');
+    if (!res.ok) return [];
+    const data = await res.json();
+    return data.names || [];
+  } catch (_) { return []; }
+}
+
+/**
+ * Start an admin-initiated manual registration. Unlike the self-service
+ * endpoint, this bypasses the registrant name validation and works while
+ * an admin session is active.
+ * @param {string} name - The display name for the new user.
+ * @returns {Promise<Object>} Result with success boolean and optional detail.
+ */
+async function apiStartAdminRegistration(name) {
+  if (USE_DEMO) {
+    await sleep(400); // simulate API round-trip
+    return { success: true };
+  }
+  try {
+    const res = await fetch('/api/admin/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    });
+    return await res.json();
+  } catch (_) { return { success: false, detail: 'Request failed' }; }
 }
 
 /* ============================================================
@@ -936,39 +988,120 @@ function showRegisterStep(stepId) {
 }
 
 /**
- * Open the user self-registration screen. Resets the name input and countdown
- * state, navigates to the register screen, and focuses the name input field.
+ * Open the registration screen. In self-service mode (default), fetches the
+ * approved name list from the backend and renders it as a searchable,
+ * scrollable list. In admin mode (S.adminRegistration === true), shows a
+ * free-text name input for manual registration of any name.
+ * @returns {Promise<void>}
  */
-function openRegister() {
-  // Reset state
-  document.getElementById('register-name').value = '';
-  document.getElementById('register-next-btn').disabled = true;
-  showRegisterStep('register-step-name');
+async function openRegister() {
+  selectedRegistrantName = null;
   clearInterval(registerCountdownTimer);
-  navigate('register');
-  // Focus the input after the transition
-  setTimeout(() => document.getElementById('register-name').focus(), 800);
+
+  if (S.adminRegistration) {
+    // Admin manual registration — show free-text input
+    const input = document.getElementById('register-name-admin');
+    input.value = '';
+    document.getElementById('register-next-btn-admin').disabled = true;
+    showRegisterStep('register-step-name-admin');
+    navigate('register');
+    setTimeout(() => input.focus(), 800);
+  } else {
+    // Self-service — fetch approved names and show searchable list
+    document.getElementById('register-search').value = '';
+    document.getElementById('register-next-btn').disabled = true;
+    showRegisterStep('register-step-name');
+    navigate('register');
+    const names = await apiGetRegistrants();
+    populateNameList(names);
+    setTimeout(() => document.getElementById('register-search').focus(), 800);
+  }
 }
 
 /**
- * Submit the registration name and advance to the "tap your card" step. Starts
- * a 60-second countdown timer and tells the backend to await the next NFC tap.
- * On timeout or backend error, shows the error step and returns to idle.
+ * Populate the registrant name list with selectable name items. Each name
+ * becomes a button that the user can click to select it for registration.
+ * Items are stagger-animated on entrance.
+ * @param {string[]} names - Array of approved registrant names to display.
+ */
+function populateNameList(names) {
+  const list = document.getElementById('register-name-list');
+  const noResults = document.getElementById('register-no-results');
+  list.innerHTML = '';
+
+  if (names.length === 0) {
+    noResults.style.display = '';
+    noResults.textContent = 'No names available. Contact an admin for registration.';
+    return;
+  }
+  noResults.style.display = 'none';
+
+  names.forEach((name, i) => {
+    const btn = document.createElement('button');
+    btn.className = 'name-item';
+    btn.type = 'button';
+    btn.dataset.name = name;
+    btn.textContent = name;
+    // Stagger entrance animation delay (capped at 0.6s for long lists)
+    btn.style.transitionDelay = `${Math.min(i * 0.03, 0.6)}s`;
+    btn.addEventListener('click', () => { clickSound(); selectRegistrantName(name, btn); });
+    list.appendChild(btn);
+  });
+
+  // Trigger entrance animation after a frame so the initial state is captured
+  requestAnimationFrame(() => {
+    list.querySelectorAll('.name-item').forEach(el => el.classList.add('in'));
+  });
+}
+
+/**
+ * Mark a registrant name as selected. Highlights the clicked item, deselects
+ * any previously selected item, and enables the Continue button.
+ * @param {string} name - The selected person's name.
+ * @param {HTMLElement} btn - The clicked name-item button element.
+ */
+function selectRegistrantName(name, btn) {
+  selectedRegistrantName = name;
+  // Remove selection from all items and highlight the clicked one
+  document.querySelectorAll('.name-item.selected').forEach(el => el.classList.remove('selected'));
+  btn.classList.add('selected');
+  // Enable the continue button now that a name is selected
+  document.getElementById('register-next-btn').disabled = false;
+}
+
+/**
+ * Submit the registration name and advance to the "tap your card" step. In
+ * self-service mode, uses the selected name from the list and calls the
+ * standard registration endpoint. In admin mode, reads the free-text input
+ * and calls the admin registration endpoint. Starts a 60-second countdown.
+ * On timeout or backend error, shows the error step and navigates back.
  * @returns {Promise<void>}
  */
 async function submitRegistrationName() {
-  const nameInput = document.getElementById('register-name');
-  const name = nameInput.value.trim();
-  if (!name) return;
+  let name;
+  let endpoint;
 
-  const btn = document.getElementById('register-next-btn');
-  btn.disabled = true;
+  if (S.adminRegistration) {
+    // Admin manual registration — get name from text input
+    name = document.getElementById('register-name-admin').value.trim();
+    if (!name) return;
+    endpoint = apiStartAdminRegistration;
+  } else {
+    // Self-service — get the name selected from the list
+    name = selectedRegistrantName;
+    if (!name) return;
+    endpoint = apiStartRegistration;
+  }
+
+  // Disable the appropriate continue button to prevent double-submit
+  const btnId = S.adminRegistration ? 'register-next-btn-admin' : 'register-next-btn';
+  document.getElementById(btnId).disabled = true;
 
   document.getElementById('register-confirm-name').textContent = name;
   showRegisterStep('register-step-tap');
 
-  // Start countdown
-  let secs = 60; // must match REGISTRATION_TIMEOUT_SECONDS in app_context.py
+  // Start 60-second countdown timer (must match REGISTRATION_TIMEOUT_SECONDS)
+  let secs = 60;
   const cdEl = document.getElementById('register-countdown');
   cdEl.textContent = secs + 's';
   registerCountdownTimer = setInterval(() => {
@@ -979,34 +1112,57 @@ async function submitRegistrationName() {
       showRegisterStep('register-step-error');
       document.getElementById('register-error-msg').textContent =
         'Registration timed out. Please try again.';
-      setTimeout(() => navigate('idle'), 3500);
+      setTimeout(() => navigateAfterRegistration(), 3500);
     }
   }, 1000);
 
-  // Tell backend to await next NFC tap for registration
-  const result = await apiStartRegistration(name);
+  // Tell backend to await the next NFC tap for registration
+  const result = await endpoint(name);
   if (!result.success) {
     clearInterval(registerCountdownTimer);
     showRegisterStep('register-step-error');
     document.getElementById('register-error-msg').textContent =
       result.detail || result.message || 'Could not start registration.';
-    setTimeout(() => navigate('idle'), 3500);
+    setTimeout(() => navigateAfterRegistration(), 3500);
+  }
+}
+
+/**
+ * Navigate to the appropriate screen after registration completes or fails.
+ * In admin mode, returns to the main menu (admin session persists). In
+ * self-service mode, returns to the idle screen.
+ */
+function navigateAfterRegistration() {
+  if (S.adminRegistration) {
+    S.adminRegistration = false;
+    navigate('main-menu');
+  } else {
+    navigate('idle');
   }
 }
 
 /**
  * Cancel the in-progress registration flow, stop the countdown timer,
- * notify the backend, and navigate back to the idle screen.
+ * notify the backend, and return to the idle screen. If the cancel was
+ * triggered during an admin-initiated registration, the admin session is
+ * ended and the admin state is cleared so the system returns to a clean
+ * idle state.
  */
 function cancelRegistration() {
   clearInterval(registerCountdownTimer);
   apiCancelRegistration();
-  navigate('idle');
+  if (S.adminRegistration) {
+    S.adminRegistration = false;
+    adminSessionActive = false;
+    endSession();
+  } else {
+    navigate('idle');
+  }
 }
 
 /**
  * Handle a successful registration SSE event. Shows the success step with a
- * welcome message and automatically returns to idle after 4 seconds.
+ * welcome message and automatically navigates back after 4 seconds.
  * @param {Object} data - The SSE event data containing the new user info.
  * @param {Object} data.user - The newly registered user object.
  * @param {string} data.user.name - The registered user's display name.
@@ -1017,12 +1173,12 @@ function handleRegistrationSuccess(data) {
   showRegisterStep('register-step-success');
   document.getElementById('register-success-msg').textContent =
     `Welcome, ${data.user.name}! You can now tap your card to log in.`;
-  setTimeout(() => navigate('idle'), 4000);
+  setTimeout(() => navigateAfterRegistration(), 4000);
 }
 
 /**
  * Handle a failed registration SSE event. Shows the error step with the failure
- * reason and automatically returns to idle after 4 seconds.
+ * reason and automatically navigates back after 4 seconds.
  * @param {Object} data - The SSE event data containing the failure reason.
  * @param {string} [data.reason] - Human-readable failure reason string.
  */
@@ -1032,7 +1188,7 @@ function handleRegistrationFailed(data) {
   showRegisterStep('register-step-error');
   document.getElementById('register-error-msg').textContent =
     data.reason || 'Registration failed. Please try again.';
-  setTimeout(() => navigate('idle'), 4000);
+  setTimeout(() => navigateAfterRegistration(), 4000);
 }
 
 /* ============================================================
@@ -1198,6 +1354,19 @@ async function adminSyncSource() {
 }
 
 /**
+ * Admin shortcut: close the admin panel and open the registration screen in
+ * admin mode (free-text name entry, bypasses registrant list validation).
+ * The admin session remains active so the backend accepts the registration.
+ * @returns {Promise<void>}
+ */
+async function adminRegisterUser() {
+  closeAdminPanel();
+  S.adminRegistration = true;
+  await sleep(300); // wait for panel close animation
+  openRegister();
+}
+
+/**
  * End the admin session from the admin panel. Closes the panel, clears the
  * admin session flag, and calls the standard session end flow.
  */
@@ -1246,17 +1415,46 @@ document.getElementById('detail-close').addEventListener('click',  () => { click
 document.getElementById('confirm-btn').addEventListener('click',   () => { clickSound(); confirmAction();    });
 document.getElementById('stay-btn').addEventListener('click',      () => { clickSound(); dismissInactivity(); });
 
-// Registration
+// Registration — self-service (name list selection)
 document.getElementById('idle-register-link').addEventListener('click', () => { clickSound(); openRegister(); });
 document.getElementById('register-cancel-btn').addEventListener('click', () => { clickSound(); cancelRegistration(); });
 document.getElementById('register-next-btn').addEventListener('click', () => { clickSound(); submitRegistrationName(); });
 
-const regInput = document.getElementById('register-name');
-regInput.addEventListener('input', () => {
-  document.getElementById('register-next-btn').disabled = !regInput.value.trim();
+// Registration — search/filter: filter the name list as the user types
+document.getElementById('register-search').addEventListener('input', (e) => {
+  const query = e.target.value.toLowerCase().trim();
+  const items = document.querySelectorAll('.name-item');
+  let visibleCount = 0;
+  items.forEach(item => {
+    const match = item.dataset.name.toLowerCase().includes(query);
+    item.style.display = match ? '' : 'none';
+    if (match) visibleCount++;
+  });
+  // Show "no results" hint when all items are filtered out
+  const noResults = document.getElementById('register-no-results');
+  noResults.style.display = visibleCount === 0 ? '' : 'none';
+  noResults.textContent = 'No matches found. Contact an admin for manual registration.';
+  // Deselect if the selected name is now hidden
+  if (selectedRegistrantName) {
+    const selectedEl = document.querySelector('.name-item.selected');
+    if (selectedEl && selectedEl.style.display === 'none') {
+      selectedEl.classList.remove('selected');
+      selectedRegistrantName = null;
+      document.getElementById('register-next-btn').disabled = true;
+    }
+  }
 });
-regInput.addEventListener('keydown', e => {
-  if (e.key === 'Enter' && regInput.value.trim()) { clickSound(); submitRegistrationName(); }
+
+// Registration — admin manual (free-text input)
+const regAdminInput = document.getElementById('register-name-admin');
+regAdminInput.addEventListener('input', () => {
+  document.getElementById('register-next-btn-admin').disabled = !regAdminInput.value.trim();
+});
+regAdminInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && regAdminInput.value.trim()) { clickSound(); submitRegistrationName(); }
+});
+document.getElementById('register-next-btn-admin').addEventListener('click', () => {
+  clickSound(); submitRegistrationName();
 });
 
 // Admin panel — secret clock tap zone (5× tap within 3s)
@@ -1269,6 +1467,7 @@ document.getElementById('admin-close').addEventListener('click', () => { clickSo
 document.getElementById('admin-goto-borrow').addEventListener('click', () => { clickSound(); adminGotoBorrow(); });
 document.getElementById('admin-goto-return').addEventListener('click', () => { clickSound(); adminGotoReturn(); });
 document.getElementById('admin-sync-source').addEventListener('click', () => { clickSound(); adminSyncSource(); });
+document.getElementById('admin-register-user').addEventListener('click', () => { clickSound(); adminRegisterUser(); });
 document.getElementById('admin-end-session').addEventListener('click', () => { clickSound(); adminEndSession(); });
 
 /* ============================================================

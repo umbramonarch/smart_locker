@@ -87,7 +87,9 @@ class ImportResult:
 
     Tracks how many devices were newly imported, updated with changed
     metadata, left unchanged, skipped (non-locker), or errored during
-    the import process.
+    the import process. Also records how many new registrant names were
+    extracted from the "Aktueller Einsatzort" column and added to the
+    registrants table for self-service registration.
     """
     imported: int = 0
     updated: int = 0
@@ -95,6 +97,7 @@ class ImportResult:
     non_locker_skipped: int = 0
     errors: int = 0
     error_details: list[str] = field(default_factory=list)
+    registrants_added: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -302,6 +305,24 @@ def import_from_source_excel(
     pm_idx = cols["pm"]
     compose_name = cols["name"] is None
 
+    # --- Registrant extraction: collect unique person names from ALL rows ---
+    # The "Aktueller Einsatzort" column lists where each device is deployed.
+    # Values containing "schrank" are locker locations; everything else is a
+    # person's name. We read ALL rows (not just schrank-filtered ones) so that
+    # the registrant list covers employees who have non-locker devices too.
+    registrant_names: set[str] = set()
+    if cols["location"] is not None:
+        for row in rows[1:]:
+            location = _cell_str(row, cols["location"])
+            if location and "schrank" not in location.lower():
+                registrant_names.add(location.strip())
+
+    if registrant_names:
+        logger.info(
+            "Found %d unique registrant name(s) in 'Aktueller Einsatzort' column.",
+            len(registrant_names),
+        )
+
     # --- First pass: build schrank auto-numbering ---
     schrank_row_indices: list[int] = []
     if slot_idx is not None:
@@ -467,6 +488,20 @@ def import_from_source_excel(
                 result.error_details.append(f"PM {d['pm_number']}: {e}")
                 logger.error("Import error for PM %s: %s", d["pm_number"], e)
 
+    # --- Sync registrant names to the registrants table ---
+    # This is done after the device import so both operations share the
+    # same get_session factory. Names are additive — existing registrants
+    # are never removed, only new ones are inserted.
+    if registrant_names:
+        from smart_locker.database.repositories import RegistrantRepository
+
+        try:
+            with get_session() as reg_session:
+                added = RegistrantRepository.add_names(reg_session, registrant_names)
+                result.registrants_added = added
+        except Exception as e:
+            logger.warning("Registrant name sync failed: %s", e)
+
     # Trigger output Excel sync
     if result.imported > 0 or result.updated > 0:
         try:
@@ -475,7 +510,9 @@ def import_from_source_excel(
             logger.warning("Excel sync after import failed: %s", e)
 
     logger.info(
-        "Source import done: %d imported, %d updated, %d unchanged, %d errors.",
+        "Source import done: %d imported, %d updated, %d unchanged, %d errors, "
+        "%d registrants added.",
         result.imported, result.updated, result.unchanged, result.errors,
+        result.registrants_added,
     )
     return result
