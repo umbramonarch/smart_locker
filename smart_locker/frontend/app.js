@@ -12,7 +12,8 @@
 /* ============================================================
    STATE — single source of truth for the UI
 ============================================================ */
-const USE_DEMO = false; // true = demo data, false = real API + SSE
+/** Whether to use demo mode with mock data. Enabled by adding ?demo to the URL. */
+const USE_DEMO = new URLSearchParams(window.location.search).has('demo');
 
 const S = {
   screen:     'idle',   // current screen id
@@ -753,8 +754,12 @@ function openDetail(dev, mode) {
   document.getElementById('detail-type').textContent    = dev.device_type;
   document.getElementById('detail-serial').textContent  = dev.serial_number;
   document.getElementById('detail-img-slot').textContent = slot;
-  document.getElementById('detail-status').textContent  =
+  const statusEl = document.getElementById('detail-status');
+  statusEl.textContent =
     maint ? 'Under Maintenance' : avail ? 'Available' : mine ? 'Borrowed by You' : 'In Use';
+  // Color-code the status: cyan for yours, green for available, amber for maintenance
+  statusEl.style.color =
+    mine ? 'var(--info)' : avail ? 'var(--success)' : maint ? 'var(--warning)' : 'var(--text-muted)';
   document.getElementById('detail-desc').textContent    =
     dev.description || 'No description available.';
 
@@ -1569,7 +1574,14 @@ async function checkExistingSession() {
   } catch (_) { /* server not reachable — stay on idle */ }
 }
 
-if (!USE_DEMO) {
+if (USE_DEMO) {
+  // In demo mode, clicking anywhere on the idle screen simulates a card tap
+  document.getElementById('screen-idle').addEventListener('click', (e) => {
+    // Don't intercept the register link
+    if (e.target.closest('.idle-register-link')) return;
+    handleTap();
+  });
+} else {
   connectSSE();
   checkExistingSession();
 }
