@@ -1,0 +1,145 @@
+<!--
+  File: dashboard.html
+  Description: Read-only network dashboard for the Smart Locker system. Displays
+               device availability, transaction history, and registered users in
+               a clean desktop-friendly layout. Accessible to anyone on the local
+               network at /dashboard — no authentication required. Replaces the
+               old auto-synced Excel file that had Windows file-locking issues.
+  Project: smart_locker/frontend
+  Notes: Loads dashboard.css for light-theme styling and dashboard.js for data
+         fetching, rendering, 30-second auto-refresh, column sorting, and status
+         filtering. Uses the same brand accent (#00d4ff) as the kiosk UI.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Smart Locker Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="dashboard.css">
+</head>
+<body>
+
+  <!-- Header bar with title and refresh indicator -->
+  <header class="header">
+    <div class="header-left">
+      <h1 class="header-title">Smart Locker</h1>
+      <span class="header-subtitle">Equipment Dashboard</span>
+    </div>
+    <div class="header-right">
+      <span class="refresh-indicator" id="refresh-indicator">
+        <span class="refresh-dot"></span>
+        Live &mdash; refreshes every 30s
+      </span>
+      <span class="last-updated" id="last-updated"></span>
+    </div>
+  </header>
+
+  <main class="main">
+
+    <!-- Device Availability Section -->
+    <section class="section" id="section-devices">
+      <div class="section-header" data-toggle="devices">
+        <h2 class="section-title">Device Availability</h2>
+        <div class="section-controls">
+          <div class="filter-group" id="status-filters">
+            <button class="filter-btn active" data-filter="all">All</button>
+            <button class="filter-btn" data-filter="available">Available</button>
+            <button class="filter-btn" data-filter="borrowed">Borrowed</button>
+            <button class="filter-btn" data-filter="maintenance">Maintenance</button>
+          </div>
+          <span class="section-count" id="device-count"></span>
+          <button class="collapse-btn" aria-label="Toggle section">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+          </button>
+        </div>
+      </div>
+      <div class="section-body" id="devices-body">
+        <div class="table-wrap">
+          <table class="data-table" id="devices-table">
+            <thead>
+              <tr>
+                <th data-sort="locker_slot">Slot</th>
+                <th data-sort="pm_number">PM Number</th>
+                <th data-sort="name">Name</th>
+                <th data-sort="device_type">Type</th>
+                <th data-sort="status">Status</th>
+                <th data-sort="borrower_name">Borrower</th>
+                <th data-sort="calibration_due">Calibration Due</th>
+              </tr>
+            </thead>
+            <tbody id="devices-tbody"></tbody>
+          </table>
+        </div>
+        <p class="empty-msg" id="devices-empty" style="display:none">No devices found.</p>
+      </div>
+    </section>
+
+    <!-- Transactions Section -->
+    <section class="section collapsed" id="section-transactions">
+      <div class="section-header" data-toggle="transactions">
+        <h2 class="section-title">Transaction History</h2>
+        <div class="section-controls">
+          <span class="section-count" id="txn-count"></span>
+          <button class="collapse-btn" aria-label="Toggle section">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+          </button>
+        </div>
+      </div>
+      <div class="section-body" id="transactions-body">
+        <div class="table-wrap">
+          <table class="data-table" id="transactions-table">
+            <thead>
+              <tr>
+                <th data-sort="timestamp">Date</th>
+                <th data-sort="user_name">User</th>
+                <th data-sort="device_name">Device</th>
+                <th data-sort="transaction_type">Type</th>
+                <th data-sort="performed_by">Performed By</th>
+                <th data-sort="notes">Notes</th>
+              </tr>
+            </thead>
+            <tbody id="transactions-tbody"></tbody>
+          </table>
+        </div>
+        <p class="empty-msg" id="txn-empty" style="display:none">No transactions recorded.</p>
+      </div>
+    </section>
+
+    <!-- Users Section -->
+    <section class="section collapsed" id="section-users">
+      <div class="section-header" data-toggle="users">
+        <h2 class="section-title">Registered Users</h2>
+        <div class="section-controls">
+          <span class="section-count" id="user-count"></span>
+          <button class="collapse-btn" aria-label="Toggle section">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+          </button>
+        </div>
+      </div>
+      <div class="section-body" id="users-body">
+        <div class="table-wrap">
+          <table class="data-table" id="users-table">
+            <thead>
+              <tr>
+                <th data-sort="display_name">Name</th>
+                <th data-sort="role">Role</th>
+                <th data-sort="is_active">Active</th>
+                <th data-sort="registered_at">Registered At</th>
+              </tr>
+            </thead>
+            <tbody id="users-tbody"></tbody>
+          </table>
+        </div>
+        <p class="empty-msg" id="users-empty" style="display:none">No users registered.</p>
+      </div>
+    </section>
+
+  </main>
+
+  <script src="dashboard.js"></script>
+</body>
+</html>

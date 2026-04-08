@@ -1741,6 +1741,8 @@ body::after {
 .admin-action-btn:nth-child(2) { --i: 1; }
 .admin-action-btn:nth-child(3) { --i: 2; }
 .admin-action-btn:nth-child(4) { --i: 3; }
+.admin-action-btn:nth-child(5) { --i: 4; }
+.admin-action-btn:nth-child(6) { --i: 5; }
 
 .admin-action-btn:hover {
   border-color: rgba(245,158,11,0.3);

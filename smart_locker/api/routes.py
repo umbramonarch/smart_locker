@@ -3,20 +3,22 @@ File: routes.py
 Description: REST API endpoints and SSE event stream for the Smart Locker kiosk.
              Provides session management, device listing, borrow/return operations,
              user self-registration (with registrant name validation), admin-only
-             manual registration, registrant list retrieval, and source sync
-             endpoints.
+             manual registration, registrant list retrieval, source sync, public
+             dashboard data endpoints, and an admin-only Excel export download.
 Project: smart_locker/api
 Notes: All device/session endpoints require an active kiosk session enforced by
        the require_session dependency. SSE stream at /api/events pushes NFC and
        session events to the browser. Self-registration validates against the
        approved registrants list; admin registration bypasses this check.
+       Dashboard endpoints under /api/dashboard/ are public (no auth) — they
+       replace the old auto-synced Excel file for network-wide device visibility.
 """
 
 import asyncio
 import json
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -26,7 +28,13 @@ from smart_locker.api.app_context import PendingRegistration
 from smart_locker.auth.session_manager import UserSession
 from smart_locker.database.engine import get_session_factory
 from sqlalchemy import select
-from smart_locker.database.models import DeviceStatus, User, UserRole
+from smart_locker.database.models import (
+    Device,
+    DeviceStatus,
+    TransactionLog,
+    User,
+    UserRole,
+)
 from smart_locker.database.repositories import DeviceRepository, RegistrantRepository
 from smart_locker.services.locker_service import LockerService
 
@@ -533,3 +541,150 @@ def trigger_source_sync(
         "unchanged": result.unchanged,
         "errors": result.errors,
     }
+
+
+@router.get("/api/admin/export-excel")
+def export_excel(user_session: UserSession = Depends(require_session)):
+    """Download the full database as an Excel workbook (admin only).
+
+    Generates a three-sheet ``.xlsx`` file (Devices, Transactions, Users) in
+    memory and returns it as an HTTP file download. No file is written to disk,
+    so there are no Windows file-locking issues. This replaces the old automatic
+    Excel sync that wrote to ``SMART_LOCKER_EXCEL_PATH`` on every DB change.
+
+    Args:
+        user_session: The active admin session (injected by ``require_session``).
+
+    Returns:
+        Response: Binary ``.xlsx`` content with ``Content-Disposition: attachment``
+                  header so the browser triggers a file download.
+
+    Raises:
+        HTTPException: 403 if the caller is not an admin.
+    """
+    if user_session.user.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Admin access required.")
+
+    from smart_locker.database.engine import get_engine
+    from smart_locker.sync.excel_sync import export_to_excel_bytes
+
+    xlsx_bytes = export_to_excel_bytes(get_engine())
+    return Response(
+        content=xlsx_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=smart_locker_data.xlsx"},
+    )
+
+
+# --- Dashboard Endpoints (public, no auth) ----------------------------------
+
+@router.get("/api/dashboard/devices")
+def dashboard_devices(db: Session = Depends(get_db)):
+    """Public device inventory for the network dashboard.
+
+    Returns all devices with their current status and borrower name. Unlike
+    the kiosk ``GET /api/devices`` endpoint, this requires no active session
+    — it replaces the old shared Excel file that anyone on the network could
+    open. Devices are sorted by locker slot then name.
+
+    Args:
+        db: Active database session (injected by ``get_db``).
+
+    Returns:
+        list[dict]: One dict per device with inventory and status fields.
+                    Sensitive fields (internal IDs, image paths) are excluded.
+    """
+    devices = db.execute(
+        select(Device).order_by(Device.locker_slot, Device.name)
+    ).scalars().all()
+
+    result = []
+    for d in devices:
+        # Resolve borrower display name from the relationship
+        borrower_name = None
+        if d.status == DeviceStatus.BORROWED and d.current_borrower is not None:
+            borrower_name = d.current_borrower.display_name
+
+        result.append({
+            "pm_number": d.pm_number,
+            "name": d.name,
+            "device_type": d.device_type,
+            "manufacturer": d.manufacturer,
+            "model": d.model,
+            "serial_number": d.serial_number,
+            "barcode": d.barcode,
+            "locker_slot": d.locker_slot,
+            "status": d.status.value,
+            "borrower_name": borrower_name,
+            "calibration_due": d.calibration_due.isoformat() if d.calibration_due else None,
+            "description": d.description,
+        })
+
+    return result
+
+
+@router.get("/api/dashboard/transactions")
+def dashboard_transactions(db: Session = Depends(get_db)):
+    """Public transaction history for the network dashboard.
+
+    Returns the most recent 500 borrow/return transactions in reverse
+    chronological order. No session required — this replaces the
+    Transactions sheet from the old shared Excel file.
+
+    Args:
+        db: Active database session (injected by ``get_db``).
+
+    Returns:
+        list[dict]: One dict per transaction with timestamp, user, device,
+                    type, performed-by (for admin returns), and notes.
+    """
+    transactions = db.execute(
+        select(TransactionLog)
+        .order_by(TransactionLog.timestamp.desc())
+        .limit(500)
+    ).scalars().all()
+
+    result = []
+    for t in transactions:
+        result.append({
+            "timestamp": t.timestamp.strftime("%Y-%m-%d %H:%M:%S") if t.timestamp else None,
+            "user_name": t.user.display_name if t.user else "",
+            "device_name": t.device.name if t.device else "",
+            "transaction_type": t.transaction_type.value,
+            "performed_by": t.performed_by.display_name if t.performed_by else "",
+            "notes": t.notes,
+        })
+
+    return result
+
+
+@router.get("/api/dashboard/users")
+def dashboard_users(db: Session = Depends(get_db)):
+    """Public registered-users list for the network dashboard.
+
+    Returns all registered users with their role and registration date.
+    Sensitive fields (uid_hmac, encrypted_card_uid) are never included.
+    No session required — this replaces the Users sheet from the old
+    shared Excel file.
+
+    Args:
+        db: Active database session (injected by ``get_db``).
+
+    Returns:
+        list[dict]: One dict per user with display name, role, active
+                    status, and registration timestamp.
+    """
+    users = db.execute(
+        select(User).order_by(User.display_name)
+    ).scalars().all()
+
+    result = []
+    for u in users:
+        result.append({
+            "display_name": u.display_name,
+            "role": u.role.value,
+            "is_active": u.is_active,
+            "registered_at": u.created_at.strftime("%Y-%m-%d %H:%M:%S") if u.created_at else None,
+        })
+
+    return result

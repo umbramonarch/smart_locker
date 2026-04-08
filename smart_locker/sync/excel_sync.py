@@ -1,59 +1,56 @@
 """
 File: excel_sync.py
-Description: Automatic Excel sync — exports device, transaction, and user data
-             on every database change. Registers SQLAlchemy after_flush and
-             after_commit event listeners so the Excel file stays in sync
-             without manual intervention.
+Description: On-demand Excel export of device, transaction, and user data.
+             Provides two export modes: ``export_to_excel()`` writes a styled
+             three-sheet workbook to disk (used by CLI scripts like
+             ``update_device.py``), and ``export_to_excel_bytes()`` returns
+             the same workbook as raw bytes (used by the admin download
+             endpoint to serve the file as an HTTP response without touching
+             disk).
 Project: smart_locker/sync
-Notes: If the output file is locked (open in Excel), the export writes to a
-       temporary file in the same directory, then attempts to replace the
-       target. If the target is still locked, the pending file is kept and
-       the next export attempt will try again. Three sheets are exported:
-       Devices, Transactions, and Users.
+Notes: Both public functions delegate to ``_build_workbook()`` which queries
+       the database and assembles the openpyxl Workbook in memory. The disk-
+       writing path uses a temp file + atomic replace for crash safety, with
+       retry logic to handle Windows file locking when the target is open in
+       Excel. Three sheets are produced: Devices, Transactions, and Users.
 """
 
+import io
 import logging
+import os
 import tempfile
+import time
 from pathlib import Path
 
 from openpyxl import Workbook
-from openpyxl.styles import Alignment, Font, PatternFill
-from sqlalchemy import event, select
+from openpyxl.styles import Font, PatternFill
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from smart_locker.database.models import Device, TransactionLog, User
 
 logger = logging.getLogger(__name__)
 
-# Module-level references set by register_auto_sync() — used by the event
-# listeners to call export_to_excel() without passing engine/path each time
-_engine_ref = None          # SQLAlchemy Engine instance
-_sync_path: Path | None = None  # Absolute path to the output Excel file
 
+def _build_workbook(engine) -> Workbook:
+    """Query the database and build a styled three-sheet Excel workbook.
 
-def export_to_excel(engine=None, output_path: str | Path | None = None) -> None:
-    """Export current device, transaction, and user data to an Excel file.
+    Creates sheets for Devices (inventory with status and borrower),
+    Transactions (borrow/return history in reverse chronological order),
+    and Users (registered users with role and registration date). Each
+    sheet has bold blue headers and auto-sized column widths.
 
-    Generates a three-sheet workbook (Devices, Transactions, Users) with
-    styled headers and auto-sized columns. Can be called standalone with
-    explicit engine/path, or uses the module-level references set by
-    ``register_auto_sync()``.
+    This is a private helper — callers should use ``export_to_excel()``
+    (disk) or ``export_to_excel_bytes()`` (in-memory bytes) instead.
 
     Args:
-        engine: SQLAlchemy Engine to query data from. Falls back to the
-                module-level ``_engine_ref`` if None.
-        output_path: Destination file path. Falls back to the module-level
-                     ``_sync_path`` if None.
+        engine: SQLAlchemy Engine instance to query data from.
 
     Returns:
-        None. The Excel file is written to disk.
+        An openpyxl Workbook ready to be saved to disk or serialised
+        to bytes.
     """
-    eng = engine or _engine_ref
-    path = Path(output_path) if output_path else _sync_path
-    if eng is None or path is None:
-        return
-
-    with Session(eng) as session:
+    with Session(engine) as session:
         devices = session.execute(
             select(Device).order_by(Device.locker_slot, Device.name)
         ).scalars().all()
@@ -62,9 +59,19 @@ def export_to_excel(engine=None, output_path: str | Path | None = None) -> None:
             select(TransactionLog).order_by(TransactionLog.timestamp.desc())
         ).scalars().all()
 
+        users = session.execute(
+            select(User).order_by(User.display_name)
+        ).scalars().all()
+
         wb = Workbook()
 
-        # --- Devices sheet ---
+        # Shared header styling — bold white text on steel-blue background
+        header_font = Font(bold=True)
+        header_fill = PatternFill(
+            start_color="D9E1F2", end_color="D9E1F2", fill_type="solid"
+        )
+
+        # --- Devices sheet ---------------------------------------------------
         ws = wb.active
         ws.title = "Devices"
         headers = [
@@ -73,10 +80,6 @@ def export_to_excel(engine=None, output_path: str | Path | None = None) -> None:
             "Current Borrower", "Description", "Calibration Due",
         ]
         ws.append(headers)
-
-        # Header styling
-        header_font = Font(bold=True)
-        header_fill = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
         for cell in ws[1]:
             cell.font = header_font
             cell.fill = header_fill
@@ -100,19 +103,13 @@ def export_to_excel(engine=None, output_path: str | Path | None = None) -> None:
                 d.calibration_due,
             ])
 
-        # Auto-width columns
-        for col in ws.columns:
-            max_len = 0
-            col_letter = col[0].column_letter
-            for cell in col:
-                val = str(cell.value) if cell.value is not None else ""
-                max_len = max(max_len, len(val))
-            # +3 for padding, capped at 40 to prevent overly wide columns
-            ws.column_dimensions[col_letter].width = min(max_len + 3, 40)
+        _auto_width(ws)
 
-        # --- Transactions sheet ---
+        # --- Transactions sheet -----------------------------------------------
         ws2 = wb.create_sheet("Transactions")
-        txn_headers = ["Date", "User", "Device", "Type", "Performed By", "Notes"]
+        txn_headers = [
+            "Date", "User", "Device", "Type", "Performed By", "Notes",
+        ]
         ws2.append(txn_headers)
         for cell in ws2[1]:
             cell.font = header_font
@@ -131,21 +128,13 @@ def export_to_excel(engine=None, output_path: str | Path | None = None) -> None:
                 t.notes,
             ])
 
-        for col in ws2.columns:
-            max_len = 0
-            col_letter = col[0].column_letter
-            for cell in col:
-                val = str(cell.value) if cell.value is not None else ""
-                max_len = max(max_len, len(val))
-            ws2.column_dimensions[col_letter].width = min(max_len + 3, 40)
+        _auto_width(ws2)
 
-        # --- Users sheet ---
-        users = session.execute(
-            select(User).order_by(User.display_name)
-        ).scalars().all()
-
+        # --- Users sheet ------------------------------------------------------
         ws3 = wb.create_sheet("Users")
-        user_headers = ["ID", "Display Name", "Role", "Active", "Registered At"]
+        user_headers = [
+            "ID", "Display Name", "Role", "Active", "Registered At",
+        ]
         ws3.append(user_headers)
         for cell in ws3[1]:
             cell.font = header_font
@@ -160,87 +149,121 @@ def export_to_excel(engine=None, output_path: str | Path | None = None) -> None:
                 u.created_at.strftime("%Y-%m-%d %H:%M:%S") if u.created_at else "",
             ])
 
-        for col in ws3.columns:
-            max_len = 0
-            col_letter = col[0].column_letter
-            for cell in col:
-                val = str(cell.value) if cell.value is not None else ""
-                max_len = max(max_len, len(val))
-            ws3.column_dimensions[col_letter].width = min(max_len + 3, 40)
+        _auto_width(ws3)
 
-        # Write to a temp file first, then replace the target. This avoids
-        # partial writes and works around Windows file locking when the
-        # output file is open in Excel.
-        tmp_fd, tmp_path_str = tempfile.mkstemp(
-            suffix=".xlsx", dir=path.parent
-        )
-        import os
-        os.close(tmp_fd)
-        tmp_path = Path(tmp_path_str)
-
-        try:
-            wb.save(tmp_path)
-            # Attempt atomic replace of the target file
-            tmp_path.replace(path)
-            logger.debug(
-                "Excel sync: %s updated (%d devices, %d transactions)",
-                path, len(devices), len(transactions),
-            )
-        except PermissionError:
-            # Target is locked by Excel — keep the temp file so the data
-            # is preserved on disk. The next export will overwrite it.
-            logger.warning(
-                "Excel sync: %s is locked (open in Excel). "
-                "Latest data written to %s instead.",
-                path, tmp_path,
-            )
+    return wb
 
 
-def register_auto_sync(engine, output_path: str | Path) -> None:
-    """Register SQLAlchemy event listeners for automatic Excel export.
+def _auto_width(ws) -> None:
+    """Auto-size every column in a worksheet based on cell content length.
 
-    After any commit that touches Device or TransactionLog rows, the Excel
-    file is regenerated. Also performs an initial export immediately.
+    Iterates all columns, measures the longest string value, and sets
+    the column width to that length plus padding (capped at 40
+    characters to prevent excessively wide columns).
+
+    Args:
+        ws: An openpyxl Worksheet to resize.
+
+    Returns:
+        None. Column widths are modified in place.
     """
-    global _engine_ref, _sync_path
-    _engine_ref = engine
-    _sync_path = Path(output_path)
+    for col in ws.columns:
+        max_len = 0
+        col_letter = col[0].column_letter
+        for cell in col:
+            val = str(cell.value) if cell.value is not None else ""
+            max_len = max(max_len, len(val))
+        # +3 for padding, capped at 40 to prevent overly wide columns
+        ws.column_dimensions[col_letter].width = min(max_len + 3, 40)
 
-    @event.listens_for(Session, "after_flush")
-    def _mark_sync_needed(session, flush_context):
-        """Flag the session if any relevant model was modified.
 
-        Args:
-            session: The SQLAlchemy session that just flushed.
-            flush_context: Flush context provided by the event system.
+def export_to_excel(engine, output_path: str | Path) -> None:
+    """Export current data to an Excel file on disk.
 
-        Returns:
-            None. Sets ``session.info["_excel_sync"]`` to True if relevant.
-        """
-        for obj in list(session.new) + list(session.dirty) + list(session.deleted):
-            if isinstance(obj, (Device, TransactionLog, User)):
-                session.info["_excel_sync"] = True
-                return
+    Builds the workbook via ``_build_workbook()``, writes it to a
+    temporary file in the same directory as the target, then atomically
+    replaces the target. If the target is locked (e.g., open in Excel),
+    retries up to 3 times with a 1-second delay before giving up.
 
-    @event.listens_for(Session, "after_commit")
-    def _sync_on_commit(session):
-        """Export to Excel if the commit included relevant changes.
+    Used by CLI scripts (``scripts/update_device.py``) that need to
+    produce a file on disk after modifying the database.
 
-        Args:
-            session: The SQLAlchemy session that just committed.
+    Args:
+        engine: SQLAlchemy Engine instance to query data from.
+        output_path: Destination file path for the Excel workbook.
 
-        Returns:
-            None. Triggers ``export_to_excel()`` if flagged by ``_mark_sync_needed``.
-        """
-        if session.info.pop("_excel_sync", False):
-            try:
-                export_to_excel()
-            except Exception as e:
-                logger.warning("Excel sync failed after commit: %s", e)
+    Returns:
+        None. The Excel file is written to disk at ``output_path``.
+    """
+    path = Path(output_path)
+    wb = _build_workbook(engine)
 
-    # Initial export so the file exists on startup
+    # Write to a temp file first, then atomically replace the target.
+    # This avoids partial writes if the process is interrupted mid-save.
+    tmp_fd, tmp_path_str = tempfile.mkstemp(suffix=".xlsx", dir=path.parent)
+    os.close(tmp_fd)
+    tmp_path = Path(tmp_path_str)
+
     try:
-        export_to_excel()
-        logger.info("Excel sync registered: %s", _sync_path)
-    except Exception as e:
-        logger.warning("Excel sync initial export failed: %s", e)
+        wb.save(tmp_path)
+
+        # Retry the atomic replace up to 3 times — the file may be
+        # momentarily locked by Excel (e.g., during an auto-save cycle)
+        # but released within a second or two.
+        max_retries = 3
+        retry_delay_seconds = 1.0
+        for attempt in range(1, max_retries + 1):
+            try:
+                tmp_path.replace(path)
+                logger.debug("Excel export: %s written successfully", path)
+                # Replace succeeded — exit the retry loop
+                break
+            except PermissionError:
+                if attempt < max_retries:
+                    # File is locked — wait briefly and retry in case
+                    # Excel releases the lock (e.g., after auto-save)
+                    logger.debug(
+                        "Excel export: %s is locked, retrying in %ss "
+                        "(attempt %d/%d)",
+                        path, retry_delay_seconds, attempt, max_retries,
+                    )
+                    time.sleep(retry_delay_seconds)
+                else:
+                    # All retries exhausted — log warning and give up
+                    logger.warning(
+                        "Excel export: %s is locked (open in Excel). "
+                        "Export skipped.",
+                        path,
+                    )
+    finally:
+        # Always clean up the temp file — never leave orphaned files in
+        # the output directory regardless of success or failure
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except OSError:
+                # Temp file removal is best-effort; may fail if another
+                # process grabbed it, but this is not a critical error
+                pass
+
+
+def export_to_excel_bytes(engine) -> bytes:
+    """Export current data as an in-memory Excel file (raw bytes).
+
+    Builds the same three-sheet workbook as ``export_to_excel()`` but
+    serialises it to a ``BytesIO`` buffer instead of writing to disk.
+    This avoids all file-locking issues and is used by the admin
+    download endpoint to return the workbook as an HTTP response.
+
+    Args:
+        engine: SQLAlchemy Engine instance to query data from.
+
+    Returns:
+        Raw bytes of the ``.xlsx`` file, suitable for streaming in an
+        HTTP response with content-type
+        ``application/vnd.openxmlformats-officedocument.spreadsheetml.sheet``.
+    """
+    wb = _build_workbook(engine)
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()

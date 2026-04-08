@@ -18,7 +18,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from config.logging_config import setup_logging
 from config.settings import (
-    EXCEL_SYNC_PATH,
     PHOTO_INPUT_PATH,
     PHOTO_SERVE_DIR,
     SESSION_TIMEOUT_SECONDS,
@@ -58,21 +57,18 @@ class SmartLockerApp:
     def run(self) -> None:
         """Start the application main loop.
 
-        Initializes logging, the database, and Excel auto-sync listeners.
-        If a source Excel path is configured, runs an immediate import on
-        startup (so the database is current before the first user interaction),
-        starts a file watcher for live source changes, and schedules a daily
-        cron import as a safety net. Then starts the NFC reader and enters
-        a blocking event loop until Ctrl+C is pressed.
+        Initializes logging and the database. If a source Excel path is
+        configured, runs an immediate import on startup (so the database
+        is current before the first user interaction), starts a file
+        watcher for live source changes, and schedules a daily cron import
+        as a safety net. Then starts the NFC reader and enters a blocking
+        event loop until Ctrl+C is pressed.
 
         Returns:
             None.
         """
         setup_logging()
         init_db()
-
-        from smart_locker.sync.excel_sync import register_auto_sync
-        register_auto_sync(get_engine(), EXCEL_SYNC_PATH)
 
         if SOURCE_EXCEL_PATH:
             from smart_locker.sync.scheduler import start_scheduler
@@ -253,12 +249,12 @@ def main() -> None:
 def run_server() -> None:
     """Web server mode — FastAPI + uvicorn with NFC bridge.
 
-    Initializes logging, the database, and Excel auto-sync listeners.
-    If a source Excel path is configured, runs an immediate import on
-    startup (so the database is current before the first request),
-    starts a file watcher for live source changes, and schedules a daily
-    cron import as a safety net. Then creates and runs the FastAPI
-    application with uvicorn. This is the default mode.
+    Initializes logging and the database. If a source Excel path is
+    configured, runs an immediate import on startup (so the database
+    is current before the first request), starts a file watcher for
+    live source changes, and schedules a daily cron import as a safety
+    net. Then creates and runs the FastAPI application with uvicorn.
+    This is the default mode.
 
     Returns:
         None.
@@ -270,9 +266,6 @@ def run_server() -> None:
 
     setup_logging()
     init_db()
-
-    from smart_locker.sync.excel_sync import register_auto_sync
-    register_auto_sync(get_engine(), EXCEL_SYNC_PATH)
 
     if SOURCE_EXCEL_PATH:
         from smart_locker.sync.scheduler import start_scheduler

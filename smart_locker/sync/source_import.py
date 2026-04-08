@@ -72,8 +72,7 @@ CALIBRATION_CANDIDATES = [
     "nächste kalibrierung", "kalibrierung", "kalibrierdatum",
 ]
 LOCATION_CANDIDATES = [
-    "aktueller einsatzort", "einsatzort", "current location", "location",
-    "standort", "aktueller standort", "current deployment",
+    "aktueller einsatzort",
 ]
 
 

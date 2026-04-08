@@ -1,0 +1,429 @@
+/**
+ * File: dashboard.css
+ * Description: Light-theme styles for the Smart Locker network dashboard.
+ *              Designed for desktop/laptop viewing (not the kiosk touch
+ *              display). Uses the same brand accent colour (#00d4ff) as
+ *              the kiosk UI for visual consistency, with a clean white
+ *              background optimised for readability on standard monitors.
+ * Project: smart_locker/frontend
+ * Notes: Responsive down to ~600px for tablet/phone viewers. Includes
+ *        @media print rules for clean paper output. Table rows alternate
+ *        shading for scanability. Status badges are colour-coded:
+ *        green (available), amber (borrowed), gray (maintenance).
+ */
+
+/* --- Reset & base -------------------------------------------------------- */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+:root {
+  /* Brand accent — matches kiosk UI */
+  --accent: #00b8d9;
+  --accent-light: #e0f7fa;
+
+  /* Surface palette — light theme for desktop readability */
+  --bg: #f4f6f8;
+  --surface: #ffffff;
+  --border: #e2e8f0;
+  --text: #1e293b;
+  --text-muted: #64748b;
+
+  /* Status badge colours */
+  --status-available: #16a34a;
+  --status-available-bg: #dcfce7;
+  --status-borrowed: #d97706;
+  --status-borrowed-bg: #fef3c7;
+  --status-maintenance: #6b7280;
+  --status-maintenance-bg: #f3f4f6;
+
+  /* Typography */
+  --font-heading: 'Space Grotesk', system-ui, sans-serif;
+  --font-body: 'Inter', system-ui, sans-serif;
+}
+
+html {
+  font-size: 14px;
+}
+
+body {
+  font-family: var(--font-body);
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.5;
+  min-height: 100vh;
+}
+
+/* --- Header -------------------------------------------------------------- */
+.header {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  padding: 1rem 2rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.header-left {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+}
+
+.header-title {
+  font-family: var(--font-heading);
+  font-size: 1.4rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.header-subtitle {
+  font-size: 0.9rem;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+}
+
+.refresh-indicator {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.refresh-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--status-available);
+  animation: pulse 2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.last-updated {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+/* --- Main content -------------------------------------------------------- */
+.main {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 1.5rem 2rem 3rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+/* --- Section cards ------------------------------------------------------- */
+.section {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.85rem 1.25rem;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.15s;
+}
+
+.section-header:hover {
+  background: var(--bg);
+}
+
+.section-title {
+  font-family: var(--font-heading);
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+
+.section-controls {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.section-count {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+/* Collapse toggle arrow rotation */
+.collapse-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-muted);
+  padding: 0.2rem;
+  display: flex;
+  transition: transform 0.25s ease;
+}
+
+.section.collapsed .collapse-btn {
+  transform: rotate(-90deg);
+}
+
+/* Hide section body when collapsed */
+.section.collapsed .section-body {
+  display: none;
+}
+
+/* --- Filter buttons (device status) -------------------------------------- */
+.filter-group {
+  display: flex;
+  gap: 0.35rem;
+}
+
+.filter-btn {
+  font-family: var(--font-body);
+  font-size: 0.75rem;
+  font-weight: 500;
+  padding: 0.3rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.filter-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.filter-btn.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+/* --- Tables -------------------------------------------------------------- */
+.table-wrap {
+  overflow-x: auto;
+}
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.data-table th {
+  text-align: left;
+  padding: 0.65rem 1rem;
+  font-weight: 600;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-muted);
+  background: var(--bg);
+  border-bottom: 2px solid var(--border);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  position: relative;
+}
+
+/* Sort arrow indicator */
+.data-table th::after {
+  content: '';
+  display: inline-block;
+  margin-left: 0.4rem;
+  opacity: 0.3;
+}
+
+.data-table th.sort-asc::after {
+  content: '\25B2';
+  opacity: 0.8;
+}
+
+.data-table th.sort-desc::after {
+  content: '\25BC';
+  opacity: 0.8;
+}
+
+.data-table th:hover {
+  color: var(--accent);
+}
+
+.data-table td {
+  padding: 0.6rem 1rem;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+
+/* Alternating row shading for scanability */
+.data-table tbody tr:nth-child(even) {
+  background: #f8fafc;
+}
+
+.data-table tbody tr:hover {
+  background: var(--accent-light);
+}
+
+/* --- Status badges ------------------------------------------------------- */
+.status-badge {
+  display: inline-block;
+  padding: 0.2rem 0.55rem;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.status-badge.available {
+  background: var(--status-available-bg);
+  color: var(--status-available);
+}
+
+.status-badge.borrowed {
+  background: var(--status-borrowed-bg);
+  color: var(--status-borrowed);
+}
+
+.status-badge.maintenance {
+  background: var(--status-maintenance-bg);
+  color: var(--status-maintenance);
+}
+
+/* Transaction type badges */
+.type-badge {
+  display: inline-block;
+  padding: 0.2rem 0.55rem;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.type-badge.borrow {
+  background: var(--status-borrowed-bg);
+  color: var(--status-borrowed);
+}
+
+.type-badge.return {
+  background: var(--status-available-bg);
+  color: var(--status-available);
+}
+
+/* Role badges */
+.role-badge {
+  display: inline-block;
+  padding: 0.2rem 0.55rem;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.role-badge.admin {
+  background: #ede9fe;
+  color: #7c3aed;
+}
+
+.role-badge.user {
+  background: var(--accent-light);
+  color: var(--accent);
+}
+
+/* Active/inactive indicator */
+.active-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 0.35rem;
+  vertical-align: middle;
+}
+
+.active-dot.yes {
+  background: var(--status-available);
+}
+
+.active-dot.no {
+  background: var(--status-maintenance);
+}
+
+/* --- Empty state --------------------------------------------------------- */
+.empty-msg {
+  text-align: center;
+  padding: 2rem;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+/* --- Responsive ---------------------------------------------------------- */
+@media (max-width: 768px) {
+  .header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.5rem;
+    padding: 1rem;
+  }
+
+  .main {
+    padding: 1rem;
+  }
+
+  .section-header {
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+
+  .filter-group {
+    order: 3;
+    width: 100%;
+  }
+}
+
+/* --- Print --------------------------------------------------------------- */
+@media print {
+  .header {
+    position: static;
+    border-bottom: 2px solid #000;
+  }
+
+  .refresh-indicator,
+  .filter-group,
+  .collapse-btn {
+    display: none !important;
+  }
+
+  .section.collapsed .section-body {
+    display: block !important;
+  }
+
+  .data-table tbody tr:hover {
+    background: transparent;
+  }
+
+  .section {
+    break-inside: avoid;
+  }
+}

@@ -1354,6 +1354,47 @@ async function adminSyncSource() {
 }
 
 /**
+ * Download the full database as an Excel workbook from the admin panel.
+ * Fetches the binary .xlsx from the admin export endpoint, creates a
+ * temporary blob URL, and triggers a browser download. Shows progress
+ * feedback on the button and a toast on completion or failure.
+ * @returns {Promise<void>}
+ */
+async function adminExportExcel() {
+  const btn = document.getElementById('admin-export-excel');
+  const label = btn.querySelector('.admin-btn-label');
+  const origText = label.textContent;
+  label.textContent = 'Downloading\u2026';
+  btn.style.pointerEvents = 'none';
+
+  try {
+    const res = await fetch('/api/admin/export-excel');
+    if (!res.ok) {
+      const data = await res.json();
+      showToast(data.detail || 'Export failed', 'error');
+      return;
+    }
+    /* Convert the response body to a blob, create a temporary download
+       link, click it to trigger the browser's save dialog, then clean up. */
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'smart_locker_data.xlsx';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    showToast('Excel exported', 'success');
+  } catch (_) {
+    showToast('Export request failed', 'error');
+  } finally {
+    label.textContent = origText;
+    btn.style.pointerEvents = '';
+  }
+}
+
+/**
  * Admin shortcut: close the admin panel and open the registration screen in
  * admin mode (free-text name entry, bypasses registrant list validation).
  * The admin session remains active so the backend accepts the registration.
@@ -1468,6 +1509,7 @@ document.getElementById('admin-goto-borrow').addEventListener('click', () => { c
 document.getElementById('admin-goto-return').addEventListener('click', () => { clickSound(); adminGotoReturn(); });
 document.getElementById('admin-sync-source').addEventListener('click', () => { clickSound(); adminSyncSource(); });
 document.getElementById('admin-register-user').addEventListener('click', () => { clickSound(); adminRegisterUser(); });
+document.getElementById('admin-export-excel').addEventListener('click', () => { clickSound(); adminExportExcel(); });
 document.getElementById('admin-end-session').addEventListener('click', () => { clickSound(); adminEndSession(); });
 
 /* ============================================================
