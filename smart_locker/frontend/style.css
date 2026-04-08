@@ -1,9 +1,12 @@
 /**
  * File: style.css
- * Description: Dark-theme kiosk stylesheet with landonorris.com-inspired animations.
- *              Circle-reveal page transitions, diagonal wipe overlays, ellipse-reveal
- *              images, character-split text, slot-machine number animations, magnetic
- *              hover, image parallax, and cursor glow effects.
+ * Description: Phoenix Contact-branded kiosk stylesheet with landonorris.com-inspired
+ *              animations. Uses Phoenix Contact signature green (#009641) as the
+ *              primary accent on a dark charcoal background (#181d24) chosen for
+ *              readability in bright industrial environments. Circle-reveal page
+ *              transitions, diagonal wipe overlays, ellipse-reveal images,
+ *              character-split text, slot-machine number animations, magnetic hover,
+ *              image parallax, and cursor glow effects.
  * Project: smart_locker/frontend
  * Notes: Uses Space Grotesk (display) and Inter (body) from Google Fonts.
  *        Custom properties in :root control the full color theme. Designed for
@@ -15,23 +18,25 @@
    Change colors here to retheme the entire UI.
 ============================================================ */
 :root {
-  --bg:            #080c10;
-  --surface:       #0f1318;
-  --surface-2:     #161c24;
-  --surface-3:     #1e2530;
-  --accent:        #00d4ff;
-  --accent-dim:    rgba(0, 212, 255, 0.10);
-  --accent-glow:   rgba(0, 212, 255, 0.35);
+  --bg:            #181d24;
+  --surface:       #1f2630;
+  --surface-2:     #28303c;
+  --surface-3:     #323e4c;
+  --accent:        #009641;
+  --accent-dim:    rgba(0, 150, 65, 0.10);
+  --accent-glow:   rgba(0, 150, 65, 0.35);
   --success:       #22c55e;
   --success-dim:   rgba(34, 197, 94, 0.12);
   --danger:        #ef4444;
   --danger-dim:    rgba(239, 68, 68, 0.12);
   --warning:       #f59e0b;
   --text:          #f0f4f8;
-  --text-dim:      #94a3b8;
-  --text-muted:    #475569;
-  --border:        rgba(255, 255, 255, 0.06);
-  --border-accent: rgba(0, 212, 255, 0.28);
+  --text-dim:      #b8c4d0;
+  --text-muted:    #9ba8b8;
+  --info:          #00d4ff;
+  --info-dim:      rgba(0, 212, 255, 0.10);
+  --border:        rgba(255, 255, 255, 0.08);
+  --border-accent: rgba(0, 150, 65, 0.28);
   /* Enhancement A: original + softer Norris-style curve */
   --ease:          cubic-bezier(0.76, 0, 0.24, 1);
   --ease-smooth:   cubic-bezier(0.65, 0.05, 0, 1);
@@ -100,13 +105,13 @@ body::after {
 #cursor.hovering {
   width: 16px;
   height: 16px;
-  box-shadow: 0 0 20px rgba(0,212,255,0.5), 0 0 60px rgba(0,212,255,0.2);
+  box-shadow: 0 0 20px rgba(0,150,65,0.5), 0 0 60px rgba(0,150,65,0.2);
 }
 #cursor-ring {
   position: fixed;
   width: 34px;
   height: 34px;
-  border: 1.5px solid rgba(0, 212, 255, 0.45);
+  border: 1.5px solid rgba(0, 150, 65, 0.45);
   border-radius: 50%;
   pointer-events: none;
   z-index: 9999;
@@ -117,7 +122,7 @@ body::after {
 #cursor-ring.hovering {
   width: 50px;
   height: 50px;
-  border-color: rgba(0, 212, 255, 0.7);
+  border-color: rgba(0, 150, 65, 0.7);
 }
 
 /* ============================================================
@@ -256,9 +261,9 @@ body::after {
   position: absolute;
   inset: 0;
   background:
-    radial-gradient(ellipse 900px 700px at 12% 60%, rgba(0, 212, 255, 0.052), transparent),
-    radial-gradient(ellipse 700px 900px at 88% 20%, rgba(124, 58, 237, 0.038), transparent),
-    radial-gradient(ellipse 500px 400px at 50% 105%, rgba(0, 212, 255, 0.028), transparent);
+    radial-gradient(ellipse 900px 700px at 12% 60%, rgba(0, 150, 65, 0.052), transparent),
+    radial-gradient(ellipse 700px 900px at 88% 20%, rgba(0, 150, 65, 0.038), transparent),
+    radial-gradient(ellipse 500px 400px at 50% 105%, rgba(0, 150, 65, 0.028), transparent);
   animation: mesh-drift 12s ease-in-out infinite alternate;
   pointer-events: none;
 }
@@ -279,7 +284,7 @@ body::after {
 .nfc-ring-outer, .nfc-ring-mid {
   position: absolute;
   border-radius: 50%;
-  border: 1px solid rgba(0, 212, 255, 0.18);
+  border: 1px solid rgba(0, 150, 65, 0.18);
 }
 .nfc-ring-outer { width: 240px; height: 240px; animation: ring-pulse 2.8s ease-in-out infinite; }
 .nfc-ring-mid   { width: 190px; height: 190px; animation: ring-pulse 2.8s ease-in-out infinite 0.55s; }
@@ -301,8 +306,8 @@ body::after {
   overflow: hidden;
 }
 @keyframes core-glow {
-  0%, 100% { box-shadow: 0 0 20px rgba(0,212,255,0.2), 0 0 60px rgba(0,212,255,0.06); transform: scale(1); }
-  50%       { box-shadow: 0 0 40px rgba(0,212,255,0.38), 0 0 100px rgba(0,212,255,0.12); transform: scale(1.06); }
+  0%, 100% { box-shadow: 0 0 20px rgba(0,150,65,0.2), 0 0 60px rgba(0,150,65,0.06); transform: scale(1); }
+  50%       { box-shadow: 0 0 40px rgba(0,150,65,0.38), 0 0 100px rgba(0,150,65,0.12); transform: scale(1.06); }
 }
 
 /* Option 4: NFC texture reveal — slow breathing ellipse loop */
@@ -365,7 +370,7 @@ body::after {
   bottom: 0; left: 0; right: 0;
   height: 46px;
   border-top: 1px solid var(--border);
-  background: rgba(0, 212, 255, 0.025);
+  background: rgba(0, 150, 65, 0.025);
   overflow: hidden;
   display: flex;
   align-items: center;
@@ -624,7 +629,7 @@ body::after {
 .btn-reveal-tint {
   position: absolute;
   inset: 0;
-  background: linear-gradient(140deg, rgba(0,212,255,0.22), rgba(0,212,255,0.05));
+  background: linear-gradient(140deg, rgba(0,150,65,0.22), rgba(0,150,65,0.05));
   clip-path: ellipse(0% 0% at 50% 100%);
   transition: clip-path 0.8s var(--ease-smooth), opacity 0.4s var(--ease-smooth);
   pointer-events: none;
@@ -651,12 +656,12 @@ body::after {
 .action-btn:active { transform: scale(0.965) !important; }
 .action-btn.primary:hover {
   border-color: var(--border-accent);
-  box-shadow: 0 14px 50px rgba(0,212,255,0.1), 0 0 0 1px rgba(0,212,255,0.15);
+  box-shadow: 0 14px 50px rgba(0,150,65,0.1), 0 0 0 1px rgba(0,150,65,0.15);
 }
 .action-btn.primary:hover::after { opacity: 1; }
 .action-btn.primary {
-  border-color: rgba(0,212,255,0.14);
-  background: linear-gradient(140deg, rgba(0,212,255,0.07), rgba(0,212,255,0.02));
+  border-color: rgba(0,150,65,0.14);
+  background: linear-gradient(140deg, rgba(0,150,65,0.07), rgba(0,150,65,0.02));
 }
 .action-btn.end-btn {
   flex: 0 0 160px;
@@ -806,7 +811,7 @@ body::after {
 }
 .device-card.mine:hover {
   transform: translateY(-5px) scale(1.025);
-  border-color: var(--border-accent);
+  border-color: rgba(0,212,255,0.5);
   box-shadow: 0 16px 48px rgba(0,212,255,0.1);
 }
 .device-card.unavailable {
@@ -845,7 +850,7 @@ body::after {
   position: absolute;
   bottom: 0; left: 0; right: 0;
   height: 60%;
-  background: linear-gradient(to top, rgba(8,12,16,0.5), transparent);
+  background: linear-gradient(to top, rgba(24,29,36,0.5), transparent);
   pointer-events: none;
   z-index: 1;
 }
@@ -881,7 +886,7 @@ body::after {
   content: '';
   position: absolute;
   inset: 0;
-  background: linear-gradient(160deg, rgba(0,212,255,0.25), rgba(0,212,255,0.05) 70%);
+  background: linear-gradient(160deg, rgba(0,150,65,0.25), rgba(0,150,65,0.05) 70%);
   clip-path: ellipse(0% 0% at 50% 0%);
   transition: clip-path 0.75s var(--ease-smooth);
 }
@@ -895,9 +900,9 @@ body::after {
   transform: translate(-50%, -50%) scale(0.6);
   width: 48px; height: 48px;
   border-radius: 50%;
-  background: rgba(0,212,255,0.2);
+  background: rgba(0,150,65,0.2);
   backdrop-filter: blur(12px);
-  border: 1px solid rgba(0,212,255,0.4);
+  border: 1px solid rgba(0,150,65,0.4);
   display: flex; align-items: center; justify-content: center;
   opacity: 0;
   transition: opacity 0.5s var(--ease-smooth), transform 0.5s var(--ease-smooth);
@@ -922,14 +927,14 @@ body::after {
   font-family: var(--font-display);
   font-size: 1rem;
   font-weight: 700;
-  color: var(--surface-3);
+  color: var(--text-muted);
   letter-spacing: 0.1em;
 }
 
 /* Locker slot badge (top-left of card image) */
 .card-slot {
   position: absolute; top: 0.65rem; left: 0.65rem;
-  background: rgba(8,12,16,0.82);
+  background: rgba(24,29,36,0.82);
   backdrop-filter: blur(8px);
   border: 1px solid var(--border);
   border-radius: 7px;
@@ -955,7 +960,7 @@ body::after {
 }
 .card-status.available { background: rgba(34,197,94,0.14);  border: 1px solid rgba(34,197,94,0.38);   color: var(--success); }
 .card-status.in-use    { background: rgba(100,116,139,0.1);  border: 1px solid rgba(100,116,139,0.25); color: var(--text-muted); }
-.card-status.mine-tag  { background: var(--accent-dim);      border: 1px solid rgba(0,212,255,0.38);   color: var(--accent); }
+.card-status.mine-tag  { background: var(--info-dim);        border: 1px solid rgba(0,212,255,0.38);  color: var(--info); }
 .card-status.maint     { background: rgba(245,158,11,0.1);   border: 1px solid rgba(245,158,11,0.3);   color: var(--warning); }
 
 .card-body { padding: 0.9rem 1rem 1.1rem; }
@@ -995,12 +1000,12 @@ body::after {
 .detail-img-placeholder {
   display: flex; flex-direction: column; align-items: center; gap: 1.25rem;
 }
-.detail-img-placeholder svg { width: 80px; height: 80px; stroke: var(--surface-3); fill: none; stroke-width: 1; }
+.detail-img-placeholder svg { width: 80px; height: 80px; stroke: var(--text-muted); fill: none; stroke-width: 1; }
 .detail-img-slot-num {
   font-family: var(--font-display);
   font-size: 4rem;
   font-weight: 800;
-  color: var(--surface-3);
+  color: var(--text-muted);
   letter-spacing: 0.08em;
 }
 
@@ -1111,7 +1116,7 @@ body::after {
 .confirm-btn:active        { transform: scale(0.97); }
 .confirm-btn.do-borrow     { background: var(--success); color: #fff; box-shadow: 0 8px 28px rgba(34,197,94,0.28); }
 .confirm-btn.do-borrow:hover  { transform: translateY(-2px); box-shadow: 0 14px 40px rgba(34,197,94,0.38); }
-.confirm-btn.do-return     { background: var(--accent); color: var(--bg); box-shadow: 0 8px 28px rgba(0,212,255,0.28); }
+.confirm-btn.do-return     { background: var(--info); color: #fff; box-shadow: 0 8px 28px rgba(0,212,255,0.28); }
 .confirm-btn.do-return:hover  { transform: translateY(-2px); box-shadow: 0 14px 40px rgba(0,212,255,0.38); }
 .confirm-btn.disabled      { background: var(--surface-2); color: var(--text-muted); cursor: not-allowed; box-shadow: none; }
 .confirm-btn.disabled:hover   { transform: none; }
@@ -1120,7 +1125,7 @@ body::after {
    OVERLAY — INACTIVITY WARNING
 ============================================================ */
 #overlay-inactivity {
-  background: rgba(8,12,16,0.9);
+  background: rgba(24,29,36,0.9);
   backdrop-filter: blur(16px);
   flex-direction: column;
   align-items: center;
@@ -1181,7 +1186,7 @@ body::after {
   padding: 1rem 3rem;
   border-radius: 14px;
   background: var(--accent);
-  color: var(--bg);
+  color: #fff;
   border: none;
   font-family: var(--font-display);
   font-size: 0.95rem;
@@ -1189,10 +1194,10 @@ body::after {
   letter-spacing: 0.08em;
   text-transform: uppercase;
   cursor: pointer;
-  box-shadow: 0 8px 28px rgba(0,212,255,0.28);
+  box-shadow: 0 8px 28px rgba(0,150,65,0.28);
   transition: transform 0.22s var(--ease), box-shadow 0.22s var(--ease);
 }
-.stay-btn:hover  { transform: translateY(-2px); box-shadow: 0 14px 40px rgba(0,212,255,0.38); }
+.stay-btn:hover  { transform: translateY(-2px); box-shadow: 0 14px 40px rgba(0,150,65,0.38); }
 .stay-btn:active { transform: scale(0.96); }
 
 /* ============================================================
@@ -1321,8 +1326,8 @@ body::after {
   stroke-linejoin: round;
 }
 @keyframes register-icon-pulse {
-  0%, 100% { box-shadow: 0 0 20px rgba(0,212,255,0.15); }
-  50%      { box-shadow: 0 0 40px rgba(0,212,255,0.3), 0 0 80px rgba(0,212,255,0.08); }
+  0%, 100% { box-shadow: 0 0 20px rgba(0,150,65,0.15); }
+  50%      { box-shadow: 0 0 40px rgba(0,150,65,0.3), 0 0 80px rgba(0,150,65,0.08); }
 }
 
 .success-circle {
@@ -1395,7 +1400,7 @@ body::after {
 }
 .register-input:focus {
   border-color: var(--border-accent);
-  box-shadow: 0 0 0 3px rgba(0,212,255,0.1), 0 8px 32px rgba(0,212,255,0.08);
+  box-shadow: 0 0 0 3px rgba(0,150,65,0.1), 0 8px 32px rgba(0,150,65,0.08);
 }
 .register-input-glow {
   position: absolute;
@@ -1452,7 +1457,7 @@ body::after {
   padding: 8px;
   border: 1px solid var(--border);
   border-radius: 16px;
-  background: rgba(15, 19, 24, 0.6);
+  background: rgba(31, 38, 48, 0.6);
   mask-image: linear-gradient(to bottom, transparent 0%, black 3%, black 97%, transparent 100%);
   -webkit-mask-image: linear-gradient(to bottom, transparent 0%, black 3%, black 97%, transparent 100%);
 }
@@ -1498,12 +1503,12 @@ body::after {
   border-color: var(--border-accent);
   background: var(--surface-2);
   transform: translateY(-1px);
-  box-shadow: 0 4px 16px rgba(0, 212, 255, 0.06);
+  box-shadow: 0 4px 16px rgba(0, 150, 65, 0.06);
 }
 .name-item.selected {
   border-color: var(--accent);
   background: var(--accent-dim);
-  box-shadow: 0 0 0 2px rgba(0, 212, 255, 0.18), 0 6px 20px rgba(0, 212, 255, 0.10);
+  box-shadow: 0 0 0 2px rgba(0, 150, 65, 0.18), 0 6px 20px rgba(0, 150, 65, 0.10);
 }
 .name-item.selected:hover {
   border-color: var(--accent);
@@ -1540,7 +1545,7 @@ body::after {
   gap: 0.6rem;
   padding: 1rem 2.5rem;
   background: var(--accent);
-  color: var(--bg);
+  color: #fff;
   border: none;
   border-radius: 14px;
   font-family: var(--font-display);
@@ -1549,7 +1554,7 @@ body::after {
   letter-spacing: 0.08em;
   text-transform: uppercase;
   cursor: pointer;
-  box-shadow: 0 8px 28px rgba(0,212,255,0.28);
+  box-shadow: 0 8px 28px rgba(0,150,65,0.28);
   transition: transform 0.22s var(--ease), box-shadow 0.22s var(--ease), opacity 0.3s;
 }
 .register-next-btn svg {
@@ -1563,7 +1568,7 @@ body::after {
 }
 .register-next-btn:hover:not(:disabled) {
   transform: translateY(-2px);
-  box-shadow: 0 14px 40px rgba(0,212,255,0.38);
+  box-shadow: 0 14px 40px rgba(0,150,65,0.38);
 }
 .register-next-btn:active:not(:disabled) { transform: scale(0.96); }
 .register-next-btn:disabled {
@@ -1637,7 +1642,7 @@ body::after {
    OVERLAY — ADMIN PANEL
 ============================================================ */
 #overlay-admin {
-  background: rgba(8,12,16,0.92);
+  background: rgba(24,29,36,0.92);
   backdrop-filter: blur(20px);
   z-index: 55;
   align-items: center;
