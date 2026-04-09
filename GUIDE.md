@@ -383,7 +383,7 @@ The NFC card is **tapped and removed** — it is not left on the reader. The car
 Tests run without any NFC hardware — they use in-memory SQLite and mock data.
 
 ```powershell
-# Run all 91 tests
+# Run all 130 tests
 python -m pytest tests/ -v
 
 # Run a specific test file
@@ -409,22 +409,24 @@ Get-Content logs\smart_locker.log -Wait
 
 ---
 
-## Step 9: Excel Data File
+## Step 9: Web Dashboard & Excel Export
 
-The system automatically exports all device and transaction data to an Excel file (`smart_locker_data.xlsx` by default) every time the database changes. This happens automatically — no manual steps needed.
+### Web Dashboard (replaces auto-synced Excel)
 
-**Two sheets:**
+The system provides a **public web dashboard** at `http://<kiosk-ip>:8000/dashboard.html` that anyone on the network can access — no login required. This replaces the old auto-synced Excel file that was prone to Windows file-locking issues.
+
+The dashboard shows three views:
 - **Devices** — PM Number, Name, Type, Manufacturer, Model, Serial, Barcode, Locker Slot, Status, Current Borrower, Description, Calibration Due
 - **Transactions** — Date, User, Device, Borrow/Return, Performed By (admin), Notes
+- **Users** — Display Name, Role, Active, Registered At
 
-The file is regenerated on:
-- App startup
-- Every borrow or return
-- After a bulk device import
+Data refreshes on each page load from the API (`/api/dashboard/*` endpoints).
 
-If the file is open in Excel when a sync happens, the system logs a warning and retries on the next change. Close the file to allow the sync to proceed.
+### On-Demand Excel Download (Admin Only)
 
-To change the output path, set `SMART_LOCKER_EXCEL_PATH` in your `.env`.
+Admins can download a full Excel workbook from the **hidden admin panel** (activated by tapping the clock 5 times on the idle screen). The "Download Excel" button calls `GET /api/admin/export-excel`, which generates a three-sheet `.xlsx` file in memory and returns it as a browser download — no file is written to disk, so there are no file-locking issues.
+
+CLI scripts (like `update_device.py`) still write to the `SMART_LOCKER_EXCEL_PATH` file on disk when they modify devices.
 
 ---
 
@@ -440,9 +442,13 @@ All settings are in `.env` (loaded by `config/settings.py`):
 | `SMART_LOCKER_READER_NAME` | `ACR1252` | Substring filter for NFC reader name |
 | `SMART_LOCKER_SESSION_TIMEOUT` | `120` | Session inactivity timeout (seconds) |
 | `SMART_LOCKER_MAX_BORROWS` | `5` | Maximum devices a user can borrow at once |
-| `SMART_LOCKER_EXCEL_PATH` | `smart_locker_data.xlsx` | Auto-synced Excel export file |
+| `SMART_LOCKER_EXCEL_PATH` | `smart_locker_data.xlsx` | Excel export file (CLI scripts only, no auto-sync) |
 | `SMART_LOCKER_API_HOST` | `0.0.0.0` | FastAPI server bind address |
 | `SMART_LOCKER_API_PORT` | `8000` | FastAPI server port |
+| `SMART_LOCKER_SOURCE_EXCEL_PATH` | *(empty = disabled)* | Company device master list on OneDrive (.xlsx path) |
+| `SMART_LOCKER_SOURCE_SYNC_HOUR` | `6` | Daily source import hour (0-23) |
+| `SMART_LOCKER_SOURCE_SYNC_MINUTE` | `0` | Daily source import minute (0-59) |
+| `SMART_LOCKER_PHOTO_INPUT_PATH` | *(empty = disabled)* | Folder for device photos (filename = model number) |
 
 ---
 
@@ -461,24 +467,31 @@ All settings are in `.env` (loaded by `config/settings.py`):
 - UID masking in logs and on screen (never displayed in full)
 - Reader connect/disconnect detection and retry logic
 - Bulk device import from Excel with German column auto-detection (Equipment, Hersteller, Typbezeichnung, Kategorie, etc.)
-- Automatic Excel sync — database changes export to `smart_locker_data.xlsx` in real-time (Devices + Transactions sheets)
+- Source Excel import with three triggers: startup, file watcher (watchdog), daily cron (APScheduler)
+- Web dashboard — public device/transaction/user views replacing shared Excel file
+- On-demand Excel export — admin download endpoint generates .xlsx in memory
+- Auto photo import — watchdog monitors input folder, matches photos by model number
+- Self-registration with approved name list (names from "Aktueller Einsatzort" Excel column)
+- Hidden admin panel (5x clock tap) for manual registration, sync trigger, Excel download
 - FastAPI REST API with SSE event stream for NFC → browser bridge
-- 91 unit tests — all passing, no NFC hardware required
+- 130 unit tests — all passing, no NFC hardware required
 
 ### ✅ Built — Frontend UI
 
-- `smart_locker/frontend/index.html` — 6-screen HTML structure
-- `smart_locker/frontend/style.css` — full styling: colors, animations, layout
-- `smart_locker/frontend/app.js` — state machine, API stubs, all UI behaviour
-- Clip-path wipe transitions between every screen
+- `smart_locker/frontend/index.html` — Kiosk screens: Idle, Auth Failed, Registration, Main Menu, Borrow, Return, Device Detail, Admin Panel
+- `smart_locker/frontend/style.css` — Phoenix Contact green theme (`#009641` on `#181d24`), animations, layout
+- `smart_locker/frontend/app.js` — state machine, API calls, all UI behaviour
+- `smart_locker/frontend/dashboard.html/js/css` — Public network dashboard (devices, transactions, users)
+- Circle-reveal page transitions between every screen (inspired by landonorris.com)
 - Animated NFC pulse icon, mesh gradient background, marquee ticker
+- Self-registration screen with searchable/filterable name list
 - Device grid with staggered card entrance and hover effects
 - Device detail overlay with photo, metadata, and confirm button
 - Inactivity warning overlay with live countdown
 - Custom cursor with lagged ring follower
 - Web Audio API click sounds (no audio files)
 - Demo mode with sample data — fully testable without a backend
-- Fully connected to the FastAPI REST API (session, devices, borrow/return, SSE events)
+- Fully connected to the FastAPI REST API (session, devices, borrow/return, registration, admin, SSE events)
 
 ---
 
@@ -552,7 +565,7 @@ A **hash** (`#clock-time`) means "find the element with that exact id".
 
 ```css
 :root {
-  --accent: #00d4ff;   /* change this one value → every cyan element updates */
+  --accent: #009641;   /* Phoenix Contact green — change this one value → every accent element updates */
   --danger: #ef4444;
 }
 
@@ -693,15 +706,25 @@ The REST API is implemented in `smart_locker/api/routes.py` with SSE event strea
 
 ### Endpoints
 
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/api/session` | Check current session state |
-| `POST` | `/api/session/end` | End the current session |
-| `POST` | `/api/session/touch` | Reset the inactivity timer |
-| `GET` | `/api/devices` | List all devices with status, borrower, and extended metadata |
-| `POST` | `/api/devices/{id}/borrow` | Borrow a device |
-| `POST` | `/api/devices/{id}/return` | Return a device (admins can return on behalf) |
-| `GET` | `/api/events` | SSE stream — pushes card-tap, auth, and session events to the browser |
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `GET` | `/api/session` | — | Check current session state |
+| `POST` | `/api/session/end` | Session | End the current session |
+| `POST` | `/api/session/touch` | Session | Reset the inactivity timer |
+| `GET` | `/api/devices` | Session | List all devices with status, borrower, and extended metadata |
+| `POST` | `/api/devices/{id}/borrow` | Session | Borrow a device |
+| `POST` | `/api/devices/{id}/return` | Session | Return a device (admins can return on behalf) |
+| `GET` | `/api/events` | — | SSE stream — pushes card-tap, auth, and session events to the browser |
+| `GET` | `/api/registrants` | — | List approved names for self-registration |
+| `POST` | `/api/register` | — | Start self-registration (validates against approved list, awaits card tap) |
+| `POST` | `/api/register/cancel` | — | Cancel pending self-registration |
+| `POST` | `/api/admin/session` | — | Start hidden admin session (5x clock tap gesture) |
+| `POST` | `/api/admin/register` | Admin | Manual user registration (bypasses approved list) |
+| `POST` | `/api/admin/sync-source` | Admin | Manually trigger source Excel import |
+| `GET` | `/api/admin/export-excel` | Admin | Download Excel workbook (Devices, Transactions, Users) |
+| `GET` | `/api/dashboard/devices` | — | Public device inventory for network dashboard |
+| `GET` | `/api/dashboard/transactions` | — | Public transaction history (last 500) |
+| `GET` | `/api/dashboard/users` | — | Public registered-users list |
 
 ### Device response fields
 
@@ -842,7 +865,7 @@ Same flow for returns: scan the barcode to identify which device is being put ba
 
 ## Future Improvements (Not Yet Planned)
 - **Calibration date notifications** — calibration dates are stored; a notification system can alert when devices are due for recalibration
-- **Admin web panel** — browser-based interface for managing users, devices, and viewing transaction history
+- **Admin device management** — add/edit/maintenance toggle from the admin panel
 - **MIFARE sector data reading** — APDU commands are already defined in `nfc/apdu.py` but not wired into the auth flow
 - **Multi-reader support** — currently only the first matching reader is used
 - **Email / webhook notifications** — alert admins when a device is overdue or a borrow limit is hit

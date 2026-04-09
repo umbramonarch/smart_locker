@@ -14,19 +14,22 @@ Equipment borrowing/returning system using NFC work cards. Users tap their card 
 ```
 smart_locker/
 ├── config/
-│   ├── settings.py              # Central config (DB path, reader name, timeouts, Excel sync path)
+│   ├── settings.py              # Central config (DB path, reader name, timeouts, sync paths)
 │   └── logging_config.py        # Rotating file + console logging
 ├── smart_locker/
 │   ├── app.py                   # Entry point: web server (FastAPI + uvicorn) or CLI mode
 │   ├── api/                     # FastAPI REST API
-│   │   ├── routes.py            # Session, device, borrow/return endpoints + SSE stream
+│   │   ├── routes.py            # Session, device, borrow/return, registration, admin, dashboard endpoints + SSE
 │   │   ├── server.py            # FastAPI app factory + static file serving
-│   │   └── app_context.py       # Shared app context (session manager, SSE queue)
-│   ├── frontend/                # Touch display web UI
-│   │   ├── index.html           # HTML screen structure (6 screens)
-│   │   ├── style.css            # All styling — colors, animations, layout
+│   │   └── app_context.py       # Shared app context (session manager, SSE queue, pending registration)
+│   ├── frontend/                # Touch display web UI + network dashboard
+│   │   ├── index.html           # Kiosk HTML structure (6 screens + registration + admin panel)
+│   │   ├── style.css            # Phoenix Contact green theme, animations, layout
 │   │   ├── app.js               # State machine, API calls, UI behaviour (demo mode included)
-│   │   └── images/              # Device placeholder photos
+│   │   ├── dashboard.html       # Network-wide device/transaction/user dashboard (public)
+│   │   ├── dashboard.js         # Dashboard logic and API calls
+│   │   ├── dashboard.css        # Dashboard styling
+│   │   └── images/              # Device photos (matched by model number)
 │   ├── nfc/                     # NFC reader interface (pyscard + APDU)
 │   │   ├── apdu.py              # APDU command definitions
 │   │   ├── card_observer.py     # Card insert/remove detection
@@ -41,22 +44,26 @@ smart_locker/
 │   │   ├── hashing.py           # HMAC-SHA256 for card UID fingerprinting
 │   │   └── key_manager.py       # Key loading from environment
 │   ├── database/                # Data layer
-│   │   ├── models.py            # ORM models (User, Device, TransactionLog)
+│   │   ├── models.py            # ORM models (User, Device, TransactionLog, Registrant)
 │   │   ├── engine.py            # SQLAlchemy engine + session factory
 │   │   └── repositories.py      # CRUD operations
 │   ├── services/                # Business logic
 │   │   ├── locker_service.py    # Borrow/return operations (5-device limit, admin overrides)
 │   │   └── user_service.py      # User enrollment, public/admin views
 │   └── sync/                    # Data synchronization
-│       └── excel_sync.py        # Auto-export DB to Excel on every change
+│       ├── excel_sync.py        # On-demand Excel export (admin download + CLI scripts)
+│       ├── source_import.py     # Source Excel import (devices + registrants from OneDrive)
+│       ├── scheduler.py         # Startup import, file watcher, daily cron job
+│       └── photo_watcher.py     # Auto-import device photos by model number
 ├── scripts/
 │   ├── generate_key.py          # Generate encryption + HMAC keys
 │   ├── init_db.py               # Create database tables
 │   ├── migrate_db.py            # Add columns to existing DB (run after schema changes)
 │   ├── enroll_card.py           # Enroll a new NFC card user
 │   ├── import_devices.py        # Bulk import devices from Excel (German + English headers)
-│   └── update_device.py        # Update device fields (image, description, etc.) by PM number
-├── tests/                       # Unit tests (91 tests, no hardware needed)
+│   ├── update_device.py         # Update device fields (image, description, etc.) by PM number
+│   └── sync_source.py           # Manually trigger source Excel import
+├── tests/                       # Unit tests (130 tests, no hardware needed)
 ├── requirements.txt
 ├── .env.example
 ├── GUIDE.md                     # Step-by-step setup and usage guide
@@ -72,11 +79,17 @@ smart_locker/
 | Security (AES/HMAC) | ✅ Done | AES-256-GCM encryption, key management |
 | Database & ORM | ✅ Done | SQLAlchemy models, repositories, extended device schema |
 | Business logic | ✅ Done | Borrow/return rules, admin overrides, borrow limit |
-| FastAPI REST API | ✅ Done | Session, device, borrow/return endpoints + SSE stream |
-| Excel auto-sync | ✅ Done | DB changes auto-export to .xlsx (Devices + Transactions sheets) |
+| FastAPI REST API | ✅ Done | Session, device, borrow/return, registration, admin, dashboard endpoints + SSE |
+| Web dashboard | ✅ Done | Public network-wide device/transaction/user dashboard (replaces shared Excel) |
+| On-demand Excel export | ✅ Done | Admin download endpoint generates .xlsx in memory (no auto-sync) |
+| Source Excel import | ✅ Done | Startup import, file watcher, daily cron job from OneDrive |
 | Device import | ✅ Done | German + English Excel headers, PM-based dedup, schrank auto-numbering |
-| Unit tests | ✅ Done | 91 tests, all passing, no hardware required |
-| Frontend UI | ✅ Done | 6-screen kiosk UI, animations, demo mode |
+| Self-registration | ✅ Done | Approved name list from source Excel, searchable/filterable selection UI |
+| Admin panel | ✅ Done | Hidden 5-tap gesture, manual registration, sync trigger, Excel download |
+| Auto photo import | ✅ Done | Watchdog monitors input folder, matches photos by model number |
+| Phoenix Contact theme | ✅ Done | Signature green (#009641) on dark charcoal (#181d24), improved readability |
+| Unit tests | ✅ Done | 130 tests, all passing, no hardware required |
+| Frontend UI | ✅ Done | Kiosk UI with registration, admin panel, animations, demo mode |
 | Barcode scanner | 🔲 Planned | Barcode values stored per device. USB scanner will emulate keyboard input to identify devices in shared lockers. |
 | Calibration alerts | 🔲 Future | Calibration dates stored; notification system not yet built |
 | Kiosk deployment | 🔲 Future | Auto-start, Chromium kiosk mode, Windows service |
@@ -114,8 +127,8 @@ See **GUIDE.md** for detailed step-by-step instructions.
 │  ┌───────────────────────────────────────────────────────┐  │
 │  │  Frontend  (smart_locker/frontend/)                   │  │
 │  │  index.html · style.css · app.js                     │  │
-│  │  Dark premium theme · clip-path animations            │  │
-│  │  6 screens · touch-optimized · Space Grotesk font     │  │
+│  │  Phoenix Contact green theme · clip-path animations    │  │
+│  │  6+ screens · touch-optimized · Space Grotesk font    │  │
 │  └─────────────────────┬─────────────────────────────────┘  │
 │          REST API       │       SSE / WebSocket              │
 │        (fetch calls)    │    (NFC tap → navigate)            │
@@ -131,11 +144,17 @@ See **GUIDE.md** for detailed step-by-step instructions.
 │  │  SQLite + SQLAlchemy │  │  NFC Reader (ACR1252U)    │      │
 │  │  users · devices     │  │  Background listener       │      │
 │  │  transaction_logs    │  │  Tap → HMAC → auth        │      │
-│  └──────┬───────────────┘  └───────────────────────────┘      │
-│         │ auto-sync on change                                   │
+│  │  registrants         │  └───────────────────────────┘      │
+│  └──────┬───────────────┘                                       │
+│         │                                                        │
 │  ┌──────▼───────────────────────────────────────────────┐      │
-│  │  Excel Export  (smart_locker_data.xlsx)               │      │
-│  │  Devices sheet · Transactions sheet                   │      │
+│  │  Web Dashboard  (/dashboard.html — public, no auth)   │      │
+│  │  Devices · Transactions · Users (replaces shared Excel)│     │
+│  └───────────────────────────────┬──────────────────────┘      │
+│                                  │                               │
+│  ┌───────────────────────────────▼──────────────────────┐      │
+│  │  Source Excel Import (OneDrive → DB)                   │      │
+│  │  Startup + file watcher + daily cron (6 AM)           │      │
 │  └──────────────────────────────────────────────────────┘      │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -156,8 +175,8 @@ The system runs as a kiosk: FastAPI serves the frontend as static files, display
 6. **Device detail** — full-screen overlay, large photo, serial / type / slot, confirm button
 
 **Design highlights:**
-- Cyan (`#00d4ff`) accent on dark (`#080c10`) background
-- `clip-path: inset()` wipe transitions between every screen — same technique as landonorris.com
+- Phoenix Contact green (`#009641`) accent on dark charcoal (`#181d24`) background
+- `clip-path: circle()` reveal transitions between every screen — inspired by landonorris.com
 - Space Grotesk display font, Inter body font
 - Staggered device card entrance animations
 - Custom lagged cursor, Web Audio API click sounds, scanline overlay
@@ -204,4 +223,4 @@ Place device photos in `smart_locker/frontend/images/`. Name them by PM number f
 python -m pytest tests/ -v
 ```
 
-All 91 tests run without NFC hardware (in-memory SQLite, no reader needed).
+All 130 tests run without NFC hardware (in-memory SQLite, no reader needed).
