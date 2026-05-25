@@ -107,7 +107,7 @@ Expected output:
 Database initialized successfully.
 ```
 
-This creates `smart_locker.db` in the project root with three tables: `users`, `devices`, `transaction_logs`.
+This creates `smart_locker.db` in the project root with four tables: `users`, `registrants`, `devices`, `transaction_logs`.
 
 **Verify** (optional):
 
@@ -115,7 +115,7 @@ This creates `smart_locker.db` in the project root with three tables: `users`, `
 python -c "import sqlite3; conn = sqlite3.connect('smart_locker.db'); print(conn.execute('SELECT name FROM sqlite_master WHERE type=\"table\"').fetchall())"
 ```
 
-Expected: `[('users',), ('devices',), ('transaction_logs',)]`
+Expected: `[('users',), ('registrants',), ('devices',), ('transaction_logs',)]`
 
 ---
 
@@ -198,7 +198,7 @@ To read a specific sheet (default is the first sheet):
 python -m scripts.import_devices --file devices.xlsx --sheet "Inventory"
 ```
 
-Duplicates are automatically skipped (by PM number), so it's safe to re-run the import if you add new rows to the Excel file. After import, the data is automatically exported to `smart_locker_data.xlsx`.
+Duplicates are automatically skipped (by PM number), so it's safe to re-run the import if you add new rows to the Excel file.
 
 ### Option B: Add a few devices manually
 
@@ -333,41 +333,50 @@ The NFC card is **tapped and removed** — it is not left on the reader. The car
 
 ### Touch Display Screens
 
-**Screen 1 — Idle (no active session)**
-- Animated NFC icon with pulsing rings and cyan glow
+**Idle (no active session)**
+- Animated NFC icon with pulsing rings and Phoenix Contact green glow
 - "TAP YOUR CARD" in large display font with text-reveal animation
 - Scrolling marquee ticker at the bottom, live clock in the top-right
+- "Register your card" entry point for new users
 
-**Screen 2 — Authentication Failed**
+**Register (self-service)**
+- Search and select your approved name from the registrants list
+- Tap your card within the registration window to enrol it under that name
+- Success or error feedback (e.g. card already registered, or name not approved)
+
+**Authentication Failed**
 - Red flash overlay, "Card Not Recognized" error card
-- Auto-returns to Screen 1 after 3 seconds with a depleting progress bar
+- Auto-returns to the idle screen after a few seconds with a depleting progress bar
 
-**Screen 3 — Main Menu (after successful tap)**
+**Main Menu (after successful tap)**
 - "WELCOME BACK, [FIRSTNAME]" with clip-path text entrance animation
 - Three large touch buttons: **Borrow** · **Return** · **End Session**
 - User initials avatar and role badge (User / Admin) in top-right
 
-**Screen 4 — Borrow View**
+**Borrow View**
 - Grid of all devices organised by locker slot, with staggered card entrance
 - **Available** devices: full colour, tappable → Device Detail (confirm borrow)
 - **Borrowed** devices: greyed out, tappable → Device Detail (shows borrower name)
 - **Maintenance** devices: amber badge, greyed out
 - Badge showing current borrow count vs. limit (e.g. `1 / 5 borrowed`)
 
-**Screen 5 — Return View**
+**Return View**
 - Same grid layout as Borrow View
-- User's own items highlighted with cyan border glow
-- Other users' items greyed out but tappable (to see who has them)
+- The user's own borrowed items are highlighted; others greyed out but tappable (to see who has them)
 
-**Screen 6 — Device Detail (overlay)**
+**Device Detail (overlay)**
 - Full-screen overlay slides up over the grid
-- Left half: device photo (or slot-number placeholder)
-- Right half: slot tag, device name, type, serial, status, description, borrower info
-- Confirm button: green (borrow) or cyan (return) or disabled (not actionable)
+- Left: device photo (or slot-number placeholder)
+- Right: slot tag, device name, type, serial, status, description, borrower info
+- Confirm button: green (borrow / return) or disabled (not actionable)
 
-**Inactivity Warning**
-- Appears 10 seconds before the session timeout
-- Large countdown number, "Stay Active" button dismisses it and resets the timer
+**Hidden Admin Panel (overlay)**
+- Opened by tapping the idle-screen clock 5 times
+- Shortcuts: Borrow, Return, Sync source, Register user, Export to Excel, End Session
+
+**Inactivity Warning (overlay)**
+- Appears shortly before the session timeout
+- Large countdown number; "Stay Active" dismisses it and resets the timer
 
 ### Borrow/Return Rules
 
@@ -383,7 +392,7 @@ The NFC card is **tapped and removed** — it is not left on the reader. The car
 Tests run without any NFC hardware — they use in-memory SQLite and mock data.
 
 ```powershell
-# Run all 91 tests
+# Run all 132 tests
 python -m pytest tests/ -v
 
 # Run a specific test file
@@ -409,22 +418,16 @@ Get-Content logs\smart_locker.log -Wait
 
 ---
 
-## Step 9: Excel Data File
+## Step 9: Excel Export & Web Dashboard
 
-The system automatically exports all device and transaction data to an Excel file (`smart_locker_data.xlsx` by default) every time the database changes. This happens automatically — no manual steps needed.
+Live data is viewed two ways — a read-only web dashboard and an on-demand Excel export. (The old always-on auto-sync was removed because an open Excel file locked the export on Windows.)
 
-**Two sheets:**
-- **Devices** — PM Number, Name, Type, Manufacturer, Model, Serial, Barcode, Locker Slot, Status, Current Borrower, Description, Calibration Due
-- **Transactions** — Date, User, Device, Borrow/Return, Performed By (admin), Notes
+**Web dashboard** — open `http://<kiosk-host>:8000/dashboard` from any browser on the network (no login required). It shows three tables, auto-refreshing every 30 seconds:
+- **Devices** — Slot, PM Number, Name, Type, Status, Borrower, Calibration Due (filterable & sortable)
+- **Transactions** — the last 500 borrow/return records
+- **Users** — registered users (name, role, active, registered date)
 
-The file is regenerated on:
-- App startup
-- Every borrow or return
-- After a bulk device import
-
-If the file is open in Excel when a sync happens, the system logs a warning and retries on the next change. Close the file to allow the sync to proceed.
-
-To change the output path, set `SMART_LOCKER_EXCEL_PATH` in your `.env`.
+**Excel export (on demand)** — from the hidden admin panel choose **Export to Excel**, or call `GET /api/admin/export-excel`, to download a three-sheet workbook (Devices + Transactions + Users). Nothing is written to disk automatically; `SMART_LOCKER_EXCEL_PATH` sets the default filename for script-driven exports.
 
 ---
 
@@ -440,9 +443,12 @@ All settings are in `.env` (loaded by `config/settings.py`):
 | `SMART_LOCKER_READER_NAME` | `ACR1252` | Substring filter for NFC reader name |
 | `SMART_LOCKER_SESSION_TIMEOUT` | `120` | Session inactivity timeout (seconds) |
 | `SMART_LOCKER_MAX_BORROWS` | `5` | Maximum devices a user can borrow at once |
-| `SMART_LOCKER_EXCEL_PATH` | `smart_locker_data.xlsx` | Auto-synced Excel export file |
+| `SMART_LOCKER_EXCEL_PATH` | `smart_locker_data.xlsx` | Default filename for on-demand Excel export |
 | `SMART_LOCKER_API_HOST` | `0.0.0.0` | FastAPI server bind address |
 | `SMART_LOCKER_API_PORT` | `8000` | FastAPI server port |
+| `SMART_LOCKER_SOURCE_EXCEL_PATH` | (empty) | Company device master list to import; empty disables auto-import |
+| `SMART_LOCKER_SOURCE_SYNC_HOUR` / `_MINUTE` | `6` / `0` | Daily source-import time (24h) |
+| `SMART_LOCKER_PHOTO_INPUT_PATH` | (empty) | Folder watched for device photos (filename = model); empty disables |
 
 ---
 
@@ -461,9 +467,12 @@ All settings are in `.env` (loaded by `config/settings.py`):
 - UID masking in logs and on screen (never displayed in full)
 - Reader connect/disconnect detection and retry logic
 - Bulk device import from Excel with German column auto-detection (Equipment, Hersteller, Typbezeichnung, Kategorie, etc.)
-- Automatic Excel sync — database changes export to `smart_locker_data.xlsx` in real-time (Devices + Transactions sheets)
+- Source import of the company master list — on startup, on file change, and a daily cron (schrank-only filter)
+- Self-service card registration against an approved-name list, plus admin manual registration
+- On-demand Excel export (Devices + Transactions + Users) and a read-only web dashboard at `/dashboard`
+- Photo auto-assignment by model (background watcher) or by PM number (`update_device`)
 - FastAPI REST API with SSE event stream for NFC → browser bridge
-- 91 unit tests — all passing, no NFC hardware required
+- 132 unit tests — all passing, no NFC hardware required
 
 ### ✅ Built — Frontend UI
 
@@ -523,12 +532,14 @@ The `id="..."` attribute works similarly, but must be **unique** — only one el
 | Element id | What it is |
 |---|---|
 | `screen-idle` | "TAP YOUR CARD" screen |
+| `screen-register` | Self-service card registration |
 | `screen-auth-failed` | Red error screen |
 | `screen-main-menu` | Welcome + Borrow / Return buttons |
 | `screen-borrow` | Device grid for borrowing |
 | `screen-return` | Device grid for returning |
 | `overlay-device-detail` | Full-screen device detail popup |
 | `overlay-inactivity` | Countdown warning overlay |
+| `overlay-admin` | Hidden admin panel (5× clock tap) |
 
 ---
 
@@ -552,7 +563,7 @@ A **hash** (`#clock-time`) means "find the element with that exact id".
 
 ```css
 :root {
-  --accent: #00d4ff;   /* change this one value → every cyan element updates */
+  --accent: #009641;   /* Phoenix Contact green — change once, the whole UI follows */
   --danger: #ef4444;
 }
 
@@ -701,6 +712,16 @@ The REST API is implemented in `smart_locker/api/routes.py` with SSE event strea
 | `GET` | `/api/devices` | List all devices with status, borrower, and extended metadata |
 | `POST` | `/api/devices/{id}/borrow` | Borrow a device |
 | `POST` | `/api/devices/{id}/return` | Return a device (admins can return on behalf) |
+| `POST` | `/api/register` | Start self-registration (validates name against registrants) |
+| `POST` | `/api/register/cancel` | Cancel a pending self-registration |
+| `GET` | `/api/registrants` | List approved names available for self-registration |
+| `POST` | `/api/admin/session` | Start a backend session for the hidden admin panel |
+| `POST` | `/api/admin/register` | Admin manual enrolment (bypasses name validation) |
+| `POST` | `/api/admin/sync-source` | Trigger source Excel import |
+| `GET` | `/api/admin/export-excel` | Download the full database as a three-sheet `.xlsx` |
+| `GET` | `/api/dashboard/devices` | Public device inventory (no auth) |
+| `GET` | `/api/dashboard/transactions` | Public transaction history, last 500 (no auth) |
+| `GET` | `/api/dashboard/users` | Public registered-users list (no auth) |
 | `GET` | `/api/events` | SSE stream — pushes card-tap, auth, and session events to the browser |
 
 ### Device response fields
@@ -763,7 +784,7 @@ Create a Windows Task Scheduler task that runs on login:
 ```powershell
 # Create a startup script: start_locker.bat
 @echo off
-cd /d "D:\Python Projects\smart_locker"
+cd /d "D:\Projects\smart_locker"
 call venv\Scripts\activate
 start /min python -m smart_locker.app
 timeout /t 3
@@ -836,13 +857,13 @@ Same flow for returns: scan the barcode to identify which device is being put ba
 
 - `devices.barcode` column stores barcode values (imported from Excel)
 - The API `GET /api/devices` response includes the `barcode` field
-- The Excel auto-sync exports barcode values
+- The on-demand Excel export includes barcode values
 
 ---
 
 ## Future Improvements (Not Yet Planned)
 - **Calibration date notifications** — calibration dates are stored; a notification system can alert when devices are due for recalibration
-- **Admin web panel** — browser-based interface for managing users, devices, and viewing transaction history
+- **Full admin web panel** — the read-only `/dashboard` and the kiosk's hidden admin panel already exist; a full browser-based management UI (edit users/devices) is still open
 - **MIFARE sector data reading** — APDU commands are already defined in `nfc/apdu.py` but not wired into the auth flow
 - **Multi-reader support** — currently only the first matching reader is used
 - **Email / webhook notifications** — alert admins when a device is overdue or a borrow limit is hit
