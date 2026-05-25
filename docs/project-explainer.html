@@ -1,0 +1,1116 @@
+<!DOCTYPE html>
+<!--
+  File: project-explainer.html
+  Description: Interactive, non-coder-friendly explainer for the Smart Locker
+               system. A living connection map + step-by-step flow player +
+               plain-English debugging helper + glossary. Self-contained
+               (no server, no build) — double-click to open in a browser.
+  Project: smart_locker
+  Notes: Content is sourced from and verified against the actual code
+         (smart_locker/, config/) as of branch feature/project-explainer.
+         Single file: open it directly. Internet only improves the fonts.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Smart Locker — How It All Works</title>
+<meta name="description" content="An interactive, plain-English guide to the Smart Locker NFC equipment kiosk: a living connection map, a step-by-step flow player, a debugging helper, and a glossary." />
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2032%2032'%3E%3Crect%20width='32'%20height='32'%20rx='7'%20fill='%230c1014'/%3E%3Ccircle%20cx='16'%20cy='16'%20r='7'%20fill='none'%20stroke='%2315c95f'%20stroke-width='3'/%3E%3C/svg%3E" />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0c1014; --bg2:#10161d; --panel:#161e27; --panel2:#1d2733;
+    --line:#2a3645; --line2:#374759;
+    --green:#15c95f; --green-d:#0c9a47; --green-dim:#11713a;
+    --amber:#ffb648; --red:#ff5c5c;
+    --tx:#eaf2f9; --tx-dim:#9fb1c2; --tx-mute:#69788a;
+    --disp:'Chakra Petch',sans-serif;
+    --body:'DM Sans',system-ui,sans-serif;
+    --mono:'JetBrains Mono',ui-monospace,monospace;
+    --ease-smooth:cubic-bezier(.65,.05,0,1);
+    --ease:cubic-bezier(.76,0,.24,1);
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  @media(hover:hover) and (pointer:fine){ *{cursor:none} }
+  body{
+    background:
+      radial-gradient(1100px 600px at 80% -10%, rgba(21,201,95,.10), transparent 60%),
+      radial-gradient(900px 500px at -10% 110%, rgba(21,201,95,.06), transparent 60%),
+      var(--bg);
+    color:var(--tx); font-family:var(--body); line-height:1.55;
+    -webkit-font-smoothing:antialiased;
+    background-attachment:fixed;
+  }
+  /* faint blueprint grid */
+  body::before{
+    content:""; position:fixed; inset:0; pointer-events:none; z-index:0;
+    background-image:
+      linear-gradient(rgba(255,255,255,.018) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,.018) 1px, transparent 1px);
+    background-size:42px 42px;
+    mask-image:radial-gradient(circle at 50% 30%, #000 30%, transparent 85%);
+  }
+  .wrap{position:relative; z-index:1; max-width:1280px; margin:0 auto; padding:0 22px 80px}
+
+  /* ---------- header ---------- */
+  header{padding:46px 0 14px}
+  .kicker{font-family:var(--mono); font-size:12px; letter-spacing:.28em; text-transform:uppercase;
+    color:var(--green); display:flex; align-items:center; gap:10px}
+  .kicker::before{content:""; width:26px; height:1px; background:var(--green)}
+  h1{font-family:var(--disp); font-weight:700; font-size:clamp(34px,5.4vw,62px);
+    line-height:.98; letter-spacing:-.01em; margin:14px 0 0}
+  h1 .b{color:var(--green)}
+  .lede{max-width:760px; color:var(--tx-dim); font-size:17px; margin:16px 0 0}
+  .lede b{color:var(--tx); font-weight:600}
+
+  /* ---------- tabs ---------- */
+  nav.tabs{display:flex; flex-wrap:wrap; gap:8px; margin:30px 0 22px;
+    border-bottom:1px solid var(--line); padding-bottom:0}
+  .tab{appearance:none; border:0; background:transparent; cursor:pointer;
+    font-family:var(--disp); font-weight:600; font-size:15px; letter-spacing:.01em;
+    color:var(--tx-mute); padding:12px 16px; border-radius:10px 10px 0 0;
+    position:relative; transition:color .2s, background .2s; display:flex; align-items:center; gap:9px}
+  .tab .ic{font-size:17px; filter:grayscale(.4) opacity(.8)}
+  .tab:hover{color:var(--tx-dim); background:rgba(255,255,255,.03)}
+  .tab.on{color:var(--tx)}
+  .tab.on .ic{filter:none}
+  .tab.on::after{content:""; position:absolute; left:10px; right:10px; bottom:-1px; height:3px;
+    background:var(--green); border-radius:3px; box-shadow:0 0 14px var(--green)}
+
+  section.view{display:none; animation:fade .35s ease}
+  section.view.on{display:block}
+  @keyframes fade{from{opacity:0; transform:translateY(6px)} to{opacity:1; transform:none}}
+
+  .panel{background:linear-gradient(180deg,var(--panel),var(--bg2));
+    border:1px solid var(--line); border-radius:16px}
+
+  /* ---------- MAP ---------- */
+  .map-hint{display:flex; flex-wrap:wrap; gap:14px 22px; align-items:center;
+    color:var(--tx-mute); font-size:13.5px; margin:0 2px 14px; font-family:var(--mono)}
+  .map-hint .dot{display:inline-flex; align-items:center; gap:7px}
+  .map-hint .pip{width:22px; height:0; border-top:2px solid var(--green); opacity:.5}
+  .map-hint .pip.cfg{border-top-style:dashed; border-color:var(--tx-mute)}
+
+  .map-grid{display:grid; grid-template-columns:1fr 360px; gap:18px}
+  @media(max-width:1080px){ .map-grid{grid-template-columns:1fr} }
+  .stage{padding:8px; overflow:hidden; position:relative}
+  svg#map{width:100%; height:auto; display:block; user-select:none; touch-action:manipulation}
+
+  .node{cursor:pointer}
+  .node .box{fill:var(--panel2); stroke:var(--line2); stroke-width:1.4;
+    transition:stroke .2s, fill .2s, opacity .25s}
+  .node .emoji{font-size:25px; text-anchor:middle; dominant-baseline:central}
+  .node .lbl{font-family:var(--disp); font-weight:600; font-size:15px; fill:var(--tx);
+    text-anchor:middle}
+  .node .sub{font-family:var(--mono); font-size:10px; fill:var(--tx-mute); text-anchor:middle}
+  .node:hover .box{stroke:var(--green)}
+  .node.hl .box{stroke:var(--green); fill:#1a2a22; filter:drop-shadow(0 0 9px rgba(21,201,95,.55))}
+  .node.pinned .box{stroke:var(--green); stroke-width:2.2; fill:#1b2c23;
+    filter:drop-shadow(0 0 12px rgba(21,201,95,.6))}
+  .node.dim{opacity:.26}
+
+  .edge .base{fill:none; stroke:var(--line2); stroke-width:1.6; transition:opacity .25s, stroke .2s}
+  .edge .flow{fill:none; stroke:var(--green); stroke-width:2; stroke-dasharray:5 13;
+    opacity:.20; animation:flow 1.5s linear infinite; transition:opacity .25s, stroke-width .2s}
+  @keyframes flow{to{stroke-dashoffset:-36}}
+  .edge.cfg .base{stroke-dasharray:3 6; stroke:var(--tx-mute); opacity:.4}
+  .edge.cfg .flow{display:none}
+  .edge.hl .base{stroke:var(--green-dim)}
+  .edge.hl .flow{opacity:.95; stroke-width:2.6}
+  .edge.dim{opacity:.10}
+  /* edge labels live in a layer ABOVE the nodes (see #labels) so a node box can
+     never occlude them; the rounded halo keeps them legible over lines. */
+  .elabel{font-family:var(--mono); font-size:11px; fill:var(--tx-dim);
+    text-anchor:middle; opacity:0; pointer-events:none; transition:opacity .2s;
+    paint-order:stroke; stroke:var(--bg); stroke-width:4px; stroke-linejoin:round}
+  .elabel.show{opacity:1; fill:var(--tx)}
+
+  /* detail side panel */
+  .detail{padding:0; align-self:start; position:sticky; top:14px; overflow:hidden; min-height:300px}
+  .detail .empty{padding:34px 24px; color:var(--tx-mute)}
+  .detail .empty .big{font-size:30px; margin-bottom:10px}
+  .dt-head{padding:18px 20px 14px; border-bottom:1px solid var(--line);
+    display:flex; gap:13px; align-items:flex-start; background:rgba(21,201,95,.05)}
+  .dt-head .em{font-size:30px; line-height:1}
+  .dt-head h3{font-family:var(--disp); font-size:21px; margin:0; font-weight:700}
+  .dt-head .file{font-family:var(--mono); font-size:11.5px; color:var(--green); margin-top:3px;
+    word-break:break-all}
+  .dt-x{margin-left:auto; appearance:none; border:1px solid var(--line2); background:transparent;
+    color:var(--tx-mute); width:26px; height:26px; border-radius:8px; cursor:pointer; flex:none}
+  .dt-x:hover{color:var(--tx); border-color:var(--tx-mute)}
+  .dt-body{padding:16px 20px 22px}
+  .dt-body p{margin:0 0 13px; color:var(--tx-dim); font-size:14.5px}
+  .dt-body p b{color:var(--tx)}
+  .dt-lab{font-family:var(--mono); font-size:10.5px; letter-spacing:.16em; text-transform:uppercase;
+    color:var(--tx-mute); margin:18px 0 8px}
+  .dt-body ul{margin:0; padding:0; list-style:none}
+  .dt-body li{font-size:13.5px; color:var(--tx-dim); padding:6px 0 6px 18px; position:relative;
+    border-bottom:1px dashed var(--line)}
+  .dt-body li::before{content:"›"; position:absolute; left:2px; color:var(--green); font-weight:700}
+  .dt-body li:last-child{border-bottom:0}
+  .dt-body code, .mono{font-family:var(--mono); font-size:12.5px; color:var(--amber)}
+  .chips{display:flex; flex-wrap:wrap; gap:7px}
+  .chip{appearance:none; font-size:12.5px; font-family:var(--body); color:var(--tx-dim); cursor:pointer;
+    background:var(--panel2); border:1px solid var(--line2); padding:6px 11px; border-radius:20px;
+    min-height:34px; display:inline-flex; align-items:center; gap:5px; line-height:1; transition:.15s}
+  .chip:hover{border-color:var(--green); color:var(--tx)}
+  .watch-btns{display:flex; flex-wrap:wrap; gap:8px; margin-top:8px}
+  .wbtn{font-family:var(--disp); font-weight:600; font-size:13px; cursor:pointer;
+    color:var(--bg); background:var(--green); border:0; padding:8px 13px; border-radius:9px;
+    display:inline-flex; gap:7px; align-items:center; transition:.15s}
+  .wbtn:hover{background:#1ee06c; box-shadow:0 4px 18px rgba(21,201,95,.35)}
+  .wbtn.ghost{background:transparent; border:1px solid var(--line2); color:var(--tx-dim)}
+  .wbtn.ghost:hover{border-color:var(--green); color:var(--tx); box-shadow:none}
+
+  /* ---------- WATCH (flows) ---------- */
+  .flow-pick{display:flex; flex-wrap:wrap; gap:9px; margin:4px 0 22px}
+  .fp{appearance:none; cursor:pointer; font-family:var(--disp); font-weight:600; font-size:14px;
+    color:var(--tx-dim); background:var(--panel); border:1px solid var(--line2);
+    padding:11px 15px; border-radius:11px; display:flex; gap:9px; align-items:center; transition:.18s}
+  .fp:hover{border-color:var(--green); color:var(--tx)}
+  .fp.on{color:var(--bg); background:var(--green); border-color:var(--green)}
+  .fp .ic{font-size:16px}
+
+  .stations{display:flex; flex-wrap:nowrap; align-items:stretch; gap:0; padding:30px 22px 14px;
+    position:relative; overflow-x:auto; scroll-behavior:smooth; scrollbar-width:thin;
+    scrollbar-color:var(--line2) transparent}
+  .stations::-webkit-scrollbar{height:7px}
+  .stations::-webkit-scrollbar-thumb{background:var(--line2); border-radius:7px}
+  .station{flex:0 0 auto; display:flex; align-items:center}
+  .st-card{width:150px; min-height:96px; background:var(--panel2); border:1px solid var(--line2);
+    border-radius:13px; padding:12px 11px; text-align:center; transition:.3s; position:relative}
+  .st-card .em{font-size:26px}
+  .st-card .nm{font-family:var(--disp); font-weight:600; font-size:13.5px; margin-top:5px}
+  .st-card .n{position:absolute; top:-9px; left:-9px; width:24px; height:24px; border-radius:50%;
+    background:var(--bg2); border:1px solid var(--line2); font-family:var(--mono); font-size:11px;
+    display:flex; align-items:center; justify-content:center; color:var(--tx-mute)}
+  .st-card.done{border-color:var(--green-dim)}
+  .st-card.done .n{border-color:var(--green-dim); color:var(--green)}
+  .st-card.active{border-color:var(--green); background:#1a2c22;
+    box-shadow:0 0 0 1px var(--green), 0 6px 26px rgba(21,201,95,.35); transform:translateY(-4px)}
+  .st-card.active .n{background:var(--green); color:var(--bg); border-color:var(--green)}
+  .st-arrow{width:34px; display:flex; align-items:center; justify-content:center; color:var(--line2);
+    font-size:18px; transition:.3s}
+  .st-arrow.lit{color:var(--green)}
+  .flow-stage{padding-bottom:6px}
+  .caption{margin:8px 20px 0; background:var(--bg2); border:1px solid var(--line);
+    border-left:3px solid var(--green); border-radius:0 12px 12px 0; padding:16px 18px;
+    min-height:74px; display:flex; gap:14px; align-items:center}
+  .caption .step{font-family:var(--disp); font-weight:700; font-size:30px; color:var(--green);
+    line-height:1; flex:none}
+  .caption .txt{font-size:15.5px; color:var(--tx)}
+  .controls{display:flex; gap:9px; align-items:center; padding:16px 20px 4px; flex-wrap:wrap}
+  .ctl{appearance:none; cursor:pointer; font-family:var(--disp); font-weight:600; font-size:13.5px;
+    color:var(--tx-dim); background:var(--panel2); border:1px solid var(--line2);
+    padding:9px 15px; border-radius:9px; transition:.15s}
+  .ctl:hover{border-color:var(--green); color:var(--tx)}
+  .ctl.primary{background:var(--green); color:var(--bg); border-color:var(--green)}
+  .ctl.primary:hover{background:#1ee06c}
+  .ctl[disabled]{opacity:.4; cursor:default}
+  .progress{flex:1; min-width:120px; height:6px; background:var(--panel2); border-radius:6px;
+    overflow:hidden; border:1px solid var(--line)}
+  .progress .fill{height:100%; width:0; background:var(--green); transition:width .4s}
+
+  /* ---------- DEBUG ---------- */
+  .sym-grid{display:grid; grid-template-columns:repeat(auto-fill,minmax(330px,1fr)); gap:14px}
+  .sym{padding:18px 18px 16px}
+  .sym h3{font-family:var(--disp); font-size:17px; margin:0 0 4px; display:flex; gap:10px; align-items:center}
+  .sym h3 .em{font-size:21px}
+  .sym .pl{color:var(--tx-dim); font-size:14px; margin:8px 0 14px}
+  .sym .invd{font-family:var(--mono); font-size:11px; color:var(--tx-mute); margin-bottom:6px}
+  .sym .parts{display:flex; flex-wrap:wrap; gap:6px; margin-bottom:14px}
+  .ptag{font-size:11.5px; font-family:var(--mono); color:var(--green); background:rgba(21,201,95,.09);
+    border:1px solid var(--green-dim); border-radius:7px; padding:3px 8px}
+  .copybar{display:flex; gap:9px; align-items:center; border-top:1px dashed var(--line); padding-top:13px}
+  .copybar .lab{font-size:12px; color:var(--tx-mute); flex:1}
+  .copy{appearance:none; cursor:pointer; font-family:var(--disp); font-weight:600; font-size:12.5px;
+    color:var(--bg); background:var(--amber); border:0; padding:8px 13px; border-radius:8px; flex:none;
+    transition:.15s}
+  .copy:hover{filter:brightness(1.08)}
+  .copy.ok{background:var(--green)}
+  .debug-note{color:var(--tx-mute); font-size:13.5px; margin:2px 2px 20px; max-width:740px}
+  .debug-note b{color:var(--tx-dim)}
+
+  /* ---------- GLOSSARY ---------- */
+  .gsearch{width:100%; max-width:420px; margin:2px 0 20px; font-family:var(--body); font-size:15px;
+    color:var(--tx); background:var(--panel); border:1px solid var(--line2); border-radius:11px;
+    padding:12px 15px; outline:none}
+  .gsearch:focus{border-color:var(--green)}
+  .gloss{display:grid; grid-template-columns:repeat(auto-fill,minmax(290px,1fr)); gap:13px}
+  .gterm{padding:15px 17px}
+  .gterm .t{font-family:var(--disp); font-weight:700; font-size:16px; color:var(--green)}
+  .gterm .d{color:var(--tx-dim); font-size:14px; margin-top:5px}
+
+  footer{margin-top:46px; padding-top:20px; border-top:1px solid var(--line);
+    color:var(--tx-mute); font-size:12.5px; font-family:var(--mono); display:flex;
+    flex-wrap:wrap; gap:6px 18px; align-items:center}
+  footer .b{color:var(--green)}
+
+  /* ---------- cinematic layer (landonorris-style) ---------- */
+  /* custom cursor */
+  .cursor-dot,.cursor-ring{position:fixed; top:0; left:0; border-radius:50%; pointer-events:none;
+    z-index:9999; mix-blend-mode:difference; will-change:transform}
+  .cursor-dot{width:7px; height:7px; background:#fff; margin:-3.5px 0 0 -3.5px;
+    transition:width .25s var(--ease-smooth), height .25s var(--ease-smooth)}
+  .cursor-ring{width:34px; height:34px; border:1.5px solid #fff; margin:-17px 0 0 -17px; opacity:.6;
+    transition:width .3s var(--ease-smooth), height .3s var(--ease-smooth), opacity .3s, margin .3s var(--ease-smooth)}
+  body.cur-hot .cursor-ring{width:54px; height:54px; margin:-27px 0 0 -27px; opacity:.9}
+  body.cur-hot .cursor-dot{width:0; height:0}
+  @media(hover:none),(pointer:coarse){ .cursor-dot,.cursor-ring{display:none} }
+
+  /* scanline + grain atmosphere */
+  .scan{position:fixed; inset:0; pointer-events:none; z-index:40;
+    background:repeating-linear-gradient(180deg, rgba(255,255,255,.018) 0 1px, transparent 1px 3px);
+    opacity:.5; mix-blend-mode:overlay}
+
+  /* load reveals */
+  .char{display:inline-block; will-change:transform,opacity}
+  .h1-on .char{animation:charIn .9s var(--ease-smooth) both; animation-delay:calc(var(--i)*34ms + .1s)}
+  @keyframes charIn{from{opacity:0; transform:translateY(120%) rotateX(-78deg)} to{opacity:1; transform:none}}
+  .reveal{opacity:0; transform:translateY(22px); transition:opacity .8s var(--ease-smooth), transform .8s var(--ease-smooth)}
+  .reveal.in{opacity:1; transform:none}
+
+  /* magnetic + smooth interactive */
+  .tab,.fp,.wbtn,.ctl,.copy,.chip{will-change:transform}
+  .tab,.fp{transition:color .2s, background .2s, transform .35s var(--ease-smooth)}
+
+  /* node entrance (staggered) — opacity only: a CSS transform here would
+     override the SVG transform="translate()" attribute and break layout */
+  .node{opacity:0}
+  svg#map.lit .node{animation:nodeIn .55s ease both; animation-delay:calc(var(--ni)*55ms)}
+  @keyframes nodeIn{to{opacity:1}}
+  svg#map.lit .edge{opacity:0; animation:edgeIn .6s ease both; animation-delay:calc(.4s + var(--ei)*30ms)}
+  @keyframes edgeIn{to{opacity:1}}
+
+  /* view switch reveal */
+  section.view.on{animation:viewIn .55s var(--ease-smooth)}
+  @keyframes viewIn{from{opacity:0; transform:translateY(14px)} to{opacity:1; transform:none}}
+
+  @media(prefers-reduced-motion:reduce){
+    *,*::before,*::after{animation-duration:.001ms !important; transition-duration:.001ms !important}
+  }
+
+  /* ---------- accessibility: visible focus + comfortable hit areas ---------- */
+  /* The custom cursor hides the pointer, so a visible focus ring is the only
+     wayfinding a keyboard user has — never remove it. */
+  :focus-visible{outline:2px solid var(--green); outline-offset:3px}
+  .tab:focus-visible{outline-offset:-2px}
+  .gsearch:focus-visible{outline:none; border-color:var(--green)}
+  .node{outline:none}
+  .node:focus-visible .box{stroke:var(--green); stroke-width:2.4;
+    filter:drop-shadow(0 0 10px rgba(21,201,95,.7))}
+  /* comfortable touch targets (kiosk display + mobile) */
+  .tab,.fp,.ctl,.copy,.wbtn{min-height:44px}
+  .ctl,.copy{display:inline-flex; align-items:center; justify-content:center}
+  .dt-x{width:32px; height:32px}
+
+  /* toast */
+  #toast{position:fixed; bottom:24px; left:50%; transform:translateX(-50%) translateY(20px);
+    background:var(--green); color:var(--bg); font-family:var(--disp); font-weight:600;
+    padding:11px 20px; border-radius:10px; opacity:0; pointer-events:none; transition:.3s; z-index:50;
+    box-shadow:0 10px 30px rgba(0,0,0,.4)}
+  #toast.show{opacity:1; transform:translateX(-50%) translateY(0)}
+</style>
+</head>
+<body>
+<div class="scan" aria-hidden="true"></div>
+<div class="cursor-ring" id="cur-ring" aria-hidden="true"></div>
+<div class="cursor-dot" id="cur-dot" aria-hidden="true"></div>
+<div class="wrap">
+  <header>
+    <div class="kicker">Smart Locker · Interactive Guide</div>
+    <h1>How the whole <span class="b">machine</span> fits together</h1>
+    <p class="lede">A plain-English map of the NFC equipment locker — every part named for what it
+      <i>does</i>, not what it's called in code. <b>Hover</b> a part to light up its connections,
+      <b>click</b> it to read about it, or <b>watch</b> a request travel through the system step by step.
+      Built for spotting <b>where</b> a problem lives so you can describe it accurately.</p>
+  </header>
+
+  <main id="main">
+  <nav class="tabs" id="tabs" role="tablist" aria-label="Guide sections">
+    <button class="tab on" id="tab-map" role="tab" aria-selected="true" aria-controls="view-map" data-view="map"><span class="ic" aria-hidden="true">🗺️</span>The Map</button>
+    <button class="tab" id="tab-watch" role="tab" aria-selected="false" aria-controls="view-watch" tabindex="-1" data-view="watch"><span class="ic" aria-hidden="true">▶️</span>Watch It Happen</button>
+    <button class="tab" id="tab-debug" role="tab" aria-selected="false" aria-controls="view-debug" tabindex="-1" data-view="debug"><span class="ic" aria-hidden="true">🛟</span>Something's Wrong?</button>
+    <button class="tab" id="tab-words" role="tab" aria-selected="false" aria-controls="view-words" tabindex="-1" data-view="words"><span class="ic" aria-hidden="true">📖</span>Word Helper</button>
+  </nav>
+
+  <!-- ============ MAP ============ -->
+  <section class="view on" id="view-map" role="tabpanel" aria-labelledby="tab-map" tabindex="0">
+    <div class="map-hint">
+      <span class="dot"><span class="pip"></span> a connection (data flows along it)</span>
+      <span class="dot"><span class="pip cfg"></span> a setting that configures a part</span>
+      <span class="dot">🖱️ hover = show links &nbsp;·&nbsp; click = details</span>
+    </div>
+    <div class="map-grid">
+      <div class="panel stage">
+        <svg id="map" viewBox="0 0 1280 832" preserveAspectRatio="xMidYMid meet" aria-label="System map">
+          <defs>
+            <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="var(--line2)"/>
+            </marker>
+            <marker id="arrow-hl" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="var(--green)"/>
+            </marker>
+          </defs>
+          <g id="edges"></g>
+          <g id="nodes"></g>
+          <g id="labels"></g>
+        </svg>
+      </div>
+      <div class="panel detail" id="detail">
+        <div class="empty" id="detail-empty">
+          <div class="big">👆</div>
+          <b style="color:var(--tx-dim)">Pick a part of the system.</b>
+          <p style="margin-top:8px">Hover any box on the map to see what it connects to,
+            then click it to read — in plain English — what it is, what it does, and which
+            parts it talks to.</p>
+        </div>
+        <div id="detail-content" style="display:none"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ WATCH ============ -->
+  <section class="view" id="view-watch" role="tabpanel" aria-labelledby="tab-watch" tabindex="0">
+    <div class="flow-pick" id="flow-pick"></div>
+    <div class="panel flow-stage">
+      <div class="stations" id="stations"></div>
+      <div class="caption" id="caption">
+        <div class="step">▶</div>
+        <div class="txt">Pick a story above, then press <b>Play</b> to watch the request travel
+          through the system one step at a time.</div>
+      </div>
+      <div class="controls">
+        <button class="ctl primary" id="play">▶ Play</button>
+        <button class="ctl" id="prev" disabled>‹ Back</button>
+        <button class="ctl" id="next" disabled>Next ›</button>
+        <button class="ctl" id="replay" disabled>↻ Replay</button>
+        <div class="progress"><div class="fill" id="pfill"></div></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ DEBUG ============ -->
+  <section class="view" id="view-debug" role="tabpanel" aria-labelledby="tab-debug" tabindex="0">
+    <p class="debug-note">You don't need to read code to report a bug well. Find the symptom that
+      matches what you're seeing — it tells you <b>which parts are probably involved</b> and gives you
+      a ready-made message you can <b>copy and paste to assistant Code</b>. The more precisely you point,
+      the faster it gets fixed.</p>
+    <div class="sym-grid" id="sym-grid"></div>
+  </section>
+
+  <!-- ============ WORDS ============ -->
+  <section class="view" id="view-words" role="tabpanel" aria-labelledby="tab-words" tabindex="0">
+    <input class="gsearch" id="gsearch" type="search" aria-label="Search the glossary" placeholder="🔎  Search a word (e.g. NFC, encryption, session)…" />
+    <div class="gloss" id="gloss"></div>
+  </section>
+  </main>
+
+  <footer>
+    <span class="b">smart_locker</span>
+    <span>· interactive explainer</span>
+    <span>· generated from the live code (smart_locker/ + config/)</span>
+    <span>· no internet or install needed</span>
+  </footer>
+</div>
+<div id="toast">Copied ✓</div>
+
+<script>
+"use strict";
+/* =========================================================================
+   DATA — every part of the system, in plain English, verified against code.
+   ========================================================================= */
+const NODES = {
+  you_card:{ em:"👤", label:"You & Your Card", sub:"your NFC card", cx:120, cy:130,
+    what:"That's you, holding your NFC card — a plastic card with a tiny chip that the kiosk reads when you tap it.",
+    does:"Tapping the card is how you log in and log out. The card carries a hidden ID number; you never type a password.",
+    talks:["reader"] },
+
+  reader:{ em:"🎫", label:"Card Reader", sub:"nfc/ · ACR1252U", cx:392, cy:130,
+    what:"The physical USB gadget you tap your card on (an ACS ACR1252U). The code in the <code>nfc</code> folder drives it.",
+    does:"When a card touches it, it reads the card's hidden ID number and passes it along. It also silences its own buzzer and retries a few times if the read is shaky.",
+    funcs:["start() — switch the reader on and watch for taps","wait_for_event() — hand over the next tap or removal","reads the ID with the GET_UID command"],
+    vars:["READER_NAME_FILTER = \"ACR1252\" — which reader to use"],
+    talks:["brain"] },
+
+  screen:{ em:"🖥️", label:"Touch Screen", sub:"frontend/app.js", cx:392, cy:450,
+    what:"The big touch display the user actually sees and taps — a web page (HTML/CSS/JavaScript) shown full-screen in a browser.",
+    does:"Shows the idle “tap your card” screen, the menu, the borrow/return grids, and confirmations. When you tap a button it sends the request to the Front Desk, and it listens for live updates like “login worked”.",
+    funcs:["6 screens run by a small state machine called S","apiBorrow / apiReturn / apiRegister — send your taps","listens to the live event stream for login, logout & registration"],
+    talks:["frontdesk"] },
+
+  settings:{ em:"⚙️", label:"The Settings", sub:"config/settings.py + .env", cx:648, cy:450,
+    what:"The control dials for the whole system. Ordinary settings live in <code>config/settings.py</code>; the secret keys and machine-specific paths live in a hidden <code>.env</code> file.",
+    does:"Sets things like the 2-minute auto-logout, the 5-device borrow limit, which card reader to use, the web port, and where the company Excel and photos come from.",
+    vars:["SESSION_TIMEOUT_SECONDS = 120","MAX_BORROWS = 5","READER_NAME_FILTER = ACR1252","API_PORT = 8000","ENC_KEY & HMAC_KEY (secret, in .env)"],
+    talks:[] },
+
+  brain:{ em:"🧠", label:"The Brain", sub:"api/app_context.py", cx:648, cy:256,
+    what:"The behind-the-scenes coordinator — the bridge between the physical card reader and everything else.",
+    does:"It runs a loop watching for card taps. On a tap it decides: are you registering, logging out, or logging in? Then it asks the Lock & Key to check your card, starts your Session, and tells the Touch Screen what happened — instantly.",
+    funcs:["_nfc_bridge_loop() — the always-running “watch for taps” loop","_handle_registration_tap() — enroll a brand-new card","pushes live events to the screen"],
+    talks:["security","session","screen","reader"] },
+
+  frontdesk:{ em:"🚦", label:"The Front Desk", sub:"api/routes.py", cx:648, cy:640,
+    what:"The set of “service windows” the Touch Screen talks to over the network — one window per action (borrow, return, register, end session, list devices…).",
+    does:"Receives each button tap from the screen, first checks you're logged in, then hands the job to the right Rule-Keeper and sends back a yes/no answer. It also serves the public Dashboard and the hidden admin actions. A few read-only requests — the Dashboard's tables and the registration name list — it answers by reading Storage directly rather than going through the Filing Clerk.",
+    funcs:["17 service windows (web addresses), e.g. /api/devices/{id}/borrow","require_session() — the “are you logged in?” gate","serves the public network Dashboard data + the /api/admin/* actions"],
+    talks:["session","rules","storage"] },
+
+  importer:{ em:"🔄", label:"The Importer", sub:"sync/", cx:648, cy:64,
+    what:"The helpers that bring information IN from outside — the company's equipment Excel file and device photos — and send data OUT (Excel export).",
+    does:"Reads the company Excel and adds/updates devices (only rows marked “schrank”) plus the approved-name list. Watches a folder for photos and matches them to devices by model name. It re-imports the moment that Excel is saved (a live file watcher), again every morning at 6am as a safety net, and once on startup. When it updates an existing device it leaves the locker slot, photo, and description untouched — but it DOES refresh the device's status and who currently has it, because the company Excel is treated as the official record of that.",
+    funcs:["import_from_source_excel() — pull devices + approved names","photo watcher — match photos to devices by model (87V.jpg → all “87V”)","live file watcher — re-imports when the Excel is saved (≈3s debounce, so one save = one import)","a daily 6am scheduled re-import + one on startup"],
+    vars:["SOURCE_EXCEL_PATH — where the company file is","PHOTO_INPUT_PATH — the photos folder"],
+    talks:["clerk","screen"] },
+
+  security:{ em:"🔐", label:"Lock & Key", sub:"security/ + auth/", cx:904, cy:130,
+    what:"The part that proves who you are and keeps card IDs secret, using two separate secret keys kept in the hidden <code>.env</code> file.",
+    does:"It turns your card's ID into a scrambled fingerprint (HMAC) to look you up fast, and separately locks the real ID away with strong encryption (AES) so even someone who steals the database can't read it. Your raw card ID is NEVER written to the logs.",
+    funcs:["authenticate() — is this card a known, active member?","compute_uid_hmac() — the fast lookup fingerprint","encrypt() / decrypt() — lock/unlock the real ID (admins only)"],
+    vars:["ENC_KEY — the encryption key","HMAC_KEY — the fingerprint key"],
+    talks:["clerk"] },
+
+  session:{ em:"🪪", label:"Session Keeper", sub:"auth/session_manager.py", cx:904, cy:410,
+    what:"Remembers that you're currently logged in. Only one person can be logged in at a time — it's a single shared kiosk.",
+    does:"Starts your session when you tap in, keeps it alive while you use the screen, and automatically logs you out after 2 minutes of no activity — or the moment you tap your card again.",
+    funcs:["start_session() / end_session()","current_session — quietly forgets you after the timeout","touch() — resets the idle timer on every action"],
+    vars:["SESSION_TIMEOUT_SECONDS = 120 (2 minutes)"],
+    talks:[] },
+
+  rules:{ em:"📐", label:"The Rule-Keeper", sub:"services/", cx:904, cy:640,
+    what:"The part that knows the borrowing rules — what's allowed and what isn't.",
+    does:"Before a borrow: checks you're logged in, you haven't hit your 5-device limit, and the device is actually free. Before a return: checks the device is really yours (admins may return for others). Then it asks the Filing Clerk to make the change and records it in the history.",
+    funcs:["borrow_device() — all the borrow checks","return_device() — the return checks + ownership","enroll_user() — create a new member (encrypts their card)"],
+    vars:["MAX_BORROWS = 5 (per person)","DeviceStatus = available / borrowed / maintenance"],
+    talks:["clerk","session"] },
+
+  clerk:{ em:"🗂️", label:"Filing Clerk", sub:"database/repositories.py", cx:1150, cy:410,
+    what:"The main gateway for reading from and writing to the Storage — almost everything that changes data goes through the clerk. (The read-only Dashboard and a couple of public name lists read Storage directly, but the kiosk's own borrow/return/device-list always go through the clerk.)",
+    does:"Finds members by their card fingerprint, finds devices, flips a device between Borrowed and Available, and writes every borrow and return into the history book.",
+    funcs:["find_by_uid_hmac() — look up a member by card fingerprint","borrow() / return_device() — flip a device's status","log_borrow() / log_return() — write the history"],
+    talks:["storage"] },
+
+  storage:{ em:"🗄️", label:"The Storage", sub:"smart_locker.db (SQLite)", cx:1150, cy:660,
+    what:"The filing cabinet where everything is permanently kept — a single database file on the computer.",
+    does:"Holds four lists: Members (users), Devices, the approved-name list (registrants), and the full History of every borrow and return.",
+    funcs:["users — members + their secret card info","devices — every item + its status & borrower","transaction_logs — the history book","registrants — approved names allowed to self-register"],
+    talks:[] },
+
+  dashboard:{ em:"📊", label:"The Dashboard", sub:"frontend/dashboard.js · /dashboard.html", cx:392, cy:600,
+    what:"A separate, read-only web page anyone on the office network can open in a browser at <code>/dashboard.html</code> — no card and no login. It replaced an old shared Excel file that kept getting locked.",
+    does:"Shows three live tables: every device and whether it's Available, Borrowed or in Maintenance; the full borrow/return history; and the list of registered members. It refreshes itself every 30 seconds by asking the Front Desk for fresh data (no live push — it simply re-asks on a timer).",
+    funcs:["three tables: Devices, History, Members","auto-refreshes every 30 seconds (polling)","sortable columns + a device-status filter"],
+    talks:["frontdesk"] },
+
+  admin:{ em:"🛠️", label:"Admin Controls", sub:"frontend/app.js · /api/admin/*", cx:392, cy:750,
+    what:"A hidden control panel on the kiosk for staff, opened by tapping the on-screen clock 5 times within 3 seconds. It needs no admin card — physical access to the kiosk is the safeguard.",
+    does:"Lets staff log in as admin without a card, manually register someone whose name isn't in the company Excel, force an immediate re-read of that Excel, and export the current data to an Excel file.",
+    funcs:["5-tap clock gesture opens the panel","start_admin_session() — card-less admin login","manual register (any name, no approved-list check)","re-sync the source Excel on demand","export current data to Excel"],
+    talks:["frontdesk"] },
+};
+
+/* edges: [from, to, label, kind:"config"?, bow?, endApproach?]
+   bow = signed perpendicular curve offset (px) to route an edge AROUND an
+   intervening node so the line never disappears behind a box it doesn't connect to.
+   endApproach = [dx,dy] travel direction INTO the target, to land the arrow on a
+   different side when two edges would otherwise collide at the same corner. */
+const EDGES = [
+  ["you_card","reader","you tap"],
+  ["reader","brain","sends the card ID"],
+  ["brain","security","“who is this?”"],
+  ["security","clerk","looks up the card"],
+  ["brain","session","starts your session"],
+  ["brain","screen","live updates"],
+  ["screen","frontdesk","sends button taps",null,0,[0,1]],
+  ["frontdesk","session","logged in?"],
+  ["frontdesk","rules","borrow / return"],
+  ["rules","session","session valid?"],
+  ["rules","clerk","update the device"],
+  ["clerk","storage","reads & saves"],
+  ["importer","clerk","adds devices",null,35],
+  ["importer","screen","device photos",null,0],
+  ["dashboard","frontdesk","asks for live data"],
+  ["admin","frontdesk","admin actions",null,0,[0,-1]],
+  ["frontdesk","storage","reads lists directly",null,95],
+  ["settings","reader","configures","config",-40],
+  ["settings","session","timeout","config",0],
+  ["settings","rules","limits","config",-70],
+];
+
+const FLOWS = [
+  { id:"login", ic:"🔓", name:"Tap to log in",
+    steps:[
+      ["you_card","You tap your card on the reader."],
+      ["reader","The Card Reader reads the card's hidden ID number."],
+      ["brain","The Brain receives the tap and takes charge."],
+      ["security","Lock & Key turns the ID into a fingerprint and checks it."],
+      ["clerk","The Filing Clerk finds your member record in Storage."],
+      ["session","Session Keeper logs you in (for 2 minutes of activity)."],
+      ["screen","The Touch Screen shows “Welcome” and the menu."],
+    ]},
+  { id:"logout", ic:"🔒", name:"Tap again to log out",
+    steps:[
+      ["you_card","You tap your card again while already logged in."],
+      ["reader","The Card Reader reads it."],
+      ["brain","The Brain sees a session is already active — so this means “log out”."],
+      ["session","Session Keeper ends your session."],
+      ["screen","The screen returns to the idle “tap your card” screen."],
+    ]},
+  { id:"borrow", ic:"📦", name:"Borrow a device",
+    steps:[
+      ["screen","You tap a device, then “Confirm Borrow” on the screen."],
+      ["frontdesk","The Front Desk receives the borrow request."],
+      ["session","It checks you're still logged in."],
+      ["rules","The Rule-Keeper checks: under your 5-device limit? is the device free?"],
+      ["clerk","The Filing Clerk marks the device Borrowed and writes it to the history."],
+      ["storage","The change is saved permanently in Storage."],
+      ["screen","The screen confirms: “Borrowed.”"],
+    ]},
+  { id:"return", ic:"↩️", name:"Return a device",
+    steps:[
+      ["screen","You tap a borrowed device, then “Confirm Return”."],
+      ["frontdesk","The Front Desk receives the return request."],
+      ["rules","The Rule-Keeper checks the device is really yours (admins can return for anyone)."],
+      ["clerk","The Filing Clerk marks it Available again and records the return."],
+      ["storage","Saved in Storage."],
+      ["screen","The screen confirms: “Returned.”"],
+    ]},
+  { id:"register", ic:"📝", name:"Register yourself",
+    steps:[
+      ["screen","You pick your name from the approved list and start registration."],
+      ["frontdesk","The Front Desk checks your name is on the approved list."],
+      ["reader","You tap your (new) card on the reader."],
+      ["brain","The Brain sees a registration is in progress, so this tap enrolls you."],
+      ["security","Lock & Key encrypts and fingerprints your card ID."],
+      ["clerk","The Filing Clerk saves you as a new member in Storage."],
+      ["screen","The screen says “Registered!” — now you can log in."],
+    ]},
+  { id:"import", ic:"📥", name:"Devices arrive from Excel",
+    steps:[
+      ["importer","On startup (and every morning at 6am) the Importer reads the company Excel."],
+      ["clerk","New devices are added and existing ones updated by the Filing Clerk — leaving each device's slot, photo, and description untouched (the Excel stays the official record of status & who has it)."],
+      ["storage","Devices and approved names are saved in Storage."],
+      ["importer","The photo watcher matches photos to devices by model name."],
+      ["screen","Devices (with photos) appear on the kiosk; the dashboard's device list updates too (it shows no photos)."],
+    ]},
+  { id:"admin", ic:"🛠️", name:"Staff use the admin panel",
+    steps:[
+      ["admin","A staff member taps the on-screen clock 5 times to open the hidden admin panel."],
+      ["frontdesk","The Front Desk starts an admin session (no card needed) and accepts admin actions."],
+      ["importer","If they press “Sync”, the Importer re-reads the company Excel right away."],
+      ["clerk","New or changed devices are written by the Filing Clerk…"],
+      ["storage","…and saved permanently in Storage."],
+      ["dashboard","Anyone watching the network Dashboard sees the change within 30 seconds."],
+    ]},
+  { id:"dashboard", ic:"📊", name:"Someone checks the Dashboard",
+    steps:[
+      ["dashboard","Someone opens /dashboard.html in a browser on the office network — no card, no login."],
+      ["frontdesk","The Dashboard asks the Front Desk for devices, history and members."],
+      ["storage","The Front Desk reads the current data straight from Storage and sends it back."],
+      ["dashboard","The three tables fill in — and refresh themselves every 30 seconds."],
+    ]},
+];
+
+const SYMPTOMS = [
+  { em:"🎫", title:"I tap my card and nothing happens",
+    pl:"The kiosk doesn't react at all — no welcome, no error. Usually the card reader isn't connected or running, or Windows' Smart Card service is switched off.",
+    parts:["Card Reader","The Brain"],
+    copy:"On the Smart Locker kiosk, tapping my NFC card does nothing — no login and no error message. Please check the NFC reader startup (nfc/reader.py) and the _nfc_bridge_loop in api/app_context.py, and whether the Windows Smart Card service is running." },
+  { em:"🚫", title:"It says “Card Not Recognized”",
+    pl:"The reader read your card, but the system doesn't know it. Either the card was never registered, or the secret keys in .env changed — which makes every existing card unrecognizable.",
+    parts:["Lock & Key","Filing Clerk","The Storage"],
+    copy:"On the Smart Locker, a card I expect to work shows “Card Not Recognized”. Please check authenticate() in auth/authenticator.py and whether SMART_LOCKER_HMAC_KEY in .env still matches the key used when the card was enrolled." },
+  { em:"📦", title:"It won't let me borrow",
+    pl:"You try to borrow but it refuses. Most often you've already borrowed the maximum of 5 devices, or that device isn't actually available (already borrowed or in maintenance).",
+    parts:["The Rule-Keeper"],
+    copy:"On the Smart Locker, borrowing a device is rejected with no clear reason. Please check borrow_device() in services/locker_service.py — specifically the MAX_BORROWS limit (5) and the device-availability check." },
+  { em:"🖼️", title:"A device has no photo",
+    pl:"A device shows a blank or placeholder image. Photos are matched to devices by model name, so the photo file must be named exactly like the device's model.",
+    parts:["The Importer","Touch Screen"],
+    copy:"On the Smart Locker, a device is missing its photo. Please check the photo watcher in sync/photo_watcher.py and confirm the image filename in SMART_LOCKER_PHOTO_INPUT_PATH exactly matches the device's model name." },
+  { em:"📋", title:"My name isn't in the registration list",
+    pl:"When registering, your name isn't in the dropdown. That list only holds approved names imported from the company Excel; if yours is missing, an admin has to add you.",
+    parts:["The Importer","The Storage"],
+    copy:"On the Smart Locker, my name doesn't appear in the self-registration list. Please check the registrants table and how sync/source_import.py fills it from the “Aktueller Einsatzort” column of the source Excel." },
+  { em:"🧯", title:"The app won't start",
+    pl:"Running the app fails right away. Common causes: the secret keys are missing from .env, or the web port 8000 is already being used by something else.",
+    parts:["The Settings","Lock & Key"],
+    copy:"The Smart Locker app fails to start. Please check that SMART_LOCKER_ENC_KEY and SMART_LOCKER_HMAC_KEY exist in .env (config/settings.py + security/key_manager.py) and that port 8000 (API_PORT) is free." },
+  { em:"📑", title:"New devices from Excel didn't show up",
+    pl:"You updated the company Excel but the kiosk didn't change. Either the Excel path isn't set, the file was open/locked, or the rows aren't marked “schrank”.",
+    parts:["The Importer","Filing Clerk"],
+    copy:"On the Smart Locker, devices from the source Excel didn't import or update. Please check SMART_LOCKER_SOURCE_EXCEL_PATH and import_from_source_excel() in sync/source_import.py — including the “schrank” row filter." },
+  { em:"⏱️", title:"It logs me out by itself",
+    pl:"Your session ends while you're still standing there. The kiosk logs you out automatically after 2 minutes without a tap — this is on purpose, but the time can be changed.",
+    parts:["Session Keeper","The Settings"],
+    copy:"On the Smart Locker, my session ends too quickly on its own. Please check SESSION_TIMEOUT_SECONDS (default 120) in config/settings.py and the timeout logic in auth/session_manager.py." },
+  { em:"📊", title:"The dashboard is blank or out of date",
+    pl:"The network dashboard page won't load, shows empty tables, or stops updating. It's a separate page at /dashboard.html that reads live data from the kiosk app, so usually the app isn't running/reachable on the network, or the dashboard data endpoints are failing.",
+    parts:["The Dashboard","The Front Desk","The Storage"],
+    copy:"On the Smart Locker, the network dashboard at /dashboard.html is blank or not refreshing. Please check the /api/dashboard/devices, /api/dashboard/transactions and /api/dashboard/users endpoints in api/routes.py and the fetchAll() / 30s polling loop in frontend/dashboard.js, plus that the app is reachable on the network." },
+  { em:"🛠️", title:"The admin panel won't open, or Sync does nothing",
+    pl:"Tapping the clock 5 times doesn't open the admin panel, or the panel opens but “Sync” / “Register” do nothing. Opening needs 5 taps within 3 seconds; the admin login needs at least one enrolled admin card to exist; Sync needs the company Excel path to be set.",
+    parts:["Admin Controls","The Front Desk","The Importer"],
+    copy:"On the Smart Locker, the hidden admin panel won't open or its Sync button does nothing. Please check the 5-tap clock gesture in frontend/app.js, POST /api/admin/session (it needs an active admin user enrolled) and POST /api/admin/sync-source plus SMART_LOCKER_SOURCE_EXCEL_PATH in api/routes.py." },
+  { em:"📤", title:"Export didn't download, or the file is empty",
+    pl:"You press Export in the admin panel but no Excel file downloads, or the file comes out empty. Export is admin-only and builds the file in memory from the current database; it fails if you're not on an admin session or there's no data yet.",
+    parts:["Admin Controls","The Front Desk"],
+    copy:"On the Smart Locker, the admin Export-to-Excel button doesn't download a file (or the file is empty). Please check GET /api/admin/export-excel in api/routes.py (it requires an active admin session) and the Excel-building helper it calls." },
+];
+
+const GLOSSARY = [
+  ["NFC","Tap-to-communicate technology — the same idea as contactless bank cards and phone payments. Two things “talk” when held close together."],
+  ["Card UID","The unique ID number hidden in your NFC card's chip. The kiosk reads it; you never see it or type it."],
+  ["HMAC (fingerprint)","A one-way scrambled fingerprint of your card ID, made with a secret key. It lets the system find you fast without ever storing your real card ID in readable form."],
+  ["Encryption / AES","Scrambling data with a secret key so only someone with the key can read it. The real card ID is stored encrypted."],
+  [".env file","A hidden text file holding secrets and machine-specific settings (the keys, the file paths). It's never shared or put online."],
+  ["Key","A long secret value used to scramble/unscramble or fingerprint data. Smart Locker uses two separate keys for extra safety."],
+  ["Database / SQLite","The filing cabinet where all data is permanently stored. SQLite keeps everything in a single file on the computer."],
+  ["Server / FastAPI","The program running in the background that serves the kiosk web page and answers its requests."],
+  ["API / endpoint","A “service window” the screen talks to — one web address per action (borrow, return, and so on)."],
+  ["SSE (live updates)","A one-way live feed the server pushes to the kiosk screen, so it can instantly show “login worked” the moment you tap. (The dashboard doesn't use this — it polls instead.)"],
+  ["Polling","Asking the server for fresh data on a timer instead of waiting for a push. The network dashboard polls every 30 seconds — simpler than SSE, but updates appear on the next tick rather than instantly."],
+  ["Session","Your logged-in period. It begins when you tap in and ends on a second tap or after 2 idle minutes."],
+  ["Kiosk","A shared public terminal — one screen everyone uses, with one person logged in at a time."],
+  ["Repository / Filing Clerk","The code layer that is the main gateway for reading from and writing to the database. Almost everything goes through it; a few read-only views (the dashboard, some name lists) read the database directly."],
+  ["Dashboard","A read-only web page at /dashboard.html that anyone on the office network can open — no card or login. It shows live device, history and member tables, refreshing every 30 seconds. It replaced an old shared Excel file that kept getting locked."],
+  ["Admin panel","A hidden control panel on the kiosk, opened by tapping the clock 5 times within 3 seconds. It lets staff register people manually, force an Excel re-sync, and export data — without an admin card (physical access is the safeguard)."],
+  ["“schrank”","German for “cabinet/locker”. In the company Excel, only rows marked schrank are imported as locker devices."],
+  ["PM number","The unique equipment number each device carries in the company's system — its main identifier."],
+  ["Status (device)","A device is always one of three: Available (free), Borrowed, or Maintenance (out of service)."],
+];
+
+/* =========================================================================
+   MAP RENDERING
+   ========================================================================= */
+const SVGNS="http://www.w3.org/2000/svg";
+const BOX_W=178, BOX_H=94;
+const edgeLayer=document.getElementById("edges");
+const nodeLayer=document.getElementById("nodes");
+const edgeEls={};      // "from|to" -> {g, base, label}
+const nodeAdj={};      // id -> Set(neighbour ids)
+const nodeEdges={};    // id -> [edge keys]
+Object.keys(NODES).forEach(id=>{nodeAdj[id]=new Set(); nodeEdges[id]=[];});
+
+// distance from a box centre to its border along a unit direction
+function rectT(ux,uy,hw,hh){
+  const tx = ux!==0 ? hw/Math.abs(ux) : Infinity;
+  const ty = uy!==0 ? hh/Math.abs(uy) : Infinity;
+  return Math.min(tx,ty);
+}
+function edgeGeom(a,b,bow,endApproach){
+  const A=NODES[a], B=NODES[b];
+  const dx=B.cx-A.cx, dy=B.cy-A.cy, dist=Math.hypot(dx,dy)||1;
+  const ux=dx/dist, uy=dy/dist;
+  const hw=BOX_W/2, hh=BOX_H/2;
+  const tEdge=rectT(ux,uy,hw,hh);            // exits right at the box border
+  const x1=A.cx+ux*(tEdge+3),  y1=A.cy+uy*(tEdge+3);
+  // The arrow normally lands on B's border along the centre-to-centre line. An
+  // optional endApproach=[dx,dy] (travel direction INTO B) lands it on a chosen
+  // side instead — used to keep two edges that share an approach angle from
+  // colliding at the same corner.
+  let evx=ux, evy=uy;
+  if(endApproach){ const el=Math.hypot(endApproach[0],endApproach[1])||1; evx=endApproach[0]/el; evy=endApproach[1]/el; }
+  const tEnd=rectT(evx,evy,hw,hh);
+  const x2=B.cx-evx*(tEnd+10), y2=B.cy-evy*(tEnd+10); // leave room for arrowhead
+  // Control points sit ALONG the travel direction at each end, so the arrowhead's
+  // tangent points straight at the target (bow=0 → a clean straight connector).
+  // A signed perpendicular "bow" curves the edge sideways to route around an
+  // intervening node without changing where it starts or ends.
+  const px=-uy, py=ux, off=bow||0, along=dist*0.25;
+  const c1x=x1+ux*along+px*off, c1y=y1+uy*along+py*off;
+  const c2x=x2-evx*along+px*off, c2y=y2-evy*along+py*off;
+  const d=`M${x1.toFixed(1)},${y1.toFixed(1)} C${c1x.toFixed(1)},${c1y.toFixed(1)} ${c2x.toFixed(1)},${c2y.toFixed(1)} ${x2.toFixed(1)},${y2.toFixed(1)}`;
+  // label at the curve's own midpoint (cubic Bézier evaluated at t=0.5)
+  const lx=(x1+3*c1x+3*c2x+x2)/8, ly=(y1+3*c1y+3*c2y+y2)/8;
+  return {d, lx, ly:ly-7};
+}
+
+const labelLayer=document.getElementById("labels");
+EDGES.forEach(([from,to,label,kind,bow,endApproach],idx)=>{
+  const key=from+"|"+to;
+  const g=document.createElementNS(SVGNS,"g");
+  g.setAttribute("class","edge"+(kind==="config"?" cfg":""));
+  g.style.setProperty("--ei", idx);
+  const geo=edgeGeom(from,to,bow,endApproach);
+  const base=document.createElementNS(SVGNS,"path");
+  base.setAttribute("class","base"); base.setAttribute("d",geo.d);
+  base.setAttribute("marker-end","url(#arrow)");
+  g.appendChild(base);
+  if(kind!=="config"){
+    const flow=document.createElementNS(SVGNS,"path");
+    flow.setAttribute("class","flow"); flow.setAttribute("d",geo.d);
+    g.appendChild(flow);
+  }
+  edgeLayer.appendChild(g);
+  // labels go in the top layer so a node box can never hide them
+  const t=document.createElementNS(SVGNS,"text");
+  t.setAttribute("class","elabel"); t.setAttribute("x",geo.lx); t.setAttribute("y",geo.ly);
+  t.textContent=label;
+  labelLayer.appendChild(t);
+  edgeEls[key]={g, base, label:t};
+  nodeAdj[from].add(to); nodeAdj[to].add(from);
+  nodeEdges[from].push(key); nodeEdges[to].push(key);
+});
+
+Object.entries(NODES).forEach(([id,n],idx)=>{
+  const g=document.createElementNS(SVGNS,"g");
+  g.setAttribute("class","node"); g.dataset.id=id;
+  g.setAttribute("tabindex","0"); g.setAttribute("role","button");
+  g.setAttribute("aria-label", `${n.label}. ${n.sub}`);
+  g.style.setProperty("--ni", idx);
+  g.setAttribute("transform",`translate(${n.cx-BOX_W/2},${n.cy-BOX_H/2})`);
+  const r=document.createElementNS(SVGNS,"rect");
+  r.setAttribute("class","box"); r.setAttribute("width",BOX_W); r.setAttribute("height",BOX_H);
+  r.setAttribute("rx",14);
+  g.appendChild(r);
+  const cxm=BOX_W/2;
+  const em=document.createElementNS(SVGNS,"text");
+  em.setAttribute("class","emoji"); em.setAttribute("x",cxm); em.setAttribute("y",28);
+  em.textContent=n.em; g.appendChild(em);
+  const lbl=document.createElementNS(SVGNS,"text");
+  lbl.setAttribute("class","lbl"); lbl.setAttribute("x",cxm); lbl.setAttribute("y",58);
+  lbl.textContent=n.label; g.appendChild(lbl);
+  const sub=document.createElementNS(SVGNS,"text");
+  sub.setAttribute("class","sub"); sub.setAttribute("x",cxm); sub.setAttribute("y",77);
+  sub.textContent=n.sub; g.appendChild(sub);
+  nodeLayer.appendChild(g);
+  n._g=g;
+  g.addEventListener("mouseenter",()=>{ if(!pinned) highlight(id); });
+  g.addEventListener("mouseleave",()=>{ if(!pinned) clearHighlight(); });
+  g.addEventListener("focus",()=>{ if(!pinned) highlight(id); });
+  g.addEventListener("blur",()=>{ if(!pinned) clearHighlight(); });
+  g.addEventListener("click",e=>{ e.stopPropagation(); selectNode(id); });
+  g.addEventListener("keydown",e=>{ if(e.key==="Enter"||e.key===" "){ e.preventDefault(); selectNode(id); }});
+});
+
+let pinned=null;
+function highlight(id){
+  const keep=new Set([id, ...nodeAdj[id]]);
+  const keepEdges=new Set(nodeEdges[id]);
+  Object.entries(NODES).forEach(([nid,n])=>{
+    n._g.classList.toggle("dim", !keep.has(nid));
+    n._g.classList.toggle("hl", keep.has(nid));
+  });
+  Object.entries(edgeEls).forEach(([key,e])=>{
+    const on=keepEdges.has(key);
+    e.g.classList.toggle("hl", on);
+    e.g.classList.toggle("dim", !on);
+    e.label.classList.toggle("show", on);
+    e.base.setAttribute("marker-end", on?"url(#arrow-hl)":"url(#arrow)");
+  });
+}
+function clearHighlight(){
+  Object.values(NODES).forEach(n=>n._g.classList.remove("dim","hl"));
+  Object.values(edgeEls).forEach(e=>{e.g.classList.remove("hl","dim"); e.label.classList.remove("show"); e.base.setAttribute("marker-end","url(#arrow)");});
+}
+document.getElementById("map").addEventListener("click",()=>{ if(pinned){ pinned=null; clearHighlight(); closeDetail(); }});
+
+/* ---------- detail panel ---------- */
+const dEmpty=document.getElementById("detail-empty");
+const dContent=document.getElementById("detail-content");
+function selectNode(id){
+  pinned=id;
+  Object.values(NODES).forEach(n=>n._g.classList.remove("pinned"));
+  NODES[id]._g.classList.add("pinned");
+  highlight(id);
+  renderDetail(id);
+}
+function closeDetail(){
+  Object.values(NODES).forEach(n=>n._g.classList.remove("pinned"));
+  dContent.style.display="none"; dEmpty.style.display="block";
+}
+function renderDetail(id){
+  const n=NODES[id];
+  const flowsWith=FLOWS.filter(f=>f.steps.some(s=>s[0]===id));
+  let h=`<div class="dt-head">
+      <span class="em">${n.em}</span>
+      <div><h3>${n.label}</h3><div class="file">${n.sub}</div></div>
+      <button class="dt-x" title="close" onclick="closeDetail()">✕</button>
+    </div><div class="dt-body">
+      <p>${n.what}</p>
+      <p><b>What it does:</b> ${n.does}</p>`;
+  if(n.talks && n.talks.length){
+    h+=`<div class="dt-lab">Talks to</div><div class="chips">`+
+      n.talks.map(t=>`<button class="chip" onclick="selectNode('${t}')"><span aria-hidden="true">${NODES[t].em}</span> ${NODES[t].label}</button>`).join("")+`</div>`;
+  }
+  if(n.funcs){ h+=`<div class="dt-lab">Key pieces inside</div><ul>`+n.funcs.map(f=>`<li>${f}</li>`).join("")+`</ul>`; }
+  if(n.vars){ h+=`<div class="dt-lab">Key settings &amp; values</div><ul>`+n.vars.map(v=>`<li><span class="mono">${v}</span></li>`).join("")+`</ul>`; }
+  if(flowsWith.length){
+    h+=`<div class="dt-lab">See it in action</div><div class="watch-btns">`+
+      flowsWith.map(f=>`<button class="wbtn" onclick="gotoFlow('${f.id}')">${f.ic} ${f.name}</button>`).join("")+`</div>`;
+  }
+  h+=`</div>`;
+  dContent.innerHTML=h; dContent.style.display="block"; dEmpty.style.display="none";
+}
+
+/* =========================================================================
+   TABS
+   ========================================================================= */
+const tabs=document.getElementById("tabs");
+tabs.addEventListener("click",e=>{
+  const b=e.target.closest(".tab"); if(!b) return;
+  showView(b.dataset.view);
+});
+// roving-tabindex arrow navigation for the tablist (WAI-ARIA tabs pattern)
+tabs.addEventListener("keydown",e=>{
+  const list=[...tabs.querySelectorAll(".tab")];
+  const i=list.indexOf(document.activeElement);
+  if(i<0) return;
+  let j=null;
+  if(e.key==="ArrowRight"||e.key==="ArrowDown") j=(i+1)%list.length;
+  else if(e.key==="ArrowLeft"||e.key==="ArrowUp") j=(i-1+list.length)%list.length;
+  else if(e.key==="Home") j=0;
+  else if(e.key==="End") j=list.length-1;
+  if(j===null) return;
+  e.preventDefault(); showView(list[j].dataset.view); list[j].focus();
+});
+function showView(v){
+  document.querySelectorAll(".tab").forEach(t=>{
+    const on=t.dataset.view===v;
+    t.classList.toggle("on",on);
+    t.setAttribute("aria-selected", on?"true":"false");
+    t.tabIndex = on?0:-1;
+  });
+  document.querySelectorAll(".view").forEach(s=>s.classList.toggle("on",s.id==="view-"+v));
+}
+function gotoFlow(fid){ showView("watch"); pickFlow(fid); }
+
+/* =========================================================================
+   WATCH (flow player)
+   ========================================================================= */
+const flowPick=document.getElementById("flow-pick");
+const stationsEl=document.getElementById("stations");
+const captionEl=document.getElementById("caption");
+const pfill=document.getElementById("pfill");
+const btnPlay=document.getElementById("play"), btnPrev=document.getElementById("prev"),
+      btnNext=document.getElementById("next"), btnReplay=document.getElementById("replay");
+let curFlow=null, curStep=-1, playing=false, timer=null;
+
+FLOWS.forEach((f,i)=>{
+  const b=document.createElement("button");
+  b.className="fp"; b.dataset.id=f.id; b.setAttribute("aria-pressed","false");
+  b.innerHTML=`<span class="ic" aria-hidden="true">${f.ic}</span>${f.name}`;
+  b.addEventListener("click",()=>pickFlow(f.id));
+  flowPick.appendChild(b);
+});
+
+function pickFlow(fid){
+  curFlow=FLOWS.find(f=>f.id===fid); if(!curFlow) return;
+  document.querySelectorAll(".fp").forEach(x=>{const on=x.dataset.id===fid; x.classList.toggle("on",on); x.setAttribute("aria-pressed",on?"true":"false");});
+  buildStations();
+  stop(); setStep(-1);
+  btnPrev.disabled=true; btnNext.disabled=false; btnReplay.disabled=false; btnPlay.disabled=false;
+  captionEl.innerHTML=`<div class="step">${curFlow.ic}</div><div class="txt"><b>${curFlow.name}.</b> Press <b>Play</b> to watch it travel step by step, or use Next / Back.</div>`;
+}
+function buildStations(){
+  stationsEl.innerHTML="";
+  curFlow.steps.forEach((s,i)=>{
+    if(i>0){
+      const ar=document.createElement("div"); ar.className="st-arrow"; ar.dataset.arrow=i;
+      ar.textContent="➜"; stationsEl.appendChild(ar);
+    }
+    const n=NODES[s[0]];
+    const st=document.createElement("div"); st.className="station";
+    st.innerHTML=`<div class="st-card" data-i="${i}">
+        <span class="n">${i+1}</span><div class="em">${n.em}</div><div class="nm">${n.label}</div></div>`;
+    stationsEl.appendChild(st);
+  });
+}
+function setStep(i){
+  curStep=i;
+  const cards=stationsEl.querySelectorAll(".st-card");
+  const arrows=stationsEl.querySelectorAll(".st-arrow");
+  cards.forEach((c,ci)=>{
+    c.classList.toggle("active",ci===i);
+    c.classList.toggle("done",ci<i);
+  });
+  arrows.forEach(a=>{ a.classList.toggle("lit", (+a.dataset.arrow)<=i && i>=0); });
+  if(i>=0){ const act=cards[i]; if(act) act.scrollIntoView({behavior:"smooth",inline:"center",block:"nearest"}); }
+  const pct=i<0?0:((i+1)/curFlow.steps.length)*100;
+  pfill.style.width=pct+"%";
+  if(i>=0){
+    const s=curFlow.steps[i];
+    captionEl.innerHTML=`<div class="step">${i+1}</div><div class="txt">${s[1]}</div>`;
+  }
+  btnPrev.disabled=(i<=0);
+  btnNext.disabled=(i>=curFlow.steps.length-1);
+}
+function next(){ if(curStep<curFlow.steps.length-1) setStep(curStep+1); else stop(); }
+function prev(){ if(curStep>0) setStep(curStep-1); }
+function play(){
+  if(!curFlow) return;
+  if(playing){ stop(); return; }
+  if(curStep>=curFlow.steps.length-1) setStep(-1);
+  playing=true; btnPlay.textContent="⏸ Pause"; btnPlay.classList.remove("primary");
+  step(); timer=setInterval(step,2100);
+  function step(){
+    if(curStep>=curFlow.steps.length-1){ setStep(curFlow.steps.length-1); stop(); return; }
+    setStep(curStep+1);
+  }
+}
+function stop(){
+  playing=false; if(timer){clearInterval(timer); timer=null;}
+  btnPlay.textContent="▶ Play"; btnPlay.classList.add("primary");
+}
+btnPlay.addEventListener("click",play);
+btnNext.addEventListener("click",()=>{stop(); next();});
+btnPrev.addEventListener("click",()=>{stop(); prev();});
+btnReplay.addEventListener("click",()=>{stop(); setStep(-1); play();});
+pickFlow("login");
+
+/* =========================================================================
+   DEBUG helper
+   ========================================================================= */
+const symGrid=document.getElementById("sym-grid");
+SYMPTOMS.forEach((s,i)=>{
+  const card=document.createElement("div"); card.className="panel sym";
+  card.innerHTML=`<h3><span class="em">${s.em}</span>${s.title}</h3>
+    <div class="pl">${s.pl}</div>
+    <div class="invd">Likely involved:</div>
+    <div class="parts">${s.parts.map(p=>`<span class="ptag">${p}</span>`).join("")}</div>
+    <div class="copybar">
+      <span class="lab">Copy a ready message for assistant Code →</span>
+      <button class="copy" data-i="${i}">📋 Copy</button>
+    </div>`;
+  symGrid.appendChild(card);
+});
+symGrid.addEventListener("click",e=>{
+  const b=e.target.closest(".copy"); if(!b) return;
+  const s=SYMPTOMS[+b.dataset.i];
+  copyText(s.copy, ()=>{ b.classList.add("ok"); b.textContent="Copied ✓";
+    toast("Message copied — paste it to assistant Code"); setTimeout(()=>{b.classList.remove("ok"); b.textContent="📋 Copy";},1800); });
+});
+
+/* =========================================================================
+   GLOSSARY
+   ========================================================================= */
+const glossEl=document.getElementById("gloss");
+function renderGloss(q=""){
+  q=q.trim().toLowerCase();
+  glossEl.innerHTML="";
+  GLOSSARY.filter(([t,d])=> !q || t.toLowerCase().includes(q) || d.toLowerCase().includes(q))
+    .forEach(([t,d])=>{
+      const el=document.createElement("div"); el.className="panel gterm";
+      el.innerHTML=`<div class="t">${t}</div><div class="d">${d}</div>`;
+      glossEl.appendChild(el);
+    });
+  if(!glossEl.children.length){
+    glossEl.innerHTML=`<div class="gterm" style="color:var(--tx-mute)">No matching word.</div>`;
+  }
+}
+document.getElementById("gsearch").addEventListener("input",e=>renderGloss(e.target.value));
+renderGloss();
+
+/* =========================================================================
+   helpers: clipboard + toast
+   ========================================================================= */
+function copyText(txt, done){
+  if(navigator.clipboard && window.isSecureContext){
+    navigator.clipboard.writeText(txt).then(done).catch(()=>fallbackCopy(txt,done));
+  } else { fallbackCopy(txt,done); }
+}
+function fallbackCopy(txt, done){
+  try{
+    const ta=document.createElement("textarea");
+    ta.value=txt; ta.style.position="fixed"; ta.style.top="-1000px"; ta.style.opacity="0";
+    document.body.appendChild(ta); ta.focus(); ta.select();
+    document.execCommand("copy"); document.body.removeChild(ta); done && done();
+  }catch(err){ done && done(); }
+}
+let toastTimer=null;
+function toast(msg){
+  const t=document.getElementById("toast");
+  t.textContent=msg; t.classList.add("show");
+  clearTimeout(toastTimer); toastTimer=setTimeout(()=>t.classList.remove("show"),2200);
+}
+
+/* =========================================================================
+   CINEMATIC LAYER — load reveals, custom cursor, magnetic hover
+   (visual language borrowed from landonorris.com, like the kiosk UI)
+   ========================================================================= */
+(function cinematic(){
+  const reduce = window.matchMedia("(prefers-reduced-motion:reduce)").matches;
+
+  /* --- char-split the headline --- */
+  const h1=document.querySelector("h1");
+  if(h1){
+    const walk=(node)=>{
+      const kids=[...node.childNodes];
+      node.textContent="";
+      kids.forEach(k=>{
+        if(k.nodeType===3){ // text
+          [...k.textContent].forEach((ch,i)=>{
+            const s=document.createElement("span");
+            s.className="char"; s.textContent=ch===" "?" ":ch;
+            node.appendChild(s);
+          });
+        } else if(k.nodeType===1){
+          const wrap=document.createElement("span");
+          wrap.className=k.className; node.appendChild(wrap);
+          wrap.append(...[...k.childNodes]); walk(wrap);
+        }
+      });
+    };
+    walk(h1);
+    let n=0; h1.querySelectorAll(".char").forEach(c=>c.style.setProperty("--i", n++));
+    requestAnimationFrame(()=>h1.classList.add("h1-on"));
+  }
+
+  /* --- staggered reveal of header + first view --- */
+  const revs=[".lede","nav.tabs",".map-hint",".map-grid"];
+  revs.forEach((sel,i)=>{
+    const el=document.querySelector(sel); if(!el) return;
+    el.classList.add("reveal");
+    const delay=reduce?0:(380+i*120);
+    setTimeout(()=>el.classList.add("in"), delay);
+    // drop the transition wrapper afterward so it doesn't slow later interactions
+    setTimeout(()=>el.classList.remove("reveal","in"), delay+1000);
+  });
+
+  /* --- light up the map nodes/edges on load --- */
+  const map=document.getElementById("map");
+  if(map) requestAnimationFrame(()=>map.classList.add("lit"));
+
+  /* --- custom cursor --- */
+  const dot=document.getElementById("cur-dot"), ring=document.getElementById("cur-ring");
+  if(dot && ring && matchMedia("(hover:hover) and (pointer:fine)").matches){
+    let rx=0,ry=0,dx=0,dy=0;
+    addEventListener("mousemove",e=>{
+      dx=e.clientX; dy=e.clientY;
+      dot.style.transform=`translate(${dx}px,${dy}px)`;
+    },{passive:true});
+    const loop=()=>{ rx+=(dx-rx)*.18; ry+=(dy-ry)*.18;
+      ring.style.transform=`translate(${rx}px,${ry}px)`; requestAnimationFrame(loop); };
+    loop();
+    const hot="a,button,.node,.chip,input,.fp,.tab,.copy,.wbtn,.ctl";
+    document.addEventListener("mouseover",e=>{ if(e.target.closest(hot)) document.body.classList.add("cur-hot"); });
+    document.addEventListener("mouseout",e=>{ if(e.target.closest(hot)) document.body.classList.remove("cur-hot"); });
+  }
+
+  /* --- magnetic hover on the chunky buttons --- */
+  if(!reduce && matchMedia("(hover:hover) and (pointer:fine)").matches){
+    const mag=12;
+    const bind=el=>{
+      el.addEventListener("mousemove",e=>{
+        const r=el.getBoundingClientRect();
+        const mx=(e.clientX-r.left-r.width/2)/r.width;
+        const my=(e.clientY-r.top-r.height/2)/r.height;
+        el.style.transform=`translate(${mx*mag}px,${my*mag}px)`;
+      });
+      el.addEventListener("mouseleave",()=>{ el.style.transform=""; });
+    };
+    const wire=()=>document.querySelectorAll(".tab,.fp,.wbtn,.ctl").forEach(b=>{ if(!b._mag){b._mag=1; bind(b);} });
+    wire();
+    // re-wire dynamically-added flow buttons in detail panel
+    new MutationObserver(wire).observe(document.body,{childList:true,subtree:true});
+  }
+})();
+</script>
+</body>
+</html>
