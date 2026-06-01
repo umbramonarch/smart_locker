@@ -124,6 +124,12 @@ body::after {
   height: 50px;
   border-color: rgba(0, 150, 65, 0.7);
 }
+/* On a touch-only device (the production capacitive panel) there is no pointer
+   to move the custom cursor, so hide it in every mode — it would otherwise sit
+   as a static dot in the corner. The JS already skips wiring it up there. */
+@media (hover: none), (pointer: coarse) {
+  #cursor, #cursor-ring { display: none !important; }
+}
 
 /* ============================================================
    SCREEN SYSTEM — circle reveal transitions
@@ -780,7 +786,9 @@ body::after {
   opacity: 0;
   transform: translateY(40px) scale(0.92);
   filter: blur(8px);
-  will-change: transform, opacity, filter;
+  /* No permanent will-change: promoting every card to its own compositor
+     layer causes layer-explosion (GPU memory + compositing jank) with a
+     full grid. The entrance still animates fine without pre-promotion. */
   transition:
     transform 0.7s var(--ease-smooth),
     box-shadow 0.4s var(--ease-smooth),
@@ -1828,3 +1836,114 @@ body::after {
    UTILITY
 ============================================================ */
 .hidden { display: none !important; }
+
+/* ============================================================
+   PERFORMANCE / LITE MODE
+   Auto-enabled (see the detection script in index.html and the
+   runtime FPS probe in app.js) on low-power hosts, when
+   prefers-reduced-motion is set, or via ?lite. The full animated
+   experience is the default (capable hardware / the kiosk / ?full).
+   Lite mode strips the GPU-expensive effects — blur filters,
+   backdrop-filters, infinite background animations, the custom
+   cursor, parallax, and the full-screen clip-path transitions —
+   and replaces them with a fast, flat version of the same UI.
+============================================================ */
+
+/* — Always-on infinite background animations (CPU/GPU even when idle) — */
+html.lite .hero-bg,
+html.lite .mesh-bg,
+html.lite .nfc-texture-reveal,
+html.lite .nfc-ring-outer,
+html.lite .nfc-ring-mid,
+html.lite .nfc-core,
+html.lite .marquee-track,
+html.lite .register-icon-circle { animation: none !important; }
+/* The marquee element is also pre-promoted via will-change; with the animation
+   off, drop the standing compositor layer too. */
+html.lite .marquee-track { will-change: auto; }
+
+/* — Expensive blur filters → flat fallbacks — */
+html.lite .hero-bg          { filter: none; opacity: 0.05; transform: none; }
+html.lite .mesh-bg          { transform: none; }
+html.lite .nfc-texture-reveal { display: none; }
+html.lite .nfc-core         { box-shadow: 0 0 24px rgba(0,150,65,0.18); transform: none; }
+html.lite .nfc-svg          { filter: none; }
+
+/* — Full-screen scanline overlay (composited over everything) — */
+html.lite body::after       { display: none; }
+
+/* — backdrop-filter is the single most expensive thing to scroll;
+     replace the blurred regions with opaque backgrounds — */
+html.lite .card-slot,
+html.lite .card-hover-icon,
+html.lite #overlay-inactivity,
+html.lite #overlay-admin {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+html.lite .card-slot         { background: rgba(24,29,36,0.92); }
+html.lite #overlay-inactivity { background: rgba(24,29,36,0.97); }
+html.lite #overlay-admin      { background: rgba(24,29,36,0.97); }
+
+/* — Custom cursor off; restore the native pointer — */
+html.lite #cursor,
+html.lite #cursor-ring      { display: none !important; }
+html.lite, html.lite body   { cursor: auto; }
+
+/* — Screen transitions: swap the full-screen clip-path circle reveal
+     (forces a full-viewport repaint per frame) for a cheap fade — */
+html.lite .screen {
+  clip-path: none !important;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.25s ease, visibility 0.25s ease;
+}
+html.lite .screen.active    { opacity: 1; visibility: visible; }
+html.lite .screen.exit      { opacity: 0; visibility: hidden; }
+
+/* — Overlay transitions: swap the polygon wipe for a fade — */
+html.lite .overlay {
+  clip-path: none !important;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+html.lite .overlay.visible       { opacity: 1; }
+html.lite .overlay.hidden-left,
+html.lite .overlay.hidden-right  { opacity: 0; }
+
+/* — Device cards: no per-card blur animation, no parallax, no extra
+     compositor layers; keep a cheap fade/slide entrance — */
+html.lite .device-card {
+  filter: none !important;
+  will-change: auto;
+  transition: transform 0.35s ease, opacity 0.35s ease,
+              border-color 0.25s ease, box-shadow 0.25s ease;
+}
+html.lite .device-card.out-up        { filter: none !important; }
+html.lite .device-card.unavailable.in { filter: none !important; }
+html.lite .card-image img {
+  will-change: auto;
+  clip-path: none !important;
+  transform: none !important;
+  transition: none !important;
+}
+html.lite .card-hover-reveal { display: none; }   /* blurred/filtered hover image */
+
+/* — Menu action-button image reveals: show flat, skip the clip-path anim — */
+html.lite .btn-reveal-img,
+html.lite .btn-reveal-tint {
+  transition: none !important;
+  clip-path: ellipse(120% 120% at 50% 100%) !important;
+  transform: none !important;
+}
+
+/* — Character-split / line-reveal text: show instantly, skip per-char anim — */
+html.lite .split-char {
+  transform: none !important;
+  opacity: 1 !important;
+  transition: none !important;
+}
+html.lite .reveal-inner {
+  transform: none !important;
+  transition: none !important;
+}

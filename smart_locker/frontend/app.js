@@ -15,6 +15,31 @@
 /** Whether to use demo mode with mock data. Enabled by adding ?demo to the URL. */
 const USE_DEMO = new URLSearchParams(window.location.search).has('demo');
 
+/* ============================================================
+   PERFORMANCE MODE
+   window.__LITE__ is set by the detection script in index.html
+   (low-power host / prefers-reduced-motion / ?lite). PERF.lite is
+   the LIVE flag every effect consults, so a runtime FPS downgrade
+   (see enableLite) instantly stops the heavy work. Pointer-driven
+   effects (custom cursor, magnetic hover, mouse parallax) are also
+   gated on canHover, so they never run on the touch panel.
+============================================================ */
+const PERF = { lite: !!window.__LITE__ };
+const canHover = window.matchMedia('(hover: hover) and (pointer: fine)').matches;
+
+/**
+ * Switch to lite mode at runtime (called by the FPS probe on a janky host).
+ * Adds the html.lite class so the CSS strips the heavy effects, flips the
+ * live PERF.lite flag (the cursor loop and parallax/magnetic handlers all
+ * bail on it), and persists the choice for this machine.
+ */
+function enableLite() {
+  if (PERF.lite) return;
+  PERF.lite = true;
+  document.documentElement.classList.add('lite');
+  try { localStorage.setItem('sl_lite', '1'); } catch (_) { /* storage unavailable */ }
+}
+
 const S = {
   screen:     'idle',   // current screen id
   user:       null,     // { id, name, role }
@@ -631,6 +656,12 @@ function buildGrid(gridId, devices, mode) {
     });
   }, { root: scrollRoot, threshold: 0.15, rootMargin: '40px 0px' }); // 15% visible triggers animation; 40px buffer for smooth entry
 
+  // Scroll/mouse parallax on card images is pointer-driven eye-candy that
+  // forces a getBoundingClientRect() per card per frame. Skip it entirely on
+  // the touch kiosk (no pointer) and in lite mode (too costly) — the cards
+  // still get their IntersectionObserver entrance and click handling below.
+  const fancy = canHover && !PERF.lite;
+
   // Scroll parallax: shift card images based on scroll position
   const parallaxCards = [];
   /**
@@ -650,9 +681,11 @@ function buildGrid(gridId, devices, mode) {
     }
     grid._rafId = null;
   }
-  scrollRoot.addEventListener('scroll', () => {
-    if (!grid._rafId) grid._rafId = requestAnimationFrame(onGridScroll);
-  }, { passive: true });
+  if (fancy) {
+    scrollRoot.addEventListener('scroll', () => {
+      if (!grid._rafId) grid._rafId = requestAnimationFrame(onGridScroll);
+    }, { passive: true });
+  }
   grid._scrollObs = cardObserver;
 
   sorted.forEach((dev, i) => {
@@ -701,13 +734,12 @@ function buildGrid(gridId, devices, mode) {
     // Observe card for scroll-triggered entrance
     cardObserver.observe(card);
 
-    // Track for scroll parallax
+    // Track for scroll parallax + mouse parallax on hover (pointer-only eye-candy)
     const cardImg = card.querySelector('.card-image img');
-    if (cardImg) parallaxCards.push({ card, img: cardImg });
-
-    // Mouse parallax on hover (layered on top of scroll parallax)
-    if (cardImg) {
+    if (fancy && cardImg) {
+      parallaxCards.push({ card, img: cardImg });
       card.addEventListener('mousemove', e => {
+        if (PERF.lite) return;           // runtime downgrade — stop applying transforms
         const rect = card.getBoundingClientRect();
         const x = (e.clientX - rect.left) / rect.width - 0.5;
         const y = (e.clientY - rect.top) / rect.height - 0.5;
@@ -724,8 +756,8 @@ function buildGrid(gridId, devices, mode) {
     grid.appendChild(card);
   });
 
-  // Trigger initial parallax positioning
-  requestAnimationFrame(onGridScroll);
+  // Trigger initial parallax positioning (full mode only)
+  if (fancy) requestAnimationFrame(onGridScroll);
 }
 
 /* ============================================================
@@ -863,34 +895,55 @@ function showToast(msg, type = '') {
 const cursorDot  = document.getElementById('cursor');
 const cursorRing = document.getElementById('cursor-ring');
 let mx = 0, my = 0, rx = 0, ry = 0;
-
-document.addEventListener('mousemove', e => {
-  mx = e.clientX; my = e.clientY;
-  cursorDot.style.left = mx + 'px';
-  cursorDot.style.top  = my + 'px';
-
-  // Detect hovering over interactive elements
-  const target = e.target.closest('button, .action-btn, .device-card, .confirm-btn, .stay-btn, a');
-  if (target) {
-    cursorDot.classList.add('hovering');
-    cursorRing.classList.add('hovering');
-  } else {
-    cursorDot.classList.remove('hovering');
-    cursorRing.classList.remove('hovering');
-  }
-});
+let ringRunning = false;
 
 /**
  * Animate the cursor ring to follow the cursor dot with an eased lag.
- * Runs as a self-invoking requestAnimationFrame loop.
+ * Self-suspending: the rAF loop stops once the ring has caught up to the dot
+ * (instead of running at 60fps forever) and is restarted on the next
+ * mousemove. Bails permanently if lite mode is enabled at runtime.
  */
-(function animRing() {
+function animRing() {
+  if (PERF.lite) { ringRunning = false; return; } // runtime downgrade — stop
   rx += (mx - rx) * 0.13; // 0.13 = easing factor — lower values increase lag
   ry += (my - ry) * 0.13;
   cursorRing.style.left = rx + 'px';
   cursorRing.style.top  = ry + 'px';
-  requestAnimationFrame(animRing);
-})();
+  // Keep going only until the ring has visually settled on the dot.
+  if (Math.abs(mx - rx) > 0.5 || Math.abs(my - ry) > 0.5) {
+    requestAnimationFrame(animRing);
+  } else {
+    ringRunning = false;
+  }
+}
+
+/**
+ * Wire up the custom cursor (dot + trailing ring + hover glow). Only invoked
+ * on hover-capable, non-lite devices — the touch kiosk and lite mode use the
+ * native/no cursor, so none of this work runs there.
+ */
+function initCursor() {
+  document.addEventListener('mousemove', e => {
+    mx = e.clientX; my = e.clientY;
+    cursorDot.style.left = mx + 'px';
+    cursorDot.style.top  = my + 'px';
+
+    // Detect hovering over interactive elements
+    const target = e.target.closest('button, .action-btn, .device-card, .confirm-btn, .stay-btn, a');
+    if (target) {
+      cursorDot.classList.add('hovering');
+      cursorRing.classList.add('hovering');
+    } else {
+      cursorDot.classList.remove('hovering');
+      cursorRing.classList.remove('hovering');
+    }
+
+    // Resume the eased ring follow if it had settled/suspended.
+    if (!ringRunning && !PERF.lite) { ringRunning = true; requestAnimationFrame(animRing); }
+  });
+}
+
+if (canHover && !PERF.lite) initCursor();
 
 /* ============================================================
    Enhancement D: MAGNETIC HOVER on action buttons
@@ -904,6 +957,7 @@ document.addEventListener('mousemove', e => {
 function initMagneticHover() {
   document.querySelectorAll('.action-btn').forEach(btn => {
     btn.addEventListener('mousemove', e => {
+      if (PERF.lite) return;             // runtime downgrade — stop applying transforms
       const rect = btn.getBoundingClientRect();
       const x = e.clientX - rect.left - rect.width / 2;
       const y = e.clientY - rect.top - rect.height / 2;
@@ -920,6 +974,7 @@ function initMagneticHover() {
   // Also on back buttons, close button, stay button
   document.querySelectorAll('.back-btn, .detail-close, .stay-btn, .confirm-btn').forEach(btn => {
     btn.addEventListener('mousemove', e => {
+      if (PERF.lite) return;             // runtime downgrade — stop applying transforms
       const rect = btn.getBoundingClientRect();
       const x = e.clientX - rect.left - rect.width / 2;
       const y = e.clientY - rect.top - rect.height / 2;
@@ -1536,11 +1591,35 @@ document.getElementById('overlay-admin').style.display         = 'none';
 // Enhancement E: split text on initial page load
 initSplitText();
 
-// Enhancement D: magnetic hover on action buttons
-initMagneticHover();
+// Enhancement D: magnetic hover on action buttons — pointer-driven, so skip
+// on the touch kiosk and in lite mode.
+if (canHover && !PERF.lite) initMagneticHover();
 
-// Seamless marquee: clone tracks to fill any viewport width
-initMarquee();
+// Seamless marquee: clone tracks to fill any viewport width. The scroll
+// animation is disabled in lite mode, so cloning is pointless there.
+if (!PERF.lite) initMarquee();
+
+/* ============================================================
+   RUNTIME FPS PROBE — auto-downgrade to lite on a janky host
+   Samples frame cadence for ~1.5s during the animated idle screen
+   (a representative load). If the host can't hold a smooth frame
+   rate, switch to lite mode. Skipped when already lite or when the
+   user explicitly forced the full experience (?full).
+============================================================ */
+function probePerformance() {
+  if (PERF.lite || window.__FORCE_FULL__) return;
+  let start = null, last = null, frames = 0, slow = 0;
+  function tick(t) {
+    if (start === null) { start = last = t; requestAnimationFrame(tick); return; }
+    const dt = t - last; last = t; frames++;
+    if (dt > 22) slow++;                 // frame longer than ~22ms => below ~45fps
+    if (t - start < 1500) { requestAnimationFrame(tick); return; }
+    // Downgrade if a meaningful share of frames missed the budget.
+    if (frames >= 10 && slow / frames > 0.35) enableLite();
+  }
+  requestAnimationFrame(tick);
+}
+probePerformance();
 
 /* ============================================================
    SSE — real-time events from backend (live mode only)
