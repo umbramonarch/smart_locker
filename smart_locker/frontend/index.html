@@ -17,6 +17,41 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700;800&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="style.css">
+
+  <!-- ================================================================
+       PERFORMANCE MODE DETECTION (runs before first paint)
+       Sets <html class="lite"> on low-power hosts so the heavy
+       animated effects (blurs, backdrop-filters, infinite background
+       animations, custom cursor, parallax) are stripped for a smooth,
+       flat UI. The full experience is preserved on capable hardware.
+       Overrides: ?lite forces lite, ?full forces full — both persist
+       per machine via localStorage. Honors prefers-reduced-motion and
+       low reported device memory. app.js may also auto-downgrade at
+       runtime if it measures a poor frame rate.
+  ================================================================ -->
+  <script>
+    (function () {
+      try {
+        var p = new URLSearchParams(location.search);
+        var force = p.has('lite') ? '1' : (p.has('full') ? '0' : null);
+        if (force !== null) { try { localStorage.setItem('sl_lite', force); } catch (e) {} }
+        var stored = null; try { stored = localStorage.getItem('sl_lite'); } catch (e) {}
+        var lite;
+        if (force === '1' || (force === null && stored === '1')) {
+          lite = true;
+        } else if (force === '0' || (force === null && stored === '0')) {
+          lite = false;
+          window.__FORCE_FULL__ = true;          // never runtime-downgrade an explicit "full"
+        } else {
+          var reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+          var mem = navigator.deviceMemory;       // undefined on some browsers
+          lite = reduce || (typeof mem === 'number' && mem <= 4);
+        }
+        window.__LITE__ = lite;
+        if (lite) document.documentElement.classList.add('lite');
+      } catch (e) { /* detection is best-effort — default to full experience */ }
+    })();
+  </script>
 </head>
 <body>
 

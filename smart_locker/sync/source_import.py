@@ -501,6 +501,31 @@ def import_from_source_excel(
         except Exception as e:
             logger.warning("Registrant name sync failed: %s", e)
 
+    # --- Re-scan existing photos for newly imported devices ---
+    # The photo watcher and source import are independent pipelines that
+    # converge at DeviceRepository. If a photo for a model (e.g. "87V.jpg")
+    # was placed in the input folder *before* the device with that model was
+    # imported, the photo watcher would never have matched it — it only fires
+    # on filesystem events, not on database changes. Re-scanning after import
+    # closes this gap without coupling the two pipelines together.
+    if result.imported > 0:
+        from config.settings import PHOTO_INPUT_PATH, PHOTO_SERVE_DIR
+
+        if PHOTO_INPUT_PATH:
+            try:
+                from smart_locker.sync.photo_watcher import scan_existing_photos
+
+                photo_count = scan_existing_photos(
+                    Path(PHOTO_INPUT_PATH), PHOTO_SERVE_DIR, engine,
+                )
+                if photo_count:
+                    logger.info(
+                        "Photo re-scan after import: %d device(s) updated.",
+                        photo_count,
+                    )
+            except Exception as e:
+                logger.warning("Photo re-scan after import failed: %s", e)
+
     # Trigger output Excel sync
     if result.imported > 0 or result.updated > 0:
         try:
