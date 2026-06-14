@@ -19,3 +19,8 @@ logs
 docs/Smart Locker Notes/
 .obsidian/
 smart_locker/frontend/PROMPTING_GUIDE.md
+
+# Node test tooling (local @playwright/cli for the frontend explainer)
+node_modules/
+test-results/
+playwright-report/
