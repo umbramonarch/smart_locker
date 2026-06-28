@@ -1,0 +1,28 @@
+[Unit]
+Description=Smart Locker NFC kiosk backend (FastAPI + NFC listener)
+Documentation=file:///home/locker/smart_locker/GUIDE.md
+# Start after the network and the PC/SC smart-card daemon are up.
+After=network-online.target pcscd.service
+Wants=network-online.target pcscd.service
+# The M: share is a SOFT dependency: the kiosk still serves borrow/return from the
+# local database if the share is down — it just can't import/export until it returns.
+# The fstab entry uses nofail + x-systemd.automount, so the mount is lazy and never
+# blocks boot. No RequiresMountsFor here on purpose, so a missing share can't stop the app.
+
+[Service]
+Type=simple
+User=locker
+Group=locker
+WorkingDirectory=/home/locker/smart_locker
+# settings.py loads .env from WorkingDirectory; keep the env file there.
+ExecStart=/home/locker/smart_locker/venv/bin/python -m smart_locker.app
+Restart=always
+RestartSec=3
+TimeoutStartSec=30
+# Send stdout/stderr to the journal (the app also logs to logs/smart_locker.log).
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

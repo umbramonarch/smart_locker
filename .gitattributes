@@ -1,0 +1,9 @@
+# Keep Linux deployment artifacts LF even when authored/edited on Windows, so they
+# run correctly on the Raspberry Pi. A stray CRLF in a shell or systemd file breaks
+# execution (e.g. "/usr/bin/env bash\r: no such file or directory").
+*.sh        text eol=lf
+*.service   text eol=lf
+*.mount     text eol=lf
+*.desktop   text eol=lf
+*.snippet   text eol=lf
+deploy/**   text eol=lf

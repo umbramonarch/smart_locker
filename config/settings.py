@@ -43,14 +43,26 @@ MAX_BORROWS = int(os.getenv("SMART_LOCKER_MAX_BORROWS", "5"))
 API_HOST = os.getenv("SMART_LOCKER_API_HOST", "0.0.0.0")
 API_PORT = int(os.getenv("SMART_LOCKER_API_PORT", "8000"))
 
-# --- Excel sync ---
-# Auto-export DB state to Excel on every change (Devices, Transactions, Users sheets)
-EXCEL_SYNC_PATH = os.getenv(
-    "SMART_LOCKER_EXCEL_PATH", str(BASE_DIR / "smart_locker_data.xlsx")
+# --- Excel export ---
+# Path for the exported workbook (Devices / Transactions / Users sheets). On the
+# Raspberry Pi this points at the M: network share (e.g.
+# /mnt/locker/smart_locker_data.xlsx) so the export lands where colleagues read it.
+EXCEL_SYNC_PATH = os.getenv("SMART_LOCKER_EXCEL_PATH") or str(
+    BASE_DIR / "smart_locker_data.xlsx"
 )
 
+# Auto-write the export to EXCEL_SYNC_PATH after each source import and photo change.
+# Off by default (export stays on-demand); enable on the Pi by setting
+# SMART_LOCKER_EXCEL_AUTO_EXPORT=1 so the workbook is refreshed on the M: share. Kept as
+# a dedicated flag (not merely "is a path set") so dev/test runs are never affected by
+# whatever SMART_LOCKER_EXCEL_PATH happens to hold.
+EXCEL_AUTO_EXPORT = os.getenv("SMART_LOCKER_EXCEL_AUTO_EXPORT", "").strip().lower() in {
+    "1", "true", "yes", "on",
+}
+
 # --- Source Excel ---
-# Company device master list (OneDrive path) — leave empty to disable automatic import
+# Company device master list on the M: network share (SMB/CIFS mount) — on the Pi this
+# is the mounted path, e.g. /mnt/locker/Messmittelliste.xlsx. Empty disables auto-import.
 SOURCE_EXCEL_PATH = os.getenv("SMART_LOCKER_SOURCE_EXCEL_PATH", "")
 
 # Daily source import schedule in 24-hour format (default: 06:00)

@@ -526,12 +526,16 @@ def import_from_source_excel(
             except Exception as e:
                 logger.warning("Photo re-scan after import failed: %s", e)
 
-    # Trigger output Excel sync
+    # Trigger output Excel sync to the configured export path (the M: share on the
+    # Pi). Only when EXCEL_AUTO_EXPORT is set; otherwise the export stays on-demand
+    # (and the test suite, which never sets SMART_LOCKER_EXCEL_PATH, is unaffected).
     if result.imported > 0 or result.updated > 0:
-        try:
-            export_to_excel(engine)
-        except Exception as e:
-            logger.warning("Excel sync after import failed: %s", e)
+        from config.settings import EXCEL_AUTO_EXPORT, EXCEL_SYNC_PATH
+        if EXCEL_AUTO_EXPORT:
+            try:
+                export_to_excel(engine, EXCEL_SYNC_PATH)
+            except Exception as e:
+                logger.warning("Excel sync after import failed: %s", e)
 
     logger.info(
         "Source import done: %d imported, %d updated, %d unchanged, %d errors, "

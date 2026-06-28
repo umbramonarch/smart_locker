@@ -1,0 +1,70 @@
+# deploy/ — Raspberry Pi appliance provisioning
+
+Everything needed to turn a stock Raspberry Pi 4 (64-bit Raspberry Pi OS) into a
+Smart Locker kiosk: a systemd backend service, a Chromium kiosk autostart, the M:
+network-share (CIFS) mount, and an offline Python install.
+
+> **Full plain-English walkthrough lives in [`../GUIDE.md`](../GUIDE.md).**
+> This file is the technical index — what each artifact is and the command sequence.
+
+## What's here
+
+| Path | What it is |
+|---|---|
+| `.env.pi.example` | Environment template for the Pi — copy to the repo root as `.env`. Paths are pre-filled for the M: mount. |
+| `install/install.sh` | One-shot, idempotent provisioner. Run as root from the repo: `sudo deploy/install/install.sh`. |
+| `install/build-wheelhouse.sh` | Run on an **online** aarch64 host to download all Python wheels for offline install. |
+| `wheelhouse/` | Where those wheels are staged (the `.whl` files are gitignored). |
+| `systemd/smart-locker.service` | Backend service: starts uvicorn + the NFC listener on boot, restarts on crash. |
+| `kiosk/start-kiosk.sh` | Launches Chromium fullscreen at `http://localhost:8000` (auto-detects `chromium`/`chromium-browser`, waits for the backend). |
+| `kiosk/smart-locker-kiosk.desktop` | XDG autostart entry that runs `start-kiosk.sh` on graphical login. |
+| `mount/fstab.snippet` | The `/etc/fstab` CIFS line for the M: share (`nofail` + automount so a missing share never blocks boot). |
+| `mount/cifs-credentials.example` | Template for `/etc/smart-locker/cifs-credentials` (root-only, `chmod 600`). |
+
+## Architecture in one breath
+
+```
+Pi boot
+  ├─ pcscd.service ............ talks to the ACR1252U NFC reader (PC/SC)
+  ├─ /mnt/locker (CIFS) ....... the company M: share, mounted via fstab (lazy automount)
+  ├─ smart-locker.service ..... uvicorn backend on :8000 + background NFC listener
+  └─ graphical login (auto)
+        └─ start-kiosk.sh ..... Chromium --kiosk -> http://localhost:8000 on the touch display
+```
+
+`.env` (repo root) points `SMART_LOCKER_SOURCE_EXCEL_PATH` and `SMART_LOCKER_EXCEL_PATH`
+at `/mnt/locker/...`, so the device list is **imported from** M: and the workbook is
+**written back to** M: (with `SMART_LOCKER_EXCEL_AUTO_EXPORT=1`). The SQLite database
+stays on the Pi's **local** disk — never on the CIFS share (WAL mode is unreliable there).
+
+## First-build command sequence
+
+```bash
+# 0. (online aarch64 host, optional) stage wheels for offline install
+deploy/install/build-wheelhouse.sh
+
+# On the Pi, with the repo at e.g. /home/locker/smart_locker:
+sudo deploy/install/install.sh        # packages, venv, pcscd, service, mount, kiosk
+
+cp deploy/.env.pi.example .env        # then edit .env
+venv/bin/python -m scripts.generate_key   # paste keys into .env
+sudo nano /etc/smart-locker/cifs-credentials              # real M: login
+sudo nano /etc/fstab                  # add the line from deploy/mount/fstab.snippet
+sudo mount /mnt/locker && ls /mnt/locker                  # verify the share
+
+venv/bin/python -m scripts.init_db
+venv/bin/python -m scripts.enroll_card --name "Your Name" --role admin
+
+sudo systemctl start smart-locker     # then reboot to test kiosk autostart
+```
+
+## Verifying a running Pi
+
+```bash
+systemctl status smart-locker                 # active (running)
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8000/         # 200
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8000/dashboard # 200
+mount | grep cifs                             # M: share is mounted
+pcsc_scan                                     # the ACR1252U is detected (Ctrl-C to exit)
+journalctl -u smart-locker -n 50 --no-pager   # recent backend logs
+```

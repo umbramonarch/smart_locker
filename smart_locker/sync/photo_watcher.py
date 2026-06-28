@@ -22,6 +22,8 @@ from pathlib import Path
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
+from smart_locker.sync.fs_utils import is_network_path
+
 logger = logging.getLogger(__name__)
 
 # File extensions recognised as device photos
@@ -108,12 +110,16 @@ def process_photo(photo_path: Path, serve_dir: Path, engine) -> int:
             photo_path.name, updated, model,
         )
 
-        # Trigger Excel export so the image_path change is reflected
-        try:
-            from smart_locker.sync.excel_sync import export_to_excel
-            export_to_excel(engine)
-        except Exception as e:
-            logger.warning("Excel sync after photo import failed: %s", e)
+        # Trigger Excel export so the image_path change is reflected on the M: share.
+        # Only when an export path is explicitly configured (EXCEL_AUTO_EXPORT); the
+        # default on-demand-only behaviour is preserved otherwise.
+        from config.settings import EXCEL_AUTO_EXPORT, EXCEL_SYNC_PATH
+        if EXCEL_AUTO_EXPORT:
+            try:
+                from smart_locker.sync.excel_sync import export_to_excel
+                export_to_excel(engine, EXCEL_SYNC_PATH)
+            except Exception as e:
+                logger.warning("Excel sync after photo import failed: %s", e)
 
     return updated
 
@@ -280,6 +286,18 @@ def start_photo_watcher(engine, input_dir: str | Path, serve_dir: str | Path) ->
     count = scan_existing_photos(input_path, serve_path, engine)
     if count:
         logger.info("Initial photo scan: %d device(s) updated.", count)
+
+    # Live watch only on local filesystems — inotify does not fire for remote writes
+    # on a network share. On the Pi the photo folder may be on the mounted M:/CIFS
+    # share, so photos present at startup are applied above; new ones are picked up on
+    # the next restart or via 'python -m scripts.update_device --auto'.
+    if is_network_path(input_path):
+        logger.info(
+            "Photo input %s is on a network share (CIFS/NFS) — live photo watching is "
+            "unreliable there and is disabled. The startup scan applied existing photos.",
+            input_path,
+        )
+        return
 
     # Start watcher
     handler = _PhotoHandler(engine, serve_path)

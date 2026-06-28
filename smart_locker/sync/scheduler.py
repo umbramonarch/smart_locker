@@ -25,6 +25,8 @@ from apscheduler.triggers.cron import CronTrigger
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
+from smart_locker.sync.fs_utils import is_network_path
+
 logger = logging.getLogger(__name__)
 
 # Module-level singletons — set by start_scheduler(), cleared by stop_scheduler()
@@ -208,8 +210,18 @@ def start_scheduler(
     # --- 1. Immediate import on startup ---
     _run_source_import(engine, source)
 
-    # --- 2. File watcher for live changes ---
-    if source.parent.exists():
+    # --- 2. File watcher for live changes (local filesystems only) ---
+    # inotify does not deliver events for writes made by other hosts on a network
+    # share, so on the Pi (source Excel on the mounted M:/CIFS share) we skip the live
+    # watch and rely on the startup import above plus the daily cron below.
+    if is_network_path(source):
+        logger.info(
+            "Source Excel %s is on a network share (CIFS/NFS) — live file watching is "
+            "unreliable there. Relying on the startup import and the daily %02d:%02d "
+            "cron instead.",
+            source, hour, minute,
+        )
+    elif source.parent.exists():
         handler = _SourceFileHandler(engine, source)
         _observer = Observer()
         # Watch the parent directory (watchdog monitors directories, not files)
