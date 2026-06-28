@@ -57,7 +57,44 @@ that sets up everything. See **Section 3a**.
 hand. See **Section 4**.
 
 Either way, you finish by filling in a few secrets (encryption keys, the M: share login)
-and enrolling your first card.
+and enrolling your first card. But **first the Pi needs an operating system** — Step 0.
+
+### Step 0 — Prepare the SD card (install Raspberry Pi OS)
+
+A Raspberry Pi 4 ships with **no operating system** — you write one onto the SD card
+yourself. Do this on any PC (including your work laptop) with the free **Raspberry Pi
+Imager** (https://www.raspberrypi.com/software/); the Pi doesn't need to be present yet.
+
+In the Imager:
+
+1. **Device:** Raspberry Pi 4.
+2. **Operating System:** **Raspberry Pi OS (64-bit)** — the standard **Desktop** edition.
+   - *64-bit* matches what this project is built for (the Python packages have prebuilt
+     64-bit wheels; 32-bit would force slow on-device compiles).
+   - *Desktop*, **not** *Lite* — the kiosk runs Chromium in a graphical session, which the
+     Lite (no-GUI) edition does not have.
+3. **Storage:** a 32 GB or larger SD card.
+4. Open the **⚙ settings** ("Edit Settings", the gear icon) **before** writing, and set:
+   - a **hostname** (e.g. `smartlocker`),
+   - **enable SSH** (lets you finish setup from another computer),
+   - a **username and password** — it can be `locker`, but any name works (`install.sh`
+     auto-detects whichever user owns the project folder),
+   - **WiFi and locale**, if you will use WiFi.
+5. Write the card, insert it into the Pi, and power on.
+
+**About the internet:** the "no internet" rule is only for *running* in the company. During
+this **one-time setup** you will want to give the Pi internet (a home or test network) so it
+can install its system packages and build the Python environment. After setup it runs fully
+offline.
+
+**Installing onto several Pis (the "SD card" model):** set up **one** Pi completely and
+confirm it works, then **clone its SD card to an image** and write that image onto the other
+units' cards. That golden image already contains the OS, the app, the Python environment, and
+your settings — so the others need no internet at all.
+
+> Tip: current Raspberry Pi OS may run the desktop under Wayland. If the kiosk autostart
+> misbehaves, switch to X11 with `sudo raspi-config` → *Advanced Options* → *Wayland* → *X11*,
+> then reboot.
 
 ### 3a. Fast path — the install script
 
