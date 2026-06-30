@@ -403,7 +403,7 @@ immediately, use **Sync source** in the admin panel, or run
 
 ---
 
-## 8. Logs and troubleshooting
+## 8. Operations — logs, troubleshooting, self-healing & updates
 
 **Logs** are in two places:
 
@@ -434,6 +434,54 @@ tail -f logs/smart_locker.log                  # the app's own rotating log file
 
 **The backend won't start:** `journalctl -u smart-locker -n 50 --no-pager`. The most common
 cause is a missing or malformed `.env` (encryption keys not pasted in).
+
+### Running unattended — what recovers on its own
+
+The Pi lives in the locker, far from you, so it is built to heal itself:
+
+- **Crashes restart automatically.** The systemd service uses `Restart=always` with
+  `StartLimitIntervalSec=0`, so if the app ever dies it comes back within a few seconds and keeps
+  retrying *forever* — a transient fault clears itself with no one on site. It also starts on boot
+  and after a power cut.
+- **A down M: share doesn't stop the kiosk.** The share is a *soft* dependency: borrow/return keep
+  working from the local database; only import/export pause until the share returns.
+- **Sync never crashes the app.** If the Excel file is left open/locked, or the share drops, the
+  import/export is logged and skipped — the kiosk stays up and the next scheduled or manual sync
+  retries.
+
+### Is it alive? Check from any browser — no SSH, no Linux
+
+- **Health:** open `http://<pi-address>:8000/api/health`. It returns a small JSON you can bookmark:
+  `status` (`ok`/`degraded`), `uptime_seconds`, `database`, `nfc_reader`, and the last sync result.
+- **Dashboard:** open `http://<pi-address>:8000/dashboard` for the live device inventory.
+- If `/api/health` doesn't load at all, the Pi is off or off the network (power / cable / Wi-Fi) —
+  the one situation that needs someone physically there.
+
+### Updating the software (the Pi never needs the internet)
+
+You author releases on your company **git host** as usual — but the **Pi never talks to git host**. The
+release rides the **M:** share you already have, so git host's internet access is irrelevant to the Pi.
+
+1. **At work** (where you have git host): download the release tarball for the tag — git host's
+   "Download source" gives exactly this — named `smart-locker-<version>.tar.gz`, and drop it in
+   `M:\locker-updates\`. (Optional: put a `smart-locker-<version>.tar.gz.sha256` next to it and the
+   Pi will verify it before applying.)
+2. **On the kiosk:** open the hidden admin panel (tap the clock 5× within 3 s) → **Software Update**
+   → confirm.
+3. The Pi then: snapshots the database **and** the current code, swaps in the new version, installs
+   any new dependencies from the offline wheelhouse, runs database migrations, restarts, and
+   health-checks the new version. **If the new version doesn't come up healthy it automatically
+   rolls back** to the previous code and database — a bad update cannot leave the locker stuck.
+
+The kiosk is briefly unavailable during the restart (seconds — invisible between card taps). A
+single-reader kiosk can't update with *zero* downtime (one process owns the NFC reader and the
+SQLite database), so the design trades that short restart for a **safe, self-reverting** update on a
+box no one is standing next to. Progress and the result are written to `logs/update.log` and
+`logs/update-status.json` (the latter drives the button's status text).
+
+**SSH fallback** (only if you ever need it): `sudo /home/locker/smart_locker/deploy/install/update.sh`.
+The button relies on the sudoers drop-in that `install.sh` writes to `/etc/sudoers.d/smart-locker`;
+if that step was skipped, use the SSH command above.
 
 ---
 

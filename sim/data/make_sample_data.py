@@ -61,25 +61,41 @@ HEADERS = [
 # Format: (Inventarnummer, Name, Slot, Hersteller, Typbezeichnung, Seriennummer, Einsatzort)
 
 ROWS = [
-    # --- Schrank rows: imported -------------------------------------------
+    # --- Schrank rows: imported (slots auto-numbered 1..N in row order) ----
     # AVAILABLE (Einsatzort contains "schrank")
-    ("1001", "Digital-Multimeter",      "Schrank A1", "Fluke", "87V",            "SN-FL-001", "Schrank A1"),
-    ("1002", "Scopemeter",              "Schrank A2", "Fluke", "ScopeMeter 120B", "SN-FL-002", "Schrank A2"),
-    ("1003", "Kabeltester",             "Schrank A3", "Fluke", "MicroScanner2",  "SN-FL-003", "Schrank A3"),
-    ("1006", "Temperaturdatenlogger",   "Schrank A6", "Testo", "175T1",          "SN-TE-006", "Schrank A6"),
+    ("1001", "Digital-Multimeter",      "Schrank A1", "Fluke", "87V",             "SN-FL-87V-01", "Schrank A1"),
+    # Second "87V" unit — SAME model: exercises one photo (87V.jpg) matching
+    # MULTIPLE device rows (the shared-model photo rule in photo_watcher).
+    ("1002", "Digital-Multimeter",      "Schrank A2", "Fluke", "87V",             "SN-FL-87V-02", "Schrank A2"),
+    ("1003", "Industrie-Multimeter",    "Schrank A3", "Fluke", "287",             "SN-FL-287",    "Schrank A3"),
+    # Model name with a SPACE — exercises exact-model photo match on "376 FC.jpg".
+    ("1004", "Zangenmessgerät",         "Schrank A4", "Fluke", "376 FC",          "SN-FL-376",    "Schrank A4"),
+    ("1005", "Temperaturdatenlogger",   "Schrank A5", "Testo", "175T1",           "SN-TE-175",    "Schrank A5"),
+    # No matching photo file — device imports fine, just has no image.
+    ("1006", "Kabeltester",             "Schrank A6", "Fluke", "MicroScanner2",   "SN-FL-MS2",    "Schrank A6"),
+    ("1007", "ScopeMeter",              "Schrank A7", "Fluke", "ScopeMeter 120B",  "SN-FL-120",    "Schrank A7"),
     # BORROWED (Einsatzort = person name, non-empty, no "schrank")
-    ("1004", "Zangenamperemeter",       "Schrank A4", "Fluke", "376 FC",         "SN-FL-004", "Max Mustermann"),
-    ("1005", "Isolationsprüfer",        "Schrank A5", "Fluke", "1587 FC",        "SN-FL-005", "Anna Schmidt"),
+    ("1008", "Isolationsprüfer",        "Schrank A8", "Fluke", "1587 FC",         "SN-FL-1587",   "Max Mustermann"),
+    ("1009", "Leistungsmessgerät",      "Schrank A9", "Fluke", "1736",            "SN-FL-1736",   "Anna Schmidt"),
 
     # --- Non-schrank rows: skipped (non_locker_skipped) -------------------
-    ("1007", "Drehmomentschlüssel",     "Regal B1",   "Gedore", "2642-05",       "SN-GE-007", "Regal B1"),
-    ("1008", "Etikettendrucker",        "",           "Brady",  "M611",          "SN-BR-008", ""),
+    # Slot does not start with "schrank" -> skipped, BUT the person in
+    # "Aktueller Einsatzort" is still harvested as a registrant (the importer
+    # reads ALL rows for names, so employees with non-locker gear can self-register).
+    ("2001", "Drehmomentschlüssel",     "Regal B1",   "Gedore", "2642-05",        "SN-GE-2642",   "Lukas Weber"),
+    ("2002", "Etikettendrucker",        "",           "Brady",  "M611",           "SN-BR-611",    ""),
 ]
 
-# Photo placeholders are created for the first two schrank model names:
-# "87V" -> 87V.jpg  (exact model match; Fluke 87V row)
-# "175T1" -> 175T1.jpg (exact model match; Testo 175T1 row)
-PHOTO_MODELS = ["87V", "175T1"]
+# Photo placeholders — the filename stem must equal the device MODEL exactly
+# (case-insensitive), per photo_watcher.process_photo / settings.PHOTO_INPUT_PATH:
+#   "87V"     -> 87V.jpg      (matches BOTH 87V rows 1001 & 1002 — shared-model rule)
+#   "287"     -> 287.jpg
+#   "376 FC"  -> "376 FC.jpg" (space in the model name is preserved verbatim)
+#   "175T1"   -> 175T1.jpg
+#   "1587 FC" -> "1587 FC.jpg" (this device is BORROWED, but the photo still attaches)
+# Models WITHOUT a photo file (MicroScanner2, ScopeMeter 120B, 1736) import with
+# no image — demonstrating that photo matching is per-model and optional.
+PHOTO_MODELS = ["87V", "287", "376 FC", "175T1", "1587 FC"]
 
 # ---------------------------------------------------------------------------
 # Minimal 1x1 white JPEG fallback (used when Pillow is not installed)

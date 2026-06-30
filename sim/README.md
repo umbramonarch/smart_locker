@@ -44,10 +44,13 @@ sim/
 ├── .env.sim.example                Sample env (copy to repo root as .env)
 ├── data/
 │   ├── make_sample_data.py         Generates the workbook + photo placeholders
-│   ├── Messmittelliste.sample.xlsx Sample device master list (6 imported, 2 skipped)
-│   └── photos/
-│       ├── 87V.jpg                 Placeholder photo — model "87V" (Fluke Digital-Multimeter)
-│       └── 175T1.jpg               Placeholder photo — model "175T1" (Testo Temperaturdatenlogger)
+│   ├── Messmittelliste.sample.xlsx Sample device master list (9 schrank imported, 2 skipped)
+│   └── photos/                     Filenames == device model exactly (see make_sample_data.py)
+│       ├── 87V.jpg                 Model "87V" — matches BOTH 87V units (shared-model rule)
+│       ├── 287.jpg                 Model "287"
+│       ├── 376 FC.jpg              Model "376 FC" (space in the name is part of the match)
+│       ├── 175T1.jpg              Model "175T1"
+│       └── 1587 FC.jpg             Model "1587 FC" (a borrowed device — photo still attaches)
 ├── native/
 │   ├── run-native.sh               Fast native run (Linux / macOS / Git Bash)
 │   └── run-native.ps1              Fast native run (Windows PowerShell)
@@ -354,9 +357,17 @@ and interprets **Aktueller Einsatzort**:
 - Empty → no change to current status
 
 The sample workbook (`sim/data/Messmittelliste.sample.xlsx`) produces:
-- 4 imported rows — AVAILABLE (Schrank A1, A2, A3, A6)
-- 2 imported rows — BORROWED (Max Mustermann, Anna Schmidt)
-- 2 rows skipped — non-schrank slot or empty slot
+- 9 imported schrank rows — **7 AVAILABLE** (Schrank A1–A7) + **2 BORROWED**
+  (1587 FC → Max Mustermann, 1736 → Anna Schmidt)
+- 2 rows skipped — non-schrank slot ("Regal B1") or empty slot
+- 3 registrant names harvested from "Aktueller Einsatzort" — Max Mustermann,
+  Anna Schmidt, **and Lukas Weber** (whose device is on the *skipped* non-schrank
+  row, showing that names are read from every row, not just imported ones)
+
+The first source import (into an empty DB) reports **9 new**; a re-import with no
+workbook change reports **0 new / 0 updated / 9 unchanged**. Editing a row (e.g. a
+borrower returning a device → its "Aktueller Einsatzort" flips back to "Schrank …")
+makes the next import report it as **1 updated**.
 
 **inotify / network-path note:** The CIFS mount point (`/mnt/locker`) is
 detected as a network path by `sync/fs_utils.is_network_path()`. The file

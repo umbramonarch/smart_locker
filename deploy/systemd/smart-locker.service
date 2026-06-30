@@ -8,6 +8,12 @@ Wants=network-online.target pcscd.service
 # local database if the share is down — it just can't import/export until it returns.
 # The fstab entry uses nofail + x-systemd.automount, so the mount is lazy and never
 # blocks boot. No RequiresMountsFor here on purpose, so a missing share can't stop the app.
+# Never stop retrying. systemd's default start-rate-limit (5 starts / 10 s) would put the
+# unit in a permanent "failed" state after a quick crash loop — fatal for an unattended Pi
+# in a locker. StartLimitIntervalSec=0 disables that limit, so combined with Restart=always
+# the service is restarted forever (every RestartSec); the moment a transient fault clears,
+# it recovers on its own with no one on site.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple

@@ -1292,14 +1292,19 @@ function toggleAdminPanel() {
  * Open the admin panel overlay with a polygon-wipe entrance animation.
  * Plays a click sound on activation.
  */
-function openAdminPanel() {
+async function openAdminPanel() {
   clickSound();
   const overlay = document.getElementById('overlay-admin');
   overlay.style.display = '';
-  refreshSyncStatus();
   requestAnimationFrame(() => requestAnimationFrame(() => {
     overlay.classList.add('visible');
   }));
+  // Establish the backend admin session up front so EVERY panel action (sync
+  // status/preview/commit, export, software update) is authorized the moment
+  // the panel opens — not only after the admin happens to use the Borrow/Return
+  // shortcuts (which were previously the only callers of adminStartSession).
+  await adminStartSession();
+  refreshSyncStatus();
 }
 
 /**
@@ -1519,6 +1524,83 @@ async function adminExportExcel() {
 }
 
 /**
+ * Trigger a software update from the admin panel. POSTs to the update endpoint,
+ * which launches the safe update script out-of-process on the Pi (snapshot ->
+ * apply release from the M: share -> migrate -> restart -> health-gate ->
+ * auto-rollback on failure). On a dev/non-Pi host the endpoint returns 503 with
+ * a clear message. After a successful launch we briefly poll the update status
+ * to surface "nothing to do" / early failures; once the service actually
+ * restarts the poll simply stops (the kiosk reconnects on its own).
+ * @returns {Promise<void>}
+ */
+async function adminUpdate() {
+  const btn = document.getElementById('admin-update');
+  const label = btn.querySelector('.admin-btn-label');
+  const origText = label.textContent;
+
+  if (!confirm('Apply a software update now? The kiosk restarts briefly; a failed update rolls back automatically.')) return;
+
+  label.textContent = 'Starting…';
+  btn.style.pointerEvents = 'none';
+  const restore = () => { label.textContent = origText; btn.style.pointerEvents = ''; };
+
+  try {
+    const res = await fetch('/api/admin/update', { method: 'POST' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      showToast(data.detail || 'Update could not start', 'error');
+      restore();
+      return;
+    }
+    showToast(data.message || 'Update started', 'success');
+    pollUpdateStatus(restore);
+  } catch (_) {
+    showToast('Update request failed', 'error');
+    restore();
+  }
+}
+
+/**
+ * Briefly poll the update-status endpoint after launching an update. Reflects
+ * terminal states (up to date / success / rolled back / failed) in a toast and
+ * the admin footer. Tolerates the service restart that an in-progress update
+ * triggers — a failed fetch is treated as "kiosk restarting" and ends polling.
+ * @param {Function} restore - Callback to restore the button to its idle label.
+ * @returns {Promise<void>}
+ */
+async function pollUpdateStatus(restore) {
+  const footer = document.getElementById('admin-sync-status');
+  const MAX_POLLS = 8;
+  const POLL_INTERVAL_MS = 1500;
+  const TERMINAL = ['idle', 'up_to_date', 'success', 'rolled_back', 'failed', 'rollback_unhealthy'];
+  // Only a genuinely-applied (or already-current) update is a success. A
+  // rolled-back or failed update is an error toast — the new version did NOT
+  // take, even though the kiosk safely reverted.
+  const SUCCESS = ['idle', 'up_to_date', 'success'];
+  for (let i = 0; i < MAX_POLLS; i++) {
+    await sleep(POLL_INTERVAL_MS);
+    let data;
+    try {
+      const res = await fetch('/api/admin/update-status');
+      if (!res.ok) throw new Error('status');
+      data = await res.json();
+    } catch (_) {
+      // Service is restarting on the new version — the kiosk will reconnect.
+      if (footer) footer.textContent = 'Update applying — kiosk restarting…';
+      restore();
+      return;
+    }
+    if (footer && data.message) footer.textContent = data.message;
+    if (TERMINAL.includes(data.state)) {
+      showToast(data.message || data.state, SUCCESS.includes(data.state) ? 'success' : 'error');
+      restore();
+      return;
+    }
+  }
+  restore();
+}
+
+/**
  * Admin shortcut: close the admin panel and open the registration screen in
  * admin mode (free-text name entry, bypasses registrant list validation).
  * The admin session remains active so the backend accepts the registration.
@@ -1634,6 +1716,7 @@ document.getElementById('admin-goto-return').addEventListener('click', () => { c
 document.getElementById('admin-sync-source').addEventListener('click', () => { clickSound(); adminSyncSource(); });
 document.getElementById('admin-register-user').addEventListener('click', () => { clickSound(); adminRegisterUser(); });
 document.getElementById('admin-export-excel').addEventListener('click', () => { clickSound(); adminExportExcel(); });
+document.getElementById('admin-update').addEventListener('click', () => { clickSound(); adminUpdate(); });
 document.getElementById('admin-end-session').addEventListener('click', () => { clickSound(); adminEndSession(); });
 
 /* ============================================================

@@ -105,6 +105,23 @@ systemctl daemon-reload
 systemctl enable smart-locker.service
 echo "    (start it with: sudo systemctl start smart-locker  — do this AFTER filling .env)"
 
+# --- 4b. Sudoers + update script (powers the in-app "Update now" button) ---
+echo "==> Installing sudoers drop-in for self-service updates"
+chmod +x "$APP_DIR/deploy/install/update.sh"
+SUDOERS_TMP="$(mktemp)"
+sed \
+  -e "s#__APP_USER__#$APP_USER#g" \
+  -e "s#__APP_DIR__#$APP_DIR#g" \
+  "$APP_DIR/deploy/install/sudoers-smart-locker" > "$SUDOERS_TMP"
+if visudo -cf "$SUDOERS_TMP" >/dev/null 2>&1; then
+  install -m 0440 -o root -g root "$SUDOERS_TMP" /etc/sudoers.d/smart-locker
+  echo "    installed /etc/sudoers.d/smart-locker (lets the app restart itself for updates)"
+else
+  echo "    WARNING: generated sudoers failed validation — NOT installed. The 'Update now'"
+  echo "             button will be disabled until this is fixed; updates can still run via SSH."
+fi
+rm -f "$SUDOERS_TMP"
+
 # --- 5. M: CIFS mount scaffolding ---
 echo "==> Scaffolding CIFS mount at $MOUNT_POINT"
 mkdir -p "$MOUNT_POINT"

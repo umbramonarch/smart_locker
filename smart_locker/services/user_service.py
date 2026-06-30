@@ -71,6 +71,14 @@ class UserService:
     ) -> User:
         """Enroll a new user with encrypted card UID and HMAC.
 
+        The UID is canonicalised (upper-cased, surrounding whitespace stripped)
+        at this boundary so the *stored ciphertext* matches the HMAC fingerprint
+        regardless of how the caller formatted it. ``compute_uid_hmac`` already
+        normalises before hashing, so without this an oddly-cased UID would still
+        authenticate by HMAC yet decrypt to a different-cased string. The reader
+        reports uppercase hex already; this makes every enrollment path (reader,
+        ``--uid`` CLI, self-registration) consistent.
+
         Args:
             db_session: Active database session.
             display_name: User's display name.
@@ -80,6 +88,7 @@ class UserService:
         Returns:
             Created User object.
         """
+        card_uid_hex = card_uid_hex.upper().strip()
         uid_hmac = compute_uid_hmac(card_uid_hex, self._hmac_key)
         encrypted_uid = encrypt(card_uid_hex, self._enc_key)
 

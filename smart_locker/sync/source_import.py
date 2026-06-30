@@ -500,7 +500,7 @@ def import_from_source_excel(
         session.rollback()
         raise
     finally:
-        factory.remove()
+        session.close()
 
     # A dry run reports the diff and stops here — no registrant sync, no photo
     # re-scan, no Excel export (all of which would mutate state).

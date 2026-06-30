@@ -70,7 +70,7 @@ smart_locker/
 │   ├── generate_key.py          # Generate AES-256 + HMAC-SHA256 keys for .env
 │   ├── init_db.py               # Create database tables
 │   ├── migrate_db.py            # Add columns/tables to an existing DB (run after schema changes)
-│   ├── enroll_card.py           # Enroll a new NFC card user (requires reader)
+│   ├── enroll_card.py           # Enroll a new NFC card user (reader tap, or --uid HEX for no hardware)
 │   ├── import_devices.py        # Bulk device import from Excel (German + English headers)
 │   ├── update_device.py         # Update device fields / match photos by PM number
 │   └── sync_source.py           # Manually trigger source Excel import
@@ -127,8 +127,11 @@ cp .env.example .env                               # Windows: Copy-Item .env.exa
 # 4. Initialize the database
 python -m scripts.init_db
 
-# 5. Enroll an admin card (requires NFC reader)
+# 5. Enroll an admin card
+#    With an ACR1252U reader connected — tap the card when prompted:
 python -m scripts.enroll_card --name "Your Name" --role admin
+#    No hardware? Supply the UID directly (hex) — no reader needed:
+python -m scripts.enroll_card --name "Your Name" --role admin --uid AABBCCDD
 
 # 6. Run the system (web UI on http://localhost:8000)
 python -m smart_locker.app

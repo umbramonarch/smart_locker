@@ -28,3 +28,8 @@ playwright-report/
 # Offline pip wheelhouse — large, architecture-specific build artifacts staged per image
 deploy/wheelhouse/*.whl
 deploy/wheelhouse/*.tar.gz
+
+# Runtime device-photo cache — populated from the M: photo source at scan time;
+# regenerated on every deployment, never committed. Keep only static UI assets.
+smart_locker/frontend/images/*
+!smart_locker/frontend/images/hero_bg.jpg
