@@ -414,15 +414,20 @@ def import_from_source_excel(
         len(parsed_devices), result.non_locker_skipped,
     )
 
-    if not parsed_devices or dry_run:
+    if not parsed_devices:
         return result
 
-    # --- Import to database ---
-    from smart_locker.database.engine import get_session
+    # --- Import to database (or compute the diff only, when dry_run) ---
+    from smart_locker.database.engine import get_session, get_session_factory
     from smart_locker.database.repositories import UserRepository
     from smart_locker.sync.excel_sync import export_to_excel
 
-    with get_session() as session:
+    # Run the real create/update logic so the per-category counts are exact, then
+    # either commit (a real import) or — for a dry run (preview) — roll the whole
+    # transaction back, so add/update/unchanged are reported without persisting.
+    factory = get_session_factory()
+    session = factory()
+    try:
         for d in parsed_devices:
             try:
                 # Resolve the borrower name (from "Aktueller Einsatzort")
@@ -486,6 +491,26 @@ def import_from_source_excel(
                 result.errors += 1
                 result.error_details.append(f"PM {d['pm_number']}: {e}")
                 logger.error("Import error for PM %s: %s", d["pm_number"], e)
+
+        if dry_run:
+            session.rollback()
+        else:
+            session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        factory.remove()
+
+    # A dry run reports the diff and stops here — no registrant sync, no photo
+    # re-scan, no Excel export (all of which would mutate state).
+    if dry_run:
+        logger.info(
+            "Source import DRY RUN: %d would import, %d would update, %d unchanged, "
+            "%d errors (nothing written).",
+            result.imported, result.updated, result.unchanged, result.errors,
+        )
+        return result
 
     # --- Sync registrant names to the registrants table ---
     # This is done after the device import so both operations share the

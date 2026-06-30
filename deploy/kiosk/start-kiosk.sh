@@ -50,6 +50,10 @@ done
 PROFILE_DIR="${HOME}/.config/smart-locker-kiosk"
 mkdir -p "$PROFILE_DIR"
 
+# Force the lite UI on the appliance. The Pi 4 GPU (VideoCore VI) cannot hold a
+# smooth frame rate with the full blur/backdrop-filter effects regardless of RAM,
+# and the in-page auto-detector only trips on <=4 GB devices — so an 8 GB Pi 4
+# would otherwise run the heavy UI. ?lite persists per-profile via localStorage.
 exec "$CHROME" \
   --kiosk \
   --user-data-dir="$PROFILE_DIR" \
@@ -61,4 +65,4 @@ exec "$CHROME" \
   --overscroll-history-navigation=0 \
   --check-for-update-interval=31536000 \
   --no-first-run \
-  "$URL"
+  "${URL}/?lite"

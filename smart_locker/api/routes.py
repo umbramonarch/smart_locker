@@ -36,7 +36,9 @@ from smart_locker.database.models import (
     UserRole,
 )
 from smart_locker.database.repositories import DeviceRepository, RegistrantRepository
+from smart_locker.nfc.factory import fake_reader_enabled
 from smart_locker.services.locker_service import LockerService
+from smart_locker.sync import sync_status
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +117,94 @@ async def sse_events():
                 yield ": keepalive\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+# --- Dev / Simulation Endpoints (no-hardware harness) -----------------------
+# These drive the simulated NFC reader (FakeNFCReader) so the full
+# tap -> authenticate -> SSE flow can be exercised with no hardware. They are
+# INERT unless SMART_LOCKER_FAKE_READER is enabled AND the running reader is the
+# fake one: otherwise they return 404, so the surface is identical to the
+# endpoints not existing. The fake reader must never be enabled in production.
+
+class TapRequest(BaseModel):
+    """Request body for POST /api/dev/tap."""
+
+    uid: str | None = Field(
+        default=None,
+        description="Hex UID to simulate; falls back to SMART_LOCKER_FAKE_DEFAULT_UID.",
+    )
+
+
+def _running_fake_reader():
+    """Return the active fake reader, or raise 404 if not in simulation mode.
+
+    A reader counts as simulated only when the env flag is set AND the reader
+    actually constructed at startup exposes ``simulate_tap`` — so flipping the
+    flag after launch cannot retro-activate these endpoints.
+
+    Returns:
+        The running FakeNFCReader instance.
+
+    Raises:
+        HTTPException: 404 when the simulation harness is not active.
+    """
+    reader = ctx_module.context.reader if ctx_module.context is not None else None
+    if not fake_reader_enabled() or reader is None or not hasattr(reader, "simulate_tap"):
+        raise HTTPException(status_code=404, detail="Not found.")
+    return reader
+
+
+@router.get("/api/dev/status")
+def dev_status():
+    """Report whether the no-hardware simulation harness is active.
+
+    Always present, but only reports True when the fake reader is the running
+    reader. The kiosk UI calls this to decide whether to show the simulated-tap
+    control; production always reports inactive.
+
+    Returns:
+        dict: ``fake_reader`` (bool) and ``default_uid_set`` (bool).
+    """
+    import os
+
+    reader = ctx_module.context.reader if ctx_module.context is not None else None
+    active = fake_reader_enabled() and reader is not None and hasattr(reader, "simulate_tap")
+    return {
+        "fake_reader": bool(active),
+        "default_uid_set": bool(os.getenv("SMART_LOCKER_FAKE_DEFAULT_UID")),
+    }
+
+
+@router.post("/api/dev/tap")
+def dev_tap(body: TapRequest):
+    """Inject a simulated card tap (simulation mode only).
+
+    Enqueues a ``CardEvent(INSERTED)`` so the normal NFC bridge runs exactly as
+    for a real tap — starting a session, ending one on a second tap, or
+    completing a pending registration, depending on current state. The UID is
+    never logged.
+
+    Args:
+        body: TapRequest with an optional ``uid`` (falls back to the
+            ``SMART_LOCKER_FAKE_DEFAULT_UID`` env var).
+
+    Returns:
+        dict: ``{"ok": True}`` once the event is queued.
+
+    Raises:
+        HTTPException: 404 if simulation mode is off; 400 if no UID is available.
+    """
+    import os
+
+    reader = _running_fake_reader()
+    uid = (body.uid or os.getenv("SMART_LOCKER_FAKE_DEFAULT_UID") or "").strip()
+    if not uid:
+        raise HTTPException(
+            status_code=400,
+            detail="No UID supplied and SMART_LOCKER_FAKE_DEFAULT_UID is not set.",
+        )
+    reader.simulate_tap(uid)
+    return {"ok": True}
 
 
 # --- Session Endpoints ------------------------------------------------------
@@ -533,7 +623,13 @@ def trigger_source_sync(
     from smart_locker.database.engine import get_engine
     from smart_locker.sync.source_import import import_from_source_excel
 
-    result = import_from_source_excel(get_engine(), SOURCE_EXCEL_PATH)
+    try:
+        result = import_from_source_excel(get_engine(), SOURCE_EXCEL_PATH)
+    except Exception as e:
+        sync_status.record_error("manual", str(e))
+        raise HTTPException(status_code=500, detail=f"Import failed: {e}") from e
+
+    sync_status.record_result("manual", result)
     return {
         "success": True,
         "imported": result.imported,
@@ -541,6 +637,69 @@ def trigger_source_sync(
         "unchanged": result.unchanged,
         "errors": result.errors,
     }
+
+
+@router.post("/api/admin/sync-preview")
+def preview_source_sync(
+    user_session: UserSession = Depends(require_session),
+):
+    """Preview the source import diff without writing anything (admin only).
+
+    Runs the import in dry-run mode (the real create/update logic inside a
+    rolled-back transaction) so the admin sees exactly how many devices would
+    be added, updated, left unchanged, or skipped before committing.
+
+    Args:
+        user_session: The active session (injected by ``require_session``).
+
+    Returns:
+        dict: ``imported`` (would-add), ``updated`` (would-change),
+              ``unchanged``, ``skipped`` (non-locker), and ``errors`` counts.
+
+    Raises:
+        HTTPException: 403 if not admin, 400 if source path not configured.
+    """
+    if user_session.user.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Admin access required.")
+
+    from config.settings import SOURCE_EXCEL_PATH
+    if not SOURCE_EXCEL_PATH:
+        raise HTTPException(status_code=400, detail="Source Excel path not configured.")
+
+    from smart_locker.database.engine import get_engine
+    from smart_locker.sync.source_import import import_from_source_excel
+
+    result = import_from_source_excel(get_engine(), SOURCE_EXCEL_PATH, dry_run=True)
+    return {
+        "preview": True,
+        "imported": result.imported,
+        "updated": result.updated,
+        "unchanged": result.unchanged,
+        "skipped": result.non_locker_skipped,
+        "errors": result.errors,
+    }
+
+
+@router.get("/api/admin/sync-status")
+def get_sync_status(user_session: UserSession = Depends(require_session)):
+    """Return the most recent source-import outcome (admin only).
+
+    Powers the dashboard "last synced …" line. Reports when the last import
+    ran, what triggered it (startup/cron/watch/mtime-poll/manual), the
+    per-category counts, and whether it succeeded.
+
+    Args:
+        user_session: The active session (injected by ``require_session``).
+
+    Returns:
+        dict: The last-sync snapshot (``at`` is null if no import has run yet).
+
+    Raises:
+        HTTPException: 403 if not admin.
+    """
+    if user_session.user.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Admin access required.")
+    return sync_status.get()
 
 
 @router.get("/api/admin/export-excel")

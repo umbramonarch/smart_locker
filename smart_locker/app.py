@@ -31,7 +31,7 @@ from smart_locker.database.engine import get_engine, get_session, init_db
 from smart_locker.database.repositories import DeviceRepository
 from smart_locker.nfc.card_observer import CardEvent, CardEventType
 from smart_locker.nfc.exceptions import NFCError
-from smart_locker.nfc.reader import NFCReader
+from smart_locker.nfc.factory import create_reader
 from smart_locker.nfc.reader_observer import ReaderEvent, ReaderEventType
 from smart_locker.security.key_manager import key_manager
 from smart_locker.services.locker_service import LockerService
@@ -49,7 +49,7 @@ class SmartLockerApp:
     """
 
     def __init__(self) -> None:
-        self._reader = NFCReader()
+        self._reader = create_reader()
         self._authenticator = Authenticator(hmac_key=key_manager.hmac_key)
         self._session_mgr = SessionManager(timeout_seconds=SESSION_TIMEOUT_SECONDS)
         self._running = False

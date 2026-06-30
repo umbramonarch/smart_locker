@@ -178,7 +178,7 @@ class TestImportFromSourceExcel:
         assert "not found" in result.error_details[0].lower()
 
     def test_dry_run_no_writes(self, db_session):
-        """Dry run parses but does not write to the database."""
+        """Dry run reports the diff (would-import count) but writes nothing."""
         path = _create_test_excel([
             ["Equipment", "Platz Messmittelschrank"],
             ["PM-001", "Schrank 1"],
@@ -186,10 +186,39 @@ class TestImportFromSourceExcel:
         try:
             from smart_locker.database.engine import get_engine
             result = import_from_source_excel(get_engine(), path, dry_run=True)
-            assert result.imported == 0
-
+            # The diff is computed (1 device WOULD be imported)...
+            assert result.imported == 1
+            # ...but nothing is persisted (the transaction is rolled back).
             device = DeviceRepository.find_by_pm(db_session, "PM-001")
             assert device is None
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_dry_run_reports_update_and_unchanged_without_writing(self, db_session):
+        """Dry run splits existing devices into would-update vs unchanged, no writes."""
+        DeviceRepository.create(
+            db_session,
+            name="Fluke 87V",
+            device_type="general",
+            pm_number="PM-001",
+            manufacturer="Fluke",
+            model="87V",
+        )
+        db_session.commit()
+
+        path = _create_test_excel([
+            ["Equipment", "Hersteller", "Typbezeichnung", "Platz Messmittelschrank"],
+            ["PM-001", "Fluke", "87-V MAX", "Schrank 1"],   # model changed -> would update
+            ["PM-002", "Keysight", "34465A", "Schrank 2"],  # new -> would import
+        ])
+        try:
+            from smart_locker.database.engine import get_engine
+            result = import_from_source_excel(get_engine(), path, dry_run=True)
+            assert (result.imported, result.updated, result.unchanged) == (1, 1, 0)
+
+            # No mutation: PM-001 still has the original model, PM-002 absent.
+            assert DeviceRepository.find_by_pm(db_session, "PM-001").model == "87V"
+            assert DeviceRepository.find_by_pm(db_session, "PM-002") is None
         finally:
             path.unlink(missing_ok=True)
 

@@ -16,15 +16,18 @@ Notes: Schedule defaults to 6:00 AM daily, configurable via
 """
 
 import logging
+import os
 import threading
 import time
 from pathlib import Path
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
+from smart_locker.sync import sync_status
 from smart_locker.sync.fs_utils import is_network_path
 
 logger = logging.getLogger(__name__)
@@ -38,16 +41,28 @@ _observer: Observer | None = None
 # Collapsing them avoids redundant import runs.
 _DEBOUNCE_SECONDS = 3.0
 
+# Network-share mtime polling. watchdog's inotify Observer never fires for writes
+# made by another host on a CIFS/NFS mount (see fs_utils.is_network_path), so on a
+# network source we poll the file's modification time on a fixed interval instead
+# and re-import when it changes. Interval is configurable (default 30 s).
+_MTIME_POLL_SECONDS = max(5, int(os.getenv("SMART_LOCKER_SOURCE_POLL_SECONDS", "30")))
+# Last-seen mtime per polled source path; seeded in start_scheduler so the first
+# poll tick after startup does not re-import the file the startup import just read.
+_poll_state: dict[str, float] = {}
 
-def _run_source_import(engine, source_path: str | Path) -> None:
+
+def _run_source_import(engine, source_path: str | Path, trigger: str = "scheduled") -> None:
     """Execute the source Excel import (called by scheduler, watcher, or startup).
 
     Validates that the source file exists, then delegates to
-    ``import_from_source_excel``. Logs the result summary or any errors.
+    ``import_from_source_excel``. Logs the result summary or any errors and
+    records the outcome in ``sync_status`` for the admin "last synced" display.
 
     Args:
         engine: SQLAlchemy Engine for database operations.
         source_path: Path to the company source Excel file on disk.
+        trigger: Which mechanism initiated this run (startup/cron/watch/
+            mtime-poll), recorded in the sync-status snapshot.
 
     Returns:
         None. Results are logged.
@@ -66,8 +81,42 @@ def _run_source_import(engine, source_path: str | Path) -> None:
             "Source import complete: %d imported, %d updated, %d unchanged, %d errors.",
             result.imported, result.updated, result.unchanged, result.errors,
         )
+        sync_status.record_result(trigger, result)
     except Exception as e:
         logger.error("Source Excel import failed: %s", e)
+        sync_status.record_error(trigger, str(e))
+
+
+def _poll_source_mtime(engine, source_path: str | Path) -> None:
+    """Re-import the source Excel when its modification time changes (network shares).
+
+    Used in place of the inotify file watcher on CIFS/NFS mounts, where remote
+    writes never raise inotify events. The first observation only records a
+    baseline; subsequent changes trigger an import.
+
+    Args:
+        engine: SQLAlchemy Engine for database operations.
+        source_path: Path to the company source Excel file on the network share.
+
+    Returns:
+        None.
+    """
+    path = Path(source_path)
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        # Share briefly unavailable (network hiccup) — try again next tick.
+        return
+
+    key = str(path)
+    prev = _poll_state.get(key)
+    if prev is None:
+        _poll_state[key] = mtime
+        return
+    if mtime != prev:
+        _poll_state[key] = mtime
+        logger.info("Source Excel mtime changed (network-share poll) — triggering import.")
+        _run_source_import(engine, source_path, trigger="mtime-poll")
 
 
 class _SourceFileHandler(FileSystemEventHandler):
@@ -173,7 +222,7 @@ class _SourceFileHandler(FileSystemEventHandler):
             None.
         """
         logger.info("Source Excel changed — triggering import.")
-        _run_source_import(self._engine, self._source_path)
+        _run_source_import(self._engine, self._source_path, trigger="watch")
 
 
 def start_scheduler(
@@ -208,19 +257,26 @@ def start_scheduler(
     source = Path(source_path).resolve()
 
     # --- 1. Immediate import on startup ---
-    _run_source_import(engine, source)
+    _run_source_import(engine, source, trigger="startup")
 
     # --- 2. File watcher for live changes (local filesystems only) ---
     # inotify does not deliver events for writes made by other hosts on a network
     # share, so on the Pi (source Excel on the mounted M:/CIFS share) we skip the live
-    # watch and rely on the startup import above plus the daily cron below.
-    if is_network_path(source):
+    # watch and rely on the startup import, a periodic mtime poll, and the daily cron.
+    on_network = is_network_path(source)
+    if on_network:
         logger.info(
-            "Source Excel %s is on a network share (CIFS/NFS) — live file watching is "
-            "unreliable there. Relying on the startup import and the daily %02d:%02d "
-            "cron instead.",
-            source, hour, minute,
+            "Source Excel %s is on a network share (CIFS/NFS) — inotify is unreliable "
+            "there, so live changes are picked up by an mtime poll every %d s (plus the "
+            "startup import and the daily %02d:%02d cron).",
+            source, _MTIME_POLL_SECONDS, hour, minute,
         )
+        # Seed the baseline so the first poll tick does not re-import the file the
+        # startup import just read; only a later change triggers an import.
+        try:
+            _poll_state[str(source)] = source.stat().st_mtime
+        except OSError:
+            _poll_state.pop(str(source), None)
     elif source.parent.exists():
         handler = _SourceFileHandler(engine, source)
         _observer = Observer()
@@ -235,21 +291,33 @@ def start_scheduler(
             source.parent,
         )
 
-    # --- 3. Daily cron job as safety net ---
+    # --- 3. Daily cron job (safety net) + network-share mtime poll ---
     _scheduler = BackgroundScheduler()
     _scheduler.add_job(
         _run_source_import,
         trigger=CronTrigger(hour=hour, minute=minute),
-        args=[engine, source],
+        args=[engine, source, "cron"],
         id="source_excel_import",
         name="Daily source Excel import",
         # 1 hour grace time — tolerate delayed execution (e.g. system wake from sleep)
         misfire_grace_time=3600,
     )
+    if on_network:
+        _scheduler.add_job(
+            _poll_source_mtime,
+            trigger=IntervalTrigger(seconds=_MTIME_POLL_SECONDS),
+            args=[engine, source],
+            id="source_excel_mtime_poll",
+            name="Network-share source Excel mtime poll",
+            max_instances=1,            # never overlap if an import runs long
+            coalesce=True,              # collapse missed ticks into one
+        )
     _scheduler.start()
     logger.info(
-        "Scheduler started: daily import at %02d:%02d, file watcher active.",
+        "Scheduler started: daily import at %02d:%02d; %s.",
         hour, minute,
+        f"mtime poll every {_MTIME_POLL_SECONDS}s (network share)" if on_network
+        else "file watcher active",
     )
 
 
