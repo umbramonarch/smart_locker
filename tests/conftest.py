@@ -37,7 +37,7 @@ def db_session():
         yield session
         session.rollback()
     finally:
-        factory.remove()
+        session.close()
         reset_engine()
 
 

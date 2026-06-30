@@ -1,169 +1,262 @@
-# Smart Locker — Step-by-Step Setup and Usage Guide
+# Smart Locker — Setup & Usage Guide (Raspberry Pi)
 
-## Prerequisites
-
-Before starting, make sure you have:
-
-1. **Python 3.11+** installed
-2. **ACR1252U NFC reader** plugged into a USB port
-3. **Windows Smart Card service** running (see Step 0 below)
-4. One or more NFC cards (MIFARE Classic, Ultralight, NTAG215, DESFire, etc.)
+This guide explains, in plain English, what the Smart Locker is, how it runs on a
+Raspberry Pi 4, and exactly how to set it up from a blank SD card to a working kiosk.
 
 ---
 
-## Step 0: Verify the Smart Card Service
+## 1. What it is and how it runs
 
-The NFC reader communicates through the Windows Smart Card (PC/SC) service. It must be running.
+The Smart Locker is a small appliance for borrowing and returning equipment. A colleague
+taps their NFC work card on a reader, then borrows or returns devices by touching a screen.
+Everything is tracked in a local database; nobody needs a login or the internet.
 
-```powershell
-# Check if the service is running
-Get-Service SCardSvr
+It runs on a **Raspberry Pi 4** as a self-contained kiosk:
 
-# If Status is "Stopped", start it:
-Start-Service SCardSvr
-
-# To make it start automatically on boot:
-Set-Service SCardSvr -StartupType Automatic
+```
+Raspberry Pi 4 (Raspberry Pi OS, 64-bit) — no internet needed at runtime
+  ├─ pcscd .................. the Linux service that talks to the ACR1252U NFC reader
+  ├─ /mnt/locker ............ the company M: drive, mounted over the network (CIFS/SMB)
+  ├─ smart-locker service ... the Python backend: a small web server on port 8000
+  │                           plus a background listener for card taps
+  └─ Chromium (kiosk mode) .. a fullscreen browser on the touch display, showing
+                              http://localhost:8000 — this is what users see and touch
 ```
 
-You should see `Status: Running`.
+Three things are worth understanding up front:
+
+- **No internet at runtime.** The Pi only needs the company network to reach the **M:
+  drive** (a normal Windows file share). Everything else runs locally. Installation pulls
+  software from the SD card, not the web. (OneDrive is no longer involved — the M: drive
+  is now the single place the device list lives.)
+- **The M: drive is both source and destination.** The Pi *imports* the company device
+  master list from M:, and *writes* an up-to-date Excel workbook back to M: so colleagues
+  can read the current borrow/return state.
+- **The database stays on the Pi.** The SQLite database lives on the Pi's local SD card,
+  never on M: (network shares don't handle SQLite's locking reliably).
 
 ---
 
-## Step 1: Set Up the Virtual Environment
+## 2. Hardware you need
 
-```powershell
-cd path\to\smart_locker
+1. **Raspberry Pi 4** (2 GB RAM or more) with a **64-bit Raspberry Pi OS** SD card.
+2. **ACR1252U NFC reader** (USB).
+3. The **Riverdi RVT101HVHNWC00** 10.1" capacitive touch display (HDMI for video + USB for
+   touch). Capacitive touch works out of the box on Linux — no calibration step needed.
+4. NFC work cards (MIFARE Classic, Ultralight, NTAG, DESFire — any card with a UID).
+5. Network access to the company **M:** share (wired Ethernet is most reliable).
 
-# Create virtual environment (if not already created)
-python -m venv venv
+---
 
-# Activate it
-.\venv\Scripts\Activate
+## 3. Two ways to install
 
-# Install dependencies
+**Fast path (recommended for production):** copy the project onto the Pi and run one script
+that sets up everything. See **Section 3a**.
+
+**Manual path (recommended the first time, to understand each piece):** do each step by
+hand. See **Section 4**.
+
+Either way, you finish by filling in a few secrets (encryption keys, the M: share login)
+and enrolling your first card. But **first the Pi needs an operating system** — Step 0.
+
+### Step 0 — Prepare the SD card (install Raspberry Pi OS)
+
+A Raspberry Pi 4 ships with **no operating system** — you write one onto the SD card
+yourself. Do this on any PC (including your work laptop) with the free **Raspberry Pi
+Imager** (https://www.raspberrypi.com/software/); the Pi doesn't need to be present yet.
+
+In the Imager:
+
+1. **Device:** Raspberry Pi 4.
+2. **Operating System:** **Raspberry Pi OS (64-bit)** — the standard **Desktop** edition.
+   - *64-bit* matches what this project is built for (the Python packages have prebuilt
+     64-bit wheels; 32-bit would force slow on-device compiles).
+   - *Desktop*, **not** *Lite* — the kiosk runs Chromium in a graphical session, which the
+     Lite (no-GUI) edition does not have.
+3. **Storage:** a 32 GB or larger SD card.
+4. Open the **⚙ settings** ("Edit Settings", the gear icon) **before** writing, and set:
+   - a **hostname** (e.g. `smartlocker`),
+   - **enable SSH** (lets you finish setup from another computer),
+   - a **username and password** — it can be `locker`, but any name works (`install.sh`
+     auto-detects whichever user owns the project folder),
+   - **WiFi and locale**, if you will use WiFi.
+5. Write the card, insert it into the Pi, and power on.
+
+**About the internet:** the "no internet" rule is only for *running* in the company. During
+this **one-time setup** you will want to give the Pi internet (a home or test network) so it
+can install its system packages and build the Python environment. After setup it runs fully
+offline.
+
+**Installing onto several Pis (the "SD card" model):** set up **one** Pi completely and
+confirm it works, then **clone its SD card to an image** and write that image onto the other
+units' cards. That golden image already contains the OS, the app, the Python environment, and
+your settings — so the others need no internet at all.
+
+> Tip: current Raspberry Pi OS may run the desktop under Wayland. If the kiosk autostart
+> misbehaves, switch to X11 with `sudo raspi-config` → *Advanced Options* → *Wayland* → *X11*,
+> then reboot.
+
+### 3a. Fast path — the install script
+
+Put the project on the Pi (for example at `/home/locker/smart_locker`) and run:
+
+```bash
+sudo deploy/install/install.sh
+```
+
+This is safe to re-run. It installs the system packages, builds the Python environment,
+enables the NFC service, installs the auto-start service and the kiosk browser, and
+scaffolds the M: mount. When it finishes it prints the few manual steps that remain
+(filling `.env`, the share login, enrolling a card). Those are covered below.
+
+> **Offline note:** the company Pi has no internet. Run
+> `deploy/install/build-wheelhouse.sh` **once on a Pi (or aarch64 machine) that does have
+> internet** to download all Python packages into `deploy/wheelhouse/`, then bake that into
+> the SD image. `install.sh` installs from there automatically when offline. See
+> `deploy/README.md`.
+
+Then jump to **Section 4.4** (keys & `.env`), **4.5** (mount M:), **4.6**–**4.8** (database,
+admin card, devices) and **Section 5** (kiosk autostart).
+
+---
+
+## 4. Step-by-step setup (manual)
+
+These steps assume a terminal on the Pi and the project at `~/smart_locker`.
+
+### 4.1 Get the code onto the Pi
+
+Copy the project folder to the Pi (USB stick, `scp`, or the SD image already contains it).
+Open a terminal in the project folder:
+
+```bash
+cd ~/smart_locker
+```
+
+### 4.2 System packages and the NFC reader
+
+The NFC reader talks to Linux through the **PC/SC daemon** (`pcscd`) plus the CCID driver.
+You also need the CIFS tools (for the M: mount) and Chromium (for the kiosk display):
+
+```bash
+sudo apt update
+sudo apt install -y pcscd pcsc-tools libccid cifs-utils chromium unclutter curl python3-venv
+sudo systemctl enable --now pcscd
+```
+
+Plug in the ACR1252U and confirm Linux sees it:
+
+```bash
+pcsc_scan          # should list "ACS ACR1252..."; press Ctrl-C to stop
+```
+
+If it isn't listed, see **Section 8 (Troubleshooting)**.
+
+### 4.3 Python environment
+
+```bash
+python3 -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-**Verify pyscard installed correctly:**
+Verify the reader is reachable from Python:
 
-```powershell
+```bash
 python -c "from smartcard.System import readers; print(readers())"
+# Expected (reader plugged in):
+# ['ACS ACR1252 Dual Reader PICC 0', 'ACS ACR1252 Dual Reader SAM 0']
 ```
 
-Expected output (with reader plugged in):
-```
-['ACS ACR1252 Dual Reader PICC 0', 'ACS ACR1252 Dual Reader SAM 0']
-```
+An empty list `[]` means the reader isn't plugged in or `pcscd` isn't running.
 
-If you see an empty list `[]`, check that the reader is plugged in and the Smart Card service is running.
+### 4.4 Encryption keys and the `.env` file
 
----
+The system encrypts every card UID. Generate the two keys:
 
-## Step 2: Generate Encryption Keys
-
-```powershell
+```bash
 python -m scripts.generate_key
 ```
 
-Output will look like:
-```
-Add these to your .env file:
+Create your `.env` from the Pi template, then paste the keys into it:
 
-SMART_LOCKER_ENC_KEY=aBcDeFgH...==
-SMART_LOCKER_HMAC_KEY=xYzAbCdE...==
-```
-
-Create a `.env` file in the project root:
-
-```powershell
-# Copy the .env.example as a starting point
-Copy-Item .env.example .env
+```bash
+cp deploy/.env.pi.example .env
+nano .env          # paste SMART_LOCKER_ENC_KEY and SMART_LOCKER_HMAC_KEY
 ```
 
-Then open `.env` in a text editor and paste the two key values from the output:
+The template already points the Excel paths at the M: mount (`/mnt/locker/...`) and keeps
+the database local. Adjust the `SMART_LOCKER_SOURCE_EXCEL_PATH` filename to match your real
+workbook. **Keep `.env` secret** — it holds the encryption keys (it is already gitignored).
 
-```
-SMART_LOCKER_ENC_KEY=aBcDeFgH...==
-SMART_LOCKER_HMAC_KEY=xYzAbCdE...==
-SMART_LOCKER_DB_PATH=smart_locker.db
-SMART_LOCKER_READER_NAME=ACR1252
-SMART_LOCKER_SESSION_TIMEOUT=120
-SMART_LOCKER_MAX_BORROWS=5
-```
+### 4.5 Mount the M: network share (CIFS)
 
-**IMPORTANT:** Keep the `.env` file secret. It contains your encryption keys. Never commit it to version control (it's already in `.gitignore`).
+The Pi reaches the M: drive as a CIFS (SMB) network mount at `/mnt/locker`.
 
----
+1. Create the mount point and a root-only credentials file:
 
-## Step 3: Initialize the Database
+   ```bash
+   sudo mkdir -p /mnt/locker
+   sudo install -d -m 700 /etc/smart-locker
+   sudo cp deploy/mount/cifs-credentials.example /etc/smart-locker/cifs-credentials
+   sudo nano /etc/smart-locker/cifs-credentials      # real username / password / domain
+   sudo chmod 600 /etc/smart-locker/cifs-credentials
+   ```
 
-```powershell
+2. Add the mount line to `/etc/fstab`. Copy the line from `deploy/mount/fstab.snippet` and
+   replace `//SERVER/share` with the real share path and the `uid`/`gid` with the locker
+   user's ids (`id <user>`):
+
+   ```bash
+   sudo nano /etc/fstab        # paste & edit the line from deploy/mount/fstab.snippet
+   sudo systemctl daemon-reload
+   sudo mount /mnt/locker
+   ls /mnt/locker              # you should see the company files
+   ```
+
+The line uses `nofail` and `x-systemd.automount`, so the Pi still boots and the kiosk still
+works even if the share is temporarily unreachable — it just can't import/export until the
+share comes back.
+
+### 4.6 Initialize the database
+
+```bash
 python -m scripts.init_db
+# Expected: Database initialized successfully.
 ```
 
-Expected output:
-```
-Database initialized successfully.
-```
+This creates `smart_locker.db` with four tables: `users`, `registrants`, `devices`,
+`transaction_logs`.
 
-This creates `smart_locker.db` in the project root with four tables: `users`, `registrants`, `devices`, `transaction_logs`.
+### 4.7 Enroll your first (admin) card
 
-**Verify** (optional):
+With the reader plugged in:
 
-```powershell
-python -c "import sqlite3; conn = sqlite3.connect('smart_locker.db'); print(conn.execute('SELECT name FROM sqlite_master WHERE type=\"table\"').fetchall())"
-```
-
-Expected: `[('users',), ('registrants',), ('devices',), ('transaction_logs',)]`
-
----
-
-## Step 4: Enroll Your First Card (Admin)
-
-Make sure your NFC reader is plugged in, then run:
-
-```powershell
+```bash
 python -m scripts.enroll_card --name "Your Name" --role admin
 ```
 
-When you see `Place card on reader...`, tap your NFC card on the reader. Hold it steady for 1-2 seconds.
+When you see `Place card on reader...`, tap your card and hold it steady for 1–2 seconds.
+The card UID is masked in the output (e.g. `A1****D4`) and stored encrypted — only admins
+can ever decrypt it. Enroll regular users the same way with `--role user`.
 
-Expected output:
+### 4.8 Load devices from the M: Excel list
+
+The company device master list lives on M:. Import it (it filters to the locker/"schrank"
+rows and auto-numbers slots 1…N). German and English column headers are auto-detected.
+
+```bash
+# Preview without writing anything:
+python -m scripts.import_devices --file "/mnt/locker/Messmittelliste.xlsx" --dry-run
+
+# Import for real:
+python -m scripts.import_devices --file "/mnt/locker/Messmittelliste.xlsx"
 ```
-Reader: ACS ACR1252 Dual Reader PICC 0
-Place card on reader...
-Card detected (UID: A1****D4)
-Enrolled: Your Name (id=1, role=admin)
-```
 
-Note: The card UID is masked for security. Only the first 2 and last 2 hex characters are shown. The full UID is encrypted and stored in the database — only admins can decrypt it.
-
-**Enroll additional users** (as regular users):
-
-```powershell
-python -m scripts.enroll_card --name "Colleague Name" --role user
-```
-
-**Troubleshooting:**
-- `Timeout — no card detected.` → Card wasn't tapped within 30 seconds. Try again.
-- `Could not read card UID.` → Card was removed too quickly. Hold it steady.
-- `ReaderNotFoundError` → Reader not plugged in or Smart Card service not running.
-
----
-
-## Step 5: Add Devices to the System
-
-### Option A: Bulk Import from Excel (recommended)
-
-Prepare your `.xlsx` file with at minimum a **PM/equipment number** column. The script auto-detects both German and English column headers.
-
-**Supported columns (auto-detected):**
-
-| Excel Column | German Name | Maps To | Required? |
+| Excel column | German | Maps to | Required? |
 |---|---|---|---|
-| Equipment | Equipment | `pm_number` | **Yes** — primary device identifier |
-| Category | Kategorie | `device_type` | No (defaults to "general") |
+| Equipment | Equipment | `pm_number` | **Yes** — the device identifier |
+| Category | Kategorie | `device_type` | No |
 | Description | Beschreibung | `description` | No |
 | Manufacturer | Hersteller | `manufacturer` | No |
 | Type designation | Typbezeichnung | `model` | No |
@@ -172,328 +265,279 @@ Prepare your `.xlsx` file with at minimum a **PM/equipment number** column. The 
 | Locker placement | Platz Messmittelschrank | `locker_slot` | No |
 | Calibration date | Datum der nächsten Kalibrierung | `calibration_due` | No |
 
-**Name auto-composition:** If no dedicated "name" column exists, the device name is composed as `"{PM number} {Manufacturer} {Model}"` (e.g., "PM-042 Keysight DSOX3054T").
+If auto-detection picks the wrong column, override it, e.g.
+`--pm-col "Equipment" --type-col "Kategorie"`. Re-importing is safe — devices are matched by
+PM number, and a re-import **never** overwrites `locker_slot`, `image_path`, `description`,
+`status`, or `borrower`.
 
-**Locker slot auto-numbering:** Devices with "schrank*" values (e.g., "schrank1") are auto-numbered 1 through N in spreadsheet order.
+Once running as a service, this same import also happens **automatically**: once on startup,
+once a day at 06:00, and on demand from the hidden admin panel. (See Section 7 for why the
+live "watch the file" mode is off for network shares.)
 
-```powershell
-# First, preview what will be imported (no changes written):
-python -m scripts.import_devices --file "path\to\devices.xlsx" --dry-run
+### 4.9 Add device photos
 
-# Import all devices:
-python -m scripts.import_devices --file "path\to\devices.xlsx"
-```
+Photos make the touch UI easier to use. Two ways to attach them — both copy the image into
+`smart_locker/frontend/images/` and link it to the matching device(s):
 
-The script prints the detected column mapping before importing. If auto-detection picks the wrong column, override it explicitly:
-
-```powershell
-python -m scripts.import_devices --file devices.xlsx --pm-col "Equipment" --type-col "Kategorie" --manufacturer-col "Hersteller"
-```
-
-All available overrides: `--pm-col`, `--name-col`, `--serial-col`, `--type-col`, `--slot-col`, `--manufacturer-col`, `--model-col`, `--barcode-col`, `--calibration-col`.
-
-To read a specific sheet (default is the first sheet):
-
-```powershell
-python -m scripts.import_devices --file devices.xlsx --sheet "Inventory"
-```
-
-Duplicates are automatically skipped (by PM number), so it's safe to re-run the import if you add new rows to the Excel file.
-
-### Option B: Add a few devices manually
-
-For adding individual devices without an Excel file:
-
-```powershell
-python -c "
-import sys; sys.path.insert(0, '.')
-from dotenv import load_dotenv; load_dotenv()
-from smart_locker.database.engine import get_session, init_db
-from smart_locker.database.repositories import DeviceRepository
-
-init_db()
-with get_session() as session:
-    DeviceRepository.create(session, name='Fluke 87V', device_type='Multimeter', pm_number='PM-001', serial_number='SN-001', manufacturer='Fluke', model='87V', locker_slot=1)
-    DeviceRepository.create(session, name='Rigol DS1054Z', device_type='Oscilloscope', pm_number='PM-002', serial_number='SN-002', manufacturer='Rigol', model='DS1054Z', locker_slot=2)
-    print('Devices added successfully.')
-"
-```
-
-### Step 5c: Add Device Images and Descriptions
-
-After importing devices, you can add images and descriptions using the update script.
-
-**1. Take photos and name them by PM number.** Run `--list` first to see which PM number is in which locker slot:
-
-```powershell
+```bash
+# By PM number — list devices, then assign:
 python -m scripts.update_device --list
+python -m scripts.update_device --auto          # auto-match PM-001.jpg, PM-002.png, ...
+python -m scripts.update_device --pm PM-042 --image scope.jpg --description "4-ch 500MHz scope"
 ```
 
-Output:
-```
-Slot   PM              Name                                Image                Description
----    ---             ---                                 ---                  ---
-1      PM-001          PM-001 Keysight DSOX3054T           -                    -
-2      PM-002          PM-002 Rohde & Schwarz HMC8043      -                    -
-3      PM-003          PM-003 Fluke 87V                    -                    -
-```
+Or drop images into the **photo folder** set by `SMART_LOCKER_PHOTO_INPUT_PATH`, named after
+the device **model** (e.g. `87V.jpg` applies to every "87V" device). If that folder is on
+the M: share, photos present at startup are applied automatically; photos added later are
+picked up on the next restart or by re-running `update_device --auto`.
 
-At the locker, take a photo of each device and **name the file by its PM number**: `PM-001.jpg`, `PM-002.jpg`, etc. Supported formats: `.jpg`, `.png`, `.webp`.
+### 4.10 Run it (test before making it permanent)
 
-**2. Place photos** in `smart_locker/frontend/images/`.
-
-**3. Auto-match** — the easiest way. Scans the `images/` folder, finds files named by PM number, and links them automatically:
-
-```powershell
-python -m scripts.update_device --auto
-```
-
-Output:
-```
-Found 3 match(es):
-
-  PM-001 <- PM-001.jpg
-  PM-002 <- PM-002.jpg
-  PM-003 <- PM-003.jpg
-
-  image_path: 'None' -> 'images/PM-001.jpg'
-Updated: PM-001 (PM-001 Keysight DSOX3054T)
-...
-```
-
-**4. Manual update** — for setting descriptions or updating individual devices:
-
-```powershell
-# Set image and description for a single device:
-python -m scripts.update_device --pm PM-042 --image oscilloscope.jpg --description "4-channel 500MHz digital oscilloscope"
-
-# Set just the image:
-python -m scripts.update_device --pm PM-042 --image oscilloscope.jpg
-
-# Set any field:
-python -m scripts.update_device --pm PM-042 --field manufacturer --value "Keysight"
-```
-
-The `--image` flag auto-prepends `images/` if you only provide a filename. Changes are immediately synced to the Excel file.
-
-**5. Batch update** — for updating many devices at once, create a text file with one update per line:
-
-```
-# updates.txt — format: PM_NUMBER field value
-PM-001 description 4-channel 500MHz digital oscilloscope
-PM-002 description Triple-output programmable DC power supply
-PM-003 description True-RMS industrial multimeter
-```
-
-Then run:
-
-```powershell
-python -m scripts.update_device --batch updates.txt
-```
-
----
-
-## Step 6: Run the Smart Locker System
-
-```powershell
+```bash
 python -m smart_locker.app
 ```
 
-This starts the NFC reader listener and the main event loop. Tap your enrolled card to authenticate, tap again to log out.
+You'll see the backend start, the NFC reader come up, and the web server bind to port 8000.
+Open `http://localhost:8000` in a browser on the Pi to see the kiosk UI. Press `Ctrl+C` to
+stop. (Use `python -m smart_locker.app --cli` for a console-only NFC loop with no web UI.)
 
-Expected terminal output:
-```
-Smart Locker starting...
-NFC reader ready: ACS ACR1252 Dual Reader PICC 0
-Smart Locker ready. Tap your card to begin.
-Press Ctrl+C to exit.
-```
-
-> **Note:** By default, the system starts in web server mode — FastAPI serves the kiosk UI at `http://localhost:8000`. Use `python -m smart_locker.app --cli` for the terminal-only NFC loop (no web UI).
-
-### Step 6b: Launch the Touch Display (Kiosk Browser)
-
-Open the UI in a fullscreen kiosk browser on the touch display:
-
-```powershell
-# Using Chromium/Chrome in kiosk mode (fullscreen, no address bar):
-chrome --kiosk http://localhost:8000
-```
-
-### Session Flow (Tap-and-Go)
-
-The NFC card is **tapped and removed** — it is not left on the reader. The card's only purpose is to authenticate. After authentication, all interaction happens on the touch display.
-
-1. **Tap your card** → NFC reader reads UID → system authenticates → touch display shows welcome screen
-2. **Interact on touch display** → Borrow devices, return devices, view device info
-3. **Session ends** via one of:
-   - **"End Session" button** on the touch display
-   - **Second card tap** — tap your card again to log out
-   - **Inactivity timeout** — 120 seconds of no touch interaction (silent security backstop)
-
-### Touch Display Screens
-
-**Idle (no active session)**
-- Animated NFC icon with pulsing rings and Phoenix Contact green glow
-- "TAP YOUR CARD" in large display font with text-reveal animation
-- Scrolling marquee ticker at the bottom, live clock in the top-right
-- "Register your card" entry point for new users
-
-**Register (self-service)**
-- Search and select your approved name from the registrants list
-- Tap your card within the registration window to enrol it under that name
-- Success or error feedback (e.g. card already registered, or name not approved)
-
-**Authentication Failed**
-- Red flash overlay, "Card Not Recognized" error card
-- Auto-returns to the idle screen after a few seconds with a depleting progress bar
-
-**Main Menu (after successful tap)**
-- "WELCOME BACK, [FIRSTNAME]" with clip-path text entrance animation
-- Three large touch buttons: **Borrow** · **Return** · **End Session**
-- User initials avatar and role badge (User / Admin) in top-right
-
-**Borrow View**
-- Grid of all devices organised by locker slot, with staggered card entrance
-- **Available** devices: full colour, tappable → Device Detail (confirm borrow)
-- **Borrowed** devices: greyed out, tappable → Device Detail (shows borrower name)
-- **Maintenance** devices: amber badge, greyed out
-- Badge showing current borrow count vs. limit (e.g. `1 / 5 borrowed`)
-
-**Return View**
-- Same grid layout as Borrow View
-- The user's own borrowed items are highlighted; others greyed out but tappable (to see who has them)
-
-**Device Detail (overlay)**
-- Full-screen overlay slides up over the grid
-- Left: device photo (or slot-number placeholder)
-- Right: slot tag, device name, type, serial, status, description, borrower info
-- Confirm button: green (borrow / return) or disabled (not actionable)
-
-**Hidden Admin Panel (overlay)**
-- Opened by tapping the idle-screen clock 5 times
-- Shortcuts: Borrow, Return, Sync source, Register user, Export to Excel, End Session
-
-**Inactivity Warning (overlay)**
-- Appears shortly before the session timeout
-- Large countdown number; "Stay Active" dismisses it and resets the timer
-
-### Borrow/Return Rules
-
-- **Borrow limit**: Each user can borrow up to `SMART_LOCKER_MAX_BORROWS` devices (default 5). Configurable in `.env`.
-- **Return ownership**: Only the borrower can return their own device. Admins can return any device on behalf of any user.
-- **Admin returns**: When an admin returns a device on behalf of someone, the transaction log records both the original borrower and the admin who performed the return.
-- **Open-access locker**: There is no physical locking mechanism. The locker is open-access and the system is purely for tracking who has what.
+When that works, make it permanent — Section 5.
 
 ---
 
-## Step 7: Run the Test Suite
+## 5. Run as a kiosk appliance (autostart on boot)
 
-Tests run without any NFC hardware — they use in-memory SQLite and mock data.
+In production the Pi should boot straight into the kiosk with no keyboard. Two pieces do
+this, and `deploy/install/install.sh` sets up both:
 
-```powershell
-# Run all 132 tests
-python -m pytest tests/ -v
+1. **The backend service** (`smart-locker.service`) — starts the web server + NFC listener
+   on boot and restarts it automatically if it ever crashes.
+2. **The kiosk browser** (`start-kiosk.sh`, launched by an autostart entry) — opens Chromium
+   fullscreen at `http://localhost:8000` on the touch display once the desktop logs in.
 
-# Run a specific test file
+If you used the fast path, both are already installed. Start the backend and reboot to test
+the full cold-boot experience:
+
+```bash
+sudo systemctl start smart-locker
+sudo reboot
+```
+
+After the reboot the Pi should come up directly into the fullscreen kiosk. Useful commands:
+
+```bash
+systemctl status smart-locker        # should say: active (running)
+sudo systemctl restart smart-locker  # restart the backend
+journalctl -u smart-locker -f        # follow the backend log live
+```
+
+**Boot to the desktop automatically:** make sure Raspberry Pi OS auto-logs into the desktop
+session for your kiosk user (`sudo raspi-config` → *System Options* → *Boot / Auto Login* →
+*Desktop Autologin*). The kiosk autostart entry runs in that session.
+
+**Display orientation (Riverdi):** the capacitive touch works out of the box. If the picture
+is rotated, set the display rotation in `/boot/firmware/config.txt` (e.g. `display_rotate=`
+or a `video=` line) and reboot.
+
+---
+
+## 6. Day-to-day: how the kiosk is used
+
+### Session flow (tap-and-go)
+
+The card is **tapped and removed** — it is not left on the reader. Its only job is to
+authenticate. After that, everything happens on the touch display.
+
+1. **Tap your card** → the reader reads the UID → the system authenticates you → the welcome
+   screen appears.
+2. **Use the touch display** → borrow devices, return devices, view device info.
+3. **The session ends** via the **End Session** button, a **second card tap**, or the
+   **inactivity timeout** (120 seconds of no touch — a silent security backstop).
+
+### The screens
+
+- **Idle** — animated NFC ring, "Tap your card", live clock, a "Register your card" entry.
+- **Register (self-service)** — search and pick your approved name, then tap your card to
+  enrol it under that name.
+- **Authentication failed** — red "Card Not Recognized", auto-returns to idle.
+- **Main menu** — "Welcome, [Name]!" with **Borrow**, **Return**, **End Session**.
+- **Borrow** — a grid of devices by locker slot; available ones are tappable, borrowed ones
+  show who has them.
+- **Return** — the same grid, with your own borrowed items highlighted.
+- **Device detail** (overlay) — photo, specs, and a confirm button.
+- **Inactivity warning** (overlay) — a countdown with a "Stay Active" button.
+- **Hidden admin panel** (overlay) — opened by tapping the idle clock 5 times. Shortcuts for
+  Borrow, Return, **Sync source**, Register user, **Export to Excel**, End Session.
+
+### The rules
+
+- **Borrow limit:** each user can hold up to `SMART_LOCKER_MAX_BORROWS` devices (default 5).
+- **Returns:** only the borrower can return their own device; an admin can return any device
+  on anyone's behalf (the log records both people).
+- **Open-access locker:** there is no physical lock — the system tracks *who has what*.
+
+---
+
+## 7. Excel, the M: share, and the dashboard
+
+There are two ways to see live data — a web dashboard and the Excel workbook on M:.
+
+**Web dashboard** — open `http://<pi-address>:8000/dashboard` from any browser on the
+network (no login). It shows three tables, auto-refreshing every 30 seconds: **Devices**
+(slot, PM number, status, borrower, calibration due — filterable/sortable), **Transactions**
+(last 500), and **Users**.
+
+**Excel on M:** the device list is **imported from** M:, and an up-to-date workbook
+(Devices + Transactions + Users) is **written back to** M: at `SMART_LOCKER_EXCEL_PATH`.
+With `SMART_LOCKER_EXCEL_AUTO_EXPORT=1` (set in the Pi template), that workbook is refreshed
+automatically after every source import — on startup, at the daily 06:00 import, and
+whenever an admin uses **Sync source**. You can also download a snapshot any time from the
+admin panel's **Export to Excel**.
+
+**Why the import is scheduled, not instant:** the Pi can't reliably get a "file changed"
+notification for a file that lives on a network share (the Linux mechanism for this,
+*inotify*, doesn't see edits made by other computers on a CIFS/SMB mount). So instead of a
+live file-watch, the system imports on startup and once a day at 06:00. To pull changes in
+immediately, use **Sync source** in the admin panel, or run
+`python -m scripts.sync_source`.
+
+---
+
+## 8. Operations — logs, troubleshooting, self-healing & updates
+
+**Logs** are in two places:
+
+```bash
+journalctl -u smart-locker -n 100 --no-pager   # the service's output (systemd journal)
+tail -f logs/smart_locker.log                  # the app's own rotating log file
+```
+
+**The NFC reader isn't detected (`pcsc_scan` shows nothing):**
+- Confirm `pcscd` is running: `sudo systemctl status pcscd`.
+- Re-seat the USB cable; try a different USB port.
+- A kernel NFC module can grab the reader. If so, blacklist it:
+  `echo -e "blacklist pn533\nblacklist pn533_usb\nblacklist nfc" | sudo tee /etc/modprobe.d/blacklist-nfc.conf` then reboot.
+- The app's error message will tell you the Linux fix: `sudo systemctl start pcscd`.
+
+**The M: share won't mount:**
+- `sudo mount /mnt/locker` prints the error. A "permission denied" usually means the
+  credentials file is wrong; a "host is down"/timeout means the network or server path is
+  wrong.
+- Try a different SMB version in the fstab line: `vers=3.0` → `vers=2.1` → `vers=1.0`.
+- Check the server path with another machine first (`\\SERVER\share` in Windows Explorer).
+
+**The kiosk screen doesn't appear after boot:**
+- Confirm the desktop auto-login is on (Section 5) and the autostart entry exists:
+  `~/.config/autostart/smart-locker-kiosk.desktop`.
+- Run the launcher by hand to see errors: `deploy/kiosk/start-kiosk.sh`.
+- Confirm the backend is up first: `curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8000/` should print `200`.
+
+**The backend won't start:** `journalctl -u smart-locker -n 50 --no-pager`. The most common
+cause is a missing or malformed `.env` (encryption keys not pasted in).
+
+### Running unattended — what recovers on its own
+
+The Pi lives in the locker, far from you, so it is built to heal itself:
+
+- **Crashes restart automatically.** The systemd service uses `Restart=always` with
+  `StartLimitIntervalSec=0`, so if the app ever dies it comes back within a few seconds and keeps
+  retrying *forever* — a transient fault clears itself with no one on site. It also starts on boot
+  and after a power cut.
+- **A down M: share doesn't stop the kiosk.** The share is a *soft* dependency: borrow/return keep
+  working from the local database; only import/export pause until the share returns.
+- **Sync never crashes the app.** If the Excel file is left open/locked, or the share drops, the
+  import/export is logged and skipped — the kiosk stays up and the next scheduled or manual sync
+  retries.
+
+### Is it alive? Check from any browser — no SSH, no Linux
+
+- **Health:** open `http://<pi-address>:8000/api/health`. It returns a small JSON you can bookmark:
+  `status` (`ok`/`degraded`), `uptime_seconds`, `database`, `nfc_reader`, and the last sync result.
+- **Dashboard:** open `http://<pi-address>:8000/dashboard` for the live device inventory.
+- If `/api/health` doesn't load at all, the Pi is off or off the network (power / cable / Wi-Fi) —
+  the one situation that needs someone physically there.
+
+### Updating the software (the Pi never needs the internet)
+
+You author releases on your company **git host** as usual — but the **Pi never talks to git host**. The
+release rides the **M:** share you already have, so git host's internet access is irrelevant to the Pi.
+
+1. **At work** (where you have git host): download the release tarball for the tag — git host's
+   "Download source" gives exactly this — named `smart-locker-<version>.tar.gz`, and drop it in
+   `M:\locker-updates\`. (Optional: put a `smart-locker-<version>.tar.gz.sha256` next to it and the
+   Pi will verify it before applying.)
+2. **On the kiosk:** open the hidden admin panel (tap the clock 5× within 3 s) → **Software Update**
+   → confirm.
+3. The Pi then: snapshots the database **and** the current code, swaps in the new version, installs
+   any new dependencies from the offline wheelhouse, runs database migrations, restarts, and
+   health-checks the new version. **If the new version doesn't come up healthy it automatically
+   rolls back** to the previous code and database — a bad update cannot leave the locker stuck.
+
+The kiosk is briefly unavailable during the restart (seconds — invisible between card taps). A
+single-reader kiosk can't update with *zero* downtime (one process owns the NFC reader and the
+SQLite database), so the design trades that short restart for a **safe, self-reverting** update on a
+box no one is standing next to. Progress and the result are written to `logs/update.log` and
+`logs/update-status.json` (the latter drives the button's status text).
+
+**SSH fallback** (only if you ever need it): `sudo /home/locker/smart_locker/deploy/install/update.sh`.
+The button relies on the sudoers drop-in that `install.sh` writes to `/etc/sudoers.d/smart-locker`;
+if that step was skipped, use the SSH command above.
+
+---
+
+## 9. Tests
+
+The test suite needs no NFC hardware (it uses in-memory SQLite and mock data):
+
+```bash
+python -m pytest tests/ -v          # all tests
 python -m pytest tests/test_security.py -v
-
-# Run with short output
-python -m pytest tests/ --tb=short
 ```
 
 ---
 
-## Step 8: View Logs
+## 10. Configuration reference
 
-Logs are written to the `logs/` directory with rotation (5 MB per file, 5 backups):
-
-```powershell
-# View the log file
-Get-Content logs\smart_locker.log
-
-# Follow the log in real-time
-Get-Content logs\smart_locker.log -Wait
-```
-
----
-
-## Step 9: Excel Export & Web Dashboard
-
-Live data is viewed two ways — a read-only web dashboard and an on-demand Excel export. (The old always-on auto-sync was removed because an open Excel file locked the export on Windows.)
-
-**Web dashboard** — open `http://<kiosk-host>:8000/dashboard` from any browser on the network (no login required). It shows three tables, auto-refreshing every 30 seconds:
-- **Devices** — Slot, PM Number, Name, Type, Status, Borrower, Calibration Due (filterable & sortable)
-- **Transactions** — the last 500 borrow/return records
-- **Users** — registered users (name, role, active, registered date)
-
-**Excel export (on demand)** — from the hidden admin panel choose **Export to Excel**, or call `GET /api/admin/export-excel`, to download a three-sheet workbook (Devices + Transactions + Users). Nothing is written to disk automatically; `SMART_LOCKER_EXCEL_PATH` sets the default filename for script-driven exports.
-
----
-
-## Configuration Reference
-
-All settings are in `.env` (loaded by `config/settings.py`):
+All settings live in `.env` (loaded by `config/settings.py`). The Pi template
+`deploy/.env.pi.example` pre-fills sensible values.
 
 | Variable | Default | Description |
-|----------|---------|-------------|
-| `SMART_LOCKER_ENC_KEY` | (required) | AES-256 encryption key, base64-encoded |
-| `SMART_LOCKER_HMAC_KEY` | (required) | HMAC-SHA256 key, base64-encoded |
-| `SMART_LOCKER_DB_PATH` | `smart_locker.db` | SQLite database file path |
-| `SMART_LOCKER_READER_NAME` | `ACR1252` | Substring filter for NFC reader name |
-| `SMART_LOCKER_SESSION_TIMEOUT` | `120` | Session inactivity timeout (seconds) |
-| `SMART_LOCKER_MAX_BORROWS` | `5` | Maximum devices a user can borrow at once |
-| `SMART_LOCKER_EXCEL_PATH` | `smart_locker_data.xlsx` | Default filename for on-demand Excel export |
-| `SMART_LOCKER_API_HOST` | `0.0.0.0` | FastAPI server bind address |
-| `SMART_LOCKER_API_PORT` | `8000` | FastAPI server port |
-| `SMART_LOCKER_SOURCE_EXCEL_PATH` | (empty) | Company device master list to import; empty disables auto-import |
+|---|---|---|
+| `SMART_LOCKER_ENC_KEY` | (required) | AES-256-GCM key, base64 — from `generate_key` |
+| `SMART_LOCKER_HMAC_KEY` | (required) | HMAC-SHA256 key, base64 — from `generate_key` |
+| `SMART_LOCKER_DB_PATH` | `smart_locker.db` | SQLite path — keep on the Pi's local disk |
+| `SMART_LOCKER_READER_NAME` | `ACR1252` | Substring filter for the NFC reader name |
+| `SMART_LOCKER_SESSION_TIMEOUT` | `120` | Idle session timeout (seconds) |
+| `SMART_LOCKER_MAX_BORROWS` | `5` | Max devices a user can hold at once |
+| `SMART_LOCKER_API_HOST` | `0.0.0.0` | Web server bind address |
+| `SMART_LOCKER_API_PORT` | `8000` | Web server port |
+| `SMART_LOCKER_SOURCE_EXCEL_PATH` | (empty) | Device master list on M: to import; empty disables auto-import |
+| `SMART_LOCKER_EXCEL_PATH` | `smart_locker_data.xlsx` | Where the exported workbook is written (the M: path on the Pi) |
+| `SMART_LOCKER_EXCEL_AUTO_EXPORT` | (off) | `1` = auto-refresh the exported workbook after each import/photo change |
 | `SMART_LOCKER_SOURCE_SYNC_HOUR` / `_MINUTE` | `6` / `0` | Daily source-import time (24h) |
-| `SMART_LOCKER_PHOTO_INPUT_PATH` | (empty) | Folder watched for device photos (filename = model); empty disables |
+| `SMART_LOCKER_PHOTO_INPUT_PATH` | (empty) | Folder watched for device photos; empty disables |
 
 ---
 
-## What's Built vs. What's Next
+## 11. What's built vs. what's next
 
-### ✅ Built — Backend Core
+**Built:** NFC enrollment & authentication (AES-256-GCM + HMAC), single-user sessions with
+timeout, device tracking with the full schema, borrow/return with admin overrides and
+per-user limits, self-service registration, Excel import (schrank filter, DE/EN headers) and
+on-demand/auto export, photo assignment, the read-only `/dashboard`, the FastAPI REST API +
+SSE bridge, the 6-screen kiosk UI, **Raspberry Pi appliance deployment** (systemd service,
+CIFS mount, Chromium kiosk, offline install), and 132 hardware-free tests.
 
-- NFC card UID reading (any card type with a UID)
-- Card enrollment with AES-256-GCM encrypted storage
-- User authentication via HMAC-SHA256 card fingerprint lookup
-- Session management with inactivity timeout
-- Device tracking with extended schema (PM number, manufacturer, model, barcode, calibration date, locker slot, status)
-- Transaction logging (borrow / return, with admin-return attribution)
-- Admin vs. regular user roles with permission enforcement
-- Borrow limit enforcement (default 5 devices per user, configurable)
-- UID masking in logs and on screen (never displayed in full)
-- Reader connect/disconnect detection and retry logic
-- Bulk device import from Excel with German column auto-detection (Equipment, Hersteller, Typbezeichnung, Kategorie, etc.)
-- Source import of the company master list — on startup, on file change, and a daily cron (schrank-only filter)
-- Self-service card registration against an approved-name list, plus admin manual registration
-- On-demand Excel export (Devices + Transactions + Users) and a read-only web dashboard at `/dashboard`
-- Photo auto-assignment by model (background watcher) or by PM number (`update_device`)
-- FastAPI REST API with SSE event stream for NFC → browser bridge
-- 132 unit tests — all passing, no NFC hardware required
-
-### ✅ Built — Frontend UI
-
-- `smart_locker/frontend/index.html` — 6-screen HTML structure
-- `smart_locker/frontend/style.css` — full styling: colors, animations, layout
-- `smart_locker/frontend/app.js` — state machine, API stubs, all UI behaviour
-- Clip-path wipe transitions between every screen
-- Animated NFC pulse icon, mesh gradient background, marquee ticker
-- Device grid with staggered card entrance and hover effects
-- Device detail overlay with photo, metadata, and confirm button
-- Inactivity warning overlay with live countdown
-- Custom cursor with lagged ring follower
-- Web Audio API click sounds (no audio files)
-- Demo mode with sample data — fully testable without a backend
-- Fully connected to the FastAPI REST API (session, devices, borrow/return, SSE events)
+**Next:** barcode scanner for shared lockers (Section 14), calibration-due notifications, a
+full admin web panel, MIFARE sector reading, and multi-reader support.
 
 ---
 
-## Understanding the Frontend Files
+## 12. Understanding the frontend files
 
-The frontend is made of three files, each with exactly one job. A common beginner confusion: **JavaScript is not Java** — they are completely different languages that happen to share part of a name. JavaScript runs inside the browser and controls what the page does.
+The frontend is three files, each with one job. A common beginner confusion: **JavaScript is
+not Java** — they are different languages that happen to share part of a name. JavaScript
+runs inside the browser and controls what the page does.
 
 Think of building a house:
 
@@ -505,366 +549,148 @@ app.js      →  The behaviour   (electricity, plumbing — what it does)
 
 None of these files is useful on its own. They only work as a set.
 
----
+### index.html — structure
 
-### index.html — Structure
-
-HTML is the skeleton of the page. It is a list of **elements** (called tags) that describe what content exists. Every tag has an opening and a closing form:
-
-```html
-<div class="auth-card">           ← open a box, give it a name ("auth-card")
-  <div class="auth-title">        ← open a smaller box inside it
-    Card Not Recognized           ← the actual visible text
-  </div>                          ← close the smaller box
-</div>                            ← close the outer box
-```
-
-The `class="..."` attribute is just a label. On its own it does nothing — it is how `style.css` and `app.js` find and target that element.
-
-The `id="..."` attribute works similarly, but must be **unique** — only one element per page can have a given id. JavaScript uses ids to update specific elements:
+HTML is the skeleton of the page: a list of **elements** (tags) describing what content
+exists. Every tag has an opening and a closing form:
 
 ```html
-<div id="clock-time">00:00</div>    ← JS updates this text every second
+<div class="auth-card">           <!-- open a box, give it a name ("auth-card") -->
+  <div class="auth-title">        <!-- a smaller box inside it -->
+    Card Not Recognized           <!-- the visible text -->
+  </div>
+</div>
 ```
 
-**In our file**, each screen is a `<div class="screen">` block. At any moment only one is visible — the others are hidden off-screen by CSS. JavaScript decides which one to show:
+The `class="..."` attribute is just a label — it does nothing by itself; it's how
+`style.css` and `app.js` find that element. The `id="..."` attribute is similar but must be
+**unique** (one element per page). Each screen is a `<div class="screen">`; only one is
+visible at a time, and JavaScript decides which:
 
 | Element id | What it is |
 |---|---|
-| `screen-idle` | "TAP YOUR CARD" screen |
-| `screen-register` | Self-service card registration |
+| `screen-idle` | "Tap your card" screen |
+| `screen-register` | Self-service registration |
 | `screen-auth-failed` | Red error screen |
-| `screen-main-menu` | Welcome + Borrow / Return buttons |
+| `screen-main-menu` | Welcome + Borrow / Return |
 | `screen-borrow` | Device grid for borrowing |
 | `screen-return` | Device grid for returning |
-| `overlay-device-detail` | Full-screen device detail popup |
-| `overlay-inactivity` | Countdown warning overlay |
+| `overlay-device-detail` | Device detail popup |
+| `overlay-inactivity` | Countdown warning |
 | `overlay-admin` | Hidden admin panel (5× clock tap) |
 
----
+### style.css — appearance
 
-### style.css — Appearance
-
-CSS is a list of rules. Each rule says: **"find elements that match this selector, and apply these visual properties."**
-
-```css
-/* selector  ↓          property: value; */
-.auth-title {
-  font-size: 1.9rem;      /* text size */
-  color: var(--danger);   /* colour — references a variable */
-  text-align: center;
-}
-```
-
-A **dot** (`.auth-title`) means "find every element whose class includes `auth-title`".
-A **hash** (`#clock-time`) means "find the element with that exact id".
-
-**CSS variables** at the top of the file are reusable values. Changing one line updates the whole UI:
+CSS is a list of rules: *"find elements that match this selector, apply these visual
+properties."* A **dot** (`.auth-title`) matches a class; a **hash** (`#clock-time`) matches
+an id. **CSS variables** at the top let you change the whole look in one line:
 
 ```css
 :root {
   --accent: #009641;   /* Phoenix Contact green — change once, the whole UI follows */
   --danger: #ef4444;
 }
-
-/* used anywhere like this: */
 color: var(--accent);
 ```
 
-**Animations** describe movement over time:
+Screen transitions use a `clip-path` trick: every screen starts clipped (hidden); when
+JavaScript adds the `active` class, CSS animates it into view (a bottom-to-top wipe).
+JavaScript triggers it; CSS does the animation.
 
-```css
-@keyframes ring-pulse {           /* define the movement */
-  0%   { transform: scale(0.78); opacity: 0.7; }   /* starting state */
-  100% { transform: scale(1.25); opacity: 0; }     /* ending state */
-}
+### app.js — behaviour
 
-.nfc-ring-outer {
-  animation: ring-pulse 2.8s ease-in-out infinite;
-  /*                    ↑ duration   ↑ timing  ↑ loops forever */
-}
-```
+JavaScript reacts to events (clicks, timers, server replies) and can read/modify the HTML
+and CSS live. It finds elements (`document.getElementById(...)`), changes them
+(`element.classList.add('active')`), and talks to the server without freezing the page using
+`async`/`await`:
 
-**The clip-path trick** — how screen wipe transitions work:
-
-```css
-/* Every screen starts hidden — clipped 100% from the top */
-.screen {
-  clip-path: inset(100% 0 0 0);
-}
-
-/* When JS adds the "active" class, CSS animates to fully visible */
-.screen.active {
-  clip-path: inset(0% 0 0 0);
-  transition: clip-path 0.72s cubic-bezier(0.76, 0, 0.24, 1);
-}
-```
-
-When JavaScript adds the `active` class to a screen, the browser automatically animates from hidden → visible, creating the bottom-to-top wipe effect. JavaScript triggers it; CSS does the animation.
-
----
-
-### app.js — Behaviour
-
-JavaScript runs in the browser and reacts to events (clicks, timers, API responses). It can read and modify the HTML and CSS in real time.
-
-**Finding an element:**
-```js
-document.getElementById('clock-time')      // find by id
-document.querySelectorAll('.back-btn')     // find all elements with this class
-```
-
-**Changing content or style:**
-```js
-document.getElementById('clock-time').textContent = '14:32';  // change text
-element.classList.add('active');      // add a CSS class  → triggers animation
-element.classList.remove('active');   // remove a CSS class
-```
-
-This is the bridge between JS and CSS: JavaScript adds or removes class names; CSS defines what those class names look like. Every screen transition works this way.
-
-**Reacting to user actions:**
-```js
-document.getElementById('btn-borrow').addEventListener('click', () => {
-  openBorrow();    // this function runs when the button is clicked
-});
-```
-
-**`async` / `await`** — talking to the server without freezing the page:
 ```js
 async function apiGetDevices() {
-  const res = await fetch('/api/devices');   // ask the FastAPI server
-  return res.json();                          // convert the response to JS data
+  const res = await fetch('/api/devices');   // ask the backend
+  return res.json();                          // turn the reply into JS data
 }
-// "await" means: pause here until the server replies, then continue
 ```
 
-**The state object `S`** is the memory of the entire app. Every important decision reads or writes it:
-```js
-const S = {
-  screen:   'idle',   // which screen is currently showing
-  user:     null,     // who is logged in  { id, name, role }
-  devices:  [],       // list of devices loaded from the server
-  selected: null,     // which device the user last tapped
-  mode:     null,     // 'borrow' or 'return' — set when entering a grid screen
-};
-```
+The state object `S` is the app's memory — `{ screen, user, devices, selected, mode }`. Every
+important decision reads or writes it.
 
-For example: `navigate('main-menu')` sets `S.screen = 'main-menu'` and updates the DOM. `confirmAction()` checks `S.mode` to know whether to call `apiBorrow` or `apiReturn`.
-
----
-
-### How the Three Files Connect
-
-```
-Browser opens index.html
-  │
-  ├── <link href="style.css"> — browser loads and applies all CSS rules immediately
-  │
-  └── <script src="app.js">  — browser runs the JS once the page is ready
-        JS on startup:
-          - hides the inactivity / detail overlays
-          - starts the clock (updates every second)
-          - attaches click listeners to all buttons
-          - waits for user interaction
-```
-
-When a button is tapped, the chain looks like this:
+### How they connect
 
 ```
 User taps "BORROW"
-  → app.js listener fires → openBorrow() is called
-      → navigate('borrow')       JS adds .active to #screen-borrow
-          → CSS animates it in   clip-path transition plays automatically
-      → apiGetDevices()          JS fetches /api/devices from FastAPI
-          → buildGrid(...)       JS creates <div> cards and inserts them into index.html
-              → CSS styles them  .device-card rules apply automatically to new elements
+  → app.js listener → openBorrow()
+      → navigate('borrow')   JS adds .active to #screen-borrow → CSS wipes it in
+      → apiGetDevices()      JS fetches /api/devices → builds the grid of cards
 ```
 
----
-
-### Quick Reference — Where to Look to Change Something
+### Where to look to change something
 
 | You want to... | File | Search for... |
 |---|---|---|
-| Change a colour | `style.css` | `:root {` at the very top |
-| Change the font | `style.css` | `--font-display` or `--font-body` |
-| Change animation speed | `style.css` | `transition:` or `animation:` on that element |
-| Change button label text | `index.html` | the button's text content |
-| Add a new screen | `index.html` + `app.js` | add a `<div class="screen">` and a navigate case |
+| Change a colour | `style.css` | `:root {` at the top |
+| Change the font | `style.css` | `--font-display` / `--font-body` |
+| Change a button label | `index.html` | the button's text |
 | Change the borrow count display | `app.js` | `borrow-badge` |
-| Connect to the real API | `app.js` | `apiAuthTap`, `apiGetDevices`, `apiBorrow`, `apiReturn` |
-| Change the inactivity timeout | `app.js` | `cdSeconds: 120` in the `S` object |
+| Change the inactivity timeout (UI) | `app.js` | `cdSeconds` in the `S` object |
 
 ---
 
-## Stage 9 — FastAPI REST API Layer (Built)
+## 13. The REST API
 
-The REST API is implemented in `smart_locker/api/routes.py` with SSE event stream for NFC bridge.
-
-### Endpoints
+The backend API is in `smart_locker/api/routes.py`, with a Server-Sent Events (SSE) stream
+that bridges card taps to the browser.
 
 | Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/api/session` | Check current session state |
-| `POST` | `/api/session/end` | End the current session |
+|---|---|---|
+| `GET` | `/api/session` | Current session state |
+| `POST` | `/api/session/end` | End the session |
 | `POST` | `/api/session/touch` | Reset the inactivity timer |
-| `GET` | `/api/devices` | List all devices with status, borrower, and extended metadata |
+| `GET` | `/api/devices` | All devices with status, borrower, metadata |
 | `POST` | `/api/devices/{id}/borrow` | Borrow a device |
-| `POST` | `/api/devices/{id}/return` | Return a device (admins can return on behalf) |
-| `POST` | `/api/register` | Start self-registration (validates name against registrants) |
+| `POST` | `/api/devices/{id}/return` | Return a device (admins on behalf) |
+| `POST` | `/api/register` | Start self-registration (validates the name) |
 | `POST` | `/api/register/cancel` | Cancel a pending self-registration |
-| `GET` | `/api/registrants` | List approved names available for self-registration |
-| `POST` | `/api/admin/session` | Start a backend session for the hidden admin panel |
-| `POST` | `/api/admin/register` | Admin manual enrolment (bypasses name validation) |
-| `POST` | `/api/admin/sync-source` | Trigger source Excel import |
-| `GET` | `/api/admin/export-excel` | Download the full database as a three-sheet `.xlsx` |
+| `GET` | `/api/registrants` | Approved names for self-registration |
+| `POST` | `/api/admin/session` | Start the hidden admin-panel session |
+| `POST` | `/api/admin/register` | Admin manual enrolment (skips name check) |
+| `POST` | `/api/admin/sync-source` | Trigger the source Excel import now |
+| `GET` | `/api/admin/export-excel` | Download the full database as `.xlsx` |
 | `GET` | `/api/dashboard/devices` | Public device inventory (no auth) |
-| `GET` | `/api/dashboard/transactions` | Public transaction history, last 500 (no auth) |
-| `GET` | `/api/dashboard/users` | Public registered-users list (no auth) |
-| `GET` | `/api/events` | SSE stream — pushes card-tap, auth, and session events to the browser |
+| `GET` | `/api/dashboard/transactions` | Public transaction history, last 500 |
+| `GET` | `/api/dashboard/users` | Public registered-users list |
+| `GET` | `/api/events` | SSE stream — card-tap, auth, and session events |
 
-### Device response fields
+`GET /api/devices` returns per device: `id`, `pm_number`, `name`, `device_type`,
+`serial_number`, `manufacturer`, `model`, `barcode`, `locker_slot`, `description`,
+`image_path`, `calibration_due`, `status`, `borrower_name`.
 
-`GET /api/devices` returns an array with these fields per device:
-
-```json
-{
-  "id": 1,
-  "pm_number": "PM-042",
-  "name": "PM-042 Keysight DSOX3054T",
-  "device_type": "Oscilloscope",
-  "serial_number": "MY12345678",
-  "manufacturer": "Keysight",
-  "model": "DSOX3054T",
-  "barcode": "4900123456789",
-  "locker_slot": 3,
-  "description": "4-channel 500MHz oscilloscope",
-  "image_path": null,
-  "calibration_due": "2026-09-15",
-  "status": "available",
-  "borrower_name": null
-}
-```
+**The NFC → browser bridge:** the background NFC listener detects a tap and puts an event on
+a queue; `GET /api/events` streams it to the browser, which then runs the auth/registration
+flow. FastAPI serves the kiosk UI (`index.html`) and the dashboard as static files from
+`smart_locker/api/server.py`.
 
 ---
 
-## Stage 10 — NFC → Frontend Event Bridge (Built)
+## 14. Barcode scanner plan (not yet built)
 
-The SSE event stream is implemented at `GET /api/events`. The NFC reader pushes events to an `asyncio.Queue` shared via the app context, and the SSE endpoint streams them to the browser.
+Each device stores a `barcode` value (imported from the Excel "Barcode" column). The planned
+use: a **shared locker** holds several identical devices (e.g. 5 current probes) instead of
+one per slot, and a USB barcode scanner identifies the specific unit being taken or returned.
 
-### Event flow
-
-```
-NFC card tap
-    ↓
-Background NFC listener thread detects card → queues event
-    ↓
-GET /api/events  (SSE stream, browser is subscribed)
-    ↓
-Frontend receives event → triggers auth flow / session update
-```
+The flow would be: tap NFC → choose Borrow/Return → scan the device barcode → the system
+matches `devices.barcode` → the transaction is recorded for that exact unit. Implementation:
+a barcode listener in `app.js` (USB scanners type the digits then Enter) plus a
+`GET /api/devices/barcode/{barcode}` endpoint. The barcode field is already imported and
+included in the API and the export.
 
 ---
 
-## Stage 11 — Static File Serving (Built)
+## 15. Future improvements
 
-FastAPI serves the frontend at `http://localhost:8000`. The `create_app()` factory in `smart_locker/api/server.py` mounts static files and serves `index.html` at the root.
-
----
-
-## Stage 12 — Kiosk Deployment
-
-Once all stages are complete, the system runs as a permanent installation on the locker PC.
-
-### Auto-start on Windows boot
-
-Create a Windows Task Scheduler task that runs on login:
-
-```powershell
-# Create a startup script: start_locker.bat
-@echo off
-cd /d "D:\Projects\smart_locker"
-call venv\Scripts\activate
-start /min python -m smart_locker.app
-timeout /t 3
-start chrome --kiosk --no-first-run --disable-infobars http://localhost:8000
-```
-
-Register it in Task Scheduler to run at logon (or as a Windows service using `pywin32`).
-
-### Chromium kiosk flags
-
-```powershell
-chrome --kiosk `
-  --no-first-run `
-  --disable-infobars `
-  --disable-session-crashed-bubble `
-  --disable-features=TranslateUI `
-  http://localhost:8000
-```
-
-- `--kiosk` — fullscreen, no address bar, no window chrome
-- `--no-first-run` — skips the Chrome welcome screen
-- `--disable-infobars` — suppresses "Chrome is being controlled" banner
-
-### Prevent accidental exit
-
-- Set Windows to auto-login to a dedicated `locker` user account
-- Disable Task Manager shortcut (Ctrl+Alt+Del) via Group Policy for the kiosk user
-- Set the desktop wallpaper to black so any accidental window close looks intentional
-
-### Touch display calibration
-
-If using a touch display, ensure the Windows touch driver is installed and calibrated:
-
-```powershell
-# Launch touch calibration tool
-TabletPC.cpl
-```
-
----
-
-## Barcode Scanner Plan
-
-The system stores a `barcode` value per device (imported from the "Barcode" column in the device Excel). This enables a future barcode scanner workflow for shared lockers.
-
-### The Problem
-
-Right now, 20 lockers hold 20 devices — one device per locker. But some device types have multiple units (e.g., 5 current probes). Using 5 lockers for 5 identical probes is wasteful. Instead, one locker can hold all probes, and a barcode scanner identifies which specific probe is being taken or returned.
-
-### Planned Workflow
-
-```
-1. User taps NFC card → authenticated
-2. User selects "Borrow" on touch display
-3. User opens shared locker, picks up a device
-4. User scans the device's barcode sticker with the USB scanner
-5. System looks up devices.barcode → identifies the exact device
-6. Borrow is recorded for that specific device
-```
-
-Same flow for returns: scan the barcode to identify which device is being put back.
-
-### Implementation Steps
-
-1. **Hardware**: USB barcode scanner plugged into the kiosk PC. Most scanners emulate a keyboard — they type the barcode digits followed by Enter.
-2. **Frontend (`app.js`)**: Add a barcode input listener that detects rapid sequential keystrokes ending in Enter (the scanner's keyboard emulation pattern). Distinguish scanner input from regular keyboard typing by timing threshold (~50ms between characters).
-3. **API**: Add a `GET /api/devices/barcode/{barcode}` endpoint that looks up a device by its barcode value.
-4. **UI flow**: When a barcode is scanned during an active session in borrow/return mode, auto-open the device detail overlay for that device and prompt to confirm.
-
-### What's Already in Place
-
-- `devices.barcode` column stores barcode values (imported from Excel)
-- The API `GET /api/devices` response includes the `barcode` field
-- The on-demand Excel export includes barcode values
-
----
-
-## Future Improvements (Not Yet Planned)
-- **Calibration date notifications** — calibration dates are stored; a notification system can alert when devices are due for recalibration
-- **Full admin web panel** — the read-only `/dashboard` and the kiosk's hidden admin panel already exist; a full browser-based management UI (edit users/devices) is still open
-- **MIFARE sector data reading** — APDU commands are already defined in `nfc/apdu.py` but not wired into the auth flow
-- **Multi-reader support** — currently only the first matching reader is used
-- **Email / webhook notifications** — alert admins when a device is overdue or a borrow limit is hit
-- **Device condition reporting** — let users flag damaged equipment on return
+- **Calibration-due notifications** — calibration dates are stored; a reminder system is not.
+- **Full admin web panel** — edit users/devices from the browser (today: read-only dashboard
+  + the kiosk's hidden admin panel).
+- **MIFARE sector reading** — APDU commands exist in `nfc/apdu.py` but aren't wired in.
+- **Multi-reader support** — currently the first matching reader is used.
+- **Email / webhook alerts** — overdue devices, borrow-limit hits.
+- **Device condition reporting** — let users flag damaged equipment on return.

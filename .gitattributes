@@ -1,0 +1,17 @@
+# Keep Linux deployment artifacts LF even when authored/edited on Windows, so they
+# run correctly on the Raspberry Pi. A stray CRLF in a shell or systemd file breaks
+# execution (e.g. "/usr/bin/env bash\r: no such file or directory").
+*.sh        text eol=lf
+*.service   text eol=lf
+*.mount     text eol=lf
+*.desktop   text eol=lf
+*.snippet   text eol=lf
+deploy/**   text eol=lf
+
+# The simulation harness mirrors the deploy artifacts (shell, env, conf, yaml run
+# in QEMU / are sourced by bash), so keep its text files LF too. Binary assets
+# (sample workbook, photos) are excluded so they are never line-ending mangled.
+sim/**          text=auto eol=lf
+sim/**/*.xlsx   binary
+sim/**/*.jpg    binary
+sim/**/*.png    binary

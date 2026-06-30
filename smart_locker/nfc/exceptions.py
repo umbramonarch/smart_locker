@@ -42,8 +42,9 @@ class CardReadError(NFCError):
 
 
 class PCSCServiceError(NFCError):
-    """The Windows Smart Card (PC/SC) service is not running.
+    """The PC/SC smart-card service is not running.
 
     Raised when pyscard cannot enumerate readers because the underlying
-    Windows service is stopped. Fix: start the 'Smart Card' service.
+    service is stopped. Fix: start the 'Smart Card' service on Windows, or the
+    pcscd daemon on Linux ('sudo systemctl start pcscd').
     """
