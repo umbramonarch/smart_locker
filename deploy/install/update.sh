@@ -23,6 +23,19 @@ set -Eeuo pipefail
 # --- Configuration (override via env) ---------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_DIR="${SMART_LOCKER_DIR:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
+
+# Load the operator's .env so this script honors the same M:/service knobs the
+# app uses everywhere else (SMART_LOCKER_UPDATE_DIR, SMART_LOCKER_KEEP_BACKUPS,
+# ...) — one config file to edit, not a second one. The transient systemd-run
+# unit that launches this script carries no environment of its own, so without
+# this the update folder could never be changed except by editing this script.
+if [ -f "$APP_DIR/.env" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "$APP_DIR/.env"
+  set +a
+fi
+
 APP_USER="$(stat -c '%U' "$APP_DIR" 2>/dev/null || echo root)"   # the update unit runs as root; restore this owner after applying
 VENV_DIR="$APP_DIR/venv"
 PY="$VENV_DIR/bin/python"

@@ -464,8 +464,9 @@ release rides the **M:** share you already have, so git host's internet access i
 
 1. **At work** (where you have git host): download the release tarball for the tag — git host's
    "Download source" gives exactly this — named `smart-locker-<version>.tar.gz`, and drop it in
-   `M:\locker-updates\`. (Optional: put a `smart-locker-<version>.tar.gz.sha256` next to it and the
-   Pi will verify it before applying.)
+   `M:\locker-updates\` (this folder is `SMART_LOCKER_UPDATE_DIR` in `.env` — change it there if you
+   want releases picked up from a different M: folder; no script edits needed). Optional: put a
+   `smart-locker-<version>.tar.gz.sha256` next to it and the Pi will verify it before applying.
 2. **On the kiosk:** open the hidden admin panel (tap the clock 5× within 3 s) → **Software Update**
    → confirm.
 3. The Pi then: snapshots the database **and** the current code, swaps in the new version, installs
@@ -515,7 +516,10 @@ All settings live in `.env` (loaded by `config/settings.py`). The Pi template
 | `SMART_LOCKER_EXCEL_PATH` | `smart_locker_data.xlsx` | Where the exported workbook is written (the M: path on the Pi) |
 | `SMART_LOCKER_EXCEL_AUTO_EXPORT` | (off) | `1` = auto-refresh the exported workbook after each import/photo change |
 | `SMART_LOCKER_SOURCE_SYNC_HOUR` / `_MINUTE` | `6` / `0` | Daily source-import time (24h) |
+| `SMART_LOCKER_SOURCE_POLL_SECONDS` | `30` | Mtime-poll interval (seconds, min `5`) used only when the source path is a network share — see Section 8 |
 | `SMART_LOCKER_PHOTO_INPUT_PATH` | (empty) | Folder watched for device photos; empty disables |
+| `SMART_LOCKER_UPDATE_DIR` | `/mnt/locker/locker-updates` | M: folder `update.sh` watches for release tarballs — see "Updating the software" below in Section 8 |
+| `SMART_LOCKER_KEEP_BACKUPS` | `5` | How many old code+DB backup pairs `update.sh` keeps under `./backups` before pruning |
 
 ---
 
