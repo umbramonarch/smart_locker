@@ -17,12 +17,19 @@ box; record the result in the sign-off table at the end.
 
 ## 1. Pre-flight (before first boot)
 
-- [ ] SD card flashed with 64-bit Raspberry Pi OS (see `GUIDE.md` Step 0).
+- [ ] SD card flashed with 64-bit Raspberry Pi OS **Full** (see `GUIDE.md` Step 0).
+- [ ] Offline install kit built and copied over via USB stick if the Pi has no internet:
+      `deploy/wheelhouse/*.whl` + `deploy/system-packages/*.deb` present (`GUIDE.md` Step 0b).
 - [ ] Repo at `/home/locker/smart_locker`; `sudo deploy/install/install.sh` ran clean.
+- [ ] `import smartcard` works in the venv (confirms `python3-pyscard` +
+      `--system-site-packages` — `GUIDE.md` Section 4.3).
 - [ ] `.env` has real `SMART_LOCKER_ENC_KEY` + `SMART_LOCKER_HMAC_KEY` (32-byte each).
 - [ ] `SMART_LOCKER_FAKE_READER` is **unset / not `1`** (production uses the real reader).
-- [ ] `/etc/smart-locker/cifs-credentials` filled; fstab line points at the real `//SERVER/share`.
-- [ ] `SMART_LOCKER_SOURCE_EXCEL_PATH` points at the workbook on the mounted `/mnt/locker`.
+- [ ] Kiosk boots and runs correctly with the M: share **not yet connected** (Sections 4-5
+      of `GUIDE.md` are all reachable with zero network).
+- [ ] **Last:** `/etc/smart-locker/cifs-credentials` filled; fstab line points at the real
+      `//SERVER/share`; `SMART_LOCKER_SOURCE_EXCEL_PATH` points at the workbook on the
+      mounted `/mnt/locker` (`GUIDE.md` Section 6).
 
 ## 2. Boot & service
 

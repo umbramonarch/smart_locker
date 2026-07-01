@@ -46,14 +46,16 @@ fi
 [ "$ONLINE" -eq 1 ] && echo "==> Network: online"  || echo "==> Network: OFFLINE (skipping apt; packages must be pre-installed)"
 
 # --- 1. OS packages ---
-PKGS="pcscd pcsc-tools libccid cifs-utils chromium unclutter curl python3-venv python3-pip"
+# python3-pyscard is here (not in requirements.txt/wheelhouse) because it has no
+# prebuilt Linux aarch64 wheel on PyPI — see deploy/system-packages/README.md.
+PKGS="pcscd pcsc-tools libccid cifs-utils chromium unclutter curl python3-venv python3-pip python3-pyscard"
 if [ "$ONLINE" -eq 1 ]; then
   echo "==> Installing OS packages: $PKGS"
   apt-get update -y
   # 'chromium' is the package on Bookworm; fall back to 'chromium-browser' on older OS.
   if ! apt-get install -y --no-install-recommends $PKGS; then
     echo "    'chromium' not found — retrying with 'chromium-browser'."
-    apt-get install -y --no-install-recommends pcscd pcsc-tools libccid cifs-utils chromium-browser unclutter curl python3-venv python3-pip
+    apt-get install -y --no-install-recommends pcscd pcsc-tools libccid cifs-utils chromium-browser unclutter curl python3-venv python3-pip python3-pyscard
   fi
 else
   echo "==> Verifying required commands are present (offline)"
@@ -68,22 +70,55 @@ else
     echo "    WARNING: missing packages:$MISSING"
     echo "    Pre-install them on a build host with internet, then re-image. Continuing."
   fi
+  # Offline pyscard: apt can't reach the internet, so install the .deb staged in
+  # deploy/system-packages/ (see that folder's README for where to download it).
+  if python3 -c "import smartcard" >/dev/null 2>&1; then
+    echo "==> python3-pyscard already present."
+  else
+    DEB="$(ls "$APP_DIR"/deploy/system-packages/*.deb 2>/dev/null | head -n1 || true)"
+    if [ -n "$DEB" ]; then
+      echo "==> Installing offline package: $DEB"
+      if ! dpkg -i "$DEB"; then
+        apt-get install -f -y || echo "    WARNING: dpkg -i failed and there is no network to fix it. Continuing install; the NFC reader will not work until this is resolved."
+      fi
+    else
+      echo "    WARNING: python3-pyscard not found and no .deb staged in deploy/system-packages/."
+      echo "    The NFC reader will not work until it's installed — see"
+      echo "    deploy/system-packages/README.md."
+    fi
+  fi
 fi
 
 # --- 2. Python virtualenv + dependencies ---
+# --system-site-packages: python3-pyscard is installed at the SYSTEM level (via apt/dpkg
+# above, not pip — it has no aarch64 wheel to put in the venv/wheelhouse), so the venv
+# needs visibility into system packages to see it.
 if [ ! -d "$VENV_DIR" ]; then
   echo "==> Creating virtualenv at $VENV_DIR"
-  sudo -u "$APP_USER" python3 -m venv "$VENV_DIR"
+  sudo -u "$APP_USER" python3 -m venv --system-site-packages "$VENV_DIR"
 fi
 echo "==> Installing Python dependencies"
+# pyscard is excluded here — always installed via apt/dpkg above, never via pip.
+REQS_NO_PYSCARD="$(mktemp)"
+grep -vi '^pyscard' "$APP_DIR/requirements.txt" > "$REQS_NO_PYSCARD"
+# mktemp defaults to mode 0600, root-owned (this whole script runs as root). The pip
+# install below runs as APP_USER via sudo -u, which could not otherwise READ this file.
+chmod 644 "$REQS_NO_PYSCARD"
 if ls "$WHEELHOUSE"/*.whl >/dev/null 2>&1; then
   echo "    using offline wheelhouse: $WHEELHOUSE"
-  sudo -u "$APP_USER" "$VENV_DIR/bin/pip" install --no-index --find-links "$WHEELHOUSE" -r "$APP_DIR/requirements.txt"
+  sudo -u "$APP_USER" "$VENV_DIR/bin/pip" install --no-index --find-links "$WHEELHOUSE" -r "$REQS_NO_PYSCARD"
 elif [ "$ONLINE" -eq 1 ]; then
-  sudo -u "$APP_USER" "$VENV_DIR/bin/pip" install -r "$APP_DIR/requirements.txt"
+  sudo -u "$APP_USER" "$VENV_DIR/bin/pip" install -r "$REQS_NO_PYSCARD"
 else
   echo "    WARNING: offline and no wheelhouse found at $WHEELHOUSE."
-  echo "    Run deploy/install/build-wheelhouse.sh on an online aarch64 host first. Skipping."
+  echo "    Run deploy/install/build-wheelhouse.sh on a machine with internet first. Skipping."
+fi
+rm -f "$REQS_NO_PYSCARD"
+if "$VENV_DIR/bin/python" -c "import smartcard" >/dev/null 2>&1; then
+  echo "==> Verified: the venv can import smartcard (pyscard) via --system-site-packages."
+else
+  echo "    WARNING: the venv cannot import smartcard — the NFC reader will not work."
+  echo "    Check that python3-pyscard is installed (see deploy/system-packages/README.md)."
 fi
 
 # --- 3. Enable the PC/SC daemon (ACR1252U reader) ---
@@ -154,7 +189,7 @@ cat <<EOF
 
 ==> Done. Remaining manual steps (see GUIDE.md for the full walkthrough):
     1. cp deploy/.env.pi.example .env   &&  edit .env  (paths are pre-filled)
-    2. python -m scripts.generate_key   ->  paste the two keys into .env
+    2. python -m scripts.generate_key   ->  paste all three keys into .env
     3. Edit /etc/smart-locker/cifs-credentials with the real M: share login
     4. Add the fstab line from deploy/mount/fstab.snippet, then: sudo mount $MOUNT_POINT
     5. $VENV_DIR/bin/python -m scripts.init_db
