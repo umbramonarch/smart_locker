@@ -1,0 +1,23 @@
+# Smart Locker — CIFS mount for the M: network share.
+# ----------------------------------------------------------------------------
+# Add ONE line like the one at the bottom to /etc/fstab. Replace:
+#   //SERVER/share  -> the real UNC path of your M: drive (e.g. //fileserver/Messmittel)
+#   uid=/gid=       -> the 'locker' user's numeric ids (find them with: id locker)
+#
+# First create the mount point and the credentials file:
+#   sudo mkdir -p /mnt/locker
+#   (see deploy/mount/cifs-credentials.example for /etc/smart-locker/cifs-credentials)
+#
+# Then mount it without rebooting and verify:
+#   sudo systemctl daemon-reload
+#   sudo mount /mnt/locker
+#   ls /mnt/locker
+#
+# Option notes:
+#   nofail              -> the Pi still boots if the share is unreachable
+#   x-systemd.automount -> mount lazily on first access and retry automatically
+#   _netdev             -> wait for the network before mounting
+#   vers=3.0            -> SMB protocol version; if the server is older, try 2.1 or 1.0
+#   file_mode/dir_mode  -> permissions the app sees on the share's files
+#
+//SERVER/share  /mnt/locker  cifs  credentials=/etc/smart-locker/cifs-credentials,uid=1000,gid=1000,file_mode=0664,dir_mode=0775,iocharset=utf8,vers=3.0,nofail,x-systemd.automount,_netdev  0  0

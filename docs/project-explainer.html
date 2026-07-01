@@ -398,7 +398,7 @@
   <section class="view" id="view-debug" role="tabpanel" aria-labelledby="tab-debug" tabindex="0">
     <p class="debug-note">You don't need to read code to report a bug well. Find the symptom that
       matches what you're seeing — it tells you <b>which parts are probably involved</b> and gives you
-      a ready-made message you can <b>copy and paste to assistant Code</b>. The more precisely you point,
+      a ready-made message you can <b>copy and share when reporting it</b>. The more precisely you point,
       the faster it gets fixed.</p>
     <div class="sym-grid" id="sym-grid"></div>
   </section>
@@ -975,7 +975,7 @@ SYMPTOMS.forEach((s,i)=>{
     <div class="invd">Likely involved:</div>
     <div class="parts">${s.parts.map(p=>`<span class="ptag">${p}</span>`).join("")}</div>
     <div class="copybar">
-      <span class="lab">Copy a ready message for assistant Code →</span>
+      <span class="lab">Copy a ready bug report →</span>
       <button class="copy" data-i="${i}">📋 Copy</button>
     </div>`;
   symGrid.appendChild(card);
@@ -984,7 +984,7 @@ symGrid.addEventListener("click",e=>{
   const b=e.target.closest(".copy"); if(!b) return;
   const s=SYMPTOMS[+b.dataset.i];
   copyText(s.copy, ()=>{ b.classList.add("ok"); b.textContent="Copied ✓";
-    toast("Message copied — paste it to assistant Code"); setTimeout(()=>{b.classList.remove("ok"); b.textContent="📋 Copy";},1800); });
+    toast("Message copied — paste it into your bug report"); setTimeout(()=>{b.classList.remove("ok"); b.textContent="📋 Copy";},1800); });
 });
 
 /* =========================================================================

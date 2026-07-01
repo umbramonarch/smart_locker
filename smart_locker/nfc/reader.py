@@ -4,13 +4,14 @@ Description: High-level NFCReader class that wires together pyscard's
              CardMonitor, ReaderMonitor, and custom observers. Provides
              blocking and non-blocking event interfaces for the application.
 Project: smart_locker/nfc
-Notes: Requires the Windows Smart Card (PC/SC) service to be running. Raises
-       PCSCServiceError if the service is stopped and ReaderNotFoundError if
-       no matching reader is detected.
+Notes: Requires a running PC/SC service — the 'Smart Card' service on Windows or
+       the pcscd daemon on Linux (Raspberry Pi). Raises PCSCServiceError if it is
+       stopped and ReaderNotFoundError if no matching reader is detected.
 """
 
 import logging
 import queue
+import sys
 from typing import Union
 
 from smartcard.CardMonitoring import CardMonitor
@@ -75,9 +76,14 @@ class NFCReader:
         try:
             available = list_readers()
         except ListReadersException as e:
-            raise PCSCServiceError(
-                "PC/SC service not running. Start the 'Smart Card' Windows service."
-            ) from e
+            if sys.platform == "win32":
+                hint = "Start the 'Smart Card' service (run services.msc -> Smart Card -> Start)."
+            else:
+                hint = (
+                    "Start the PC/SC daemon: 'sudo systemctl start pcscd'. "
+                    "If it is missing, install it: 'sudo apt install pcscd libccid'."
+                )
+            raise PCSCServiceError(f"PC/SC service not running. {hint}") from e
 
         target = None
         for r in available:

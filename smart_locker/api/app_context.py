@@ -51,12 +51,14 @@ class AppContext:
     """
 
     def __init__(self) -> None:
-        # Defer NFC/crypto imports so the module can be imported without pyscard
-        from smart_locker.nfc.reader import NFCReader
+        # Defer NFC/crypto imports so the module can be imported without pyscard.
+        # create_reader() picks the real NFCReader, or the simulated reader when
+        # SMART_LOCKER_FAKE_READER is set (no-hardware simulation harness).
+        from smart_locker.nfc.factory import create_reader
         from smart_locker.auth.authenticator import Authenticator
         from smart_locker.security.key_manager import key_manager
 
-        self.reader = NFCReader()
+        self.reader = create_reader()
         self.authenticator = Authenticator(hmac_key=key_manager.hmac_key)
         self.session_mgr = SessionManager(timeout_seconds=SESSION_TIMEOUT_SECONDS)
         self.sse_queue: asyncio.Queue = asyncio.Queue()

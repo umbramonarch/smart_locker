@@ -17,16 +17,20 @@ Notes: All device/session endpoints require an active kiosk session enforced by
 import asyncio
 import json
 import logging
+import shutil
+import subprocess
+import time
 
 from fastapi import APIRouter, Depends, HTTPException, Response
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 import smart_locker.api.app_context as ctx_module
 from smart_locker.api.app_context import PendingRegistration
 from smart_locker.auth.session_manager import UserSession
-from smart_locker.database.engine import get_session_factory
+from config.settings import BASE_DIR
+from smart_locker.database.engine import get_session, get_session_factory
 from sqlalchemy import select
 from smart_locker.database.models import (
     Device,
@@ -36,11 +40,99 @@ from smart_locker.database.models import (
     UserRole,
 )
 from smart_locker.database.repositories import DeviceRepository, RegistrantRepository
+from smart_locker.nfc.factory import fake_reader_enabled
 from smart_locker.services.locker_service import LockerService
+from smart_locker.sync import sync_status
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# Static frontend directory (index.html, dashboard.html, …) — used to serve the
+# dashboard at the documented bare "/dashboard" URL below.
+_FRONTEND_DIR = BASE_DIR / "smart_locker" / "frontend"
+
+# Process start time, used for the /api/health uptime field.
+_START_TIME = time.time()
+
+# systemd-run presence marks a real Pi/systemd host. The admin "Update now"
+# button is disabled (clean 503) anywhere this is absent (dev box / Windows).
+# Resolved once at import — it cannot change while the process runs.
+_SYSTEMD_RUN = shutil.which("systemd-run")
+
+
+# --- Page routes ------------------------------------------------------------
+
+@router.get("/dashboard")
+def serve_dashboard() -> FileResponse:
+    """Serve the read-only dashboard at the documented ``/dashboard`` URL.
+
+    The frontend is mounted via ``StaticFiles(html=True)``, which maps a
+    directory to its ``index.html`` but does NOT map a bare name to
+    ``<name>.html`` — so ``/dashboard`` would otherwise 404 while only
+    ``/dashboard.html`` worked. This route makes the user-facing URL printed in
+    the README/GUIDE resolve correctly. Registered before the static mount, so
+    it takes priority.
+
+    Returns:
+        FileResponse: the dashboard HTML page.
+    """
+    return FileResponse(_FRONTEND_DIR / "dashboard.html")
+
+
+@router.get("/api/health")
+def health() -> dict:
+    """Liveness/health probe (no auth) for remote, hands-off monitoring.
+
+    Returns a small JSON snapshot a remote operator can open in any browser —
+    no SSH, no Linux — to confirm the appliance is alive and see at a glance
+    whether the database answers, the NFC reader is running, and when the last
+    source sync ran. Every probe is individually guarded so this endpoint can
+    NEVER raise and take the server down; it always returns HTTP 200, and the
+    ``status`` field is ``"ok"`` or ``"degraded"``.
+
+    Returns:
+        dict: status, uptime, database/reader liveness, and the last-sync snapshot.
+    """
+    ctx = ctx_module.context
+
+    # Database probe — a trivial query, guarded so a DB hiccup can't 500 here.
+    # Reuses get_session() (create → rollback-on-error → close) rather than
+    # re-implementing the session lifecycle.
+    db_ok = False
+    try:
+        with get_session() as db:
+            db.execute(select(1))
+        db_ok = True
+    except Exception:
+        pass
+
+    reader_running = False
+    try:
+        reader_running = bool(ctx is not None and ctx.reader.is_running)
+    except Exception:
+        pass
+
+    session_active = False
+    try:
+        session_active = bool(ctx is not None and ctx.session_mgr.has_active_session)
+    except Exception:
+        pass
+
+    try:
+        last_sync = sync_status.get()
+    except Exception:
+        last_sync = None
+
+    return {
+        "status": "ok" if db_ok else "degraded",
+        "uptime_seconds": round(time.time() - _START_TIME, 1),
+        "database": db_ok,
+        "nfc_reader": reader_running,
+        "fake_reader": fake_reader_enabled(),
+        "session_active": session_active,
+        "last_sync": last_sync,
+    }
 
 
 # --- Dependencies -----------------------------------------------------------
@@ -48,9 +140,11 @@ router = APIRouter()
 def get_db() -> Session:
     """Yield a database session for the request, with auto-commit/rollback.
 
-    FastAPI dependency that provides a scoped SQLAlchemy session.
-    Commits on success, rolls back on exception, and removes the
-    scoped session on completion.
+    FastAPI dependency that provides a SQLAlchemy session bound to this
+    request. Commits on success, rolls back on exception, and closes this
+    session on completion. The factory is a plain sessionmaker (NOT a
+    scoped_session) — see engine.get_session_factory for why that matters
+    under FastAPI's reused thread pool.
 
     Yields:
         Session: An active SQLAlchemy database session.
@@ -64,7 +158,7 @@ def get_db() -> Session:
         session.rollback()
         raise
     finally:
-        factory.remove()
+        session.close()
 
 
 def require_session() -> UserSession:
@@ -115,6 +209,94 @@ async def sse_events():
                 yield ": keepalive\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+# --- Dev / Simulation Endpoints (no-hardware harness) -----------------------
+# These drive the simulated NFC reader (FakeNFCReader) so the full
+# tap -> authenticate -> SSE flow can be exercised with no hardware. They are
+# INERT unless SMART_LOCKER_FAKE_READER is enabled AND the running reader is the
+# fake one: otherwise they return 404, so the surface is identical to the
+# endpoints not existing. The fake reader must never be enabled in production.
+
+class TapRequest(BaseModel):
+    """Request body for POST /api/dev/tap."""
+
+    uid: str | None = Field(
+        default=None,
+        description="Hex UID to simulate; falls back to SMART_LOCKER_FAKE_DEFAULT_UID.",
+    )
+
+
+def _running_fake_reader():
+    """Return the active fake reader, or raise 404 if not in simulation mode.
+
+    A reader counts as simulated only when the env flag is set AND the reader
+    actually constructed at startup exposes ``simulate_tap`` — so flipping the
+    flag after launch cannot retro-activate these endpoints.
+
+    Returns:
+        The running FakeNFCReader instance.
+
+    Raises:
+        HTTPException: 404 when the simulation harness is not active.
+    """
+    reader = ctx_module.context.reader if ctx_module.context is not None else None
+    if not fake_reader_enabled() or reader is None or not hasattr(reader, "simulate_tap"):
+        raise HTTPException(status_code=404, detail="Not found.")
+    return reader
+
+
+@router.get("/api/dev/status")
+def dev_status():
+    """Report whether the no-hardware simulation harness is active.
+
+    Always present, but only reports True when the fake reader is the running
+    reader. The kiosk UI calls this to decide whether to show the simulated-tap
+    control; production always reports inactive.
+
+    Returns:
+        dict: ``fake_reader`` (bool) and ``default_uid_set`` (bool).
+    """
+    import os
+
+    reader = ctx_module.context.reader if ctx_module.context is not None else None
+    active = fake_reader_enabled() and reader is not None and hasattr(reader, "simulate_tap")
+    return {
+        "fake_reader": bool(active),
+        "default_uid_set": bool(os.getenv("SMART_LOCKER_FAKE_DEFAULT_UID")),
+    }
+
+
+@router.post("/api/dev/tap")
+def dev_tap(body: TapRequest):
+    """Inject a simulated card tap (simulation mode only).
+
+    Enqueues a ``CardEvent(INSERTED)`` so the normal NFC bridge runs exactly as
+    for a real tap — starting a session, ending one on a second tap, or
+    completing a pending registration, depending on current state. The UID is
+    never logged.
+
+    Args:
+        body: TapRequest with an optional ``uid`` (falls back to the
+            ``SMART_LOCKER_FAKE_DEFAULT_UID`` env var).
+
+    Returns:
+        dict: ``{"ok": True}`` once the event is queued.
+
+    Raises:
+        HTTPException: 404 if simulation mode is off; 400 if no UID is available.
+    """
+    import os
+
+    reader = _running_fake_reader()
+    uid = (body.uid or os.getenv("SMART_LOCKER_FAKE_DEFAULT_UID") or "").strip()
+    if not uid:
+        raise HTTPException(
+            status_code=400,
+            detail="No UID supplied and SMART_LOCKER_FAKE_DEFAULT_UID is not set.",
+        )
+    reader.simulate_tap(uid)
+    return {"ok": True}
 
 
 # --- Session Endpoints ------------------------------------------------------
@@ -533,7 +715,13 @@ def trigger_source_sync(
     from smart_locker.database.engine import get_engine
     from smart_locker.sync.source_import import import_from_source_excel
 
-    result = import_from_source_excel(get_engine(), SOURCE_EXCEL_PATH)
+    try:
+        result = import_from_source_excel(get_engine(), SOURCE_EXCEL_PATH)
+    except Exception as e:
+        sync_status.record_error("manual", str(e))
+        raise HTTPException(status_code=500, detail=f"Import failed: {e}") from e
+
+    sync_status.record_result("manual", result)
     return {
         "success": True,
         "imported": result.imported,
@@ -541,6 +729,69 @@ def trigger_source_sync(
         "unchanged": result.unchanged,
         "errors": result.errors,
     }
+
+
+@router.post("/api/admin/sync-preview")
+def preview_source_sync(
+    user_session: UserSession = Depends(require_session),
+):
+    """Preview the source import diff without writing anything (admin only).
+
+    Runs the import in dry-run mode (the real create/update logic inside a
+    rolled-back transaction) so the admin sees exactly how many devices would
+    be added, updated, left unchanged, or skipped before committing.
+
+    Args:
+        user_session: The active session (injected by ``require_session``).
+
+    Returns:
+        dict: ``imported`` (would-add), ``updated`` (would-change),
+              ``unchanged``, ``skipped`` (non-locker), and ``errors`` counts.
+
+    Raises:
+        HTTPException: 403 if not admin, 400 if source path not configured.
+    """
+    if user_session.user.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Admin access required.")
+
+    from config.settings import SOURCE_EXCEL_PATH
+    if not SOURCE_EXCEL_PATH:
+        raise HTTPException(status_code=400, detail="Source Excel path not configured.")
+
+    from smart_locker.database.engine import get_engine
+    from smart_locker.sync.source_import import import_from_source_excel
+
+    result = import_from_source_excel(get_engine(), SOURCE_EXCEL_PATH, dry_run=True)
+    return {
+        "preview": True,
+        "imported": result.imported,
+        "updated": result.updated,
+        "unchanged": result.unchanged,
+        "skipped": result.non_locker_skipped,
+        "errors": result.errors,
+    }
+
+
+@router.get("/api/admin/sync-status")
+def get_sync_status(user_session: UserSession = Depends(require_session)):
+    """Return the most recent source-import outcome (admin only).
+
+    Powers the dashboard "last synced …" line. Reports when the last import
+    ran, what triggered it (startup/cron/watch/mtime-poll/manual), the
+    per-category counts, and whether it succeeded.
+
+    Args:
+        user_session: The active session (injected by ``require_session``).
+
+    Returns:
+        dict: The last-sync snapshot (``at`` is null if no import has run yet).
+
+    Raises:
+        HTTPException: 403 if not admin.
+    """
+    if user_session.user.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Admin access required.")
+    return sync_status.get()
 
 
 @router.get("/api/admin/export-excel")
@@ -574,6 +825,112 @@ def export_excel(user_session: UserSession = Depends(require_session)):
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": "attachment; filename=smart_locker_data.xlsx"},
     )
+
+
+# --- Software update (admin only) -------------------------------------------
+
+def _deployed_version() -> str:
+    """Read the deployed version marker written by update.sh (best-effort).
+
+    ``read_text`` raises ``FileNotFoundError`` (an ``OSError``) when the marker
+    is absent — e.g. a dev checkout that was never deployed — so no separate
+    existence check is needed.
+    """
+    try:
+        return (BASE_DIR / "VERSION").read_text(encoding="utf-8").strip() or "unknown"
+    except OSError:
+        return "unknown"
+
+
+@router.get("/api/admin/update-status")
+def get_update_status(user_session: UserSession = Depends(require_session)):
+    """Return the last/in-progress software-update outcome (admin only).
+
+    Reads the small JSON marker that ``deploy/install/update.sh`` writes to
+    ``logs/update-status.json`` so the admin panel can show update progress and
+    the result (success / rolled_back / failed) without any SSH access.
+
+    Args:
+        user_session: The active session (injected by ``require_session``).
+
+    Returns:
+        dict: ``{state, message, version, at, current_version}`` — ``state`` is
+              ``idle`` when no update has ever run.
+
+    Raises:
+        HTTPException: 403 if not admin.
+    """
+    if user_session.user.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Admin access required.")
+
+    current = _deployed_version()
+    status_path = BASE_DIR / "logs" / "update-status.json"
+    try:
+        data = json.loads(status_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        # Missing marker (no update has ever run) or an unreadable/corrupt one →
+        # report idle either way; the panel just shows "no update yet".
+        return {"state": "idle", "message": "No update has run yet.",
+                "version": current, "at": None, "current_version": current}
+    data["current_version"] = current
+    return data
+
+
+@router.post("/api/admin/update")
+def trigger_update(user_session: UserSession = Depends(require_session)):
+    """Launch the safe software-update script out-of-process (admin only).
+
+    Backs the admin-panel "Update now" button. The update itself is applied by
+    ``deploy/install/update.sh``, which picks up a release tarball delivered to
+    the M: share, snapshots the DB + code, swaps in the new version, migrates,
+    restarts the service, health-checks, and AUTO-ROLLS-BACK on failure — so a
+    bad update self-reverts on a box no one is standing next to.
+
+    The script restarts the very systemd service that hosts this request, so it
+    must run in its OWN cgroup; we launch it as a transient ``systemd-run`` unit
+    so the restart cannot kill the updater mid-apply. On a non-Pi/dev host (no
+    ``systemd-run``, or the script is absent) this returns 503 with a clear
+    message rather than pretending to update.
+
+    Args:
+        user_session: The active session (injected by ``require_session``).
+
+    Returns:
+        dict: ``{"started": True, "message": ...}`` once the updater is launched.
+
+    Raises:
+        HTTPException: 403 if not admin; 503 if updates aren't runnable here;
+                       500 if the updater unit could not be launched.
+    """
+    if user_session.user.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Admin access required.")
+
+    script = BASE_DIR / "deploy" / "install" / "update.sh"
+    if not script.exists():
+        raise HTTPException(status_code=503, detail="Update script not found on this host.")
+    if _SYSTEMD_RUN is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Software updates run on the Raspberry Pi appliance only.",
+        )
+
+    # Run in a transient unit so update.sh survives the service restart it
+    # triggers. Every argument is fixed and space-free so the sudoers rule can
+    # whitelist this exact command (no wildcard → no privilege-escalation gap).
+    cmd = [
+        "sudo", "-n", "systemd-run", "--collect",
+        "--unit=smart-locker-update",
+        "/bin/bash", str(script),
+    ]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=15)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as e:
+        detail = (getattr(e, "stderr", "") or str(e)).strip()
+        logger.error("Failed to launch update unit: %s", detail)
+        raise HTTPException(status_code=500, detail=f"Could not start update: {detail}") from e
+
+    logger.info("Software update launched by admin %s.", user_session.user.display_name)
+    return {"started": True, "message": "Update started. The kiosk will restart briefly."}
 
 
 # --- Dashboard Endpoints (public, no auth) ----------------------------------

@@ -31,12 +31,47 @@ from smart_locker.database.engine import get_engine, get_session, init_db
 from smart_locker.database.repositories import DeviceRepository
 from smart_locker.nfc.card_observer import CardEvent, CardEventType
 from smart_locker.nfc.exceptions import NFCError
-from smart_locker.nfc.reader import NFCReader
+from smart_locker.nfc.factory import create_reader
 from smart_locker.nfc.reader_observer import ReaderEvent, ReaderEventType
 from smart_locker.security.key_manager import key_manager
 from smart_locker.services.locker_service import LockerService
 
 logger = logging.getLogger(__name__)
+
+
+def _start_background_sync() -> None:
+    """Start the source-import scheduler and the photo watcher, each guarded.
+
+    The appliance must keep running no matter what the network share or the
+    source files are doing. A failure to start either subsystem — the M: share
+    is down at boot, a source/photo path is unreadable, or a watcher cannot be
+    created — is logged and swallowed here so it can NEVER stop the web server
+    and NFC flow from coming up. Each missed sync is retried by the daily cron,
+    the network-share mtime poll, or the admin "Sync source" action once the
+    share is back. The two subsystems are guarded independently so one failing
+    does not disable the other.
+    """
+    if SOURCE_EXCEL_PATH:
+        try:
+            from smart_locker.sync.scheduler import start_scheduler
+            start_scheduler(
+                get_engine(), SOURCE_EXCEL_PATH, SOURCE_SYNC_HOUR, SOURCE_SYNC_MINUTE
+            )
+        except Exception:
+            logger.exception(
+                "Source-import scheduler failed to start — continuing without it. "
+                "The kiosk stays up; run the admin 'Sync source' once the share is back."
+            )
+
+    if PHOTO_INPUT_PATH:
+        try:
+            from smart_locker.sync.photo_watcher import start_photo_watcher
+            start_photo_watcher(get_engine(), PHOTO_INPUT_PATH, PHOTO_SERVE_DIR)
+        except Exception:
+            logger.exception(
+                "Photo watcher failed to start — continuing without it. "
+                "Photos can be applied later via 'python -m scripts.update_device --auto'."
+            )
 
 
 class SmartLockerApp:
@@ -49,7 +84,7 @@ class SmartLockerApp:
     """
 
     def __init__(self) -> None:
-        self._reader = NFCReader()
+        self._reader = create_reader()
         self._authenticator = Authenticator(hmac_key=key_manager.hmac_key)
         self._session_mgr = SessionManager(timeout_seconds=SESSION_TIMEOUT_SECONDS)
         self._running = False
@@ -70,13 +105,7 @@ class SmartLockerApp:
         setup_logging()
         init_db()
 
-        if SOURCE_EXCEL_PATH:
-            from smart_locker.sync.scheduler import start_scheduler
-            start_scheduler(get_engine(), SOURCE_EXCEL_PATH, SOURCE_SYNC_HOUR, SOURCE_SYNC_MINUTE)
-
-        if PHOTO_INPUT_PATH:
-            from smart_locker.sync.photo_watcher import start_photo_watcher
-            start_photo_watcher(get_engine(), PHOTO_INPUT_PATH, PHOTO_SERVE_DIR)
+        _start_background_sync()
 
         logger.info("Smart Locker starting...")
 
@@ -267,13 +296,7 @@ def run_server() -> None:
     setup_logging()
     init_db()
 
-    if SOURCE_EXCEL_PATH:
-        from smart_locker.sync.scheduler import start_scheduler
-        start_scheduler(get_engine(), SOURCE_EXCEL_PATH, SOURCE_SYNC_HOUR, SOURCE_SYNC_MINUTE)
-
-    if PHOTO_INPUT_PATH:
-        from smart_locker.sync.photo_watcher import start_photo_watcher
-        start_photo_watcher(get_engine(), PHOTO_INPUT_PATH, PHOTO_SERVE_DIR)
+    _start_background_sync()
 
     app = create_app()
     logger.info("Starting Smart Locker web server on %s:%d", API_HOST, API_PORT)

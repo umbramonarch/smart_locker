@@ -4,10 +4,14 @@ Equipment borrowing/returning system using NFC work cards. Users tap their card 
 
 ## Requirements
 
-- Windows with the **Smart Card** service running
+- **Raspberry Pi 4** (2 GB+), 64-bit Raspberry Pi OS — production target. (Also runs on
+  Windows/macOS for development.)
+- A running **PC/SC** service: `pcscd` on Linux/Pi, the **Smart Card** service on Windows
 - ACR1252U NFC reader (USB)
 - Python 3.11+
 - NFC cards (MIFARE Classic, Ultralight, NTAG, DESFire — any card type with a UID)
+- For the appliance: a touch display, and access to the company **M:** share (CIFS/SMB) for
+  the device Excel. No internet is needed at runtime. See **GUIDE.md** and **`deploy/`**.
 
 ## Project Structure
 
@@ -51,15 +55,22 @@ smart_locker/
 │   │   ├── locker_service.py    # Borrow/return rules (per-user limit, admin overrides)
 │   │   └── user_service.py      # User enrollment, public/admin views
 │   └── sync/
-│       ├── excel_sync.py        # On-demand Excel export (Devices / Transactions / Users sheets)
+│       ├── excel_sync.py        # On-demand / auto Excel export (Devices / Transactions / Users)
 │       ├── source_import.py     # Import company device master list (schrank only, DE/EN headers)
-│       ├── scheduler.py         # Source import: on startup + file-watch + daily cron fallback
-│       └── photo_watcher.py     # Auto-assign device photos by model number
+│       ├── scheduler.py         # Source import: startup + daily cron (+ file-watch on local FS)
+│       ├── photo_watcher.py     # Auto-assign device photos by model number
+│       └── fs_utils.py          # Detect network (CIFS/NFS) paths so watchers skip unreliable inotify
+├── deploy/                      # Raspberry Pi provisioning: systemd, CIFS mount, kiosk, offline install
+│   ├── install/                 # install.sh (one-shot setup) + build-wheelhouse.sh (offline wheels)
+│   ├── systemd/                 # smart-locker.service (backend autostart)
+│   ├── kiosk/                   # start-kiosk.sh + autostart .desktop (Chromium fullscreen)
+│   ├── mount/                   # CIFS fstab snippet + credentials template
+│   └── .env.pi.example          # Pi environment template (M: paths pre-filled)
 ├── scripts/
 │   ├── generate_key.py          # Generate AES-256 + HMAC-SHA256 keys for .env
 │   ├── init_db.py               # Create database tables
 │   ├── migrate_db.py            # Add columns/tables to an existing DB (run after schema changes)
-│   ├── enroll_card.py           # Enroll a new NFC card user (requires reader)
+│   ├── enroll_card.py           # Enroll a new NFC card user (reader tap, or --uid HEX for no hardware)
 │   ├── import_devices.py        # Bulk device import from Excel (German + English headers)
 │   ├── update_device.py         # Update device fields / match photos by PM number
 │   └── sync_source.py           # Manually trigger source Excel import
@@ -91,27 +102,38 @@ smart_locker/
 | Unit tests | ✅ Done | 132 tests across 10 modules, all hardware-free |
 | Barcode scanner | 🔲 Planned | Barcode stored per device; USB scanner (keyboard emulation) to identify devices in shared lockers |
 | Calibration alerts | 🔲 Future | Calibration dates stored; notification system not yet built |
-| Kiosk deployment | 🔲 Future | Auto-start, Chromium kiosk mode, Windows service |
+| Kiosk deployment | ✅ Done | Raspberry Pi appliance: systemd service, CIFS mount, Chromium kiosk, offline install (`deploy/`) |
 
 ## Quick Start
 
-```powershell
-# 1. Install dependencies
+**Raspberry Pi appliance (production):** copy the repo onto the Pi, then
+`sudo deploy/install/install.sh` sets up packages, the venv, the NFC daemon, the systemd
+service, the CIFS mount, and the Chromium kiosk. Full walkthrough in **GUIDE.md**;
+artifact reference in **`deploy/README.md`**.
+
+**Development (any OS):**
+
+```bash
+# 1. Create a virtualenv and install dependencies
+python -m venv venv && source venv/bin/activate   # Windows: .\venv\Scripts\Activate
 pip install -r requirements.txt
 
 # 2. Generate encryption keys
 python -m scripts.generate_key
 
 # 3. Create .env from the template, then paste the generated keys into it
-Copy-Item .env.example .env
+cp .env.example .env                               # Windows: Copy-Item .env.example .env
 
 # 4. Initialize the database
 python -m scripts.init_db
 
-# 5. Enroll an admin card (requires NFC reader)
+# 5. Enroll an admin card
+#    With an ACR1252U reader connected — tap the card when prompted:
 python -m scripts.enroll_card --name "Your Name" --role admin
+#    No hardware? Supply the UID directly (hex) — no reader needed:
+python -m scripts.enroll_card --name "Your Name" --role admin --uid AABBCCDD
 
-# 6. Run the system
+# 6. Run the system (web UI on http://localhost:8000)
 python -m smart_locker.app
 ```
 
@@ -188,7 +210,7 @@ Admins can also register anyone manually from the hidden admin panel (`POST /api
 
 Two ways to attach device photos (both copy into `smart_locker/frontend/images/` and update the device's `image_path`):
 
-```powershell
+```bash
 # By PM number (manual / batch / auto) — primary CLI:
 python -m scripts.update_device --list                       # list devices + image status
 python -m scripts.update_device --pm PM-042 --image scope.jpg --description "4-ch 500MHz scope"
@@ -203,13 +225,13 @@ A background **photo watcher** also auto-assigns photos by **device model**: dro
 The system stores a barcode value per device. The planned workflow:
 
 - **Shared lockers**: multiple devices of the same type (e.g. 5 current probes) share one locker; the barcode identifies the specific device.
-- **Hardware**: USB barcode scanner (keyboard emulation) on the kiosk PC.
+- **Hardware**: USB barcode scanner (keyboard emulation) on the kiosk Pi.
 - **Flow**: NFC authenticate → Borrow/Return → scan barcode → match `devices.barcode` → complete transaction.
 - **Implementation**: barcode listener in `app.js` (detects rapid keystrokes ending in Enter) + a `GET /api/devices/barcode/{barcode}` endpoint.
 
 ## Running Tests
 
-```powershell
+```bash
 python -m pytest tests/ -v
 ```
 

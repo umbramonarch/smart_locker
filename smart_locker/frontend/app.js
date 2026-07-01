@@ -1292,13 +1292,19 @@ function toggleAdminPanel() {
  * Open the admin panel overlay with a polygon-wipe entrance animation.
  * Plays a click sound on activation.
  */
-function openAdminPanel() {
+async function openAdminPanel() {
   clickSound();
   const overlay = document.getElementById('overlay-admin');
   overlay.style.display = '';
   requestAnimationFrame(() => requestAnimationFrame(() => {
     overlay.classList.add('visible');
   }));
+  // Establish the backend admin session up front so EVERY panel action (sync
+  // status/preview/commit, export, software update) is authorized the moment
+  // the panel opens — not only after the admin happens to use the Borrow/Return
+  // shortcuts (which were previously the only callers of adminStartSession).
+  await adminStartSession();
+  refreshSyncStatus();
 }
 
 /**
@@ -1385,32 +1391,95 @@ async function adminGotoReturn() {
   armIdle();
 }
 
+/** @type {{timer:number, origDesc:string}|null} Pending sync confirmation, if any. */
+let _syncPreview = null;
+
 /**
- * Trigger a manual source Excel sync from the admin panel. Updates the button
- * label to "Syncing..." during the request and shows a toast with the result.
+ * Render the "Last sync: …" line in the admin footer from /api/admin/sync-status.
+ * @returns {Promise<void>}
+ */
+async function refreshSyncStatus() {
+  const el = document.getElementById('admin-sync-status');
+  if (!el) return;
+  try {
+    const res = await fetch('/api/admin/sync-status');
+    if (!res.ok) return;
+    const s = await res.json();
+    if (!s.at) { el.textContent = 'Last sync: never'; return; }
+    const when = new Date(s.at).toLocaleString();
+    const verdict = s.ok ? `${s.imported} new, ${s.updated} updated` : `failed${s.message ? ': ' + s.message : ''}`;
+    el.textContent = `Last sync: ${when} (${s.trigger}) — ${verdict}`;
+  } catch (_) { /* status unavailable — leave the line as-is */ }
+}
+
+/**
+ * Admin source sync with a preview-then-confirm flow. The first tap runs a
+ * dry-run preview (/api/admin/sync-preview) and shows the add/update/skip diff
+ * on the button; a second tap within the confirm window commits the import
+ * (/api/admin/sync-source). Avoids native dialogs so it works in kiosk Chromium.
  * @returns {Promise<void>}
  */
 async function adminSyncSource() {
   const btn = document.getElementById('admin-sync-source');
   const label = btn.querySelector('.admin-btn-label');
-  const origText = label.textContent;
-  label.textContent = 'Syncing…';
-  btn.style.pointerEvents = 'none';
+  const desc = btn.querySelector('.admin-btn-desc');
 
-  try {
-    const res = await fetch('/api/admin/sync-source', { method: 'POST' });
-    const data = await res.json();
-    if (res.ok) {
-      showToast(`Synced: ${data.imported} new, ${data.updated} updated`, 'success');
-    } else {
-      showToast(data.detail || 'Sync failed', 'error');
+  const reset = (origDesc) => {
+    label.textContent = 'Sync Source';
+    if (origDesc !== undefined) desc.textContent = origDesc;
+    btn.classList.remove('confirm');
+    btn.style.pointerEvents = '';
+  };
+
+  // Second tap within the confirm window -> commit the import.
+  if (_syncPreview) {
+    const p = _syncPreview;
+    _syncPreview = null;
+    clearTimeout(p.timer);
+    label.textContent = 'Syncing…';
+    btn.style.pointerEvents = 'none';
+    try {
+      const res = await fetch('/api/admin/sync-source', { method: 'POST' });
+      const data = await res.json();
+      if (res.ok) showToast(`Synced: ${data.imported} new, ${data.updated} updated`, 'success');
+      else showToast(data.detail || 'Sync failed', 'error');
+    } catch (_) {
+      showToast('Sync request failed', 'error');
     }
-  } catch (_) {
-    showToast('Sync request failed', 'error');
+    reset(p.origDesc);
+    refreshSyncStatus();
+    return;
   }
 
-  label.textContent = origText;
-  btn.style.pointerEvents = '';
+  // First tap -> dry-run preview.
+  const origDesc = desc.textContent;
+  label.textContent = 'Checking…';
+  btn.style.pointerEvents = 'none';
+  try {
+    const res = await fetch('/api/admin/sync-preview', { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) {
+      showToast(data.detail || 'Preview failed', 'error');
+      reset();
+      return;
+    }
+    const changes = data.imported + data.updated;
+    if (changes === 0) {
+      showToast(`Up to date — ${data.unchanged} unchanged, ${data.skipped} skipped`, 'success');
+      reset();
+      refreshSyncStatus();
+      return;
+    }
+    label.textContent = `Apply ${changes} change${changes === 1 ? '' : 's'}?`;
+    desc.textContent = `${data.imported} new · ${data.updated} upd · ${data.unchanged} same · ${data.skipped} skip — tap to apply`;
+    btn.classList.add('confirm');
+    btn.style.pointerEvents = '';
+    const timer = setTimeout(() => { _syncPreview = null; reset(origDesc); }, 8000);
+    _syncPreview = { timer, origDesc };
+  } catch (_) {
+    showToast('Preview request failed', 'error');
+    reset();
+  }
 }
 
 /**
@@ -1452,6 +1521,83 @@ async function adminExportExcel() {
     label.textContent = origText;
     btn.style.pointerEvents = '';
   }
+}
+
+/**
+ * Trigger a software update from the admin panel. POSTs to the update endpoint,
+ * which launches the safe update script out-of-process on the Pi (snapshot ->
+ * apply release from the M: share -> migrate -> restart -> health-gate ->
+ * auto-rollback on failure). On a dev/non-Pi host the endpoint returns 503 with
+ * a clear message. After a successful launch we briefly poll the update status
+ * to surface "nothing to do" / early failures; once the service actually
+ * restarts the poll simply stops (the kiosk reconnects on its own).
+ * @returns {Promise<void>}
+ */
+async function adminUpdate() {
+  const btn = document.getElementById('admin-update');
+  const label = btn.querySelector('.admin-btn-label');
+  const origText = label.textContent;
+
+  if (!confirm('Apply a software update now? The kiosk restarts briefly; a failed update rolls back automatically.')) return;
+
+  label.textContent = 'Starting…';
+  btn.style.pointerEvents = 'none';
+  const restore = () => { label.textContent = origText; btn.style.pointerEvents = ''; };
+
+  try {
+    const res = await fetch('/api/admin/update', { method: 'POST' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      showToast(data.detail || 'Update could not start', 'error');
+      restore();
+      return;
+    }
+    showToast(data.message || 'Update started', 'success');
+    pollUpdateStatus(restore);
+  } catch (_) {
+    showToast('Update request failed', 'error');
+    restore();
+  }
+}
+
+/**
+ * Briefly poll the update-status endpoint after launching an update. Reflects
+ * terminal states (up to date / success / rolled back / failed) in a toast and
+ * the admin footer. Tolerates the service restart that an in-progress update
+ * triggers — a failed fetch is treated as "kiosk restarting" and ends polling.
+ * @param {Function} restore - Callback to restore the button to its idle label.
+ * @returns {Promise<void>}
+ */
+async function pollUpdateStatus(restore) {
+  const footer = document.getElementById('admin-sync-status');
+  const MAX_POLLS = 8;
+  const POLL_INTERVAL_MS = 1500;
+  const TERMINAL = ['idle', 'up_to_date', 'success', 'rolled_back', 'failed', 'rollback_unhealthy'];
+  // Only a genuinely-applied (or already-current) update is a success. A
+  // rolled-back or failed update is an error toast — the new version did NOT
+  // take, even though the kiosk safely reverted.
+  const SUCCESS = ['idle', 'up_to_date', 'success'];
+  for (let i = 0; i < MAX_POLLS; i++) {
+    await sleep(POLL_INTERVAL_MS);
+    let data;
+    try {
+      const res = await fetch('/api/admin/update-status');
+      if (!res.ok) throw new Error('status');
+      data = await res.json();
+    } catch (_) {
+      // Service is restarting on the new version — the kiosk will reconnect.
+      if (footer) footer.textContent = 'Update applying — kiosk restarting…';
+      restore();
+      return;
+    }
+    if (footer && data.message) footer.textContent = data.message;
+    if (TERMINAL.includes(data.state)) {
+      showToast(data.message || data.state, SUCCESS.includes(data.state) ? 'success' : 'error');
+      restore();
+      return;
+    }
+  }
+  restore();
 }
 
 /**
@@ -1570,6 +1716,7 @@ document.getElementById('admin-goto-return').addEventListener('click', () => { c
 document.getElementById('admin-sync-source').addEventListener('click', () => { clickSound(); adminSyncSource(); });
 document.getElementById('admin-register-user').addEventListener('click', () => { clickSound(); adminRegisterUser(); });
 document.getElementById('admin-export-excel').addEventListener('click', () => { clickSound(); adminExportExcel(); });
+document.getElementById('admin-update').addEventListener('click', () => { clickSound(); adminUpdate(); });
 document.getElementById('admin-end-session').addEventListener('click', () => { clickSound(); adminEndSession(); });
 
 /* ============================================================
@@ -1601,23 +1748,41 @@ if (!PERF.lite) initMarquee();
 
 /* ============================================================
    RUNTIME FPS PROBE — auto-downgrade to lite on a janky host
-   Samples frame cadence for ~1.5s during the animated idle screen
-   (a representative load). If the host can't hold a smooth frame
-   rate, switch to lite mode. Skipped when already lite or when the
-   user explicitly forced the full experience (?full).
+   Samples frame cadence in ~1.5s windows on the animated idle screen.
+   Hardened against false downgrades (see MEM-20260614-1310): a WARM-UP
+   delay skips the initial load/animation burst, and TWO CONSECUTIVE bad
+   windows are required before switching to lite — so a single transient
+   stall no longer strips the full UI. Skipped when already lite or when
+   the user explicitly forced the full experience (?full).
+   (On the Pi appliance the kiosk launches with ?lite, so this never runs
+   there; it only guards mid-tier non-kiosk hosts.)
 ============================================================ */
 function probePerformance() {
   if (PERF.lite || window.__FORCE_FULL__) return;
-  let start = null, last = null, frames = 0, slow = 0;
-  function tick(t) {
-    if (start === null) { start = last = t; requestAnimationFrame(tick); return; }
-    const dt = t - last; last = t; frames++;
-    if (dt > 22) slow++;                 // frame longer than ~22ms => below ~45fps
-    if (t - start < 1500) { requestAnimationFrame(tick); return; }
-    // Downgrade if a meaningful share of frames missed the budget.
-    if (frames >= 10 && slow / frames > 0.35) enableLite();
+
+  const WINDOW_MS = 1500;       // length of one sample window
+  const JANK_FRAME_MS = 22;     // a frame slower than this is ~below 45fps
+  const JANK_SHARE = 0.35;      // window is "bad" if this share of frames are janky
+  const WARMUP_MS = 1200;       // ignore the initial load/animation burst
+
+  function sampleWindow(onDone) {
+    let start = null, last = null, frames = 0, slow = 0;
+    function tick(t) {
+      if (PERF.lite) return;                     // already downgraded elsewhere
+      if (start === null) { start = last = t; requestAnimationFrame(tick); return; }
+      const dt = t - last; last = t; frames++;
+      if (dt > JANK_FRAME_MS) slow++;
+      if (t - start < WINDOW_MS) { requestAnimationFrame(tick); return; }
+      onDone(frames >= 10 && slow / frames > JANK_SHARE);
+    }
+    requestAnimationFrame(tick);
   }
-  requestAnimationFrame(tick);
+
+  // Warm up, then require two consecutive bad windows (hysteresis) to downgrade.
+  setTimeout(() => sampleWindow((bad1) => {
+    if (!bad1) return;                           // host holds up — stay full
+    sampleWindow((bad2) => { if (bad2) enableLite(); });
+  }), WARMUP_MS);
 }
 probePerformance();
 
@@ -1706,3 +1871,63 @@ if (USE_DEMO) {
   connectSSE();
   checkExistingSession();
 }
+
+/* ============================================================
+   DEV / SIMULATION — no-hardware tap injection
+   Activates ONLY when the backend reports the fake NFC reader is
+   running (SMART_LOCKER_FAKE_READER). In production /api/dev/status
+   returns fake_reader:false, so nothing below is wired up and there
+   is zero visible footprint. Provides a floating "Simulate tap"
+   button plus the F2 keyboard shortcut; both POST /api/dev/tap, which
+   flows through the real NFC bridge exactly like a physical card tap
+   (auth, second-tap logout, or registration — driven by server state).
+============================================================ */
+(function initDevTap() {
+  fetch('/api/dev/status')
+    .then(r => (r.ok ? r.json() : null))
+    .then(status => {
+      if (!status || !status.fake_reader) return;   // not in simulation mode
+
+      async function simulateTap(uid) {
+        try {
+          const res = await fetch('/api/dev/tap', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(uid ? { uid } : {}),
+          });
+          if (res.status === 400) {
+            // No default UID configured on the server — ask once and retry.
+            const entered = prompt('Simulated card UID (hex):');
+            if (entered) return simulateTap(entered.trim());
+            return;
+          }
+          if (!res.ok) showToast('Simulated tap failed', 'error');
+          // On success the auth_success / auth_failed SSE event drives the UI.
+        } catch (_) {
+          showToast('Simulated tap request failed', 'error');
+        }
+      }
+
+      const btn = document.createElement('button');
+      btn.id = 'dev-tap-btn';
+      btn.type = 'button';
+      btn.textContent = '⊙ Simulate tap (F2)';
+      btn.setAttribute('aria-label', 'Simulate an NFC card tap (developer tool)');
+      Object.assign(btn.style, {
+        position: 'fixed', right: '12px', bottom: '12px', zIndex: '9999',
+        padding: '8px 12px', font: '600 13px Inter, system-ui, sans-serif',
+        color: '#fff', background: 'rgba(150,20,20,.85)',
+        border: '1px solid rgba(255,255,255,.35)', borderRadius: '8px',
+        cursor: 'pointer', letterSpacing: '.02em',
+      });
+      btn.addEventListener('click', () => simulateTap());
+      document.body.appendChild(btn);
+
+      document.addEventListener('keydown', (e) => {
+        if (e.key === 'F2') { e.preventDefault(); simulateTap(); }
+      });
+
+      console.info('[sim] Fake NFC reader active — press F2 or the corner button to inject a tap.');
+    })
+    .catch(() => { /* dev status unavailable — ignore */ });
+})();
