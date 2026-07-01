@@ -34,6 +34,16 @@ directory; nothing outside it is touched.
 > QEMU also does **not** validate GPU smoothness — confirm kiosk performance
 > only on real Pi 4 hardware.
 
+> **Path A status — not run on the current dev box:** the full QEMU-boot +
+> Samba-mount rehearsal (Path A) has **not** been executed in this repo's
+> history; the dev machine used for this work has no `qemu-system-aarch64`
+> system emulator and no Docker/host `smbd` for the Samba stand-in. All
+> lifecycle validation to date (borrow/return flow, source-Excel import,
+> no-UID-in-logs check) was done via **Path B (native run)** against a local
+> filesystem path standing in for the CIFS mount. Path A remains available
+> for anyone with the tooling installed; do not read the native-run results
+> as having exercised the CIFS/QEMU boot path.
+
 ---
 
 ## Files in `sim/`
