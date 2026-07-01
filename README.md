@@ -73,7 +73,8 @@ smart_locker/
 │   ├── enroll_card.py           # Enroll a new NFC card user (reader tap, or --uid HEX for no hardware)
 │   ├── import_devices.py        # Bulk device import from Excel (German + English headers)
 │   ├── update_device.py         # Update device fields / match photos by PM number
-│   └── sync_source.py           # Manually trigger source Excel import
+│   ├── sync_source.py           # Manually trigger source Excel import
+│   └── sign_update.py           # Sign a release tarball for update.sh (HMAC-SHA256)
 ├── tests/                       # 132 tests (no hardware required)
 ├── docs/Smart Locker Notes/     # Obsidian documentation vault
 ├── requirements.txt
