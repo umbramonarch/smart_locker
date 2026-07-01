@@ -172,7 +172,7 @@ An empty list `[]` means the reader isn't plugged in or `pcscd` isn't running.
 
 ### 4.4 Encryption keys and the `.env` file
 
-The system encrypts every card UID. Generate the two keys:
+The system encrypts every card UID. Generate the three keys:
 
 ```bash
 python -m scripts.generate_key
@@ -182,7 +182,7 @@ Create your `.env` from the Pi template, then paste the keys into it:
 
 ```bash
 cp deploy/.env.pi.example .env
-nano .env          # paste SMART_LOCKER_ENC_KEY and SMART_LOCKER_HMAC_KEY
+nano .env          # paste SMART_LOCKER_ENC_KEY, SMART_LOCKER_HMAC_KEY, and SMART_LOCKER_UPDATE_HMAC_KEY
 ```
 
 The template already points the Excel paths at the M: mount (`/mnt/locker/...`) and keeps
@@ -463,10 +463,14 @@ You author releases on your company **git host** as usual — but the **Pi never
 release rides the **M:** share you already have, so git host's internet access is irrelevant to the Pi.
 
 1. **At work** (where you have git host): download the release tarball for the tag — git host's
-   "Download source" gives exactly this — named `smart-locker-<version>.tar.gz`, and drop it in
+   "Download source" gives exactly this — named `smart-locker-<version>.tar.gz`. **Sign it** with
+   `python -m scripts.sign_update smart-locker-<version>.tar.gz` (needs `SMART_LOCKER_UPDATE_HMAC_KEY`
+   in your `.env` — generate it once with `python -m scripts.generate_key` and keep the same value in
+   the Pi's `.env`). This writes a `.hmac` sidecar next to the tarball. Drop **both files** in
    `M:\locker-updates\` (this folder is `SMART_LOCKER_UPDATE_DIR` in `.env` — change it there if you
-   want releases picked up from a different M: folder; no script edits needed). Optional: put a
-   `smart-locker-<version>.tar.gz.sha256` next to it and the Pi will verify it before applying.
+   want releases picked up from a different M: folder; no script edits needed). The Pi refuses to
+   apply a tarball that isn't signed with the matching key — this isn't optional, since the M: share
+   has broader write access than "people who should be able to push a Pi update."
 2. **On the kiosk:** open the hidden admin panel (tap the clock 5× within 3 s) → **Software Update**
    → confirm.
 3. The Pi then: snapshots the database **and** the current code, swaps in the new version, installs
@@ -506,6 +510,7 @@ All settings live in `.env` (loaded by `config/settings.py`). The Pi template
 |---|---|---|
 | `SMART_LOCKER_ENC_KEY` | (required) | AES-256-GCM key, base64 — from `generate_key` |
 | `SMART_LOCKER_HMAC_KEY` | (required) | HMAC-SHA256 key, base64 — from `generate_key` |
+| `SMART_LOCKER_UPDATE_HMAC_KEY` | (required on the Pi) | HMAC-SHA256 key, base64 — from `generate_key`; verifies signed release tarballs, see "Updating the software" in Section 8 |
 | `SMART_LOCKER_DB_PATH` | `smart_locker.db` | SQLite path — keep on the Pi's local disk |
 | `SMART_LOCKER_READER_NAME` | `ACR1252` | Substring filter for the NFC reader name |
 | `SMART_LOCKER_SESSION_TIMEOUT` | `120` | Idle session timeout (seconds) |
