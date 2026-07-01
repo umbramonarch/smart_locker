@@ -1,7 +1,8 @@
 # Smart Locker — Setup & Usage Guide (Raspberry Pi)
 
 This guide explains, in plain English, what the Smart Locker is, how it runs on a
-Raspberry Pi 4, and exactly how to set it up from a blank SD card to a working kiosk.
+Raspberry Pi 4, and exactly how to set it up from a blank SD card to a working kiosk —
+including the case where the Pi will **never** have internet access, anywhere, ever.
 
 ---
 
@@ -35,29 +36,102 @@ Three things are worth understanding up front:
 - **The database stays on the Pi.** The SQLite database lives on the Pi's local SD card,
   never on M: (network shares don't handle SQLite's locking reliably).
 
+If your Pi will genuinely **never** touch a network except the eventual M: share — not
+even briefly, not even at your own desk — read Section 3 carefully before you do anything
+else. Every "just apt install X" or "just pip install Y" instinct needs a different answer
+in that scenario, and this guide is written for it.
+
 ---
 
 ## 2. Hardware you need
 
 1. **Raspberry Pi 4** (2 GB RAM or more) with a **64-bit Raspberry Pi OS** SD card.
-2. **ACR1252U NFC reader** (USB).
-3. The **Riverdi RVT101HVHNWC00** 10.1" capacitive touch display (HDMI for video + USB for
-   touch). Capacitive touch works out of the box on Linux — no calibration step needed.
-4. NFC work cards (MIFARE Classic, Ultralight, NTAG, DESFire — any card with a UID).
-5. Network access to the company **M:** share (wired Ethernet is most reliable).
+2. **The official Raspberry Pi 4 power supply (5V/3A, 15W, USB-C).** This matters more
+   than it sounds like it should: the Pi 4 does **not** do USB-C Power Delivery
+   negotiation — it needs a source that presents a plain, high-current 5V by default. Most
+   phone/laptop chargers either cap around 1–2A or only unlock more current through a PD
+   handshake the Pi never initiates. That's fine for the bare board with nothing plugged
+   in, but once a USB hub, an NFC reader, and a touch display's touch controller are all
+   drawing through the Pi's own USB rail, an under-specified supply is a real cause of the
+   under-voltage warning icon, random reboots, or SD card corruption — especially at boot,
+   when everything initializes at once. Don't substitute a phone charger once peripherals
+   are attached, even temporarily.
+3. **ACR1252U NFC reader** (USB).
+4. The **Riverdi RVT101HVHNWCA0** 10.1" capacitive touch display (HDMI for video, USB-C
+   for touch only). Capacitive touch works out of the box on Linux — no calibration step
+   needed. **This display needs its own separate power supply** (a 7–14V DC barrel-jack
+   input) — the video/touch connections do *not* power the panel or its backlight. Make
+   sure you have that power adapter; it's easy to miss since it's not mentioned on the box
+   as prominently as the HDMI/USB connections.
+5. If your reader and display's USB-C touch connector need more USB-A ports than the Pi
+   has free, a small **USB hub** works fine — the Pi's combined USB budget across all
+   ports (1200 mA) comfortably covers a reader (~200 mA rated) plus a touch controller
+   (well under 100 mA for this class of device) with a lot of headroom to spare. A
+   bus-powered (no separate power adapter) hub is fine current-wise for this combination;
+   just don't add other high-draw devices to the same hub. A **Delock 64272** (4-port,
+   bus-powered) is a known-good example if you want a specific model to buy rather than
+   picking one yourself.
+6. NFC work cards (MIFARE Classic, Ultralight, NTAG, DESFire — any card with a UID).
+7. Network access to the company **M:** share (wired Ethernet is most reliable) —
+   **connected last**, after everything else is working. See Section 6.
+
+**A note on the OS account password:** whatever you choose for the Pi's login, treat it
+like any other credential on a device that will sit in a shared company location — avoid
+anything that's a simple variation on the username or product name.
 
 ---
 
 ## 3. Two ways to install
 
 **Fast path (recommended for production):** copy the project onto the Pi and run one script
-that sets up everything. See **Section 3a**.
+that sets up everything. See **Section 3c**.
 
 **Manual path (recommended the first time, to understand each piece):** do each step by
 hand. See **Section 4**.
 
 Either way, you finish by filling in a few secrets (encryption keys, the M: share login)
-and enrolling your first card. But **first the Pi needs an operating system** — Step 0.
+and enrolling your first card. But **first the Pi needs an operating system and an offline
+install kit** — Steps 0 and 0b, below.
+
+### The physical sequence, start to finish (read this first)
+
+It's very easy to mix up "the SD card" and "a USB stick" — they are **two different
+physical objects with two completely different jobs**, used at different times. Here's the
+whole flow before the detailed steps, specifically to avoid that mix-up:
+
+**Part A — entirely on your Windows PC. The Pi is not touched yet.**
+
+1. Flash the SD card **once**, using Raspberry Pi Imager (Step 0, below). This SD card now
+   contains the Pi's entire operating system. **You do not format it or touch it again**
+   after this — it goes straight from the Imager into the Pi.
+2. Still on your PC, with that SD card already set aside: build the offline wheelhouse and
+   download the `pyscard` `.deb` (Step 0b, below).
+3. Format **one ordinary USB flash drive** (just one — not the SD card, a completely
+   different physical object) as exFAT, and copy the whole project folder plus the
+   wheelhouse and the `.deb` onto it (also Step 0b). You only ever need this single stick;
+   it plugs into any regular USB-A port on the Pi's side, not any special slot.
+
+At the end of Part A you're holding two separate physical items: the flashed SD card, and a
+USB stick full of files. Neither has touched the Pi yet.
+
+**Part B — now, for the first time, the Pi gets involved.**
+
+4. Put the flashed SD card into the Pi. Connect the display (with its **own** power
+   adapter — not from the Pi), a temporary keyboard/mouse, and the Pi's official power
+   supply. Power it on — this is the Pi's first-ever boot, straight to a normal desktop
+   (Section 4.1).
+5. Once you're looking at the Pi's desktop, plug the USB stick from step 3 into the Pi, and
+   copy the project folder **from the USB stick onto the Pi's own disk** (also Section 4.1).
+   This copy happens on the Pi itself, in its own file manager or terminal — not from
+   Windows.
+6. From this point on, every remaining command runs **on the Pi**, in a terminal there:
+   installing packages, building the Python environment, filling in `.env`, running the
+   app, and setting up kiosk autostart (Sections 4–5). The M: share is connected **last**
+   (Section 6), once all of that is already working.
+
+So: the SD card is written to exactly once, on your PC, before anything else happens. The
+USB stick is created afterward, also on your PC, and its only job is handing files to the
+Pi once the Pi already exists and is running its own OS from the SD card.
 
 ### Step 0 — Prepare the SD card (install Raspberry Pi OS)
 
@@ -65,84 +139,313 @@ A Raspberry Pi 4 ships with **no operating system** — you write one onto the S
 yourself. Do this on any PC (including your work laptop) with the free **Raspberry Pi
 Imager** (https://www.raspberrypi.com/software/); the Pi doesn't need to be present yet.
 
-In the Imager:
-
-1. **Device:** Raspberry Pi 4.
-2. **Operating System:** **Raspberry Pi OS (64-bit)** — the standard **Desktop** edition.
+1. Download and install **Raspberry Pi Imager** from the link above (it's a normal
+   Windows installer — download, run it, accept the defaults).
+2. Insert your SD card into your PC (a card reader slot or a USB adapter) and open
+   Raspberry Pi Imager.
+3. **Choose Device:** Raspberry Pi 4.
+4. **Choose OS → Raspberry Pi OS (other) → Raspberry Pi OS (64-bit) Full.**
    - *64-bit* matches what this project is built for (the Python packages have prebuilt
      64-bit wheels; 32-bit would force slow on-device compiles).
-   - *Desktop*, **not** *Lite* — the kiosk runs Chromium in a graphical session, which the
-     Lite (no-GUI) edition does not have.
-3. **Storage:** a 32 GB or larger SD card.
-4. Open the **⚙ settings** ("Edit Settings", the gear icon) **before** writing, and set:
+   - **Full, not the plain Desktop or Lite image** — this is the important call for a Pi
+     that will *never* be online again after setup. Full bundles a broader set of
+     software up front; Lite has no graphical desktop at all (the kiosk needs one to run
+     Chromium), and once this Pi is offline for good, you lose the ability to
+     `apt install` anything you forgot. Full's extra size is a one-time SD-card cost in
+     exchange for that safety margin.
+5. **Choose Storage:** your SD card (32 GB or larger).
+6. Click the **⚙ gear icon ("Edit Settings")** before writing, and set:
    - a **hostname** (e.g. `smartlocker`),
-   - **enable SSH** (lets you finish setup from another computer),
-   - a **username and password** — it can be `locker`, but any name works (`install.sh`
-     auto-detects whichever user owns the project folder),
-   - **WiFi and locale**, if you will use WiFi.
-5. Write the card, insert it into the Pi, and power on.
+   - **enable SSH** (useful for troubleshooting later even without internet — you can
+     still SSH in over a direct Ethernet cable or the eventual company LAN),
+   - a **username and password** (`install.sh` auto-detects whichever user owns the
+     project folder, so any username works),
+   - skip WiFi entirely if this Pi will truly never be online.
+7. Click **Save**, then **Write**, and wait for it to finish (writes + verifies).
 
-**About the internet:** the "no internet" rule is only for *running* in the company. During
-this **one-time setup** you will want to give the Pi internet (a home or test network) so it
-can install its system packages and build the Python environment. After setup it runs fully
-offline.
-
-**Installing onto several Pis (the "SD card" model):** set up **one** Pi completely and
-confirm it works, then **clone its SD card to an image** and write that image onto the other
-units' cards. That golden image already contains the OS, the app, the Python environment, and
-your settings — so the others need no internet at all.
+**Do not boot the Pi yet.** Go to Step 0b first — everything the Pi needs (packages,
+project files) has to be staged *before* the Pi's first real boot at the deployment site,
+since it will never be able to fetch anything itself afterward.
 
 > Tip: current Raspberry Pi OS may run the desktop under Wayland. If the kiosk autostart
-> misbehaves, switch to X11 with `sudo raspi-config` → *Advanced Options* → *Wayland* → *X11*,
-> then reboot.
+> misbehaves, switch to X11 with `sudo raspi-config` → *Advanced Options* → *Wayland* →
+> *X11*, then reboot.
 
-### 3a. Fast path — the install script
+### Step 0b — Build your offline install kit (on your PC, before the Pi ever boots there)
 
-Put the project on the Pi (for example at `/home/locker/smart_locker`) and run:
+Since this Pi will never reach the internet itself, every Python package and OS-level
+dependency has to be fetched **once, on a machine that does have internet** (your Windows
+PC is fine — you don't need Linux or matching hardware, see why below), then carried over
+physically.
+
+**1. Build the wheelhouse** (pre-downloaded Python packages):
+
+```bash
+# From the project root, in Git Bash (comes with Git for Windows):
+deploy/install/build-wheelhouse.sh
+```
+
+This downloads every package in `requirements.txt` — except `pyscard`, see step 2 — as
+prebuilt Linux/ARM64 wheels for Python 3.11, using `pip`'s `--platform` cross-download
+flags. **This works even though your PC is Windows/x86_64**: a `.whl` file is just a
+compiled, ready-to-install archive tagged for a target platform — pip can fetch the right
+one for a *different* machine than the one running pip, without compiling anything
+locally. I verified every package in `requirements.txt` (including the C/Rust-extension
+ones — `cryptography`, `pydantic-core`, `uvloop`, `httptools`, `websockets`, `watchfiles`,
+`SQLAlchemy`, `PyYAML`) actually publishes a `manylinux`+`aarch64`+`cp311` wheel on PyPI, so
+this isn't a guess. The wheels land in `deploy/wheelhouse/`.
+
+**2. Get the `pyscard` package separately** — it's the one exception. It has **no**
+prebuilt Linux ARM64 wheel on PyPI at all (only Windows/macOS), so it can't go through the
+wheelhouse. Instead, download the real Debian package it corresponds to:
+
+```
+https://deb.debian.org/debian/pool/main/p/pyscard/python3-pyscard_2.0.5-1+b2_arm64.deb
+```
+
+(If that exact filename is gone by the time you read this, browse
+`https://deb.debian.org/debian/pool/main/p/pyscard/` for the current `arm64` build.) Save
+it into `deploy/system-packages/`. Full explanation of why this is safe (dependency check,
+version-gap check) is in `deploy/system-packages/README.md`.
+
+**3. Copy the whole project onto a USB stick:**
+
+1. Plug the USB stick into your PC.
+2. Open **File Explorer** (Windows key + `E`) and find the stick under **This PC** — it
+   shows up as a drive letter, e.g. `E:`.
+3. Right-click that drive → **Format...**
+4. In the Format dialog, open the **File system** dropdown and pick **exFAT**. (If you want
+   to check what it currently is first, right-click the drive → **Properties** shows the
+   current file system.)
+5. Leave **Allocation unit size** on its default. A **Volume label** is optional (e.g.
+   `SMARTLOCKER` — makes it easier to recognize later, purely cosmetic).
+6. Click **Start**. It'll warn you this erases everything already on the stick — confirm,
+   and wait for it to finish (a progress bar, usually quick for a normal-sized stick).
+7. Open the now-formatted drive and copy the entire `smart_locker` project folder onto it —
+   drag-and-drop or copy/paste both work — **including** the `deploy/wheelhouse/*.whl` files
+   from step 1 above and the `.deb` from step 2 above (they should already be sitting inside
+   your local `smart_locker` project folder at those paths, so copying the whole folder
+   picks them up automatically — no separate copy step needed for them).
+
+*(Why a USB stick and not just the SD card directly: Raspberry Pi Imager writes two
+partitions — a small `bootfs` that Windows can read/write, and the main Linux filesystem,
+which Windows cannot see at all. Getting files onto that second partition has to happen
+from the Pi's own side, once it's booted — a USB stick is the simplest way to hand files to
+a machine you can't network yet.)*
+
+**What if you boot the Pi before the USB stick is ready?** Nothing bad happens — the SD card
+(with the OS) and the USB stick (with the project files) are completely independent. The SD
+card alone is enough for the Pi to boot all the way to a normal desktop; the USB stick is
+only needed *after* that, for Section 4.1's file copy. If you boot first and prepare the
+stick later, you'll just be looking at a bare Raspberry Pi OS desktop with no project on it
+yet — plug the stick in and pick up at Section 4.1 whenever it's ready. (You may see a
+one-time first-boot setup wizard asking about locale/updates/WiFi — since you already set
+hostname and user via the Imager's settings gear, you can click through it, skipping WiFi
+and "check for updates" since this Pi stays offline.)
+
+Now you're ready to boot the Pi for the first time — Section 4.
+
+---
+
+### 3a. Understanding the `deploy/` files
+
+Before running anything, here's what each file in `deploy/` actually does and when it gets
+used — this trips people up because most of them are only ever invoked *indirectly*, by
+`install.sh`.
+
+| File | What it is | When it's used |
+|---|---|---|
+| `.env.pi.example` | Environment template pre-filled for the Pi (M: paths, etc.) | You manually copy it to `.env` and fill in your keys — Section 4.4 |
+| `install/install.sh` | The one-shot provisioner — packages, venv, service, mount scaffolding, kiosk autostart | You run it once, as root, on the Pi — Section 3c |
+| `install/build-wheelhouse.sh` | Downloads Python packages as offline wheels | You run it **once, on your PC**, before ever touching the Pi — Step 0b |
+| `wheelhouse/` | Where those downloaded `.whl` files sit | Read automatically by `install.sh`/`update.sh` — you never touch it directly |
+| `system-packages/` | Holds the `python3-pyscard` `.deb` (see Step 0b) | Read automatically by `install.sh` if offline; installed via plain `apt` if online |
+| `systemd/smart-locker.service` | Defines the backend as a systemd service (auto-restart, boot-start) | Installed by `install.sh`; started manually the first time — Section 5 |
+| `install/sudoers-smart-locker` | Grants the app account passwordless sudo for *only* restarting its own service and running updates | Installed by `install.sh`; powers the admin panel's "Update now" button — Section 9 |
+| `install/update.sh` | Applies a signed release tarball with backup + health-check + auto-rollback | Runs later, whenever you ship an update — Section 9 |
+| `kiosk/start-kiosk.sh` | Launches Chromium fullscreen once the backend is up | Installed by `install.sh`; runs automatically at every graphical login — Section 5 |
+| `kiosk/smart-locker-kiosk.desktop` | The autostart entry that triggers `start-kiosk.sh` | Installed by `install.sh` into the app user's autostart folder |
+| `mount/fstab.snippet` | The `/etc/fstab` line template for the M: CIFS mount | You copy/edit it by hand — Section 6 (done **last**) |
+| `mount/cifs-credentials.example` | Template for the M: share's login, stored root-only | You copy/edit it by hand — Section 6 |
+| `PI-VALIDATION-CHECKLIST.md` | A sign-off checklist for things a no-hardware simulation can't test (real reader, real GPU, real network share) | Run through once, after the Pi is fully set up |
+| `README.md` | A short technical index of this table, for quick reference without opening this guide | Reference only |
+
+None of these files need to be understood in isolation before you start — `install.sh`
+wires almost all of them together automatically. This table is here for when you want to
+know *why* something exists or *where* a given piece of behavior comes from. A few of them
+deserve more explanation than a one-line table cell:
+
+**`install/install.sh`** is the single script that does almost everything in Section 4 for
+you. Read top to bottom, it: (1) installs OS packages if online, or checks they're already
+present if offline; (2) installs `python3-pyscard` — via `apt` if online, or by finding and
+`dpkg -i`-ing the `.deb` you staged in `system-packages/` if offline; (3) creates the venv
+with `--system-site-packages` and installs everything else from `wheelhouse/`; (4) enables
+`pcscd`; (5) copies `systemd/smart-locker.service` into place with your actual username/
+paths substituted in, and enables it (but doesn't start it yet — that needs `.env` filled
+in first); (6) installs the sudoers rule that lets the app restart itself for updates; (7)
+creates `/mnt/locker` and the credentials-file skeleton (but does **not** mount it — that's
+a manual step, done last, in Section 6); (8) installs the kiosk autostart entry. It's
+idempotent — re-running it after you've already done some steps by hand won't break
+anything, it just skips what's already in place.
+
+**`install/build-wheelhouse.sh`** is the one script in this list you run somewhere other
+than the Pi — on your Windows PC, in Step 0b, before the Pi even boots. It has nothing to
+do with the Pi's own filesystem; it just downloads files to `deploy/wheelhouse/` inside
+your local copy of the project, which you then carry over via the USB stick.
+
+**`install/update.sh`** is what actually runs, weeks or months later, when you ship a new
+version. You never run this by hand during initial setup — it's what the admin panel's
+"Update now" button calls (via the sudoers rule from `install.sh`), and what
+`SMART_LOCKER_UPDATE_DIR`/`SMART_LOCKER_UPDATE_HMAC_KEY` in `.env` configure. Full mechanism
+in Section 9.
+
+**Why is `PI-VALIDATION-CHECKLIST.md` a separate file instead of being folded into this
+guide?** Two reasons: (1) it's a different *kind* of document — a fill-in-the-blanks
+sign-off sheet with Pass/Fail boxes, a signature line, and a date, meant to be checked off
+once per physical Pi you deploy, not read once like a tutorial. If you build five of these
+kiosks, you'd fill out five checklists against the same one `GUIDE.md`. (2) It specifically
+covers the handful of things that *can't* be verified any other way than physically testing
+the real hardware (a real card tap, real screen smoothness, a real network share) — folding
+it into the guide would bury that "these specific things still need a human to physically
+check" signal inside hundreds of lines of setup instructions instead of giving it its own
+clearly-scoped, physically-holdable page.
+
+---
+
+### 3b. What files actually need to go on the Pi
+
+Not everything in this repository belongs on the appliance. If you're copying the project
+folder by hand (rather than a clean `git archive`/release tarball), here's the real split:
+
+| Goes on the Pi | Stays off (dev-only, or created fresh) |
+|---|---|
+| `smart_locker/`, `config/`, `scripts/`, `deploy/` | `venv/` — not portable, see the note below |
+| `requirements.txt`, `GUIDE.md`, `README.md` | `.env` — the Pi gets its own from `deploy/.env.pi.example` |
+| | `smart_locker.db` / `.db-wal` / `.db-shm` — the Pi creates its own via `scripts.init_db` |
+| | `sim/` — a no-hardware development/testing harness, not part of the running appliance |
+| | `tests/` — optional, only needed if you want to run the test suite somewhere |
+| | `docs/` (besides this guide), `node_modules/`, `package.json` — documentation/tooling for the explainer page, not the kiosk |
+| | Anything gitignored: `.obsidian/`, `logs/`, `.pytest_cache/` — local development tooling, never part of the shipped app |
+
+**Why you can't just copy `venv/` instead of building the wheelhouse:** a venv isn't
+portable code — it's a thin wrapper tied to the *exact* OS, CPU architecture, and Python
+build it was created against, including any compiled extensions (like `cryptography`'s C
+code) installed into it. A venv built on your Windows PC contains **Windows** binaries,
+which cannot run on Linux at all, let alone the Pi's ARM64 chip specifically — copying it
+over wouldn't fail loudly, individual imports would just be the wrong binary format. A
+wheel file, by contrast, genuinely *is* portable to any machine matching its platform tag —
+that's its whole design purpose. `install.sh` creates the venv **once**, the first time it
+runs (and always gets the absolute paths right), then installs *into* it from the
+wheelhouse instead of the internet — so you get "no waiting on package installation"
+without the portability problem. Re-running `install.sh` later reuses that same venv
+rather than rebuilding it from scratch — it only recreates the venv if it's missing, or if
+it predates the `--system-site-packages` flag pyscard needs (detected automatically).
+
+### 3c. Fast path — the install script
+
+Get the project onto the Pi first — see Section 4.1 for exactly how (USB stick, since the
+Pi's own filesystem isn't reachable from Windows). Once it's at e.g.
+`/home/locker/smart_locker`, run:
 
 ```bash
 sudo deploy/install/install.sh
 ```
 
-This is safe to re-run. It installs the system packages, builds the Python environment,
-enables the NFC service, installs the auto-start service and the kiosk browser, and
-scaffolds the M: mount. When it finishes it prints the few manual steps that remain
-(filling `.env`, the share login, enrolling a card). Those are covered below.
+This is safe to re-run. It installs the system packages (including `python3-pyscard`
+directly via apt if online, or via the `.deb` you staged in `deploy/system-packages/` if
+not — see Section 3a), builds the Python environment (with `--system-site-packages` so it
+can see the apt-installed `pyscard`, and from the offline wheelhouse if present), enables
+the NFC service, installs the auto-start service and the kiosk browser, and scaffolds the
+M: mount (but does **not** connect it — that's Section 6, done last). When it finishes it
+prints the few manual steps that remain (filling `.env`, enrolling a card). Those are
+covered below.
 
-> **Offline note:** the company Pi has no internet. Run
-> `deploy/install/build-wheelhouse.sh` **once on a Pi (or aarch64 machine) that does have
-> internet** to download all Python packages into `deploy/wheelhouse/`, then bake that into
-> the SD image. `install.sh` installs from there automatically when offline. See
-> `deploy/README.md`.
-
-Then jump to **Section 4.4** (keys & `.env`), **4.5** (mount M:), **4.6**–**4.8** (database,
-admin card, devices) and **Section 5** (kiosk autostart).
+Then jump to **Section 4.4** (keys & `.env`), **4.5**–**4.6** (database, admin card),
+**4.7** (test run), and **Section 5** (kiosk autostart). Section 6 (M: share, real device
+data) comes **last**, once everything else is verified working.
 
 ---
 
 ## 4. Step-by-step setup (manual)
 
-These steps assume a terminal on the Pi and the project at `~/smart_locker`.
+These steps assume a terminal on the Pi and the project at `~/smart_locker`. **Notice what's
+*not* here:** connecting the M: share and importing real device data — that's Section 6,
+deliberately done last, after the kiosk itself is proven working. This matches how the
+share typically gets provisioned in practice: IT connects it once everything else is ready,
+not before.
+
+**Manual (this section) vs. fast path (Section 3c) — pick ONE, not both.** `install.sh`
+(the fast path) does everything in 4.2–4.3 and part of Section 5 for you, automatically, in
+one script. Section 4 is the *same work*, broken into individual commands you type yourself
+— useful the first time, so you understand what's actually happening and can fix any one
+piece without re-running the whole thing. If you're following Section 4 manually, you never
+need to run `install.sh` at all — it's a shortcut for later re-installs or additional units,
+not a required prerequisite.
+
+**If you make a mistake partway through:** almost everything below is safe to just re-run —
+`apt`/`dpkg` installs, `python3 -m venv`, `pip install`, and `scripts.init_db` are all
+harmless to repeat. The one genuinely destructive step is re-running `scripts.init_db` on a
+database that already has real data in it (Section 4.5 explicitly calls this out). If
+something feels badly broken and you're not sure what state you're in, the true reset button
+is cheap: re-flash the SD card from Raspberry Pi Imager (Step 0) and start over — you lose
+nothing except retyping these commands, since the offline install kit on your USB stick is
+untouched and reusable as-is.
 
 ### 4.1 Get the code onto the Pi
 
-Copy the project folder to the Pi (USB stick, `scp`, or the SD image already contains it).
-Open a terminal in the project folder:
+Boot the Pi for the first time (with a temporary keyboard/mouse and the display connected —
+the display needs its own power supply plugged in too; see Section 2). Once you're at the
+desktop:
 
-```bash
-cd ~/smart_locker
-```
+1. **Open a terminal.** On Raspberry Pi OS's default desktop, look for a black terminal-
+   screen icon in the taskbar (top or bottom of the screen), or open the application menu
+   (the Raspberry Pi icon, top-left) → **Accessories** → **Terminal**. A window opens with a
+   command prompt — this is bash, the same shell used throughout this guide.
+2. Plug in the USB stick you prepared in Step 0b. Give it a couple of seconds to auto-mount.
+3. Confirm you can see it and find its exact path:
+   ```bash
+   ls /media/*/*
+   ```
+   This lists what's inside your home folder's auto-mounted drives — you should see your USB
+   stick's name as one of the folders, and the `smart_locker` project folder inside it.
+4. Copy the whole project folder into your home directory (adjust the path below to match
+   exactly what step 3 showed you — the `*` wildcards usually work as-is if this is the only
+   USB stick plugged in):
+   ```bash
+   cp -r /media/*/*/smart_locker ~/smart_locker
+   ```
+5. Move into the project folder — **every command in the rest of this guide assumes you're
+   sitting in this directory**:
+   ```bash
+   cd ~/smart_locker
+   ```
+   Confirm you're in the right place and can see the project files:
+   ```bash
+   pwd    # should print /home/<your-username>/smart_locker
+   ls     # should list smart_locker/, config/, scripts/, deploy/, requirements.txt, ...
+   ```
+
+(Files app drag-and-drop works identically to steps 2–4 if you prefer a GUI over typing —
+just end up with the project at `~/smart_locker` either way.)
 
 ### 4.2 System packages and the NFC reader
 
 The NFC reader talks to Linux through the **PC/SC daemon** (`pcscd`) plus the CCID driver.
-You also need the CIFS tools (for the M: mount) and Chromium (for the kiosk display):
+You also need the CIFS tools (for the M: mount, connected later), Chromium (for the kiosk
+display), and `python3-pyscard` (the reader's Python bindings — see Section 3a for why this
+comes from a `.deb`, not pip). Run these from the terminal, still inside `~/smart_locker`:
 
 ```bash
-sudo apt update
+sudo dpkg -i deploy/system-packages/python3-pyscard_*.deb
 sudo apt install -y pcscd pcsc-tools libccid cifs-utils chromium unclutter curl python3-venv
 sudo systemctl enable --now pcscd
 ```
+
+Since this Pi has no internet, that `apt install` line will fail unless these packages were
+already present on the Full image (they usually are — Chromium and the CIFS/PCSC tools are
+common enough to ship on Full) or you've separately staged their `.deb`s the same way as
+`pyscard`. If something's missing, `install.sh` prints a clear warning naming exactly what,
+rather than failing silently.
 
 Plug in the ACR1252U and confirm Linux sees it:
 
@@ -150,15 +453,33 @@ Plug in the ACR1252U and confirm Linux sees it:
 pcsc_scan          # should list "ACS ACR1252..."; press Ctrl-C to stop
 ```
 
-If it isn't listed, see **Section 8 (Troubleshooting)**.
+If it isn't listed, see **Section 9 (Troubleshooting)**.
 
 ### 4.3 Python environment
 
 ```bash
-python3 -m venv venv
+python3 -m venv --system-site-packages venv
 source venv/bin/activate
-pip install -r requirements.txt
+pip install --no-index --find-links deploy/wheelhouse -r <(grep -vi '^pyscard' requirements.txt)
 ```
+
+`--system-site-packages` is what lets this venv see the `python3-pyscard` you installed at
+the system level in 4.2 — a plain `python3 -m venv venv` would be fully isolated and
+wouldn't see it. `--no-index --find-links deploy/wheelhouse` tells pip to install from the
+wheels you staged in Step 0b instead of reaching out to PyPI (which it can't reach anyway).
+This creates the venv as a new `venv/` folder *inside* `~/smart_locker` — you should now see
+it if you run `ls`.
+
+**Important: `source venv/bin/activate` only applies to the current terminal window.** If
+you close this terminal (or reboot) and open a new one later to keep working through the
+rest of this guide, `python`/`pip` will silently go back to meaning the *system* Python,
+which doesn't have any of these packages — commands will fail or behave strangely rather
+than clearly erroring. Every time you open a fresh terminal to run a `python -m scripts...`
+or `python -m smart_locker.app` command from this guide, first run:
+```bash
+cd ~/smart_locker && source venv/bin/activate
+```
+(You'll know it worked because your prompt gets a `(venv)` prefix.)
 
 Verify the reader is reachable from Python:
 
@@ -185,40 +506,68 @@ cp deploy/.env.pi.example .env
 nano .env          # paste SMART_LOCKER_ENC_KEY, SMART_LOCKER_HMAC_KEY, and SMART_LOCKER_UPDATE_HMAC_KEY
 ```
 
-The template already points the Excel paths at the M: mount (`/mnt/locker/...`) and keeps
-the database local. Adjust the `SMART_LOCKER_SOURCE_EXCEL_PATH` filename to match your real
-workbook. **Keep `.env` secret** — it holds the encryption keys (it is already gitignored).
+The template already points the Excel paths at the M: mount (`/mnt/locker/...`, connected
+later in Section 6) and keeps the database local. Adjust the
+`SMART_LOCKER_SOURCE_EXCEL_PATH` filename to match your real workbook. **Keep `.env`
+secret** — it holds the encryption keys (it is already gitignored).
 
-### 4.5 Mount the M: network share (CIFS)
+**Every line in `.env`, explained** (the full authoritative reference, with every default,
+is Section 11 — this is the same information, walked through in the order it appears in
+`deploy/.env.pi.example`):
 
-The Pi reaches the M: drive as a CIFS (SMB) network mount at `/mnt/locker`.
+- `SMART_LOCKER_ENC_KEY` — the AES-256-GCM key. Every card UID is encrypted with this
+  before it touches the database. You just generated it above; paste it in as-is.
+- `SMART_LOCKER_HMAC_KEY` — a *separate* key used to compute a one-way fingerprint of each
+  card UID, so the app can look up "have I seen this card before?" by comparing
+  fingerprints, without ever decrypting every stored UID to check. Also just generated.
+- `SMART_LOCKER_UPDATE_HMAC_KEY` — a *third*, unrelated key that has nothing to do with
+  cards. It signs/verifies release tarballs so `update.sh` refuses to apply anything that
+  wasn't produced by someone who has this exact key (Section 9). Also generated by the same
+  command; paste in the third value.
+- `SMART_LOCKER_DB_PATH` — where the SQLite database file lives. Leave this pointing at the
+  Pi's local disk (the template already does) — never move it onto the M: share.
+- `SMART_LOCKER_READER_NAME` — a text filter used to pick the right reader if more than one
+  PC/SC device is plugged in. `ACR1252` (the default) matches the ACR1252U; you shouldn't
+  need to touch this unless you use a different reader model.
+- `SMART_LOCKER_SESSION_TIMEOUT` — seconds of no touch before a session auto-ends (120 by
+  default = 2 minutes). Purely a UX/security tradeoff; change it if 2 minutes feels wrong
+  for how people actually use the kiosk.
+- `SMART_LOCKER_MAX_BORROWS` — how many devices one person can have checked out at once
+  before Borrow refuses further items (5 by default).
+- `SMART_LOCKER_API_HOST` / `SMART_LOCKER_API_PORT` — what address/port the backend listens
+  on. `0.0.0.0:8000` (the default) means "every network interface, port 8000" — this is
+  what lets you reach `http://<pi-address>:8000/dashboard` from another computer on the
+  same network. You almost never need to change this.
+- `SMART_LOCKER_SOURCE_EXCEL_PATH` — the company device master list to **import from** M:.
+  Empty disables automatic import entirely. Point this at the real filename once you know
+  it (Section 6.2) — until then it can stay as the template's placeholder.
+- `SMART_LOCKER_EXCEL_PATH` — the workbook the app **writes back to** M: (devices,
+  transactions, users). Different from the line above — one is read-from, this one is
+  written-to.
+- `SMART_LOCKER_EXCEL_AUTO_EXPORT` — `1` means "refresh that exported workbook
+  automatically after every import/photo change." The Pi template sets this to `1`; your
+  dev machine's `.env.example` leaves it off, since there's no M: share to write to there.
+- `SMART_LOCKER_SOURCE_SYNC_HOUR` / `SMART_LOCKER_SOURCE_SYNC_MINUTE` — what time of day
+  (24-hour clock) the automatic daily re-import from M: runs. `6` / `0` means 06:00.
+- `SMART_LOCKER_SOURCE_POLL_SECONDS` — only matters because M: is a network share: Linux
+  can't get an instant "this file changed" notification for edits made by *other* computers
+  on a CIFS mount, so instead the app checks the file's last-modified time this often
+  (seconds) as a fallback, on top of the daily import. 30 is a reasonable default; don't set
+  it below 5.
+- `SMART_LOCKER_PHOTO_INPUT_PATH` — a folder (can be on M: or local) the app scans for
+  device photos, matched by filename to the device model. Empty disables photo import
+  entirely.
+- `SMART_LOCKER_UPDATE_DIR` — the M: folder `update.sh` watches for a new signed release
+  tarball. Change this one value if you want updates picked up from a different M: folder —
+  no script edits needed anywhere else.
+- `SMART_LOCKER_KEEP_BACKUPS` — how many old code+database backup pairs `update.sh` keeps
+  under `./backups` before deleting the oldest. `5` by default.
 
-1. Create the mount point and a root-only credentials file:
+*(This is a different file from the repo-root `.env.example` you may have used for
+development — that one has empty/local defaults meant for a Windows dev machine with no M:
+share and no update mechanism. Always use `deploy/.env.pi.example` on the Pi.)*
 
-   ```bash
-   sudo mkdir -p /mnt/locker
-   sudo install -d -m 700 /etc/smart-locker
-   sudo cp deploy/mount/cifs-credentials.example /etc/smart-locker/cifs-credentials
-   sudo nano /etc/smart-locker/cifs-credentials      # real username / password / domain
-   sudo chmod 600 /etc/smart-locker/cifs-credentials
-   ```
-
-2. Add the mount line to `/etc/fstab`. Copy the line from `deploy/mount/fstab.snippet` and
-   replace `//SERVER/share` with the real share path and the `uid`/`gid` with the locker
-   user's ids (`id <user>`):
-
-   ```bash
-   sudo nano /etc/fstab        # paste & edit the line from deploy/mount/fstab.snippet
-   sudo systemctl daemon-reload
-   sudo mount /mnt/locker
-   ls /mnt/locker              # you should see the company files
-   ```
-
-The line uses `nofail` and `x-systemd.automount`, so the Pi still boots and the kiosk still
-works even if the share is temporarily unreachable — it just can't import/export until the
-share comes back.
-
-### 4.6 Initialize the database
+### 4.5 Initialize the database
 
 ```bash
 python -m scripts.init_db
@@ -228,7 +577,7 @@ python -m scripts.init_db
 This creates `smart_locker.db` with four tables: `users`, `registrants`, `devices`,
 `transaction_logs`.
 
-### 4.7 Enroll your first (admin) card
+### 4.6 Enroll your first (admin) card
 
 With the reader plugged in:
 
@@ -240,58 +589,7 @@ When you see `Place card on reader...`, tap your card and hold it steady for 1�
 The card UID is masked in the output (e.g. `A1****D4`) and stored encrypted — only admins
 can ever decrypt it. Enroll regular users the same way with `--role user`.
 
-### 4.8 Load devices from the M: Excel list
-
-The company device master list lives on M:. Import it (it filters to the locker/"schrank"
-rows and auto-numbers slots 1…N). German and English column headers are auto-detected.
-
-```bash
-# Preview without writing anything:
-python -m scripts.import_devices --file "/mnt/locker/Messmittelliste.xlsx" --dry-run
-
-# Import for real:
-python -m scripts.import_devices --file "/mnt/locker/Messmittelliste.xlsx"
-```
-
-| Excel column | German | Maps to | Required? |
-|---|---|---|---|
-| Equipment | Equipment | `pm_number` | **Yes** — the device identifier |
-| Category | Kategorie | `device_type` | No |
-| Description | Beschreibung | `description` | No |
-| Manufacturer | Hersteller | `manufacturer` | No |
-| Type designation | Typbezeichnung | `model` | No |
-| Serial number | Hersteller-serialnummer | `serial_number` | No |
-| Barcode | Barcode | `barcode` | No |
-| Locker placement | Platz Messmittelschrank | `locker_slot` | No |
-| Calibration date | Datum der nächsten Kalibrierung | `calibration_due` | No |
-
-If auto-detection picks the wrong column, override it, e.g.
-`--pm-col "Equipment" --type-col "Kategorie"`. Re-importing is safe — devices are matched by
-PM number, and a re-import **never** overwrites `locker_slot`, `image_path`, `description`,
-`status`, or `borrower`.
-
-Once running as a service, this same import also happens **automatically**: once on startup,
-once a day at 06:00, and on demand from the hidden admin panel. (See Section 7 for why the
-live "watch the file" mode is off for network shares.)
-
-### 4.9 Add device photos
-
-Photos make the touch UI easier to use. Two ways to attach them — both copy the image into
-`smart_locker/frontend/images/` and link it to the matching device(s):
-
-```bash
-# By PM number — list devices, then assign:
-python -m scripts.update_device --list
-python -m scripts.update_device --auto          # auto-match PM-001.jpg, PM-002.png, ...
-python -m scripts.update_device --pm PM-042 --image scope.jpg --description "4-ch 500MHz scope"
-```
-
-Or drop images into the **photo folder** set by `SMART_LOCKER_PHOTO_INPUT_PATH`, named after
-the device **model** (e.g. `87V.jpg` applies to every "87V" device). If that folder is on
-the M: share, photos present at startup are applied automatically; photos added later are
-picked up on the next restart or by re-running `update_device --auto`.
-
-### 4.10 Run it (test before making it permanent)
+### 4.7 Run it (test before making it permanent)
 
 ```bash
 python -m smart_locker.app
@@ -300,6 +598,7 @@ python -m smart_locker.app
 You'll see the backend start, the NFC reader come up, and the web server bind to port 8000.
 Open `http://localhost:8000` in a browser on the Pi to see the kiosk UI. Press `Ctrl+C` to
 stop. (Use `python -m smart_locker.app --cli` for a console-only NFC loop with no web UI.)
+At this point there's no real device data yet — that's expected, it comes in Section 6.
 
 When that works, make it permanent — Section 5.
 
@@ -339,9 +638,105 @@ session for your kiosk user (`sudo raspi-config` → *System Options* → *Boot 
 is rotated, set the display rotation in `/boot/firmware/config.txt` (e.g. `display_rotate=`
 or a `video=` line) and reboot.
 
+At this point the kiosk is fully working end-to-end, just with no real device inventory yet
+(the empty database from Section 4.5). That's intentional — **connect the M: share now**,
+Section 6, typically once IT is ready to provision it.
+
 ---
 
-## 6. Day-to-day: how the kiosk is used
+## 6. Connect the M: share and load your real data (do this last)
+
+Everything up to here works with **zero** network access. This section is the one place the
+Pi needs the company network — and it's deliberately the *last* thing you set up, matching
+how the share is usually actually provisioned (IT connects it once the appliance itself is
+proven working, not before). The mount is a **soft dependency**: if the share is ever down
+after this point, borrow/return keeps working from the local database — only import/export
+pause until it's back (see Section 5's systemd unit comments, and Section 9).
+
+### 6.1 Mount the M: network share (CIFS)
+
+The Pi reaches the M: drive as a CIFS (SMB) network mount at `/mnt/locker`.
+
+1. Create the mount point and a root-only credentials file (skip if `install.sh` already
+   scaffolded these):
+
+   ```bash
+   sudo mkdir -p /mnt/locker
+   sudo install -d -m 700 /etc/smart-locker
+   sudo cp deploy/mount/cifs-credentials.example /etc/smart-locker/cifs-credentials
+   sudo nano /etc/smart-locker/cifs-credentials      # real username / password / domain
+   sudo chmod 600 /etc/smart-locker/cifs-credentials
+   ```
+
+2. Add the mount line to `/etc/fstab`. Copy the line from `deploy/mount/fstab.snippet` and
+   replace `//SERVER/share` with the real share path and the `uid`/`gid` with the locker
+   user's ids (`id <user>`):
+
+   ```bash
+   sudo nano /etc/fstab        # paste & edit the line from deploy/mount/fstab.snippet
+   sudo systemctl daemon-reload
+   sudo mount /mnt/locker
+   ls /mnt/locker              # you should see the company files
+   ```
+
+The line uses `nofail` and `x-systemd.automount`, so the Pi still boots and the kiosk still
+works even if the share is temporarily unreachable — it just can't import/export until the
+share comes back.
+
+### 6.2 Load devices from the M: Excel list
+
+The company device master list lives on M:. Import it (it filters to the locker/"schrank"
+rows and auto-numbers slots 1…N). German and English column headers are auto-detected.
+
+```bash
+# Preview without writing anything:
+python -m scripts.import_devices --file "/mnt/locker/Messmittelliste.xlsx" --dry-run
+
+# Import for real:
+python -m scripts.import_devices --file "/mnt/locker/Messmittelliste.xlsx"
+```
+
+| Excel column | German | Maps to | Required? |
+|---|---|---|---|
+| Equipment | Equipment | `pm_number` | **Yes** — the device identifier |
+| Category | Kategorie | `device_type` | No |
+| Description | Beschreibung | `description` | No |
+| Manufacturer | Hersteller | `manufacturer` | No |
+| Type designation | Typbezeichnung | `model` | No |
+| Serial number | Hersteller-serialnummer | `serial_number` | No |
+| Barcode | Barcode | `barcode` | No |
+| Locker placement | Platz Messmittelschrank | `locker_slot` | No |
+| Calibration date | Datum der nächsten Kalibrierung | `calibration_due` | No |
+
+If auto-detection picks the wrong column, override it, e.g.
+`--pm-col "Equipment" --type-col "Kategorie"`. Re-importing is safe — devices are matched by
+PM number, and a re-import **never** overwrites `locker_slot`, `image_path`, `description`,
+`status`, or `borrower`.
+
+Once running as a service, this same import also happens **automatically**: once on startup,
+once a day at 06:00, and on demand from the hidden admin panel. (See Section 8 for why the
+live "watch the file" mode is off for network shares.)
+
+### 6.3 Add device photos
+
+Photos make the touch UI easier to use. Two ways to attach them — both copy the image into
+`smart_locker/frontend/images/` and link it to the matching device(s):
+
+```bash
+# By PM number — list devices, then assign:
+python -m scripts.update_device --list
+python -m scripts.update_device --auto          # auto-match PM-001.jpg, PM-002.png, ...
+python -m scripts.update_device --pm PM-042 --image scope.jpg --description "4-ch 500MHz scope"
+```
+
+Or drop images into the **photo folder** set by `SMART_LOCKER_PHOTO_INPUT_PATH`, named after
+the device **model** (e.g. `87V.jpg` applies to every "87V" device). If that folder is on
+the M: share, photos present at startup are applied automatically; photos added later are
+picked up on the next restart or by re-running `update_device --auto`.
+
+---
+
+## 7. Day-to-day: how the kiosk is used
 
 ### Session flow (tap-and-go)
 
@@ -378,7 +773,7 @@ authenticate. After that, everything happens on the touch display.
 
 ---
 
-## 7. Excel, the M: share, and the dashboard
+## 8. Excel, the M: share, and the dashboard
 
 There are two ways to see live data — a web dashboard and the Excel workbook on M:.
 
@@ -403,7 +798,7 @@ immediately, use **Sync source** in the admin panel, or run
 
 ---
 
-## 8. Operations — logs, troubleshooting, self-healing & updates
+## 9. Operations — logs, troubleshooting, self-healing & updates
 
 **Logs** are in two places:
 
@@ -418,6 +813,9 @@ tail -f logs/smart_locker.log                  # the app's own rotating log file
 - A kernel NFC module can grab the reader. If so, blacklist it:
   `echo -e "blacklist pn533\nblacklist pn533_usb\nblacklist nfc" | sudo tee /etc/modprobe.d/blacklist-nfc.conf` then reboot.
 - The app's error message will tell you the Linux fix: `sudo systemctl start pcscd`.
+- If `import smartcard` fails in the venv, confirm `python3-pyscard` is actually installed
+  (`dpkg -l python3-pyscard`) and that the venv was created with `--system-site-packages` —
+  see Section 3a/4.3.
 
 **The M: share won't mount:**
 - `sudo mount /mnt/locker` prints the error. A "permission denied" usually means the
@@ -461,6 +859,12 @@ The Pi lives in the locker, far from you, so it is built to heal itself:
 
 You author releases on your company **git host** as usual — but the **Pi never talks to git host**. The
 release rides the **M:** share you already have, so git host's internet access is irrelevant to the Pi.
+There is **no git on the Pi, and none is needed** — this mechanism replaces it entirely. Manually
+syncing/copying files onto the Pi instead of using this mechanism is **not supported**: it wouldn't
+be picked up (wrong filename/no signature), it bypasses the rollback and health-check safety net
+below entirely, and copying files into the app's live working directory while `smart-locker.service`
+is running risks a crash or a partially-overwritten file — the service has to be stopped first, which
+this script already does correctly.
 
 1. **At work** (where you have git host): download the release tarball for the tag — git host's
    "Download source" gives exactly this — named `smart-locker-<version>.tar.gz`. **Sign it** with
@@ -490,7 +894,7 @@ if that step was skipped, use the SSH command above.
 
 ---
 
-## 9. Tests
+## 10. Tests
 
 The test suite needs no NFC hardware (it uses in-memory SQLite and mock data):
 
@@ -501,7 +905,7 @@ python -m pytest tests/test_security.py -v
 
 ---
 
-## 10. Configuration reference
+## 11. Configuration reference
 
 All settings live in `.env` (loaded by `config/settings.py`). The Pi template
 `deploy/.env.pi.example` pre-fills sensible values.
@@ -510,7 +914,7 @@ All settings live in `.env` (loaded by `config/settings.py`). The Pi template
 |---|---|---|
 | `SMART_LOCKER_ENC_KEY` | (required) | AES-256-GCM key, base64 — from `generate_key` |
 | `SMART_LOCKER_HMAC_KEY` | (required) | HMAC-SHA256 key, base64 — from `generate_key` |
-| `SMART_LOCKER_UPDATE_HMAC_KEY` | (required on the Pi) | HMAC-SHA256 key, base64 — from `generate_key`; verifies signed release tarballs, see "Updating the software" in Section 8 |
+| `SMART_LOCKER_UPDATE_HMAC_KEY` | (required on the Pi) | HMAC-SHA256 key, base64 — from `generate_key`; verifies signed release tarballs, see "Updating the software" in Section 9 |
 | `SMART_LOCKER_DB_PATH` | `smart_locker.db` | SQLite path — keep on the Pi's local disk |
 | `SMART_LOCKER_READER_NAME` | `ACR1252` | Substring filter for the NFC reader name |
 | `SMART_LOCKER_SESSION_TIMEOUT` | `120` | Idle session timeout (seconds) |
@@ -521,28 +925,29 @@ All settings live in `.env` (loaded by `config/settings.py`). The Pi template
 | `SMART_LOCKER_EXCEL_PATH` | `smart_locker_data.xlsx` | Where the exported workbook is written (the M: path on the Pi) |
 | `SMART_LOCKER_EXCEL_AUTO_EXPORT` | (off) | `1` = auto-refresh the exported workbook after each import/photo change |
 | `SMART_LOCKER_SOURCE_SYNC_HOUR` / `_MINUTE` | `6` / `0` | Daily source-import time (24h) |
-| `SMART_LOCKER_SOURCE_POLL_SECONDS` | `30` | Mtime-poll interval (seconds, min `5`) used only when the source path is a network share — see Section 8 |
+| `SMART_LOCKER_SOURCE_POLL_SECONDS` | `30` | Mtime-poll interval (seconds, min `5`) used only when the source path is a network share — see Section 9 |
 | `SMART_LOCKER_PHOTO_INPUT_PATH` | (empty) | Folder watched for device photos; empty disables |
-| `SMART_LOCKER_UPDATE_DIR` | `/mnt/locker/locker-updates` | M: folder `update.sh` watches for release tarballs — see "Updating the software" below in Section 8 |
+| `SMART_LOCKER_UPDATE_DIR` | `/mnt/locker/locker-updates` | M: folder `update.sh` watches for release tarballs — see "Updating the software" below in Section 9 |
 | `SMART_LOCKER_KEEP_BACKUPS` | `5` | How many old code+DB backup pairs `update.sh` keeps under `./backups` before pruning |
 
 ---
 
-## 11. What's built vs. what's next
+## 12. What's built vs. what's next
 
 **Built:** NFC enrollment & authentication (AES-256-GCM + HMAC), single-user sessions with
 timeout, device tracking with the full schema, borrow/return with admin overrides and
 per-user limits, self-service registration, Excel import (schrank filter, DE/EN headers) and
 on-demand/auto export, photo assignment, the read-only `/dashboard`, the FastAPI REST API +
 SSE bridge, the 6-screen kiosk UI, **Raspberry Pi appliance deployment** (systemd service,
-CIFS mount, Chromium kiosk, offline install), and 132 hardware-free tests.
+CIFS mount, Chromium kiosk, fully offline install including the no-PyPI-wheel `pyscard`
+case), and 132 hardware-free tests.
 
-**Next:** barcode scanner for shared lockers (Section 14), calibration-due notifications, a
+**Next:** barcode scanner for shared lockers (Section 15), calibration-due notifications, a
 full admin web panel, MIFARE sector reading, and multi-reader support.
 
 ---
 
-## 12. Understanding the frontend files
+## 13. Understanding the frontend files
 
 The frontend is three files, each with one job. A common beginner confusion: **JavaScript is
 not Java** — they are different languages that happen to share part of a name. JavaScript
@@ -644,7 +1049,7 @@ User taps "BORROW"
 
 ---
 
-## 13. The REST API
+## 14. The REST API
 
 The backend API is in `smart_locker/api/routes.py`, with a Server-Sent Events (SSE) stream
 that bridges card taps to the browser.
@@ -680,7 +1085,7 @@ flow. FastAPI serves the kiosk UI (`index.html`) and the dashboard as static fil
 
 ---
 
-## 14. Barcode scanner plan (not yet built)
+## 15. Barcode scanner plan (not yet built)
 
 Each device stores a `barcode` value (imported from the Excel "Barcode" column). The planned
 use: a **shared locker** holds several identical devices (e.g. 5 current probes) instead of
@@ -694,7 +1099,7 @@ included in the API and the export.
 
 ---
 
-## 15. Future improvements
+## 16. Future improvements
 
 - **Calibration-due notifications** — calibration dates are stored; a reminder system is not.
 - **Full admin web panel** — edit users/devices from the browser (today: read-only dashboard
