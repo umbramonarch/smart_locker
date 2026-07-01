@@ -373,7 +373,8 @@ makes the next import report it as **1 updated**.
 detected as a network path by `sync/fs_utils.is_network_path()`. The file
 watcher intentionally skips live monitoring on network paths (inotify never
 fires for remote writes on a CIFS client). Import is triggered by the cron
-and manually — **do not swap in PollingObserver** (see PROJECT-NOTES.md).
+and manually — **do not swap in PollingObserver** to work around this; it doesn't fix
+the underlying CIFS/inotify incompatibility.
 
 ---
 
