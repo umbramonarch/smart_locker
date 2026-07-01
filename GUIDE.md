@@ -68,7 +68,9 @@ in that scenario, and this guide is written for it.
    ports (1200 mA) comfortably covers a reader (~200 mA rated) plus a touch controller
    (well under 100 mA for this class of device) with a lot of headroom to spare. A
    bus-powered (no separate power adapter) hub is fine current-wise for this combination;
-   just don't add other high-draw devices to the same hub.
+   just don't add other high-draw devices to the same hub. A **Delock 64272** (4-port,
+   bus-powered) is a known-good example if you want a specific model to buy rather than
+   picking one yourself.
 6. NFC work cards (MIFARE Classic, Ultralight, NTAG, DESFire — any card with a UID).
 7. Network access to the company **M:** share (wired Ethernet is most reliable) —
    **connected last**, after everything else is working. See Section 6.
@@ -332,10 +334,12 @@ code) installed into it. A venv built on your Windows PC contains **Windows** bi
 which cannot run on Linux at all, let alone the Pi's ARM64 chip specifically — copying it
 over wouldn't fail loudly, individual imports would just be the wrong binary format. A
 wheel file, by contrast, genuinely *is* portable to any machine matching its platform tag —
-that's its whole design purpose. `install.sh` still creates a **fresh** venv on the Pi
-every time (fast, and always gets the absolute paths right), but installs *into* it from
-the wheelhouse instead of the internet — so you get "no waiting on package installation"
-without the portability problem.
+that's its whole design purpose. `install.sh` creates the venv **once**, the first time it
+runs (and always gets the absolute paths right), then installs *into* it from the
+wheelhouse instead of the internet — so you get "no waiting on package installation"
+without the portability problem. Re-running `install.sh` later reuses that same venv
+rather than rebuilding it from scratch — it only recreates the venv if it's missing, or if
+it predates the `--system-site-packages` flag pyscard needs (detected automatically).
 
 ### 3c. Fast path — the install script
 

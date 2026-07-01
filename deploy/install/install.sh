@@ -93,6 +93,14 @@ fi
 # --system-site-packages: python3-pyscard is installed at the SYSTEM level (via apt/dpkg
 # above, not pip — it has no aarch64 wheel to put in the venv/wheelhouse), so the venv
 # needs visibility into system packages to see it.
+# A venv created before this script gained --system-site-packages (or any venv that
+# predates pyscard moving to a system-level apt/dpkg install) cannot see python3-pyscard,
+# even though the package IS installed. Re-running this "idempotent" script must not leave
+# that stale venv in place — detect it via pyvenv.cfg and rebuild it.
+if [ -d "$VENV_DIR" ] && ! grep -q '^include-system-site-packages = true$' "$VENV_DIR/pyvenv.cfg" 2>/dev/null; then
+  echo "==> Existing virtualenv at $VENV_DIR predates --system-site-packages (pyscard would be invisible) — recreating it"
+  rm -rf "$VENV_DIR"
+fi
 if [ ! -d "$VENV_DIR" ]; then
   echo "==> Creating virtualenv at $VENV_DIR"
   sudo -u "$APP_USER" python3 -m venv --system-site-packages "$VENV_DIR"
@@ -119,6 +127,8 @@ if "$VENV_DIR/bin/python" -c "import smartcard" >/dev/null 2>&1; then
 else
   echo "    WARNING: the venv cannot import smartcard — the NFC reader will not work."
   echo "    Check that python3-pyscard is installed (see deploy/system-packages/README.md)."
+  echo "    If it IS installed, the venv itself may be missing --system-site-packages —"
+  echo "    delete it and re-run this script: rm -rf $VENV_DIR && sudo $SCRIPT_DIR/install.sh"
 fi
 
 # --- 3. Enable the PC/SC daemon (ACR1252U reader) ---
