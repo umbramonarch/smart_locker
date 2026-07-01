@@ -29,6 +29,10 @@ playwright-report/
 deploy/wheelhouse/*.whl
 deploy/wheelhouse/*.tar.gz
 
+# Offline system (.deb) packages — e.g. pyscard, which has no aarch64 PyPI wheel;
+# architecture-specific, staged per image, see deploy/system-packages/README.md
+deploy/system-packages/*.deb
+
 # Runtime device-photo cache — populated from the M: photo source at scan time;
 # regenerated on every deployment, never committed. Keep only static UI assets.
 smart_locker/frontend/images/*

@@ -65,6 +65,7 @@ smart_locker/
 │   ├── systemd/                 # smart-locker.service (backend autostart)
 │   ├── kiosk/                   # start-kiosk.sh + autostart .desktop (Chromium fullscreen)
 │   ├── mount/                   # CIFS fstab snippet + credentials template
+│   ├── system-packages/         # Offline .deb packages (pyscard — no aarch64 PyPI wheel)
 │   └── .env.pi.example          # Pi environment template (M: paths pre-filled)
 ├── scripts/
 │   ├── generate_key.py          # Generate AES-256 + HMAC-SHA256 keys for .env

@@ -13,12 +13,13 @@ network-share (CIFS) mount, and an offline Python install.
 |---|---|
 | `.env.pi.example` | Environment template for the Pi — copy to the repo root as `.env`. Paths are pre-filled for the M: mount. |
 | `install/install.sh` | One-shot, idempotent provisioner. Run as root from the repo: `sudo deploy/install/install.sh`. |
-| `install/build-wheelhouse.sh` | Run on an **online** aarch64 host to download all Python wheels for offline install. |
+| `install/build-wheelhouse.sh` | Downloads all Python wheels for offline install. Works from an aarch64 host directly, OR from any other machine (e.g. Windows/x86_64) via pip's cross-platform `--platform`/`--python-version`/`--abi` flags — no aarch64 hardware needed to build it. Deliberately excludes `pyscard` (see below). |
 | `wheelhouse/` | Where those wheels are staged (the `.whl` files are gitignored). |
+| `system-packages/` | Holds the `python3-pyscard` `.deb` — `pyscard` has no prebuilt Linux aarch64 wheel on PyPI, so it's installed via `dpkg`/`apt` instead of pip. See `system-packages/README.md`. |
 | `systemd/smart-locker.service` | Backend service: starts uvicorn + the NFC listener on boot, restarts on crash. |
 | `kiosk/start-kiosk.sh` | Launches Chromium fullscreen at `http://localhost:8000` (auto-detects `chromium`/`chromium-browser`, waits for the backend). |
 | `kiosk/smart-locker-kiosk.desktop` | XDG autostart entry that runs `start-kiosk.sh` on graphical login. |
-| `mount/fstab.snippet` | The `/etc/fstab` CIFS line for the M: share (`nofail` + automount so a missing share never blocks boot). |
+| `mount/fstab.snippet` | The `/etc/fstab` CIFS line for the M: share (`nofail` + automount so a missing share never blocks boot). Connected **last**, after everything else works — see `../GUIDE.md` Section 6. |
 | `mount/cifs-credentials.example` | Template for `/etc/smart-locker/cifs-credentials` (root-only, `chmod 600`). |
 
 ## Architecture in one breath
@@ -39,23 +40,31 @@ stays on the Pi's **local** disk — never on the CIFS share (WAL mode is unreli
 
 ## First-build command sequence
 
+If the Pi will never have internet access at all, build the offline kit **before** the Pi
+ever boots at the deployment site — see `../GUIDE.md` Section 3b/4.1 for the full
+walkthrough (SD card partitions aren't readable from Windows, so getting the project onto
+the Pi needs a USB stick, not a direct copy):
+
 ```bash
-# 0. (online aarch64 host, optional) stage wheels for offline install
+# 0. On ANY machine with internet (aarch64 not required — cross-platform download):
 deploy/install/build-wheelhouse.sh
+# + download the python3-pyscard .deb into deploy/system-packages/ (see that folder's README)
 
 # On the Pi, with the repo at e.g. /home/locker/smart_locker:
-sudo deploy/install/install.sh        # packages, venv, pcscd, service, mount, kiosk
+sudo deploy/install/install.sh        # packages (incl. pyscard via apt/.deb), venv, pcscd, service, kiosk
 
 cp deploy/.env.pi.example .env        # then edit .env
 venv/bin/python -m scripts.generate_key   # paste keys into .env
-sudo nano /etc/smart-locker/cifs-credentials              # real M: login
-sudo nano /etc/fstab                  # add the line from deploy/mount/fstab.snippet
-sudo mount /mnt/locker && ls /mnt/locker                  # verify the share
-
 venv/bin/python -m scripts.init_db
 venv/bin/python -m scripts.enroll_card --name "Your Name" --role admin
 
 sudo systemctl start smart-locker     # then reboot to test kiosk autostart
+
+# LAST — connect the M: share, once the kiosk itself is proven working:
+sudo nano /etc/smart-locker/cifs-credentials              # real M: login
+sudo nano /etc/fstab                  # add the line from deploy/mount/fstab.snippet
+sudo mount /mnt/locker && ls /mnt/locker                  # verify the share
+venv/bin/python -m scripts.import_devices --file "/mnt/locker/<workbook>.xlsx"
 ```
 
 ## Verifying a running Pi

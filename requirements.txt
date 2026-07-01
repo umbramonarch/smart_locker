@@ -1,3 +1,6 @@
+# pyscard has no prebuilt Linux aarch64 wheel on PyPI — on the Pi it's installed via
+# apt/dpkg (python3-pyscard) instead, see deploy/system-packages/README.md. This pin
+# still applies for Windows/macOS dev machines, where pip installs it normally.
 pyscard>=2.0.7
 cryptography>=42.0.0
 SQLAlchemy>=2.0.0
