@@ -460,3 +460,141 @@ class TestRegistrantEndpoints:
         """POST /api/admin/register requires an active session."""
         resp = client.post("/api/admin/register", json={"name": "Someone"})
         assert resp.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Dev / Simulation Endpoint Tests
+# ---------------------------------------------------------------------------
+
+class TestDevEndpoints:
+    """Tests for the no-hardware simulation endpoints -- inert unless the fake
+    reader is enabled AND the running reader is actually the fake one, so
+    production is unaffected regardless of who can reach the kiosk's HTTP port.
+    """
+
+    def test_dev_status_inactive_by_default(self, client, mock_context, monkeypatch):
+        """GET /api/dev/status reports inactive when SMART_LOCKER_FAKE_READER is unset.
+
+        Forces the flag unset via monkeypatch rather than relying on the ambient
+        host .env -- a dev box left with SMART_LOCKER_FAKE_READER=1 from a prior
+        simulation session must not silently make this test pass for the wrong
+        reason (production kiosks must never have this flag on either).
+        """
+        monkeypatch.delenv("SMART_LOCKER_FAKE_READER", raising=False)
+        mock_context.reader = None
+        resp = client.get("/api/dev/status")
+        assert resp.status_code == 200
+        assert resp.json()["fake_reader"] is False
+
+    def test_dev_tap_404_by_default(self, client, mock_context, monkeypatch):
+        """POST /api/dev/tap 404s when the simulation harness is not active (production posture)."""
+        monkeypatch.delenv("SMART_LOCKER_FAKE_READER", raising=False)
+        mock_context.reader = None
+        resp = client.post("/api/dev/tap", json={"uid": "AABBCCDD"})
+        assert resp.status_code == 404
+
+    def test_dev_tap_404_when_flag_set_but_reader_not_fake(self, client, mock_context, monkeypatch):
+        """The env flag alone is not enough -- the running reader must actually be the fake one."""
+        monkeypatch.setenv("SMART_LOCKER_FAKE_READER", "1")
+        mock_context.reader = object()  # no simulate_tap -- not a fake reader
+        resp = client.post("/api/dev/tap", json={"uid": "AABBCCDD"})
+        assert resp.status_code == 404
+
+    def test_dev_tap_enqueues_card_event(self, client, mock_context, monkeypatch):
+        """POST /api/dev/tap simulates a real tap: the fake reader enqueues a CardEvent(INSERTED)."""
+        from smart_locker.nfc.card_observer import CardEvent, CardEventType
+        from smart_locker.nfc.fake_reader import FakeNFCReader
+
+        monkeypatch.setenv("SMART_LOCKER_FAKE_READER", "1")
+        reader = FakeNFCReader()
+        mock_context.reader = reader
+
+        resp = client.post("/api/dev/tap", json={"uid": "AABBCCDD"})
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
+
+        event = reader.poll_event()
+        assert isinstance(event, CardEvent)
+        assert event.event_type == CardEventType.INSERTED
+        assert event.uid == "AABBCCDD"
+
+    def test_dev_tap_no_uid_available(self, client, mock_context, monkeypatch):
+        """POST /api/dev/tap 400s when no UID is supplied and no default is configured."""
+        from smart_locker.nfc.fake_reader import FakeNFCReader
+
+        monkeypatch.setenv("SMART_LOCKER_FAKE_READER", "1")
+        monkeypatch.delenv("SMART_LOCKER_FAKE_DEFAULT_UID", raising=False)
+        mock_context.reader = FakeNFCReader()
+
+        resp = client.post("/api/dev/tap", json={})
+        assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Admin Sync / Update Endpoint Tests
+# ---------------------------------------------------------------------------
+
+class TestAdminSyncAndUpdateEndpoints:
+    """Auth-gate tests for the sync-preview, sync-status, and software-update
+    admin endpoints -- these read/mutate sync state or launch a root-privileged
+    updater, so require_session + the admin-role check is the only thing
+    standing between a LAN client and those actions.
+    """
+
+    def test_sync_preview_requires_session(self, client, mock_context):
+        resp = client.post("/api/admin/sync-preview")
+        assert resp.status_code == 401
+
+    def test_sync_preview_rejects_non_admin(self, client, mock_context, test_user):
+        mock_context.session_mgr.start_session(test_user)
+        resp = client.post("/api/admin/sync-preview")
+        assert resp.status_code == 403
+
+    def test_sync_status_requires_session(self, client, mock_context):
+        resp = client.get("/api/admin/sync-status")
+        assert resp.status_code == 401
+
+    def test_sync_status_rejects_non_admin(self, client, mock_context, test_user):
+        mock_context.session_mgr.start_session(test_user)
+        resp = client.get("/api/admin/sync-status")
+        assert resp.status_code == 403
+
+    def test_sync_status_accepts_admin(self, client, mock_context, admin_user):
+        mock_context.session_mgr.start_session(admin_user)
+        resp = client.get("/api/admin/sync-status")
+        assert resp.status_code == 200
+
+    def test_update_status_requires_session(self, client, mock_context):
+        resp = client.get("/api/admin/update-status")
+        assert resp.status_code == 401
+
+    def test_update_status_rejects_non_admin(self, client, mock_context, test_user):
+        mock_context.session_mgr.start_session(test_user)
+        resp = client.get("/api/admin/update-status")
+        assert resp.status_code == 403
+
+    def test_update_status_accepts_admin(self, client, mock_context, admin_user):
+        mock_context.session_mgr.start_session(admin_user)
+        resp = client.get("/api/admin/update-status")
+        assert resp.status_code == 200
+        assert resp.json()["state"] == "idle"
+
+    def test_trigger_update_requires_session(self, client, mock_context):
+        resp = client.post("/api/admin/update")
+        assert resp.status_code == 401
+
+    def test_trigger_update_rejects_non_admin(self, client, mock_context, test_user):
+        mock_context.session_mgr.start_session(test_user)
+        resp = client.post("/api/admin/update")
+        assert resp.status_code == 403
+
+    def test_trigger_update_unavailable_off_pi(self, client, mock_context, admin_user, monkeypatch):
+        """When systemd-run isn't present (dev/CI host), the endpoint refuses cleanly
+        (503) rather than pretending to update -- it must never fall through to
+        attempting the privileged update path off the Pi."""
+        import smart_locker.api.routes as routes_module
+
+        monkeypatch.setattr(routes_module, "_SYSTEMD_RUN", None)
+        mock_context.session_mgr.start_session(admin_user)
+        resp = client.post("/api/admin/update")
+        assert resp.status_code == 503

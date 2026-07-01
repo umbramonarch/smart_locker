@@ -414,15 +414,20 @@ def import_from_source_excel(
         len(parsed_devices), result.non_locker_skipped,
     )
 
-    if not parsed_devices or dry_run:
+    if not parsed_devices:
         return result
 
-    # --- Import to database ---
-    from smart_locker.database.engine import get_session
+    # --- Import to database (or compute the diff only, when dry_run) ---
+    from smart_locker.database.engine import get_session, get_session_factory
     from smart_locker.database.repositories import UserRepository
     from smart_locker.sync.excel_sync import export_to_excel
 
-    with get_session() as session:
+    # Run the real create/update logic so the per-category counts are exact, then
+    # either commit (a real import) or — for a dry run (preview) — roll the whole
+    # transaction back, so add/update/unchanged are reported without persisting.
+    factory = get_session_factory()
+    session = factory()
+    try:
         for d in parsed_devices:
             try:
                 # Resolve the borrower name (from "Aktueller Einsatzort")
@@ -487,6 +492,26 @@ def import_from_source_excel(
                 result.error_details.append(f"PM {d['pm_number']}: {e}")
                 logger.error("Import error for PM %s: %s", d["pm_number"], e)
 
+        if dry_run:
+            session.rollback()
+        else:
+            session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+    # A dry run reports the diff and stops here — no registrant sync, no photo
+    # re-scan, no Excel export (all of which would mutate state).
+    if dry_run:
+        logger.info(
+            "Source import DRY RUN: %d would import, %d would update, %d unchanged, "
+            "%d errors (nothing written).",
+            result.imported, result.updated, result.unchanged, result.errors,
+        )
+        return result
+
     # --- Sync registrant names to the registrants table ---
     # This is done after the device import so both operations share the
     # same get_session factory. Names are additive — existing registrants
@@ -526,12 +551,16 @@ def import_from_source_excel(
             except Exception as e:
                 logger.warning("Photo re-scan after import failed: %s", e)
 
-    # Trigger output Excel sync
+    # Trigger output Excel sync to the configured export path (the M: share on the
+    # Pi). Only when EXCEL_AUTO_EXPORT is set; otherwise the export stays on-demand
+    # (and the test suite, which never sets SMART_LOCKER_EXCEL_PATH, is unaffected).
     if result.imported > 0 or result.updated > 0:
-        try:
-            export_to_excel(engine)
-        except Exception as e:
-            logger.warning("Excel sync after import failed: %s", e)
+        from config.settings import EXCEL_AUTO_EXPORT, EXCEL_SYNC_PATH
+        if EXCEL_AUTO_EXPORT:
+            try:
+                export_to_excel(engine, EXCEL_SYNC_PATH)
+            except Exception as e:
+                logger.warning("Excel sync after import failed: %s", e)
 
     logger.info(
         "Source import done: %d imported, %d updated, %d unchanged, %d errors, "

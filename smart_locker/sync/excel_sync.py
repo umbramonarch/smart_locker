@@ -198,52 +198,56 @@ def export_to_excel(engine, output_path: str | Path) -> None:
     path = Path(output_path)
     wb = _build_workbook(engine)
 
-    # Write to a temp file first, then atomically replace the target.
-    # This avoids partial writes if the process is interrupted mid-save.
-    tmp_fd, tmp_path_str = tempfile.mkstemp(suffix=".xlsx", dir=path.parent)
-    os.close(tmp_fd)
-    tmp_path = Path(tmp_path_str)
-
+    # The export is best-effort and must NEVER raise: the database is the source
+    # of truth, and the kiosk must not crash because a backup workbook couldn't be
+    # written. Any OSError — an unreachable/down M: share (mkstemp can't stage the
+    # temp file), the share vanishing mid-write (wb.save), or the replace failing
+    # for a reason other than a lock — is logged and skipped here in one place; the
+    # next scheduled/manual sync retries once the share is back.
+    tmp_path = None
     try:
+        # Stage into a temp file in the target dir, then atomically replace, so an
+        # interrupted write can't leave a half-written workbook behind.
+        tmp_fd, tmp_path_str = tempfile.mkstemp(suffix=".xlsx", dir=path.parent)
+        os.close(tmp_fd)
+        tmp_path = Path(tmp_path_str)
         wb.save(tmp_path)
 
-        # Retry the atomic replace up to 3 times — the file may be
-        # momentarily locked by Excel (e.g., during an auto-save cycle)
-        # but released within a second or two.
+        # Retry the atomic replace up to 3 times — the target may be momentarily
+        # locked by Excel (an auto-save cycle) but released within a second or two.
+        # A lock is the one failure worth retrying; any other OSError falls through
+        # to the outer handler.
         max_retries = 3
         retry_delay_seconds = 1.0
         for attempt in range(1, max_retries + 1):
             try:
                 tmp_path.replace(path)
                 logger.debug("Excel export: %s written successfully", path)
-                # Replace succeeded — exit the retry loop
                 break
             except PermissionError:
                 if attempt < max_retries:
-                    # File is locked — wait briefly and retry in case
-                    # Excel releases the lock (e.g., after auto-save)
                     logger.debug(
-                        "Excel export: %s is locked, retrying in %ss "
-                        "(attempt %d/%d)",
+                        "Excel export: %s is locked, retrying in %ss (attempt %d/%d)",
                         path, retry_delay_seconds, attempt, max_retries,
                     )
                     time.sleep(retry_delay_seconds)
                 else:
-                    # All retries exhausted — log warning and give up
                     logger.warning(
-                        "Excel export: %s is locked (open in Excel). "
-                        "Export skipped.",
+                        "Excel export: %s is locked (open in Excel). Export skipped.",
                         path,
                     )
+    except OSError as e:
+        logger.warning(
+            "Excel export to %s skipped — destination unavailable or unwritable (%s).",
+            path, e,
+        )
     finally:
-        # Always clean up the temp file — never leave orphaned files in
-        # the output directory regardless of success or failure
-        if tmp_path.exists():
+        # Always clean up the temp file; never leave an orphan in the output dir.
+        if tmp_path is not None and tmp_path.exists():
             try:
                 tmp_path.unlink()
             except OSError:
-                # Temp file removal is best-effort; may fail if another
-                # process grabbed it, but this is not a critical error
+                # Best-effort cleanup; not critical if another process grabbed it.
                 pass
 
 

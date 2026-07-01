@@ -1769,6 +1769,13 @@ body::after {
   box-shadow: 0 8px 28px rgba(239,68,68,0.08);
 }
 
+/* Sync button awaiting a confirm tap after a preview (W3a). */
+.admin-action-btn.confirm {
+  border-color: rgba(245,158,11,0.55);
+  box-shadow: 0 8px 28px rgba(245,158,11,0.16);
+}
+.admin-action-btn.confirm .admin-btn-label { color: rgba(245,158,11,0.95); }
+
 .admin-btn-icon {
   width: 42px;
   height: 42px;

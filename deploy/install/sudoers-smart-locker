@@ -1,0 +1,12 @@
+# File: sudoers-smart-locker
+# Description: Grants the Smart Locker service account passwordless sudo for the
+#              EXACT privileged commands the in-app "Update now" button and
+#              deploy/install/update.sh need — managing its own systemd service
+#              and launching the transient update unit — and nothing else.
+# Project: smart_locker/deploy
+# Notes: install.sh renders this to /etc/sudoers.d/smart-locker with __APP_USER__
+#        and __APP_DIR__ substituted, mode 0440, owned by root, and validates it
+#        with `visudo -cf`. Every command is fully specified (no trailing
+#        wildcard) so this cannot be used to run arbitrary commands as root.
+#        Keep LF line endings.
+__APP_USER__ ALL=(root) NOPASSWD: /usr/bin/systemctl start smart-locker.service, /usr/bin/systemctl stop smart-locker.service, /usr/bin/systemctl restart smart-locker.service, /usr/bin/systemctl start smart-locker, /usr/bin/systemctl stop smart-locker, /usr/bin/systemctl restart smart-locker, /usr/bin/systemd-run --collect --unit=smart-locker-update /bin/bash __APP_DIR__/deploy/install/update.sh

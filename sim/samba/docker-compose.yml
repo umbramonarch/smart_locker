@@ -1,0 +1,45 @@
+---
+# File: docker-compose.yml
+# Description: Minimal Samba share that stands in for the company M: drive.
+#              Exposes a "locker" share on the host at port 445, populated
+#              from ./share-data/ (drop sample workbook + photos there).
+# Project: smart_locker/sim/samba
+# Notes:
+#   - Drop the sample workbook at:  sim/samba/share-data/Messmittelliste.xlsx
+#     (copy from sim/data/Messmittelliste.sample.xlsx)
+#   - Drop photos at:               sim/samba/share-data/photos/
+#   - Inside the QEMU guest, mount with:
+#       sudo mount -t cifs //10.0.2.2/locker /mnt/locker \
+#            -o username=simuser,password=simpass,vers=3.0,uid=locker,gid=locker
+#     (10.0.2.2 is the QEMU user-net gateway — the host from inside the guest)
+#   - Outside QEMU (native run on Windows/Linux), the env vars in
+#     sim/.env.sim.example point directly at sim/data/ — no CIFS mount needed.
+#
+# Start:  docker compose up -d
+# Stop:   docker compose down
+
+services:
+  samba:
+    image: dperson/samba:latest
+    # Alternative actively-maintained image (uncomment to use instead):
+    # image: ghcr.io/crazy-max/samba:4.19
+
+    container_name: smart-locker-samba
+    restart: unless-stopped
+    ports:
+      - "445:445"     # SMB/CIFS — map to a higher port (e.g. 4445:445) if 445
+      - "139:139"     #            is already in use on the host
+    environment:
+      # dperson/samba env-var syntax: USER="name;password"  SHARE="name;path;..."
+      - "USERID=1000"
+      - "GROUPID=1000"
+      - "USER=simuser;simpass"
+      - "SHARE=locker;/share;yes;no;no;simuser;simuser"
+      - "RECYCLE=false"
+    volumes:
+      - ./share-data:/share:rw
+    # inotify is deliberately NOT used — remote Samba writes never trigger
+    # inotify events on the CIFS client (same as the real M: drive on the Pi).
+    # The importer relies on the startup + daily-06:00 cron, not live watching.
+
+volumes: {}

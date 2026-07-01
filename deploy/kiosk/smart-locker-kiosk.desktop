@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Smart Locker Kiosk
+Comment=Launch the Smart Locker UI fullscreen in Chromium on login
+Exec=/home/locker/smart_locker/deploy/kiosk/start-kiosk.sh
+Terminal=false
+X-GNOME-Autostart-enabled=true
