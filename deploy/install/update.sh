@@ -29,10 +29,16 @@ APP_DIR="${SMART_LOCKER_DIR:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 # ...) — one config file to edit, not a second one. The transient systemd-run
 # unit that launches this script carries no environment of its own, so without
 # this the update folder could never be changed except by editing this script.
+#
+# This script runs as root, but .env is owned by the app's non-root service
+# account -- so it is read as plain KEY=VALUE data (never `source`d/`.`-ed),
+# which would hand root-level shell execution to anyone who can write .env.
 if [ -f "$APP_DIR/.env" ]; then
   set -a
-  # shellcheck disable=SC1091
-  source "$APP_DIR/.env"
+  while IFS='=' read -r _env_key _env_val; do
+    [[ "$_env_key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+    export "$_env_key=$_env_val"
+  done < <(grep -vE '^[[:space:]]*(#|$)' "$APP_DIR/.env")
   set +a
 fi
 
@@ -181,13 +187,24 @@ fi
 log "New release available: $CUR_VERSION -> $NEW_VERSION ($TARBALL)"
 write_status "updating" "Applying $NEW_VERSION."
 
-# Optional integrity check: if a sibling <tarball>.sha256 exists, it must match.
-if [ -f "$TARBALL.sha256" ]; then
-  log "Verifying checksum..."
-  ( cd "$UPDATE_DIR" && sha256sum -c "$(basename "$TARBALL").sha256" >/dev/null ) \
-    || { log "Checksum FAILED — refusing to apply $TARBALL."; write_status "failed" "Release checksum did not match; refused."; rm -rf "$STAGING_DIR"; exit 1; }
-  log "Checksum OK."
-fi
+# Mandatory integrity + authenticity check. A plain checksum sitting next to the
+# tarball on the same M: share only proves self-consistency -- anyone with SMB
+# write access to the share could forge both files together. Instead this
+# requires an HMAC-SHA256 sidecar keyed with SMART_LOCKER_UPDATE_HMAC_KEY, a
+# secret shared only between whoever signs releases (scripts.sign_update) and
+# this Pi's .env -- so a tarball dropped without the key cannot pass. Missing
+# key, missing sidecar, or a mismatch all refuse the update (fail closed).
+[ -n "${SMART_LOCKER_UPDATE_HMAC_KEY:-}" ] \
+  || { log "SMART_LOCKER_UPDATE_HMAC_KEY not set — refusing to apply an unverifiable release. Generate one with: python -m scripts.generate_key"; write_status "failed" "Update HMAC key not configured; refused."; rm -rf "$STAGING_DIR"; exit 1; }
+[ -f "$TARBALL.hmac" ] \
+  || { log "No $TARBALL.hmac sidecar — refusing to apply an unsigned release. Sign it with: python -m scripts.sign_update"; write_status "failed" "Release is unsigned; refused."; rm -rf "$STAGING_DIR"; exit 1; }
+
+log "Verifying release signature..."
+EXPECTED_HMAC="$(tr -d '[:space:]' < "$TARBALL.hmac")"
+ACTUAL_HMAC="$(openssl dgst -sha256 -hmac "$SMART_LOCKER_UPDATE_HMAC_KEY" "$TARBALL" | awk '{print $NF}')"
+[ "$EXPECTED_HMAC" = "$ACTUAL_HMAC" ] \
+  || { log "Signature FAILED — refusing to apply $TARBALL."; write_status "failed" "Release signature did not match; refused."; rm -rf "$STAGING_DIR"; exit 1; }
+log "Signature OK."
 
 # ============================================================================
 # 3. Stage the new code (strip the tarball's top-level dir)
