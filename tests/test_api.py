@@ -472,14 +472,24 @@ class TestDevEndpoints:
     production is unaffected regardless of who can reach the kiosk's HTTP port.
     """
 
-    def test_dev_status_inactive_by_default(self, client, mock_context):
-        """GET /api/dev/status reports inactive when SMART_LOCKER_FAKE_READER is unset."""
+    def test_dev_status_inactive_by_default(self, client, mock_context, monkeypatch):
+        """GET /api/dev/status reports inactive when SMART_LOCKER_FAKE_READER is unset.
+
+        Forces the flag unset via monkeypatch rather than relying on the ambient
+        host .env -- a dev box left with SMART_LOCKER_FAKE_READER=1 from a prior
+        simulation session must not silently make this test pass for the wrong
+        reason (production kiosks must never have this flag on either).
+        """
+        monkeypatch.delenv("SMART_LOCKER_FAKE_READER", raising=False)
+        mock_context.reader = None
         resp = client.get("/api/dev/status")
         assert resp.status_code == 200
         assert resp.json()["fake_reader"] is False
 
-    def test_dev_tap_404_by_default(self, client, mock_context):
+    def test_dev_tap_404_by_default(self, client, mock_context, monkeypatch):
         """POST /api/dev/tap 404s when the simulation harness is not active (production posture)."""
+        monkeypatch.delenv("SMART_LOCKER_FAKE_READER", raising=False)
+        mock_context.reader = None
         resp = client.post("/api/dev/tap", json={"uid": "AABBCCDD"})
         assert resp.status_code == 404
 
