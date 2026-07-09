@@ -43,12 +43,27 @@ trap 'rm -f "$REQS_NO_PYSCARD"' EXIT
 HOST_ARCH="$(uname -m)"
 if [ "$HOST_ARCH" = "aarch64" ] || [ "$HOST_ARCH" = "arm64" ]; then
   echo "==> Native aarch64 host detected ($(python3 --version 2>&1)) — downloading directly."
+  # Native path trusts the host Python to pick compatible wheels. If the host is NOT
+  # on the target Python version we'd silently ship a broken kit for the Pi, so guard
+  # it: fail loud if the host Python != target. (To build cp313 wheels on a non-cp313
+  # aarch64 host, run the cross-download path by invoking this script from x86.)
+  HOST_PY="$("$(command -v python3)" -c 'import sys; print("%d%d" % sys.version_info[:2])')"
+  if [ "$HOST_PY" != "$PYTHON_VERSION" ]; then
+    echo "    FATAL: native aarch64 host is Python $HOST_PY, but target is $PYTHON_VERSION." >&2
+    echo "    Either run this on a ${PYTHON_VERSION} host, or run it from x86_64/Windows" >&2
+    echo "    (the cross-download path below targets ${PYTHON_ABI} correctly)." >&2
+    exit 1
+  fi
+  # Wipe old wheels first so a rebuild can't leave mixed-ABI debris from a prior
+  # build (e.g. cp311 wheels lingering next to new cp313 ones).
+  rm -f "$DEST"/*.whl "$DEST"/*.tar.gz 2>/dev/null || true
   python3 -m pip download -r "$REQS_NO_PYSCARD" -d "$DEST"
 else
   echo "==> Host is $HOST_ARCH, not aarch64 — cross-downloading Linux/aarch64 wheels for Python ${PYTHON_VERSION}."
   echo "    (verified: every package in requirements.txt except pyscard publishes a"
   echo "    manylinux_aarch64 + ${PYTHON_ABI} wheel, so this works with no compilation, no QEMU,"
   echo "    and no aarch64 hardware needed on this machine.)"
+  rm -f "$DEST"/*.whl "$DEST"/*.tar.gz 2>/dev/null || true
   python3 -m pip download \
     --platform manylinux2014_aarch64 \
     --python-version "${PYTHON_VERSION}" \
@@ -58,13 +73,13 @@ else
     -r "$REQS_NO_PYSCARD" -d "$DEST"
 fi
 
-# --- Post-build ABI assertion ----------------------------------------------
-# Catch a stale/mismatched wheelhouse at BUILD time, before it ever reaches the Pi
-# and makes pip fail mid-install (the symptom that prompted this guard). Accept:
-#   - cp313-tagged wheels (exact match for the target Python)
-#   - stable-ABI wheels (*-abi3-*)
-#   - pure-Python py3-none wheels
-# Fail loud if none of those are present.
+# --- Post-build assertion ---------------------------------------------------
+# pip download with --abi/--python-version (or a matching native host) will already
+# error out under set -e if a package has no compatible wheel — so a clean exit past
+# here already means pip resolved everything. This assertion is the belt-and-suspenders
+# guard for a *later-tampered* or partially-completed wheelhouse folder: it fails loud
+# if no cp313/abi3/py3-none wheel is present at all. It does NOT prove every requirement
+# is satisfiable (only pip's own resolver can); it proves the folder isn't empty/garbage.
 if ! ls "$DEST"/*.whl 2>/dev/null | grep -E "(-${PYTHON_ABI}-|abi3-|py3-none)" | grep -q .; then
   echo "    FATAL: built wheelhouse has no ${PYTHON_ABI}-/abi3/py3-none wheels." >&2
   echo "    Something is wrong with pip's --platform/--abi flags or requirements.txt." >&2

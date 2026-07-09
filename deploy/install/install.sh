@@ -116,19 +116,30 @@ grep -vi '^pyscard' "$APP_DIR/requirements.txt" > "$REQS_NO_PYSCARD"
 chmod 644 "$REQS_NO_PYSCARD"
 if ls "$WHEELHOUSE"/*.whl >/dev/null 2>&1; then
   echo "    using offline wheelhouse: $WHEELHOUSE"
-  # Preflight: ensure the wheelhouse was built for the Python version in this venv.
-  # A stale wheelhouse (e.g. cp311 wheels on a cp313 Pi) makes pip fail mid-install
-  # AFTER partially installing some packages. Fail fast with a clear message instead.
-  # Accept: exact cpXY-tagged wheels, stable-ABI wheels (*-abi3-*), and pure-Python
-  # py3-none wheels. A cp311-only wheelhouse has none of those for a cp313 Pi.
-  PY_TAG="$("$VENV_DIR/bin/python" -c 'import sys; print("cp%d%d" % sys.version_info[:2])')"
-  if ! ls "$WHEELHOUSE"/*.whl 2>/dev/null | grep -E "(-${PY_TAG}-|abi3-|py3-none)" | grep -q .; then
-    echo "    FATAL: wheelhouse has no wheels compatible with $PY_TAG" >&2
-    echo "    (no exact -${PY_TAG}-, no abi3, and no py3-none wheels found)." >&2
+  # Preflight: do the EXACT validation pip would do, but WITHOUT installing anything.
+  # `pip install --dry-run --no-index --find-links` resolves every requirement against
+  # the wheelhouse and reports any unresolvable one. This is the only preflight that
+  # catches the real failure mode: a stale cp311 kit on a cp313 Pi PASSes an
+  # existence-grep (any py3-none wheel satisfies "(-cp313-|abi3-|py3-none)"), but
+  # `pip --dry-run` correctly fails on SQLAlchemy (no abi3 build, needs exact cp313).
+  # Filter pyscard out of the dry-run (it is never in the wheelhouse and is installed
+  # separately as a system .deb).
+  REQS_NO_PYSCARD_DRY="$(mktemp)"
+  grep -vi '^pyscard' "$APP_DIR/requirements.txt" > "$REQS_NO_PYSCARD_DRY"
+  chmod 644 "$REQS_NO_PYSCARD_DRY"
+  DRY_LOG="$(mktemp)"
+  if ! sudo -u "$APP_USER" "$VENV_DIR/bin/pip" install --dry-run --no-index --find-links "$WHEELHOUSE" -r "$REQS_NO_PYSCARD_DRY" >"$DRY_LOG" 2>&1; then
+    echo "    FATAL: wheelhouse cannot satisfy requirements.txt for this Python" >&2
+    echo "    (typical cause: a cp311 wheelhouse on a cp313/trixie Pi — pip finds no" >&2
+    echo "    cp313 wheel for a binary package like SQLAlchemy)." >&2
     echo "    Rebuild with deploy/install/build-wheelhouse.sh on a machine with internet," >&2
     echo "    then recopy deploy/wheelhouse/ to the Pi before running this script." >&2
+    echo "    --- pip dry-run output (last 30 lines) ---" >&2
+    tail -n 30 "$DRY_LOG" >&2 || true
+    rm -f "$REQS_NO_PYSCARD_DRY" "$DRY_LOG"
     exit 1
   fi
+  rm -f "$REQS_NO_PYSCARD_DRY" "$DRY_LOG"
   sudo -u "$APP_USER" "$VENV_DIR/bin/pip" install --no-index --find-links "$WHEELHOUSE" -r "$REQS_NO_PYSCARD"
 elif [ "$ONLINE" -eq 1 ]; then
   sudo -u "$APP_USER" "$VENV_DIR/bin/pip" install -r "$REQS_NO_PYSCARD"
