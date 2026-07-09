@@ -204,10 +204,13 @@ land in `deploy/wheelhouse/`.
 
 **2. The `pyscard` `.deb` is downloaded automatically** — it's the one exception. `pyscard`
 has **no** prebuilt Linux aarch64 wheel on PyPI at all (only Windows/macOS), so it can't
-go through the wheelhouse. `build-wheelhouse.sh` scrapes the Debian pool and drops the
-current arm64 `python3-pyscard_*.deb` into `deploy/system-packages/` for you. (Trixie
-currently ships `python3-pyscard_2.2.2-1_arm64.deb`.) If you staged it by hand and want
-to confirm the version matches, full explanation is in `deploy/system-packages/README.md`.
+go through the wheelhouse. `build-wheelhouse.sh` downloads the **pinned** trixie package
+(`python3-pyscard_2.2.2-1_arm64.deb`) into `deploy/system-packages/` for you; if that
+exact file 404s on a future pool refresh, it falls back to scraping the pool for the
+latest arm64 build. Pinning (not "latest") matters — the pool also carries `2.3.x`
+builds for sid/forky that are NOT what trixie ships and could mismatch deps. If you
+staged it by hand and want to confirm the version matches, full explanation is in
+`deploy/system-packages/README.md`.
 
 **3. Copy the whole project onto a USB stick:**
 

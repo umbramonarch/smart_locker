@@ -13,7 +13,7 @@ network-share (CIFS) mount, and an offline Python install.
 |---|---|
 | `.env.pi.example` | Environment template for the Pi — copy to the repo root as `.env`. Paths are pre-filled for the M: mount. |
 | `install/install.sh` | One-shot, idempotent provisioner. Run as root from the repo: `sudo bash deploy/install/install.sh` (`bash <script>` is intentional — exFAT copies strip the +x bit, see `../GUIDE.md` 3c). |
-| `install/build-wheelhouse.sh` | Downloads all Python wheels for offline install. Works from an aarch64 host directly, OR from any other machine (e.g. Windows/x86_64) via pip's cross-platform `--platform`/`--python-version`/`--abi` flags — no aarch64 hardware needed to build it. Deliberately excludes `pyscard` (see below). |
+| `install/build-wheelhouse.sh` | Builds the **complete** offline kit in one run: downloads all Python wheels for offline install **and** auto-fetches the `python3-pyscard` `.deb` into `deploy/system-packages/`. Works from an aarch64 host directly, OR from any other machine (e.g. Windows/x86_64) via pip's cross-platform `--platform`/`--python-version`/`--abi` flags — no aarch64 hardware needed to build it. Targets Python 3.13 / cp313 (trixie). |
 | `wheelhouse/` | Where those wheels are staged (the `.whl` files are gitignored). |
 | `system-packages/` | Holds the `python3-pyscard` `.deb` — `pyscard` has no prebuilt Linux aarch64 wheel on PyPI, so it's installed via `dpkg`/`apt` instead of pip. See `system-packages/README.md`. |
 | `systemd/smart-locker.service` | Backend service: starts uvicorn + the NFC listener on boot, restarts on crash. |
@@ -48,7 +48,7 @@ the Pi needs a USB stick, not a direct copy):
 ```bash
 # 0. On ANY machine with internet (aarch64 not required — cross-platform download):
 deploy/install/build-wheelhouse.sh
-# + download the python3-pyscard .deb into deploy/system-packages/ (see that folder's README)
+#    (auto-downloads the python3-pyscard .deb into deploy/system-packages/ — nothing else to fetch)
 
 # On the Pi, with the repo at e.g. /home/locker/smart_locker:
 sudo bash deploy/install/install.sh        # packages (incl. pyscard via apt/.deb), venv, pcscd, service, kiosk
