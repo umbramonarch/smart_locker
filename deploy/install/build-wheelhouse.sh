@@ -71,71 +71,155 @@ else
     --abi "${PYTHON_ABI}" \
     --only-binary=:all: \
     -r "$REQS_NO_PYSCARD" -d "$DEST"
+  # Environment markers (sys_platform / platform_python_implementation) are still
+  # evaluated on the *host*. Building on Windows/macOS therefore SKIPS Linux-only
+  # deps such as uvloop (uvicorn[standard] extra: sys_platform != 'win32'). The Pi
+  # is Linux aarch64 — pull those explicitly so the kit is complete without apt/network.
+  echo "==> Pulling Linux-only transitive wheels the host markers would skip..."
+  python3 -m pip download \
+    --platform manylinux2014_aarch64 \
+    --python-version "${PYTHON_VERSION}" \
+    --implementation cp \
+    --abi "${PYTHON_ABI}" \
+    --only-binary=:all: \
+    -d "$DEST" \
+    "uvloop>=0.15.1"
+  if ! ls "$DEST"/uvloop-*.whl >/dev/null 2>&1; then
+    echo "    FATAL: uvloop wheel missing after explicit pull (uvicorn[standard] on Linux)." >&2
+    exit 1
+  fi
 fi
 
-# --- Post-build assertion ---------------------------------------------------
-# pip download with --abi/--python-version (or a matching native host) will already
-# error out under set -e if a package has no compatible wheel — so a clean exit past
-# here already means pip resolved everything. This assertion is the belt-and-suspenders
-# guard for a *later-tampered* or partially-completed wheelhouse folder: it fails loud
-# if no cp313/abi3/py3-none wheel is present at all. It does NOT prove every requirement
-# is satisfiable (only pip's own resolver can); it proves the folder isn't empty/garbage.
-if ! ls "$DEST"/*.whl 2>/dev/null | grep -E "(-${PYTHON_ABI}-|abi3-|py3-none)" | grep -q .; then
-  echo "    FATAL: built wheelhouse has no ${PYTHON_ABI}-/abi3/py3-none wheels." >&2
-  echo "    Something is wrong with pip's --platform/--abi flags or requirements.txt." >&2
-  echo "    Refusing to ship a broken offline kit — investigate before copying to the Pi." >&2
+# --- Post-build: empty/garbage guard + FULL resolver check -------------------
+# The Pi production path is never-networked and does not use apt. The wheelhouse
+# must therefore contain every pip-installable dep (direct + transitive) for
+# requirements.txt except pyscard. `pip download` already fails under set -e if a
+# package has no compatible wheel; the dry-run below re-resolves against ONLY this
+# folder (--no-index --ignore-installed) so a partial/corrupt DEST cannot ship.
+if ! ls "$DEST"/*.whl >/dev/null 2>&1; then
+  echo "    FATAL: wheelhouse is empty after pip download — nothing to ship." >&2
+  exit 1
+fi
+echo "==> Verifying wheelhouse fully resolves requirements (pip --dry-run, no index)..."
+DRY_LOG="$(mktemp)"
+if [ "$HOST_ARCH" = "aarch64" ] || [ "$HOST_ARCH" = "arm64" ]; then
+  # Native host already matches target Python (asserted above). Markers match Linux
+  # so this is the definitive check (includes uvloop for uvicorn[standard]).
+  if ! python3 -m pip install --dry-run --ignore-installed --no-index --find-links "$DEST" \
+      -r "$REQS_NO_PYSCARD" >"$DRY_LOG" 2>&1; then
+    echo "    FATAL: wheelhouse cannot satisfy requirements.txt (resolver dry-run failed)." >&2
+    echo "    --- pip dry-run output (last 40 lines) ---" >&2
+    tail -n 40 "$DRY_LOG" >&2 || true
+    rm -f "$DRY_LOG"
+    exit 1
+  fi
+else
+  # Cross-build host: resolve with platform tags. NOTE: host environment markers
+  # still apply (Windows will not *require* uvloop here) — that is why we force-
+  # download Linux-only wheels above and assert their files exist.
+  if ! python3 -m pip install --dry-run --ignore-installed --no-index --find-links "$DEST" \
+      --platform manylinux2014_aarch64 \
+      --python-version "${PYTHON_VERSION}" \
+      --implementation cp \
+      --abi "${PYTHON_ABI}" \
+      --only-binary=:all: \
+      -r "$REQS_NO_PYSCARD" >"$DRY_LOG" 2>&1; then
+    echo "    FATAL: wheelhouse cannot satisfy requirements.txt for Linux aarch64/${PYTHON_ABI}." >&2
+    echo "    (A missing transitive wheel would show here.)" >&2
+    echo "    --- pip dry-run output (last 40 lines) ---" >&2
+    tail -n 40 "$DRY_LOG" >&2 || true
+    rm -f "$DRY_LOG"
+    exit 1
+  fi
+  if ! ls "$DEST"/uvloop-*.whl >/dev/null 2>&1; then
+    echo "    FATAL: cross-built wheelhouse is missing uvloop (Linux-only uvicorn extra)." >&2
+    exit 1
+  fi
+fi
+rm -f "$DRY_LOG"
+echo "    OK: every non-pyscard requirement (and its deps) is present as a wheel."
+
+# Hard-require the packages that historically failed mid-install on the Pi when a
+# stale (cp311) wheelhouse was used. SQLAlchemy has no abi3 build — it must be
+# an exact cp313 wheel. cryptography is often "already satisfied" from
+# /usr/lib/python3/dist-packages on the Pi and can mask an incomplete kit; we still
+# require its wheel so --ignore-installed install is self-contained.
+# Wheel filenames are usually lowercase (sqlalchemy-…); accept either case.
+if ! ls "$DEST"/sqlalchemy-*-cp313-*.whl >/dev/null 2>&1 \
+   && ! ls "$DEST"/SQLAlchemy-*-cp313-*.whl >/dev/null 2>&1; then
+  echo "    FATAL: no SQLAlchemy cp313 wheel in $DEST." >&2
+  echo "    That is exactly the package that failed offline install on trixie" >&2
+  echo "    ('No matching distribution found for SQLAlchemy>=2.0.0'). Rebuild." >&2
+  exit 1
+fi
+if ! ls "$DEST"/cryptography-*.whl >/dev/null 2>&1; then
+  echo "    FATAL: no cryptography wheel in $DEST (must not rely on system crypto)." >&2
   exit 1
 fi
 
 COUNT="$(ls -1 "$DEST"/*.whl "$DEST"/*.tar.gz 2>/dev/null | wc -l | tr -d ' ')"
 echo "==> Done. $COUNT package file(s) staged in $DEST"
 
-# --- Auto-download the python3-pyscard .deb for trixie/arm64 ----------------
-# pyscard has NO aarch64 PyPI wheel (Windows/macOS only). The Debian `.deb` for
-# python3-pyscard ships the compiled extension against the system Python, which is
-# what install.sh installs offline via dpkg -i (visible to the venv through
-# --system-site-packages). This auto-download makes build-wheelhouse.sh produce a
-# COMPLETE offline kit in one run — no separate manual step to forget.
-#
-# Prefer the known-good trixie package (2.2.2-1 — matches what apt installs on a
-# trixie Pi). The pool also has newer builds (e.g. 2.3.x for sid/forky) that are
-# NOT what trixie ships; "latest" would grab those and risk ABI/dep mismatch.
-# If the pinned URL 404s, fall back to scraping the pool for any arm64 build.
-PYSCARD_POOL="https://deb.debian.org/debian/pool/main/p/pyscard/"
-PINNED_DEB="python3-pyscard_2.2.2-1_arm64.deb"
-echo "==> Fetching python3-pyscard arm64 .deb for trixie offline installs..."
-DEB_NAME="$PINNED_DEB"
-DEB_PATH="$SYSDEST/$DEB_NAME"
-if [ -f "$DEB_PATH" ]; then
-  echo "    $DEB_NAME already present in $SYSDEST — leaving it."
-elif curl -fsSL -o "$DEB_PATH" "${PYSCARD_POOL}${DEB_NAME}"; then
-  find "$SYSDEST" -maxdepth 1 -name 'python3-pyscard_*_arm64.deb' ! -name "$DEB_NAME" -delete 2>/dev/null || true
-  echo "    saved to $DEB_PATH"
-else
-  rm -f "$DEB_PATH" 2>/dev/null || true
-  echo "    pinned $PINNED_DEB not available — scraping pool for an arm64 build..."
-  DEB_NAME="$(curl -fsSL "$PYSCARD_POOL" 2>/dev/null \
-    | grep -oE 'python3-pyscard_[0-9][^"]*_arm64\.deb' \
-    | sort -V | tail -n 1 || true)"
-  if [ -n "$DEB_NAME" ]; then
-    DEB_PATH="$SYSDEST/$DEB_NAME"
-    if curl -fsSL -o "$DEB_PATH" "${PYSCARD_POOL}${DEB_NAME}"; then
-      find "$SYSDEST" -maxdepth 1 -name 'python3-pyscard_*_arm64.deb' ! -name "$DEB_NAME" -delete 2>/dev/null || true
-      echo "    saved to $DEB_PATH"
-    else
-      rm -f "$DEB_PATH" 2>/dev/null || true
-      echo "    WARNING: download failed for ${PYSCARD_POOL}${DEB_NAME}" >&2
-      echo "    Falling back to manual staging — see deploy/system-packages/README.md." >&2
-    fi
-  else
-    echo "    WARNING: could not resolve a python3-pyscard arm64 .deb from $PYSCARD_POOL." >&2
-    echo "    Falling back to manual staging — see deploy/system-packages/README.md." >&2
+# --- Offline OS .debs (what a trixie Full image still needs beyond the base OS) ---
+# Captured from a real Pi online install of install.sh's apt list (trixie, arm64):
+#   NEW: libccid, pcscd, libintl-perl, libpcsc-perl, pcsc-tools, python3-pyscard, unclutter
+#   ALREADY on Full: cifs-utils, curl, python3-venv, python3-pip, chromium*
+# Production has no apt — stage the NEW packages here for dpkg -i on the Pi.
+# Versions pinned to what trixie served on that validation run (not "latest"/sid).
+DEB_BASE="https://deb.debian.org/debian/pool/main"
+# "url path relative to pool/main"  "filename"
+# shellcheck disable=SC2034
+OFFLINE_OS_DEBS=(
+  "c/ccid|libccid_1.6.2-1_arm64.deb"
+  "p/pcsc-lite|pcscd_2.3.3-1_arm64.deb"
+  "libi/libintl-perl|libintl-perl_1.35-1_all.deb"
+  "p/pcsc-perl|libpcsc-perl_1.4.16-1+b3_arm64.deb"
+  "p/pcsc-tools|pcsc-tools_1.7.3-1_arm64.deb"
+  "p/pyscard|python3-pyscard_2.2.2-1_arm64.deb"
+  "u/unclutter|unclutter_8-25+nmu1_arm64.deb"
+)
+
+fetch_deb() {
+  # fetch_deb <pool_subdir> <filename>
+  local subdir="$1" name="$2"
+  local path="$SYSDEST/$name"
+  local url="${DEB_BASE}/${subdir}/${name}"
+  if [ -f "$path" ]; then
+    echo "    $name already present — leaving it."
+    return 0
   fi
-fi
+  echo "    fetching $name ..."
+  if curl -fsSL -o "$path" "$url"; then
+    echo "    saved $path"
+    return 0
+  fi
+  rm -f "$path" 2>/dev/null || true
+  echo "    FATAL: could not download $url" >&2
+  echo "    Offline Pi has no apt; fix network or stage this .deb by hand." >&2
+  return 1
+}
+
+echo "==> Fetching offline OS .debs for trixie/arm64 into $SYSDEST ..."
+for entry in "${OFFLINE_OS_DEBS[@]}"; do
+  subdir="${entry%%|*}"
+  name="${entry##*|}"
+  fetch_deb "$subdir" "$name" || exit 1
+done
+
+# Hard-require the NFC-critical debs (pcscd + pyscard).
+for must in pcscd_ python3-pyscard_ libccid_; do
+  if ! ls "$SYSDEST"/${must}*.deb >/dev/null 2>&1; then
+    echo "    FATAL: missing required offline package matching ${must}*.deb in $SYSDEST" >&2
+    exit 1
+  fi
+done
+DEB_COUNT="$(ls -1 "$SYSDEST"/*.deb 2>/dev/null | wc -l | tr -d ' ')"
 
 echo ""
-echo "==> Offline kit ready: $DEST (wheels) + $SYSDEST (pyscard .deb)"
-echo "    Copy the whole deploy/ tree onto the Pi (USB stick), then on the Pi run:"
+echo "==> Offline kit ready (no apt required on the Pi):"
+echo "    wheels : $DEST  ($COUNT files — full requirements.txt except pyscard + deps)"
+echo "    os debs: $SYSDEST  ($DEB_COUNT .deb files — pcscd stack, unclutter, pyscard)"
+echo "    Copy the whole project (incl. deploy/) onto the Pi via USB, then run:"
 echo "        sudo bash deploy/install/install.sh"
-echo "    (Use 'sudo bash <script>', not 'sudo <script>' — the +x bit is stripped when"
-echo "    copying via exFAT from Windows; 'bash <script>' does not rely on it.)"
+echo "    ALWAYS use 'sudo bash …' — never 'sudo deploy/install/install.sh'."
+echo "    (exFAT/Windows strips +x → sudo reports 'command not found' without bash.)"

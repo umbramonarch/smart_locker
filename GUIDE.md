@@ -355,12 +355,13 @@ Pi's own filesystem isn't reachable from Windows). Once it's at e.g.
 sudo bash deploy/install/install.sh
 ```
 
-> **Use `sudo bash deploy/install/install.sh`, not `sudo deploy/install/install.sh`.**
-> Copying files from Windows via exFAT strips the executable (`+x`) bit; `sudo <path>`
-> then fails with `sudo: deploy/install/install.sh: command not found` (sudo's PATH
-> lookup can't find it, and even `sudo ./deploy/...` would fail the execve +x check).
-> `bash <script>` ignores the +x bit and works regardless of how the files got onto
-> the Pi.
+> **ALWAYS use `sudo bash deploy/install/install.sh`.**
+> Never `sudo deploy/install/install.sh` and never `sudo ./deploy/install/install.sh`
+> until after the first successful bash run. Copying via exFAT from Windows strips the
+> executable (`+x`) bit; without it, sudo prints:
+> `sudo: deploy/install/install.sh: command not found`.
+> `bash <script>` ignores the +x bit. After a successful install the script re-chmods
+> itself, so a later `sudo ./deploy/install/install.sh` also works.
 
 This is safe to re-run. It installs the system packages (including `python3-pyscard`
 directly via apt if online, or via the `.deb` you staged in `deploy/system-packages/` if
