@@ -20,7 +20,7 @@ box; record the result in the sign-off table at the end.
 - [ ] SD card flashed with 64-bit Raspberry Pi OS **Full** (see `GUIDE.md` Step 0).
 - [ ] Offline install kit built and copied over via USB stick if the Pi has no internet:
       `deploy/wheelhouse/*.whl` + `deploy/system-packages/*.deb` present (`GUIDE.md` Step 0b).
-- [ ] Repo at `/home/locker/smart_locker`; `sudo deploy/install/install.sh` ran clean.
+- [ ] Repo at `/home/locker/smart_locker`; `sudo bash deploy/install/install.sh` ran clean.
 - [ ] `import smartcard` works in the venv (confirms `python3-pyscard` +
       `--system-site-packages` — `GUIDE.md` Section 4.3).
 - [ ] `.env` has real `SMART_LOCKER_ENC_KEY` + `SMART_LOCKER_HMAC_KEY` (32-byte each).
