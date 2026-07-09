@@ -1,47 +1,59 @@
 # system-packages/ — offline OS-level (.deb) packages
 
-Some dependencies aren't Python packages at all, or don't publish a prebuilt Linux
-aarch64 wheel on PyPI — `pip`/wheelhouse can't help with those. This folder holds
-their Debian `.deb` files instead, so they can be installed offline with `dpkg`.
+The production Pi is **never-networked and does not use apt**. Anything not already
+on the OS image is installed offline with `dpkg -i` from this folder.
 
-Running `deploy/install/build-wheelhouse.sh` **automatically downloads** the
-correct `python3-pyscard_*_arm64.deb` into this folder — so in the normal case you
-do not need to touch it. The notes below apply only if you stage it by hand.
+`deploy/install/build-wheelhouse.sh` **auto-downloads** the full set below (pinned
+to the versions a real trixie Pi pulled during an online `install.sh` validation).
+Missing any required `.deb` fails the kit build — not a soft warning.
 
-## pyscard (the ACR1252U reader's PC/SC bindings)
+## What gets staged (from a real Pi online apt run)
 
-`pyscard` (in `requirements.txt`) has **no prebuilt Linux aarch64 wheel on PyPI** —
-only Windows and macOS. Building it from source needs a compiler, `swig`, and
-`libpcsclite-dev`, none of which are worth adding to an offline Pi's toolchain just
-for one package. Instead, install the real **Debian arm64 package**:
+| Package | Role | On Raspberry Pi OS Full by default? |
+|---|---|---|
+| `libccid` | USB CCID driver for ACR1252U | **No** — staged |
+| `pcscd` | PC/SC daemon | **No** — staged |
+| `libintl-perl` | dep of pcsc-tools | **No** — staged |
+| `libpcsc-perl` | dep of pcsc-tools | **No** — staged |
+| `pcsc-tools` | `pcsc_scan` diagnostics | **No** — staged |
+| `python3-pyscard` | Python PC/SC bindings | **No** — staged |
+| `unclutter` | hide mouse cursor in kiosk | **No** — staged |
+| `cifs-utils`, `curl`, `python3-venv`, `python3-pip`, `chromium*` | base kiosk | **Yes** on Full — not staged (huge) |
 
-- Package: `python3-pyscard` — Debian **trixie**, the base Raspberry Pi OS is built on
-  as of the 6.18 kernel line. (Earlier Raspberry Pi OS used bookworm + Python 3.11;
-  the same machine now ships trixie + Python 3.13 by default. A bookworm `.deb`
-  will NOT import under Python 3.13 — ABI mismatch.)
-- Current version on trixie: **`2.2.2-1`** (satisfies `requirements.txt`'s `pyscard>=2.0.7` pin).
-- Download (on a machine with internet — any OS, no aarch64 needed, it's just a file):
-  `https://deb.debian.org/debian/pool/main/p/pyscard/python3-pyscard_2.2.2-1_arm64.deb`
-  (if that exact filename 404s, browse `https://deb.debian.org/debian/pool/main/p/pyscard/`
-  for the current arm64 build — pick the one whose version satisfies `>=2.0.7`).
-- Dependencies: only `libc6` and `python3` — both already on any Raspberry Pi OS
-  install. Nothing else to fetch.
+Pinned filenames (trixie / arm64, as of the validation install):
 
-Put the downloaded `.deb` in this folder (alongside the wheelhouse, which `build-wheelhouse.sh`
-handles automatically), copy the whole `deploy/` tree onto the Pi (SD card / USB stick)
-along with the rest of the project, then either:
+```
+libccid_1.6.2-1_arm64.deb
+pcscd_2.3.3-1_arm64.deb
+libintl-perl_1.35-1_all.deb
+libpcsc-perl_1.4.16-1+b3_arm64.deb
+pcsc-tools_1.7.3-1_arm64.deb
+python3-pyscard_2.2.2-1_arm64.deb
+unclutter_8-25+nmu1_arm64.deb
+```
 
-- **Online** (temporary internet on the Pi): `install.sh` just runs
-  `apt-get install -y python3-pyscard` like any other OS package — this folder isn't
-  needed in that case.
-- **Offline** (the real scenario here): `install.sh` looks for a `.deb` in this folder
-  and runs `dpkg -i` on it automatically.
+## pyscard note
 
-## Why the venv can still see it
+`pyscard` has **no** prebuilt Linux aarch64 wheel on PyPI. The Debian package is the
+only offline path. A bookworm `.deb` will **not** import under Python 3.13.
 
-`install.sh` creates the venv with `--system-site-packages`, so a package installed at
-the **system** Python level (which is where `dpkg -i` puts it) is visible inside the venv
-too — no need to get `pyscard` into the wheelhouse or the venv directly.
+## What install.sh does offline
 
-The `.deb` files themselves are **not committed** (see `.gitignore`) — like the
-wheelhouse, they're architecture-specific binary artifacts, fetched per image.
+1. `dpkg -i deploy/system-packages/*.deb` (all staged OS packages).
+2. Verifies `pcscd`, `chromium`, `python3`, `mount.cifs`, and `import smartcard`.
+3. Creates the venv with `--system-site-packages` so system-level pyscard is visible.
+4. Installs **all other** Python deps from `../wheelhouse/` only
+   (`pip --no-index --ignore-installed` — does **not** trust distro cryptography to
+   paper over a incomplete wheelhouse; that is what made SQLAlchemy fail mid-install
+   while crypto looked “already satisfied”).
+
+## On the Pi
+
+```bash
+sudo bash deploy/install/install.sh
+```
+
+Always `sudo bash …` — never `sudo deploy/install/install.sh` (exFAT strips `+x` →
+`command not found`).
+
+The `.deb` files are **not committed** (see `.gitignore`).

@@ -216,6 +216,45 @@ tar -xzf "$TARBALL" -C "$STAGING_DIR" --strip-components=1
 [ -f "$STAGING_DIR/requirements.txt" ] || { log "Staged release looks invalid (no requirements.txt) — aborting."; write_status "failed" "Release archive is invalid."; rm -rf "$STAGING_DIR"; exit 1; }
 
 # ============================================================================
+# 3b. Offline wheelhouse preflight (BEFORE stop/rsync — kiosk stays on old version)
+# ============================================================================
+# Mirror install.sh: filter pyscard (system .deb, never in the wheelhouse), require a
+# wheelhouse, and pip --dry-run so a stale/wrong-ABI kit fails closed without touching
+# the live tree. The Pi is never-networked in production — if the preserved wheelhouse
+# cannot satisfy the staged release's requirements, refuse the update now.
+# deploy/wheelhouse is in PRESERVE, so the kit on disk is the one that must work.
+REQS_FOR_UPDATE="$(mktemp)"
+grep -vi '^pyscard' "$STAGING_DIR/requirements.txt" > "$REQS_FOR_UPDATE"
+# Keep cleaned up on every exit path (success, refuse, or ERR rollback).
+trap 'rm -f "$REQS_FOR_UPDATE"' EXIT
+if [ ! -d "$WHEELHOUSE" ] || ! ls "$WHEELHOUSE"/*.whl >/dev/null 2>&1; then
+  log "FATAL: no wheelhouse at $WHEELHOUSE — cannot safely update deps in-field."
+  log "    The Pi has no internet; a release without a matching offline wheelhouse is refused."
+  log "    Service was NOT stopped; live code was NOT swapped — still running $CUR_VERSION."
+  write_status "failed" "No wheelhouse; update refused; still on $CUR_VERSION."
+  rm -rf "$STAGING_DIR"
+  exit 1
+fi
+log "Preflight: verifying wheelhouse satisfies staged requirements (pip --dry-run)..."
+DRY_LOG="$(mktemp)"
+# --ignore-installed: system-site-packages must not mask an incomplete wheelhouse.
+if ! "$VENV_DIR/bin/pip" install --dry-run --ignore-installed --no-index --find-links "$WHEELHOUSE" -r "$REQS_FOR_UPDATE" >"$DRY_LOG" 2>&1; then
+  log "FATAL: wheelhouse cannot satisfy the staged requirements.txt for this Python."
+  log "    (typical cause: a stale cp311 wheelhouse on a cp313/trixie Pi.)"
+  log "    Rebuild with deploy/install/build-wheelhouse.sh on a machine with internet,"
+  log "    recopy deploy/wheelhouse/ to the Pi, then retry. Service was NOT stopped;"
+  log "    live code was NOT swapped — still running $CUR_VERSION."
+  log "    --- pip dry-run output (last 30 lines) ---"
+  tail -n 30 "$DRY_LOG" >>"$LOG_FILE" 2>&1 || true
+  rm -f "$DRY_LOG"
+  write_status "failed" "Wheelhouse cannot satisfy requirements; update refused; still on $CUR_VERSION."
+  rm -rf "$STAGING_DIR"
+  exit 1
+fi
+rm -f "$DRY_LOG"
+log "Preflight OK — wheelhouse can satisfy staged requirements."
+
+# ============================================================================
 # 4. Backup (the rollback point) — from here on, failure triggers rollback
 # ============================================================================
 CODE_BACKUP="$BACKUP_DIR/code-$STAMP.tar.gz"
@@ -243,42 +282,10 @@ log "New code in place."
 # ============================================================================
 # 6. Dependencies (offline wheelhouse) + DB migrations
 # ============================================================================
-# Mirror install.sh's offline safety: filter pyscard out of requirements (it's
-# never in the wheelhouse — installed separately as a system .deb), preflight the
-# wheelhouse with pip --dry-run so a stale/wrong-ABI kit fails BEFORE we touch the
-# venv, and fail closed if there is no wheelhouse at all (an in-field update with
-# no wheelhouse is not safe to "skip" — deps may have changed and the new code
-# would then run against the old venv with no warning).
-REQS_FOR_UPDATE="$(mktemp)"
-grep -vi '^pyscard' "$REQUIREMENTS" > "$REQS_FOR_UPDATE"
-trap 'rm -f "$REQS_FOR_UPDATE"' EXIT
-if [ -d "$WHEELHOUSE" ] && ls "$WHEELHOUSE"/*.whl >/dev/null 2>&1; then
-  log "Preflight: verifying wheelhouse satisfies requirements (pip --dry-run)..."
-  DRY_LOG="$(mktemp)"
-  if ! "$VENV_DIR/bin/pip" install --dry-run --no-index --find-links "$WHEELHOUSE" -r "$REQS_FOR_UPDATE" >"$DRY_LOG" 2>&1; then
-    log "FATAL: wheelhouse cannot satisfy requirements.txt for this Python."
-    log "    (typical cause: a stale cp311 wheelhouse on a cp313/trixie Pi.)"
-    log "    Rebuild with deploy/install/build-wheelhouse.sh on a machine with internet,"
-    log "    then recopy deploy/wheelhouse/ to the Pi. Aborting update BEFORE any code"
-    log "    swap — the service is still running the previous version."
-    log "    --- pip dry-run output (last 30 lines) ---"
-    tail -n 30 "$DRY_LOG" >>"$LOG_FILE" 2>&1 || true
-    rm -f "$DRY_LOG"
-    write_status "failed" "Wheelhouse cannot satisfy requirements; update aborted before code swap."
-    rm -rf "$STAGING_DIR"
-    exit 1
-  fi
-  rm -f "$DRY_LOG"
-  log "Installing dependencies from offline wheelhouse..."
-  "$VENV_DIR/bin/pip" install --no-index --find-links "$WHEELHOUSE" -r "$REQS_FOR_UPDATE" >>"$LOG_FILE" 2>&1
-else
-  log "FATAL: no wheelhouse at $WHEELHOUSE — cannot safely update deps in-field."
-  log "    Dropping a release without a matching wheelhouse is not supported. Aborting"
-  log "    update BEFORE any code swap — the service is still running the previous version."
-  write_status "failed" "No wheelhouse; update aborted before code swap."
-  rm -rf "$STAGING_DIR"
-  exit 1
-fi
+# Preflight already proved the wheelhouse resolves REQS_FOR_UPDATE; install for real.
+# On failure, ERR trap → rollback (BACKED_UP=1) restores previous code + restarts service.
+log "Installing dependencies from offline wheelhouse..."
+"$VENV_DIR/bin/pip" install --ignore-installed --no-index --find-links "$WHEELHOUSE" -r "$REQS_FOR_UPDATE" >>"$LOG_FILE" 2>&1
 
 log "Running database migrations..."
 ( cd "$APP_DIR" && "$PY" -m scripts.migrate_db >>"$LOG_FILE" 2>&1 )

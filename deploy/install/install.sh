@@ -1,16 +1,20 @@
 #!/usr/bin/env bash
 # install.sh — provision a Raspberry Pi to run Smart Locker as a kiosk appliance.
 # ----------------------------------------------------------------------------
-# Run as root from inside the cloned/copied repo:
+# ALWAYS run as:
 #     sudo bash deploy/install/install.sh
-# (Use `sudo bash <script>` — copying via exFAT from Windows strips +x, and `sudo
-#  <path>` then fails with "command not found". `bash <script>` ignores +x.)
+# Never:
+#     sudo deploy/install/install.sh          # "command not found" if +x stripped
+#     sudo ./deploy/install/install.sh        # same when +x missing (exFAT/Windows)
+# `bash <script>` does not need the +x bit. After a successful run this script
+# re-chmods itself so a later `sudo ./deploy/install/install.sh` also works.
 #
 # It is idempotent — safe to re-run. It will:
-#   1. Install OS packages (pcscd, libccid, cifs-utils, chromium, ...) when online.
-#   2. Create the Python virtualenv and install deps (offline from deploy/wheelhouse
-#      if present, otherwise from PyPI).
-#   3. Enable pcscd (PC/SC daemon for the ACR1252U reader).
+#   1. Install OS packages (pcscd, libccid, …) via apt when online, or via
+#      deploy/system-packages/*.deb when offline (no apt in production).
+#   2. Create the Python virtualenv and install deps from deploy/wheelhouse
+#      (offline kit) — fail closed if the kit is missing/stale.
+#   3. Enable pcscd (PC/SC daemon for the ACR1252U reader) + polkit rule.
 #   4. Install + enable the smart-locker systemd service.
 #   5. Scaffold the M: CIFS mount point and credentials file.
 #   6. Install the Chromium kiosk autostart entry for the app user.
@@ -22,17 +26,26 @@
 set -euo pipefail
 
 if [ "$(id -u)" -ne 0 ]; then
-  echo "Please run as root:  sudo $0" >&2
+  echo "Please run as root with bash (required — do not omit 'bash'):" >&2
+  echo "    sudo bash deploy/install/install.sh" >&2
+  echo "" >&2
+  echo "If you saw:  sudo: deploy/install/install.sh: command not found" >&2
+  echo "you used 'sudo <path>' without bash, or the +x bit was stripped by exFAT." >&2
+  echo "'sudo bash deploy/install/install.sh' always works." >&2
   exit 1
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# Restore +x on this script (and siblings) so a future direct exec also works
+# after an exFAT copy. Harmless if already executable.
+chmod +x "$SCRIPT_DIR/install.sh" "$SCRIPT_DIR/update.sh" "$SCRIPT_DIR/build-wheelhouse.sh" 2>/dev/null || true
 APP_DIR="${SMART_LOCKER_DIR:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 APP_USER="${SMART_LOCKER_USER:-$(stat -c '%U' "$APP_DIR")}"
 APP_GROUP="$(id -gn "$APP_USER")"
 MOUNT_POINT="${SMART_LOCKER_MOUNT:-/mnt/locker}"
 VENV_DIR="$APP_DIR/venv"
 WHEELHOUSE="$APP_DIR/deploy/wheelhouse"
+SYSDEST="$APP_DIR/deploy/system-packages"
 
 echo "==> Smart Locker install"
 echo "    app dir : $APP_DIR"
@@ -45,7 +58,7 @@ ONLINE=0
 if timeout 4 getent hosts deb.debian.org >/dev/null 2>&1; then
   ONLINE=1
 fi
-[ "$ONLINE" -eq 1 ] && echo "==> Network: online"  || echo "==> Network: OFFLINE (skipping apt; packages must be pre-installed)"
+[ "$ONLINE" -eq 1 ] && echo "==> Network: online"  || echo "==> Network: OFFLINE (no apt — OS .debs from deploy/system-packages/ + Full image)"
 
 # --- 1. OS packages ---
 # python3-pyscard is here (not in requirements.txt/wheelhouse) because it has no
@@ -60,7 +73,47 @@ if [ "$ONLINE" -eq 1 ]; then
     apt-get install -y --no-install-recommends pcscd pcsc-tools libccid cifs-utils chromium-browser unclutter curl python3-venv python3-pip python3-pyscard
   fi
 else
-  echo "==> Verifying required commands are present (offline)"
+  # Production is never-networked and does not use apt. Stage OS .debs via
+  # build-wheelhouse.sh into deploy/system-packages/ (pcscd stack, unclutter,
+  # python3-pyscard — the packages a trixie Full image does NOT already ship).
+  # Base tools (python3, curl, chromium, cifs-utils, python3-venv) come from the
+  # Full image itself.
+  echo "==> Offline OS packages from $SYSDEST (no apt)"
+  if ls "$SYSDEST"/*.deb >/dev/null 2>&1; then
+    # Prefer dependency-friendly order (libccid before pcscd, perl deps before
+    # pcsc-tools, pyscard last among NFC bits). Any leftover .debs install after.
+    echo "==> dpkg -i staged .deb files..."
+    DEB_ORDER=()
+    for pat in \
+      'libccid_*.deb' \
+      'pcscd_*.deb' \
+      'libintl-perl_*.deb' \
+      'libpcsc-perl_*.deb' \
+      'pcsc-tools_*.deb' \
+      'python3-pyscard_*.deb' \
+      'unclutter_*.deb'
+    do
+      for f in "$SYSDEST"/$pat; do
+        [ -f "$f" ] && DEB_ORDER+=("$f")
+      done
+    done
+    for f in "$SYSDEST"/*.deb; do
+      [ -f "$f" ] || continue
+      already=0
+      for g in "${DEB_ORDER[@]+"${DEB_ORDER[@]}"}"; do
+        [ "$f" = "$g" ] && already=1 && break
+      done
+      [ "$already" -eq 0 ] && DEB_ORDER+=("$f")
+    done
+    if [ "${#DEB_ORDER[@]}" -eq 0 ] || ! dpkg -i "${DEB_ORDER[@]}"; then
+      echo "    FATAL: dpkg -i of deploy/system-packages/*.deb failed (no apt to fix)." >&2
+      echo "    Rebuild the offline kit with deploy/install/build-wheelhouse.sh and recopy." >&2
+      exit 1
+    fi
+  else
+    echo "    WARNING: no .deb files in $SYSDEST — relying on the OS image alone."
+  fi
+  echo "==> Verifying required commands are present (offline, no apt)"
   MISSING=""
   for cmd in pcscd mount.cifs curl python3; do
     command -v "$cmd" >/dev/null 2>&1 || MISSING="$MISSING $cmd"
@@ -69,26 +122,18 @@ else
     MISSING="$MISSING chromium"
   fi
   if [ -n "$MISSING" ]; then
-    echo "    WARNING: missing packages:$MISSING"
-    echo "    Pre-install them on a build host with internet, then re-image. Continuing."
+    echo "    FATAL: missing OS tools:$MISSING" >&2
+    echo "    Expected on Raspberry Pi OS Full: chromium, curl, python3, cifs-utils." >&2
+    echo "    Expected from deploy/system-packages/*.deb: pcscd (+ libccid, pcsc-tools)." >&2
+    echo "    Re-run build-wheelhouse.sh, recopy deploy/system-packages/, re-image if needed." >&2
+    exit 1
   fi
-  # Offline pyscard: apt can't reach the internet, so install the .deb staged in
-  # deploy/system-packages/ (see that folder's README for where to download it).
-  if python3 -c "import smartcard" >/dev/null 2>&1; then
-    echo "==> python3-pyscard already present."
-  else
-    DEB="$(ls "$APP_DIR"/deploy/system-packages/*.deb 2>/dev/null | head -n1 || true)"
-    if [ -n "$DEB" ]; then
-      echo "==> Installing offline package: $DEB"
-      if ! dpkg -i "$DEB"; then
-        apt-get install -f -y || echo "    WARNING: dpkg -i failed and there is no network to fix it. Continuing install; the NFC reader will not work until this is resolved."
-      fi
-    else
-      echo "    WARNING: python3-pyscard not found and no .deb staged in deploy/system-packages/."
-      echo "    The NFC reader will not work until it's installed — see"
-      echo "    deploy/system-packages/README.md."
-    fi
+  if ! python3 -c "import smartcard" >/dev/null 2>&1; then
+    echo "    FATAL: python3-pyscard not importable after offline dpkg." >&2
+    echo "    Need python3-pyscard_*_arm64.deb in deploy/system-packages/ (build-wheelhouse.sh)." >&2
+    exit 1
   fi
+  echo "==> Offline OS package check OK (incl. import smartcard)."
 fi
 
 # --- 2. Python virtualenv + dependencies ---
@@ -122,13 +167,13 @@ if ls "$WHEELHOUSE"/*.whl >/dev/null 2>&1; then
   # catches the real failure mode: a stale cp311 kit on a cp313 Pi PASSes an
   # existence-grep (any py3-none wheel satisfies "(-cp313-|abi3-|py3-none)"), but
   # `pip --dry-run` correctly fails on SQLAlchemy (no abi3 build, needs exact cp313).
-  # Filter pyscard out of the dry-run (it is never in the wheelhouse and is installed
-  # separately as a system .deb).
-  REQS_NO_PYSCARD_DRY="$(mktemp)"
-  grep -vi '^pyscard' "$APP_DIR/requirements.txt" > "$REQS_NO_PYSCARD_DRY"
-  chmod 644 "$REQS_NO_PYSCARD_DRY"
+  # Reuse the same filtered reqs file for dry-run and the real install (pyscard is
+  # never in the wheelhouse — installed separately as a system .deb).
+  # --ignore-installed: do NOT let system-site-packages (e.g. distro cryptography)
+  # mask an incomplete wheelhouse. The kit must be self-contained for every pip
+  # requirement except pyscard (system .deb, filtered out of REQS_NO_PYSCARD).
   DRY_LOG="$(mktemp)"
-  if ! sudo -u "$APP_USER" "$VENV_DIR/bin/pip" install --dry-run --no-index --find-links "$WHEELHOUSE" -r "$REQS_NO_PYSCARD_DRY" >"$DRY_LOG" 2>&1; then
+  if ! sudo -u "$APP_USER" "$VENV_DIR/bin/pip" install --dry-run --ignore-installed --no-index --find-links "$WHEELHOUSE" -r "$REQS_NO_PYSCARD" >"$DRY_LOG" 2>&1; then
     echo "    FATAL: wheelhouse cannot satisfy requirements.txt for this Python" >&2
     echo "    (typical cause: a cp311 wheelhouse on a cp313/trixie Pi — pip finds no" >&2
     echo "    cp313 wheel for a binary package like SQLAlchemy)." >&2
@@ -136,11 +181,11 @@ if ls "$WHEELHOUSE"/*.whl >/dev/null 2>&1; then
     echo "    then recopy deploy/wheelhouse/ to the Pi before running this script." >&2
     echo "    --- pip dry-run output (last 30 lines) ---" >&2
     tail -n 30 "$DRY_LOG" >&2 || true
-    rm -f "$REQS_NO_PYSCARD_DRY" "$DRY_LOG"
+    rm -f "$DRY_LOG" "$REQS_NO_PYSCARD"
     exit 1
   fi
-  rm -f "$REQS_NO_PYSCARD_DRY" "$DRY_LOG"
-  sudo -u "$APP_USER" "$VENV_DIR/bin/pip" install --no-index --find-links "$WHEELHOUSE" -r "$REQS_NO_PYSCARD"
+  rm -f "$DRY_LOG"
+  sudo -u "$APP_USER" "$VENV_DIR/bin/pip" install --ignore-installed --no-index --find-links "$WHEELHOUSE" -r "$REQS_NO_PYSCARD"
 elif [ "$ONLINE" -eq 1 ]; then
   sudo -u "$APP_USER" "$VENV_DIR/bin/pip" install -r "$REQS_NO_PYSCARD"
 else
