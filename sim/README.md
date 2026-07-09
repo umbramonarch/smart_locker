@@ -247,9 +247,11 @@ git clone <your-repo-url> ~/smart_locker
 cd ~/smart_locker
 
 # Run the installer (mirrors the production flow exactly)
-sudo deploy/install/install.sh
+sudo bash deploy/install/install.sh
 # This runs as root, creates the locker user, installs the venv, installs
 # the systemd service, and scaffolds /mnt/locker. See deploy/README.md.
+# Use `sudo bash <script>` — copying via exFAT from Windows strips +x,
+# and `sudo <path>` then fails with "command not found".
 ```
 
 ### Step A6 — Configure and mount the share inside the guest

@@ -186,27 +186,28 @@ deploy/install/build-wheelhouse.sh
 ```
 
 This downloads every package in `requirements.txt` — except `pyscard`, see step 2 — as
-prebuilt Linux/ARM64 wheels for Python 3.11, using `pip`'s `--platform` cross-download
-flags. **This works even though your PC is Windows/x86_64**: a `.whl` file is just a
-compiled, ready-to-install archive tagged for a target platform — pip can fetch the right
-one for a *different* machine than the one running pip, without compiling anything
-locally. I verified every package in `requirements.txt` (including the C/Rust-extension
-ones — `cryptography`, `pydantic-core`, `uvloop`, `httptools`, `websockets`, `watchfiles`,
-`SQLAlchemy`, `PyYAML`) actually publishes a `manylinux`+`aarch64`+`cp311` wheel on PyPI, so
-this isn't a guess. The wheels land in `deploy/wheelhouse/`.
+prebuilt Linux/ARM64 wheels for **Python 3.13** (the version Raspberry Pi OS "trixie"
+ships), using `pip`'s `--platform` cross-download flags. **This works even though your
+PC is Windows/x86_64**: a `.whl` file is just a compiled, ready-to-install archive tagged
+for a target platform — pip can fetch the right one for a *different* machine than the
+one running pip, without compiling anything locally. Every package in `requirements.txt`
+(including the C/Rust-extension ones — `cryptography`, `pydantic-core`, `uvloop`,
+`httptools`, `websockets`, `watchfiles`, `SQLAlchemy`, `PyYAML`) publishes a
+`manylinux`+`aarch64`+`cp313` wheel on PyPI, so this is verified, not a guess. The wheels
+land in `deploy/wheelhouse/`.
 
-**2. Get the `pyscard` package separately** — it's the one exception. It has **no**
-prebuilt Linux ARM64 wheel on PyPI at all (only Windows/macOS), so it can't go through the
-wheelhouse. Instead, download the real Debian package it corresponds to:
+> **Don't reuse a wheelhouse built before the move to Python 3.13.** A wheelhouse built
+> for cp311 (older Pi OS images) will let pip partially install some packages and then
+> fail mid-run on a trixie/Python-3.13 Pi — exactly the failure `install.sh`'s preflight
+> guard is designed to catch loud. If you're unsure, delete `deploy/wheelhouse/*.whl` and
+> re-run `build-wheelhouse.sh`.
 
-```
-https://deb.debian.org/debian/pool/main/p/pyscard/python3-pyscard_2.0.5-1+b2_arm64.deb
-```
-
-(If that exact filename is gone by the time you read this, browse
-`https://deb.debian.org/debian/pool/main/p/pyscard/` for the current `arm64` build.) Save
-it into `deploy/system-packages/`. Full explanation of why this is safe (dependency check,
-version-gap check) is in `deploy/system-packages/README.md`.
+**2. The `pyscard` `.deb` is downloaded automatically** — it's the one exception. `pyscard`
+has **no** prebuilt Linux aarch64 wheel on PyPI at all (only Windows/macOS), so it can't
+go through the wheelhouse. `build-wheelhouse.sh` scrapes the Debian pool and drops the
+current arm64 `python3-pyscard_*.deb` into `deploy/system-packages/` for you. (Trixie
+currently ships `python3-pyscard_2.2.2-1_arm64.deb`.) If you staged it by hand and want
+to confirm the version matches, full explanation is in `deploy/system-packages/README.md`.
 
 **3. Copy the whole project onto a USB stick:**
 
@@ -257,9 +258,9 @@ used — this trips people up because most of them are only ever invoked *indire
 |---|---|---|
 | `.env.pi.example` | Environment template pre-filled for the Pi (M: paths, etc.) | You manually copy it to `.env` and fill in your keys — Section 4.4 |
 | `install/install.sh` | The one-shot provisioner — packages, venv, service, mount scaffolding, kiosk autostart | You run it once, as root, on the Pi — Section 3c |
-| `install/build-wheelhouse.sh` | Downloads Python packages as offline wheels | You run it **once, on your PC**, before ever touching the Pi — Step 0b |
+| `install/build-wheelhouse.sh` | Downloads Python packages as offline wheels **and** auto-downloads the `python3-pyscard` `.deb` | You run it **once, on your PC**, before ever touching the Pi — Step 0b |
 | `wheelhouse/` | Where those downloaded `.whl` files sit | Read automatically by `install.sh`/`update.sh` — you never touch it directly |
-| `system-packages/` | Holds the `python3-pyscard` `.deb` (see Step 0b) | Read automatically by `install.sh` if offline; installed via plain `apt` if online |
+| `system-packages/` | Holds the `python3-pyscard` `.deb` (auto-filled by `build-wheelhouse.sh`, see Step 0b) | Read automatically by `install.sh` if offline; installed via plain `apt` if online |
 | `systemd/smart-locker.service` | Defines the backend as a systemd service (auto-restart, boot-start) | Installed by `install.sh`; started manually the first time — Section 5 |
 | `install/sudoers-smart-locker` | Grants the app account passwordless sudo for *only* restarting its own service and running updates | Installed by `install.sh`; powers the admin panel's "Update now" button — Section 9 |
 | `install/update.sh` | Applies a signed release tarball with backup + health-check + auto-rollback | Runs later, whenever you ship an update — Section 9 |
@@ -348,8 +349,15 @@ Pi's own filesystem isn't reachable from Windows). Once it's at e.g.
 `/home/locker/smart_locker`, run:
 
 ```bash
-sudo deploy/install/install.sh
+sudo bash deploy/install/install.sh
 ```
+
+> **Use `sudo bash deploy/install/install.sh`, not `sudo deploy/install/install.sh`.**
+> Copying files from Windows via exFAT strips the executable (`+x`) bit; `sudo <path>`
+> then fails with `sudo: deploy/install/install.sh: command not found` (sudo's PATH
+> lookup can't find it, and even `sudo ./deploy/...` would fail the execve +x check).
+> `bash <script>` ignores the +x bit and works regardless of how the files got onto
+> the Pi.
 
 This is safe to re-run. It installs the system packages (including `python3-pyscard`
 directly via apt if online, or via the `.deb` you staged in `deploy/system-packages/` if
@@ -816,6 +824,30 @@ tail -f logs/smart_locker.log                  # the app's own rotating log file
 - If `import smartcard` fails in the venv, confirm `python3-pyscard` is actually installed
   (`dpkg -l python3-pyscard`) and that the venv was created with `--system-site-packages` —
   see Section 3a/4.3.
+
+**`SCardEstablishContext: Access denied (0x8010006A)` (pcscd is running, socket is fine):**
+- On Raspberry Pi OS **trixie**, this is a **polkit** denial — not a socket/permission
+  problem. Even with a world-writable `/run/pcscd/pcscd.comm` and the user in the `pcscd`
+  group, non-console sessions (SSH, systemd services) get denied by default.
+- `install.sh` installs the fix automatically at
+  `/etc/polkit-1/rules.d/50-smart-locker-pcsc.rules` (grants `access_pcsc` /
+  `access_card` to members of `pcscd` or `plugdev`). Re-run
+  `sudo bash deploy/install/install.sh` if that file is missing, then
+  `sudo systemctl try-restart polkit && sudo systemctl restart pcscd`.
+- Confirm: `pcsc_scan` should then list the ACR1252U without the Access denied error.
+
+**`sudo: deploy/install/install.sh: command not found`:**
+- The executable (`+x`) bit was stripped when files were copied from Windows via
+  exFAT (exFAT has no POSIX permissions). Run
+  `sudo bash deploy/install/install.sh` instead — `bash <script>` does not need
+  the +x bit. Do **not** use `sudo deploy/install/install.sh` (no `bash`).
+
+**`pip` fails with `No matching distribution found for SQLAlchemy` (or similar) during install:**
+- The wheelhouse was built for a different Python ABI (e.g. cp311 wheels on a
+  cp313 / trixie Pi). `install.sh` now fails fast with a clear message before pip
+  partially installs. Fix: re-run `deploy/install/build-wheelhouse.sh` on a machine
+  with internet (it targets Python 3.13 / cp313), recopy `deploy/wheelhouse/` and
+  `deploy/system-packages/` onto the Pi, re-run the installer.
 
 **The M: share won't mount:**
 - `sudo mount /mnt/locker` prints the error. A "permission denied" usually means the
