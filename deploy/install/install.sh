@@ -2,7 +2,9 @@
 # install.sh — provision a Raspberry Pi to run Smart Locker as a kiosk appliance.
 # ----------------------------------------------------------------------------
 # Run as root from inside the cloned/copied repo:
-#     sudo deploy/install/install.sh
+#     sudo bash deploy/install/install.sh
+# (Use `sudo bash <script>` — copying via exFAT from Windows strips +x, and `sudo
+#  <path>` then fails with "command not found". `bash <script>` ignores +x.)
 #
 # It is idempotent — safe to re-run. It will:
 #   1. Install OS packages (pcscd, libccid, cifs-utils, chromium, ...) when online.
@@ -114,12 +116,31 @@ grep -vi '^pyscard' "$APP_DIR/requirements.txt" > "$REQS_NO_PYSCARD"
 chmod 644 "$REQS_NO_PYSCARD"
 if ls "$WHEELHOUSE"/*.whl >/dev/null 2>&1; then
   echo "    using offline wheelhouse: $WHEELHOUSE"
+  # Preflight: ensure the wheelhouse was built for the Python version in this venv.
+  # A stale wheelhouse (e.g. cp311 wheels on a cp313 Pi) makes pip fail mid-install
+  # AFTER partially installing some packages. Fail fast with a clear message instead.
+  # Accept: exact cpXY-tagged wheels, stable-ABI wheels (*-abi3-*), and pure-Python
+  # py3-none wheels. A cp311-only wheelhouse has none of those for a cp313 Pi.
+  PY_TAG="$("$VENV_DIR/bin/python" -c 'import sys; print("cp%d%d" % sys.version_info[:2])')"
+  if ! ls "$WHEELHOUSE"/*.whl 2>/dev/null | grep -E "(-${PY_TAG}-|abi3-|py3-none)" | grep -q .; then
+    echo "    FATAL: wheelhouse has no wheels compatible with $PY_TAG" >&2
+    echo "    (no exact -${PY_TAG}-, no abi3, and no py3-none wheels found)." >&2
+    echo "    Rebuild with deploy/install/build-wheelhouse.sh on a machine with internet," >&2
+    echo "    then recopy deploy/wheelhouse/ to the Pi before running this script." >&2
+    exit 1
+  fi
   sudo -u "$APP_USER" "$VENV_DIR/bin/pip" install --no-index --find-links "$WHEELHOUSE" -r "$REQS_NO_PYSCARD"
 elif [ "$ONLINE" -eq 1 ]; then
   sudo -u "$APP_USER" "$VENV_DIR/bin/pip" install -r "$REQS_NO_PYSCARD"
 else
-  echo "    WARNING: offline and no wheelhouse found at $WHEELHOUSE."
-  echo "    Run deploy/install/build-wheelhouse.sh on a machine with internet first. Skipping."
+  # Offline + NO wheelhouse: fail loud rather than silently "skipping" and leaving a
+  # half-installed venv. The previous "Skipping" path hid exactly the failure mode
+  # the preflight above is designed to catch — a missing/stale wheelhouse is not
+  # something to paper over.
+  echo "    FATAL: offline and no wheelhouse found at $WHEELHOUSE." >&2
+  echo "    Run deploy/install/build-wheelhouse.sh on a machine with internet," >&2
+  echo "    then recopy deploy/wheelhouse/ and deploy/system-packages/ to the Pi." >&2
+  exit 1
 fi
 rm -f "$REQS_NO_PYSCARD"
 if "$VENV_DIR/bin/python" -c "import smartcard" >/dev/null 2>&1; then
@@ -128,12 +149,72 @@ else
   echo "    WARNING: the venv cannot import smartcard — the NFC reader will not work."
   echo "    Check that python3-pyscard is installed (see deploy/system-packages/README.md)."
   echo "    If it IS installed, the venv itself may be missing --system-site-packages —"
-  echo "    delete it and re-run this script: rm -rf $VENV_DIR && sudo $SCRIPT_DIR/install.sh"
+  echo "    delete it and re-run this script: rm -rf $VENV_DIR && sudo bash $SCRIPT_DIR/install.sh"
 fi
 
 # --- 3. Enable the PC/SC daemon (ACR1252U reader) ---
 echo "==> Enabling pcscd"
 systemctl enable --now pcscd || echo "    (could not start pcscd now — it is socket-activated and will start on demand)"
+
+# --- 3b. pcscd group, socket group, and polkit rule (critical for the NFC
+# reader on Raspberry Pi OS trixie and beyond) -----------------------------------
+# On trixie, SCardEstablishContext() returns "Access denied" (0x8010006A) even
+# when /run/pcscd/pcscd.comm is world-writable and the app user is in the pcscd
+# group — polkit gates access_pcsc/access_card, and a non-console session (SSH
+# or a systemd service) gets denied by default. The base image also does not
+# always create the 'pcscd' group. The block below:
+#   (1) creates the 'pcscd' group if missing (groupadd is a standard core
+#       command — no extra package needed, online or offline);
+#   (2) adds the app user to it;
+#   (3) sets SocketGroup=pcscd on pcscd.socket via a drop-in so the socket
+#       created on next activation has the right group;
+#   (4) installs a polkit rule granting pcscd/plugdev group members access —
+#       the actual authorization fix on trixie;
+#   (5) restarts pcscd.socket + pcscd.service so all of the above is live
+#       immediately, no reboot required.
+# We deliberately do NOT chmod the socket mode: pcscd.socket's own SocketMode=
+# (typically 0666) is the authority for the mode, and the polkit rule is the
+# authority for access — tightening the mode here would be overridden on every
+# (re)activation and is unnecessary. The chgrp on a pre-existing socket is the
+# only best-effort live fix; the drop-in handles future activations.
+if ! getent group pcscd >/dev/null 2>&1; then
+  groupadd --system pcscd 2>/dev/null || true
+fi
+if getent group pcscd >/dev/null 2>&1; then
+  usermod -a -G pcscd "$APP_USER" 2>/dev/null || true
+  echo "==> Added $APP_USER to pcscd group (required for NFC reader)"
+fi
+for sock in /run/pcscd/pcscd.comm /var/run/pcscd/pcscd.comm; do
+  if [ -S "$sock" ]; then
+    chgrp pcscd "$sock" 2>/dev/null || true
+    break
+  fi
+done
+mkdir -p /etc/systemd/system/pcscd.socket.d
+cat > /etc/systemd/system/pcscd.socket.d/smart-locker.conf << 'EOC'
+[Socket]
+SocketGroup=pcscd
+EOC
+systemctl daemon-reload || true
+echo "==> Configured pcscd.socket to use group pcscd"
+# polkit rule — needed for SSH and service users on trixie. polkit ships on the
+# desktop image (no extra package to install, online or offline).
+mkdir -p /etc/polkit-1/rules.d
+cat > /etc/polkit-1/rules.d/50-smart-locker-pcsc.rules << 'EOR'
+polkit.addRule(function(action, subject) {
+    if ((action.id == "org.debian.pcsc-lite.access_pcsc" ||
+         action.id == "org.debian.pcsc-lite.access_card") &&
+        (subject.isInGroup("pcscd") || subject.isInGroup("plugdev"))) {
+        return polkit.Result.YES;
+    }
+});
+EOR
+systemctl try-restart polkit 2>/dev/null || true
+echo "==> Installed polkit rule for pcscd/plugdev groups (fixes SCardEstablishContext for SSH/service)"
+# Restart last so the group, socket drop-in, and polkit rule are all live after install.sh.
+# This lets the user run pcsc_scan immediately after the script finishes, with no reboot.
+systemctl restart pcscd.socket pcscd.service 2>/dev/null || systemctl restart pcscd 2>/dev/null || true
+echo "==> Restarted pcscd so the NFC setup is live immediately (no reboot needed)"
 
 # --- 4. systemd service (paths/user substituted to match this install) ---
 echo "==> Installing systemd service: smart-locker.service"

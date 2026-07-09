@@ -109,7 +109,7 @@ smart_locker/
 ## Quick Start
 
 **Raspberry Pi appliance (production):** copy the repo onto the Pi, then
-`sudo deploy/install/install.sh` sets up packages, the venv, the NFC daemon, the systemd
+`sudo bash deploy/install/install.sh` sets up packages, the venv, the NFC daemon, the systemd
 service, the CIFS mount, and the Chromium kiosk. Full walkthrough in **GUIDE.md**;
 artifact reference in **`deploy/README.md`**.
 
