@@ -12,7 +12,7 @@ network-share (CIFS) mount, and an offline Python install.
 | Path | What it is |
 |---|---|
 | `.env.pi.example` | Environment template for the Pi — copy to the repo root as `.env`. Paths are pre-filled for the M: mount. |
-| `install/install.sh` | One-shot, idempotent provisioner. Run as root from the repo: `sudo deploy/install/install.sh`. |
+| `install/install.sh` | One-shot, idempotent provisioner. Run as root from the repo: `sudo bash deploy/install/install.sh` (`bash <script>` is intentional — exFAT copies strip the +x bit, see `../GUIDE.md` 3c). |
 | `install/build-wheelhouse.sh` | Downloads all Python wheels for offline install. Works from an aarch64 host directly, OR from any other machine (e.g. Windows/x86_64) via pip's cross-platform `--platform`/`--python-version`/`--abi` flags — no aarch64 hardware needed to build it. Deliberately excludes `pyscard` (see below). |
 | `wheelhouse/` | Where those wheels are staged (the `.whl` files are gitignored). |
 | `system-packages/` | Holds the `python3-pyscard` `.deb` — `pyscard` has no prebuilt Linux aarch64 wheel on PyPI, so it's installed via `dpkg`/`apt` instead of pip. See `system-packages/README.md`. |
@@ -51,7 +51,7 @@ deploy/install/build-wheelhouse.sh
 # + download the python3-pyscard .deb into deploy/system-packages/ (see that folder's README)
 
 # On the Pi, with the repo at e.g. /home/locker/smart_locker:
-sudo deploy/install/install.sh        # packages (incl. pyscard via apt/.deb), venv, pcscd, service, kiosk
+sudo bash deploy/install/install.sh        # packages (incl. pyscard via apt/.deb), venv, pcscd, service, kiosk
 
 cp deploy/.env.pi.example .env        # then edit .env
 venv/bin/python -m scripts.generate_key   # paste keys into .env
