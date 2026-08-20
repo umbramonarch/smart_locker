@@ -1,15 +1,12 @@
 #!/usr/bin/env bash
 #
 # File: update.sh
-# Description: Safe, offline software update for the Smart Locker Pi appliance.
-#              Picks up a release tarball delivered onto the M: share (the Pi
-#              never contacts git host/the internet), then applies it with a full
-#              rollback safety net: snapshot the DB + current code, swap in the
-#              new code, install deps from the offline wheelhouse, run DB
-#              migrations, restart the service, and HEALTH-GATE on /api/health.
-#              If the new version does not come up healthy, the previous code
-#              and database are restored automatically and the service is
-#              restarted on the old version.
+# Description: Offline software update for the Smart Locker Pi appliance.
+#              Picks up a signed release tarball from the locker share, then
+#              snapshots DB + code, swaps in the new tree, installs deps from
+#              the wheelhouse, runs DB migrations, restarts the service, and
+#              health-checks /api/health. If the new version does not come up,
+#              the previous code and database are restored.
 # Project: smart_locker/deploy
 # Notes: Run on the Pi as: sudo bash deploy/install/update.sh   (the admin-panel
 #        "Update now" button runs exactly this). Use `sudo bash <script>` — copying
@@ -26,7 +23,7 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_DIR="${SMART_LOCKER_DIR:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 
-# Load the operator's .env so this script honors the same M:/service knobs the
+# Load the operator's .env so this script honors the same share/service knobs the
 # app uses everywhere else (SMART_LOCKER_UPDATE_DIR, SMART_LOCKER_KEEP_BACKUPS,
 # ...) — one config file to edit, not a second one. The transient systemd-run
 # unit that launches this script carries no environment of its own, so without
@@ -53,10 +50,9 @@ SERVICE="${SMART_LOCKER_SERVICE:-smart-locker}"
 HEALTH_URL="${SMART_LOCKER_HEALTH_URL:-http://127.0.0.1:8000/api/health}"
 HEALTH_TIMEOUT="${SMART_LOCKER_HEALTH_TIMEOUT:-45}"   # seconds to wait for a healthy boot
 
-# Where releases are dropped (a folder on the M: CIFS share). Each release is a
-# tarball named smart-locker-<version>.tar.gz (exactly what git host's "Download
-# source" gives you for a tag). The Pi reads this folder over the LAN; it never
-# needs git host or the internet.
+# Where releases are dropped (a folder on the locker share). Each release is a
+# tarball named smart-locker-<version>.tar.gz. The Pi reads this folder over
+# the LAN; it does not need the internet.
 UPDATE_DIR="${SMART_LOCKER_UPDATE_DIR:-/mnt/locker/locker-updates}"
 
 DB_PATH="${SMART_LOCKER_DB_PATH:-$APP_DIR/smart_locker.db}"
@@ -164,7 +160,7 @@ log "=== Smart Locker update check (current version: $CUR_VERSION) ==="
 write_status "checking" "Looking for a new release on the share."
 
 if [ ! -d "$UPDATE_DIR" ]; then
-  log "Update folder $UPDATE_DIR is not reachable (M: share down?) — nothing to do."
+  log "Update folder $UPDATE_DIR is not reachable (share down?) — nothing to do."
   write_status "idle" "Update share not reachable; staying on $CUR_VERSION."
   exit 0
 fi
@@ -190,7 +186,7 @@ log "New release available: $CUR_VERSION -> $NEW_VERSION ($TARBALL)"
 write_status "updating" "Applying $NEW_VERSION."
 
 # Mandatory integrity + authenticity check. A plain checksum sitting next to the
-# tarball on the same M: share only proves self-consistency -- anyone with SMB
+# tarball on the same share only proves self-consistency -- anyone with SMB
 # write access to the share could forge both files together. Instead this
 # requires an HMAC-SHA256 sidecar keyed with SMART_LOCKER_UPDATE_HMAC_KEY, a
 # secret shared only between whoever signs releases (scripts.sign_update) and

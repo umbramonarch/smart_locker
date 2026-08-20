@@ -261,7 +261,7 @@ def start_scheduler(
 
     # --- 2. File watcher for live changes (local filesystems only) ---
     # inotify does not deliver events for writes made by other hosts on a network
-    # share, so on the Pi (source Excel on the mounted M:/CIFS share) we skip the live
+    # share, so on the Pi (source Excel on the mounted CIFS share) we skip the live
     # watch and rely on the startup import, a periodic mtime poll, and the daily cron.
     on_network = is_network_path(source)
     if on_network:

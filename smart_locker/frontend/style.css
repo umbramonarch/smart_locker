@@ -1,16 +1,11 @@
 /**
  * File: style.css
- * Description: Phoenix Contact-branded kiosk stylesheet with landonorris.com-inspired
- *              animations. Uses Phoenix Contact signature green (#009641) as the
- *              primary accent on a dark charcoal background (#181d24) chosen for
- *              readability in bright industrial environments. Circle-reveal page
- *              transitions, diagonal wipe overlays, ellipse-reveal images,
- *              character-split text, slot-machine number animations, magnetic hover,
- *              image parallax, and cursor glow effects.
+ * Description: Kiosk stylesheet. Green accent (#009641) on charcoal (#181d24).
+ *              Circle-reveal page transitions, wipe overlays, split text,
+ *              slot-machine numbers, hover and cursor effects.
  * Project: smart_locker/frontend
- * Notes: Uses Space Grotesk (display) and Inter (body) from Google Fonts.
- *        Custom properties in :root control the full color theme. Designed for
- *        a fullscreen kiosk touch display at 1920x1080.
+ * Notes: Custom properties in :root control the colour theme. Designed for
+ *        a fullscreen kiosk touch display at 1920x1080. System fonts only.
  */
 
 /* ============================================================
@@ -37,7 +32,7 @@
   --info-dim:      rgba(0, 212, 255, 0.10);
   --border:        rgba(255, 255, 255, 0.08);
   --border-accent: rgba(0, 150, 65, 0.28);
-  /* Enhancement A: original + softer Norris-style curve */
+  /* easing */
   --ease:          cubic-bezier(0.76, 0, 0.24, 1);
   --ease-smooth:   cubic-bezier(0.65, 0.05, 0, 1);
   --ease-out:      cubic-bezier(0, 0, 0.24, 1);
@@ -370,7 +365,7 @@ body::after {
   z-index: 2;
 }
 
-/* Scrolling marquee ticker at bottom (landonorris.com-style seamless loop) */
+/* Scrolling marquee at the bottom */
 .marquee-bar {
   position: absolute;
   bottom: 0; left: 0; right: 0;
@@ -863,11 +858,7 @@ body::after {
   z-index: 1;
 }
 
-/* ── Helmets-style hover reveal ────────────────────────────
-   A secondary overlay image expands from the top via
-   clip-path: ellipse() on hover — inspired by the helmet
-   gallery on landonorris.com.
-   ────────────────────────────────────────────────────────── */
+/* Hover reveal: secondary image expands from the top via clip-path ellipse. */
 .card-hover-reveal {
   position: absolute;
   inset: 0;

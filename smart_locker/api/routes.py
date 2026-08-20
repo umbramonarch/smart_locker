@@ -882,7 +882,7 @@ def trigger_update(user_session: UserSession = Depends(require_session)):
 
     Backs the admin-panel "Update now" button. The update itself is applied by
     ``deploy/install/update.sh``, which picks up a release tarball delivered to
-    the M: share, snapshots the DB + code, swaps in the new version, migrates,
+    the locker share, snapshots the DB + code, swaps in the new version, migrates,
     restarts the service, health-checks, and AUTO-ROLLS-BACK on failure — so a
     bad update self-reverts on a box no one is standing next to.
 

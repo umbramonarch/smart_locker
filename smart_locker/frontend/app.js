@@ -4,9 +4,8 @@
  *               interaction flow across idle, auth, menu, borrow, return, detail,
  *               registration, and admin screens.
  * @project smart_locker/frontend
- * @description Includes demo mode with mock data, landonorris.com-inspired
- *              animations (circle reveals, character-split text, magnetic hover,
- *              image parallax), inactivity countdown, and self-registration flow.
+ * @description Demo mode (?demo), circle-reveal transitions, split text,
+ *              inactivity countdown, and self-registration.
  */
 
 /* ============================================================

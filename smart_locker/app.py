@@ -43,7 +43,7 @@ def _start_background_sync() -> None:
     """Start the source-import scheduler and the photo watcher, each guarded.
 
     The appliance must keep running no matter what the network share or the
-    source files are doing. A failure to start either subsystem — the M: share
+    source files are doing. A failure to start either subsystem — the locker share
     is down at boot, a source/photo path is unreadable, or a watcher cannot be
     created — is logged and swallowed here so it can NEVER stop the web server
     and NFC flow from coming up. Each missed sync is retried by the daily cron,

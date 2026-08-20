@@ -7,7 +7,7 @@ Description: Filesystem helpers for the sync layer. Provides is_network_path(),
 Project: smart_locker/sync
 Notes: inotify (watchdog's default Observer on Linux) does NOT receive events
        for changes made by *other* hosts on a network share. On the Raspberry Pi
-       the source Excel and photos live on the mounted M: (CIFS) share, so the
+       the source Excel and photos live on the mounted locker share (CIFS) share, so the
        watchers fall back to the startup import + daily cron instead of a watch
        that would silently never fire. Detection is Linux-specific via
        /proc/mounts; on other platforms it returns False (assume local).
