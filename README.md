@@ -13,6 +13,23 @@ Equipment borrowing/returning system using NFC work cards. Users tap their card 
 - For the appliance: a touch display, and access to the company **M:** share (CIFS/SMB) for
   the device Excel. No internet is needed at runtime. See **GUIDE.md** and **`deploy/`**.
 
+## Git workflow
+
+`main` is the releasable branch. Never commit product work directly on `main`. Every change
+goes through a **short-lived branch** and a merge request. Delete the branch after merge.
+
+Work branches (cut from `main`): `feature/`, `fix/`, `refactor/`, `docs/`, `chore/`,
+`hotfix/`, `spike/`.
+
+- **Tags** `vX.Y.Z` on the commit you actually shipped.
+- **`hotfix/*`** from that tag (or from `main` if that tag *is* `main`). Minimal MR into
+  `main` (and into `release/x.y` if that line is still supported), then tag a new patch.
+- **`release/x.y`** only when vX.Y is in the field and you still need patches there while
+  `main` has moved. Merge hotfix into `main` **and** into the living `release/x.y` if both
+  exist.
+
+Pytest is the merge gate for `main`. Run it on the work branch before opening the MR.
+
 ## Project Structure
 
 ```
