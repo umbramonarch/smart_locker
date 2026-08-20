@@ -975,12 +975,26 @@ git-based update.
 
 **Signed tarball (current button)**
 
+`update.sh` only proceeds when all of this is true:
+
+1. `SMART_LOCKER_UPDATE_HMAC_KEY` is in the Pi `.env`, same value used with
+   `python -m scripts.sign_update` on the PC.
+2. The share has a signed pair:
+   `locker-updates/smart-locker-<version>.tar.gz` and the matching `.hmac`
+   (`SMART_LOCKER_UPDATE_DIR`, default `/mnt/locker/locker-updates`).
+3. The Pi still has **its own** `venv/` and `deploy/wheelhouse/` (aarch64).
+   `update.sh` never replaces those. Do not copy them from a Windows USB tree.
+4. `.env` and `smart_locker.db` (plus `-wal`/`-shm`) are still the Pi's.
+   `update.sh` leaves them in place. Do not overwrite them with a PC copy.
+
+If the app is not running, the admin button is unavailable. SSH instead:
+
+`sudo bash /home/locker/smart_locker/deploy/install/update.sh`
+
 1. On a PC, pack `smart-locker-<version>.tar.gz` and sign it:
    `python -m scripts.sign_update smart-locker-<version>.tar.gz`
-   (needs `SMART_LOCKER_UPDATE_HMAC_KEY` in `.env` on both the PC and the Pi).
-2. Put the `.tar.gz` and the `.hmac` in `/mnt/locker/locker-updates/`
-   (`SMART_LOCKER_UPDATE_DIR`).
-3. On the kiosk: admin panel → **Software Update**.
+2. Put the `.tar.gz` and the `.hmac` in `/mnt/locker/locker-updates/`.
+3. On the kiosk: admin panel → **Software Update** (or the SSH command above).
 
 The share is writable by more people than should be able to update the Pi, which is why
 the HMAC check is required for this path.
