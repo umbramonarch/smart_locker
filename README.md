@@ -92,7 +92,7 @@ smart_locker/
 │   ├── import_devices.py        # Bulk device import from Excel (German + English headers)
 │   ├── update_device.py         # Update device fields / match photos by PM number
 │   ├── sync_source.py           # Manually trigger source Excel import
-│   └── sign_update.py           # Sign a release tarball for update.sh (HMAC-SHA256)
+│   └── pack_release.py          # Pack a signed release (tracked-file snapshot + HMAC sidecar)
 ├── tests/                       # hardware-free pytest suite
 ├── requirements.txt
 ├── .env.example

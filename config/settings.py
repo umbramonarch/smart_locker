@@ -62,7 +62,7 @@ EXCEL_AUTO_EXPORT = os.getenv("SMART_LOCKER_EXCEL_AUTO_EXPORT", "").strip().lowe
 
 # --- Source Excel ---
 # Company device master list on the locker share (SMB/CIFS mount) — on the Pi this
-# is the mounted path, e.g. /mnt/locker/Messmittelliste.xlsx. Empty disables auto-import.
+# is the mounted path, e.g. /mnt/locker/device-list.xlsx. Empty disables auto-import.
 SOURCE_EXCEL_PATH = os.getenv("SMART_LOCKER_SOURCE_EXCEL_PATH", "")
 
 # Daily source import schedule in 24-hour format (default: 06:00)

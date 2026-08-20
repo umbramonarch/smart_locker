@@ -1831,6 +1831,75 @@ body::after {
 }
 
 /* ============================================================
+   OVERLAY — SOFTWARE UPDATE
+============================================================ */
+#overlay-update {
+  background: rgba(24,29,36,0.92);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1.25rem;
+  z-index: 70;
+}
+.update-center {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1.25rem;
+  width: 100%;
+  max-width: 36rem;
+  padding: 2rem 1.5rem;
+}
+.update-spinner {
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  border: 3px solid var(--border);
+  border-top-color: var(--accent);
+  animation: update-spin 0.85s linear infinite;
+}
+@keyframes update-spin {
+  to { transform: rotate(360deg); }
+}
+.update-title {
+  font-family: var(--font-display);
+  font-size: clamp(2rem, 5vw, 3.2rem);
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text);
+  line-height: 1.05;
+  text-align: center;
+}
+.update-sub {
+  font-family: var(--font-display);
+  font-size: 0.85rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  text-align: center;
+}
+.update-status {
+  font-size: 1rem;
+  color: var(--text-dim);
+  text-align: center;
+  line-height: 1.45;
+  max-width: 28rem;
+}
+.update-version {
+  font-family: var(--font-display);
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  text-align: center;
+}
+#overlay-update .stay-btn { margin-top: 0.25rem; }
+
+/* ============================================================
    UTILITY
 ============================================================ */
 .hidden { display: none !important; }
@@ -1875,13 +1944,15 @@ html.lite body::after       { display: none; }
 html.lite .card-slot,
 html.lite .card-hover-icon,
 html.lite #overlay-inactivity,
-html.lite #overlay-admin {
+html.lite #overlay-admin,
+html.lite #overlay-update {
   backdrop-filter: none !important;
   -webkit-backdrop-filter: none !important;
 }
 html.lite .card-slot         { background: rgba(24,29,36,0.92); }
 html.lite #overlay-inactivity { background: rgba(24,29,36,0.97); }
 html.lite #overlay-admin      { background: rgba(24,29,36,0.97); }
+html.lite #overlay-update     { background: rgba(24,29,36,0.97); }
 
 /* — Custom cursor off; restore the native pointer — */
 html.lite #cursor,

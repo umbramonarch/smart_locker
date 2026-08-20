@@ -74,7 +74,7 @@ sudo bash deploy/install/install.sh
 - **Excel import:** `smart_locker/sync/source_import.py` — schrank rows only, slots 1–N, DE/EN headers. Re-import never overwrites `locker_slot` / `image_path` / `description`. It **does** overwrite `status` and `current_borrower_id` from `Aktueller Einsatzort`.
 - **Excel auto-export** only if `SMART_LOCKER_EXCEL_AUTO_EXPORT=1`.
 - **Photos:** filename stem = device **model**. `scripts/update_device.py --auto` matches **PM number** — different scheme.
-- **Pi updates:** HMAC-signed tarball in `/mnt/locker/locker-updates`, or git fetch from a bare repo on the share. `update.sh` still does stop / backup / pip / migrate / health / rollback. Git reset is not a full update.
+- **Pi updates:** signed tarball from `python -m scripts.pack_release` only (copy `.tar.gz` + `.hmac` to `/mnt/locker/locker-updates`). `update.sh` still does stop / backup / pip / migrate / health / rollback. Git reset is not a full update.
 - **Hidden admin:** idle screen, tap the **clock 5× within 3 s**. Dashboard: `http://<pi>:8000/dashboard` (no login). Health: `/api/health`.
 - **Entry / layout:** `smart_locker/app.py`, `config/`, `scripts/`, `deploy/`, `tests/`, `GUIDE.md`. Frontend: `smart_locker/frontend/`.
 - **Logging:** `config/logging_config.py` → `logs/smart_locker.log` (5 MB × 5) + stdout INFO.

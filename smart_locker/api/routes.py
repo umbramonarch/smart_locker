@@ -55,6 +55,23 @@ _FRONTEND_DIR = BASE_DIR / "smart_locker" / "frontend"
 # Process start time, used for the /api/health uptime field.
 _START_TIME = time.time()
 
+
+def _last_update_status() -> dict | None:
+    """Read ``logs/update-status.json`` if present (best-effort).
+
+    Used by the public health probe so the kiosk overlay can see
+    success vs rollback after the in-memory admin session is gone.
+
+    Returns:
+        Parsed status dict, or ``None`` if the marker is missing/unreadable.
+    """
+    path = BASE_DIR / "logs" / "update-status.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
 # systemd-run presence marks a real Pi/systemd host. The admin "Update now"
 # button is disabled (clean 503) anywhere this is absent (dev box / Windows).
 # Resolved once at import — it cannot change while the process runs.
@@ -132,6 +149,7 @@ def health() -> dict:
         "fake_reader": fake_reader_enabled(),
         "session_active": session_active,
         "last_sync": last_sync,
+        "update": _last_update_status(),
     }
 
 
@@ -864,10 +882,8 @@ def get_update_status(user_session: UserSession = Depends(require_session)):
         raise HTTPException(status_code=403, detail="Admin access required.")
 
     current = _deployed_version()
-    status_path = BASE_DIR / "logs" / "update-status.json"
-    try:
-        data = json.loads(status_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    data = _last_update_status()
+    if not data:
         # Missing marker (no update has ever run) or an unreadable/corrupt one →
         # report idle either way; the panel just shows "no update yet".
         return {"state": "idle", "message": "No update has run yet.",

@@ -17,7 +17,7 @@ def main() -> None:
 
     Creates three 32-byte (256-bit) random keys -- one for AES-256-GCM
     encryption, one for HMAC-SHA256 card-UID hashing, and one for
-    HMAC-SHA256 update-tarball signing (see scripts.sign_update) -- encoded
+    HMAC-SHA256 update-tarball signing (see scripts.pack_release) -- encoded
     as base64 strings ready to paste into the project's .env file.
 
     Returns:

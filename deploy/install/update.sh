@@ -16,6 +16,9 @@
 #        restart (seconds, invisible between card taps) for a SAFE, self-reverting
 #        update on a box no one is standing next to.
 #        Must stay LF (enforced by .gitattributes); CRLF breaks it on the Pi.
+#        PRESERVE keeps runtime files (.env, DB, venv, logs, backups, wheelhouse,
+#        deploy/system-packages, device photos) across rsync --delete; committed
+#        UI images from the release are overlaid afterwards without --delete.
 #
 set -Eeuo pipefail
 
@@ -65,8 +68,8 @@ KEEP_BACKUPS="${SMART_LOCKER_KEEP_BACKUPS:-5}"
 
 # Runtime paths preserved across the code swap (never overwritten by a release).
 PRESERVE=(".env" "smart_locker.db" "smart_locker.db-wal" "smart_locker.db-shm"
-          "logs" "venv" "deploy/wheelhouse" "backups" ".update-staging" ".git"
-          "smart_locker/frontend/images" "VERSION")
+          "logs" "venv" "deploy/wheelhouse" "deploy/system-packages" "backups"
+          ".update-staging" ".git" "smart_locker/frontend/images" "VERSION")
 
 mkdir -p "$BACKUP_DIR" "$APP_DIR/logs"
 
@@ -159,6 +162,19 @@ OLD_VERSION="$CUR_VERSION"
 log "=== Smart Locker update check (current version: $CUR_VERSION) ==="
 write_status "checking" "Looking for a new release on the share."
 
+# Fail closed before stop/backup: later HMAC verify needs openssl, the code
+# swap needs rsync. Missing either would leave the kiosk down with no swap.
+if ! command -v rsync >/dev/null 2>&1; then
+  log "rsync not found on PATH — refusing to update (needed to swap in the new tree). Service was NOT stopped; still running $CUR_VERSION."
+  write_status "failed" "rsync not found; update refused; still on $CUR_VERSION."
+  exit 1
+fi
+if ! command -v openssl >/dev/null 2>&1; then
+  log "openssl not found on PATH — refusing to update (needed to verify the release HMAC). Service was NOT stopped; still running $CUR_VERSION."
+  write_status "failed" "openssl not found; update refused; still on $CUR_VERSION."
+  exit 1
+fi
+
 if [ ! -d "$UPDATE_DIR" ]; then
   log "Update folder $UPDATE_DIR is not reachable (share down?) — nothing to do."
   write_status "idle" "Update share not reachable; staying on $CUR_VERSION."
@@ -169,7 +185,9 @@ fi
 # 2. Find the newest release tarball and decide whether it is newer
 # ============================================================================
 # Newest by version-sorted filename: smart-locker-<version>.tar.gz
-TARBALL="$(ls -1 "$UPDATE_DIR"/smart-locker-*.tar.gz 2>/dev/null | sort -V | tail -n1 || true)"
+# Newest by mtime (not sort -V): pack_release names files from git describe,
+# which may be a short hash that does not version-sort.
+TARBALL="$(ls -1t "$UPDATE_DIR"/smart-locker-*.tar.gz 2>/dev/null | head -n1 || true)"
 if [ -z "$TARBALL" ]; then
   log "No release tarball in $UPDATE_DIR — nothing to do."
   write_status "idle" "No release found on the share; staying on $CUR_VERSION."
@@ -189,13 +207,13 @@ write_status "updating" "Applying $NEW_VERSION."
 # tarball on the same share only proves self-consistency -- anyone with SMB
 # write access to the share could forge both files together. Instead this
 # requires an HMAC-SHA256 sidecar keyed with SMART_LOCKER_UPDATE_HMAC_KEY, a
-# secret shared only between whoever signs releases (scripts.sign_update) and
+# secret shared only between whoever signs releases (scripts.pack_release) and
 # this Pi's .env -- so a tarball dropped without the key cannot pass. Missing
 # key, missing sidecar, or a mismatch all refuse the update (fail closed).
 [ -n "${SMART_LOCKER_UPDATE_HMAC_KEY:-}" ] \
   || { log "SMART_LOCKER_UPDATE_HMAC_KEY not set — refusing to apply an unverifiable release. Generate one with: python -m scripts.generate_key"; write_status "failed" "Update HMAC key not configured; refused."; rm -rf "$STAGING_DIR"; exit 1; }
 [ -f "$TARBALL.hmac" ] \
-  || { log "No $TARBALL.hmac sidecar — refusing to apply an unsigned release. Sign it with: python -m scripts.sign_update"; write_status "failed" "Release is unsigned; refused."; rm -rf "$STAGING_DIR"; exit 1; }
+  || { log "No $TARBALL.hmac sidecar — refusing to apply an unsigned release. Pack it with: python -m scripts.pack_release"; write_status "failed" "Release is unsigned; refused."; rm -rf "$STAGING_DIR"; exit 1; }
 
 log "Verifying release signature..."
 EXPECTED_HMAC="$(tr -d '[:space:]' < "$TARBALL.hmac")"
@@ -273,6 +291,13 @@ rsync -a --delete "${RSYNC_EXCLUDES[@]}" "$STAGING_DIR"/ "$APP_DIR"/
 # The transient update unit runs as root, so newly written files are root-owned;
 # hand the tree back to the service account (runtime dirs were preserved anyway).
 chown -R "$APP_USER":"$APP_USER" "$APP_DIR" 2>/dev/null || true
+# PRESERVE skipped this dir so gitignored device photos survive --delete.
+# Overlay committed UI assets from the staged release without removing photos.
+if [ -d "$STAGING_DIR/smart_locker/frontend/images" ]; then
+  mkdir -p "$APP_DIR/smart_locker/frontend/images"
+  rsync -a "$STAGING_DIR/smart_locker/frontend/images/" "$APP_DIR/smart_locker/frontend/images/"
+  chown -R "$APP_USER":"$APP_USER" "$APP_DIR/smart_locker/frontend/images" 2>/dev/null || true
+fi
 log "New code in place."
 
 # ============================================================================

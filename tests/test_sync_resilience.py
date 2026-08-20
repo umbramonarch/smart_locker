@@ -44,6 +44,6 @@ class TestImportResilience:
 
     def test_import_missing_file_returns_error(self, db_session):
         """A missing source file (wrong path / share down) yields errors >= 1."""
-        result = import_from_source_excel(get_engine(), "Z:/__offline__/Messmittelliste.xlsx")
+        result = import_from_source_excel(get_engine(), "Z:/__offline__/device-list.xlsx")
         assert result.errors >= 1
         # No exception propagated — the kiosk keeps serving from the local DB.

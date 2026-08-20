@@ -56,6 +56,7 @@ table at the end.
 - [ ] Edit the workbook on the share from another PC → within the poll interval (default 30 s) the change imports (check `journalctl` for `mtime poll`).
 - [ ] Reboot with the share **unavailable** → boot still completes (nofail), service starts, kiosk loads.
 - [ ] (If `SMART_LOCKER_EXCEL_AUTO_EXPORT=1`) the exported workbook is refreshed on the share after an import.
+- [ ] Software update from a signed tarball (`pack_release` → `/mnt/locker/locker-updates/`): admin **Software Update** overlay, or SSH `sudo bash deploy/install/update.sh`.
 
 ## 6. Sign-off
 
