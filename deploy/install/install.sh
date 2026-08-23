@@ -16,7 +16,7 @@
 #      (offline kit) — fail closed if the kit is missing/stale.
 #   3. Enable pcscd (PC/SC daemon for the ACR1252U reader) + polkit rule.
 #   4. Install + enable the smart-locker systemd service.
-#   5. Scaffold the M: CIFS mount point and credentials file.
+#   5. Scaffold the CIFS mount point and credentials file.
 #   6. Install the Chromium kiosk autostart entry for the app user.
 #
 # Overridable via environment variables:
@@ -304,7 +304,7 @@ else
 fi
 rm -f "$SUDOERS_TMP"
 
-# --- 5. M: CIFS mount scaffolding ---
+# --- 5. CIFS mount scaffolding ---
 echo "==> Scaffolding CIFS mount at $MOUNT_POINT"
 mkdir -p "$MOUNT_POINT"
 install -d -m 700 /etc/smart-locker
@@ -337,7 +337,7 @@ cat <<EOF
 ==> Done. Remaining manual steps (see GUIDE.md for the full walkthrough):
     1. cp deploy/.env.pi.example .env   &&  edit .env  (paths are pre-filled)
     2. python -m scripts.generate_key   ->  paste all three keys into .env
-    3. Edit /etc/smart-locker/cifs-credentials with the real M: share login
+    3. Edit /etc/smart-locker/cifs-credentials with the real locker share login
     4. Add the fstab line from deploy/mount/fstab.snippet, then: sudo mount $MOUNT_POINT
     5. $VENV_DIR/bin/python -m scripts.init_db
     6. $VENV_DIR/bin/python -m scripts.enroll_card --name "Your Name" --role admin

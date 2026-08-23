@@ -110,7 +110,7 @@ def process_photo(photo_path: Path, serve_dir: Path, engine) -> int:
             photo_path.name, updated, model,
         )
 
-        # Trigger Excel export so the image_path change is reflected on the M: share.
+        # Trigger Excel export so the image_path change is reflected on the locker share.
         # Only when an export path is explicitly configured (EXCEL_AUTO_EXPORT); the
         # default on-demand-only behaviour is preserved otherwise.
         from config.settings import EXCEL_AUTO_EXPORT, EXCEL_SYNC_PATH
@@ -288,7 +288,7 @@ def start_photo_watcher(engine, input_dir: str | Path, serve_dir: str | Path) ->
         logger.info("Initial photo scan: %d device(s) updated.", count)
 
     # Live watch only on local filesystems — inotify does not fire for remote writes
-    # on a network share. On the Pi the photo folder may be on the mounted M:/CIFS
+    # on a network share. On the Pi the photo folder may be on the mounted CIFS
     # share, so photos present at startup are applied above; new ones are picked up on
     # the next restart or via 'python -m scripts.update_device --auto'.
     if is_network_path(input_path):

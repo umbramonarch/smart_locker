@@ -579,6 +579,14 @@ class TestAdminSyncAndUpdateEndpoints:
         assert resp.status_code == 200
         assert resp.json()["state"] == "idle"
 
+    def test_health_exposes_update_without_session(self, client, mock_context):
+        """Kiosk overlay reads update verdict from public /api/health after restart."""
+        resp = client.get("/api/health")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert "status" in body
+        assert "update" in body
+
     def test_trigger_update_requires_session(self, client, mock_context):
         resp = client.post("/api/admin/update")
         assert resp.status_code == 401

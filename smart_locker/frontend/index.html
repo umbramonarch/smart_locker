@@ -2,10 +2,10 @@
   File: index.html
   Description: Kiosk touch-display UI with six screens (Idle, Auth Failed,
     Main Menu, Borrow Grid, Return Grid, Device Detail) plus overlays for
-    inactivity warning, self-registration, and admin panel.
+    inactivity warning, self-registration, admin panel, and software update.
   Project: smart_locker/frontend
   Notes: Served as a static file by FastAPI. Requires app.js and style.css.
-    Fonts loaded from Google Fonts CDN. All interactivity is in app.js.
+    All interactivity is in app.js. Offline: system fonts only.
 -->
 <!DOCTYPE html>
 <html lang="en">
@@ -13,9 +13,6 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Smart Locker</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700;800&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="style.css">
 
   <!-- ================================================================
@@ -478,6 +475,20 @@
         <span class="admin-footer-hint" id="admin-sync-status">Last sync: —</span>
         <span class="admin-footer-hint">5× tap clock to toggle</span>
       </div>
+    </div>
+  </div>
+
+  <!-- ================================================================
+       OVERLAY — SOFTWARE UPDATE (covers admin while the Pi applies a release)
+  ================================================================ -->
+  <div id="overlay-update" class="overlay" style="display:none">
+    <div class="update-center">
+      <div class="update-spinner" id="update-spinner"></div>
+      <h1 class="update-title" id="update-title">Updating</h1>
+      <p class="update-sub" id="update-sub">Do not power off</p>
+      <p class="update-status" id="update-status">Starting…</p>
+      <p class="update-version" id="update-version" style="display:none"></p>
+      <button class="stay-btn hidden" id="update-dismiss">OK</button>
     </div>
   </div>
 

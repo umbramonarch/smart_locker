@@ -10,8 +10,8 @@ Equipment borrowing/returning system using NFC work cards. Users tap their card 
 - ACR1252U NFC reader (USB)
 - Python 3.11+
 - NFC cards (MIFARE Classic, Ultralight, NTAG, DESFire — any card type with a UID)
-- For the appliance: a touch display, and access to the company **M:** share (CIFS/SMB) for
-  the device Excel. No internet is needed at runtime. See **GUIDE.md** and **`deploy/`**.
+- For the appliance: a touch display, and a CIFS/SMB file share for the device Excel.
+  No internet is needed at runtime. See **GUIDE.md** and **`deploy/`**.
 
 ## Git workflow
 
@@ -45,7 +45,7 @@ smart_locker/
 │   │   └── app_context.py       # Shared app state (session manager, SSE queue, pending registration)
 │   ├── frontend/
 │   │   ├── index.html           # Kiosk UI — 6 screens + overlays
-│   │   ├── style.css            # Phoenix Contact green theme (#009641 on #181d24)
+│   │   ├── style.css            # kiosk theme (#009641 on #181d24)
 │   │   ├── app.js               # Kiosk state machine, API calls, NFC-driven navigation
 │   │   ├── dashboard.html       # Read-only network dashboard (served at /dashboard)
 │   │   ├── dashboard.css        # Dashboard styling
@@ -83,7 +83,7 @@ smart_locker/
 │   ├── kiosk/                   # start-kiosk.sh + autostart .desktop (Chromium fullscreen)
 │   ├── mount/                   # CIFS fstab snippet + credentials template
 │   ├── system-packages/         # Offline .deb packages (pyscard — no aarch64 PyPI wheel)
-│   └── .env.pi.example          # Pi environment template (M: paths pre-filled)
+│   └── .env.pi.example          # Pi environment template (share paths pre-filled)
 ├── scripts/
 │   ├── generate_key.py          # Generate AES-256 + HMAC-SHA256 keys for .env
 │   ├── init_db.py               # Create database tables
@@ -92,11 +92,11 @@ smart_locker/
 │   ├── import_devices.py        # Bulk device import from Excel (German + English headers)
 │   ├── update_device.py         # Update device fields / match photos by PM number
 │   ├── sync_source.py           # Manually trigger source Excel import
-│   └── sign_update.py           # Sign a release tarball for update.sh (HMAC-SHA256)
-├── tests/                       # 132 tests (no hardware required)
-├── docs/Smart Locker Notes/     # Obsidian documentation vault
+│   └── pack_release.py          # Pack a signed release (tracked-file snapshot + HMAC sidecar)
+├── tests/                       # hardware-free pytest suite
 ├── requirements.txt
 ├── .env.example
+├── PROJECT-NOTES.md                    # project rules
 ├── GUIDE.md                     # Step-by-step setup and usage guide
 └── README.md
 ```
@@ -117,8 +117,8 @@ smart_locker/
 | Device import | ✅ Done | German + English Excel headers, PM-based dedup, schrank auto-numbering |
 | Photo import | ✅ Done | By PM number (`update_device`) or by model (photo watcher) |
 | Web dashboard | ✅ Done | Read-only `/dashboard` — devices, transactions, users; 30s auto-refresh |
-| Frontend UI | ✅ Done | 6-screen kiosk UI + overlays, Phoenix Contact theme |
-| Unit tests | ✅ Done | 132 tests across 10 modules, all hardware-free |
+| Frontend UI | ✅ Done | 6-screen kiosk UI + overlays |
+| Unit tests | ✅ Done | ~168 tests across 13 modules, all hardware-free |
 | Barcode scanner | 🔲 Planned | Barcode stored per device; USB scanner (keyboard emulation) to identify devices in shared lockers |
 | Calibration alerts | 🔲 Future | Calibration dates stored; notification system not yet built |
 | Kiosk deployment | ✅ Done | Raspberry Pi appliance: systemd service, CIFS mount, Chromium kiosk, offline install (`deploy/`) |
@@ -200,7 +200,7 @@ The system runs as a kiosk: FastAPI serves the frontend as static files in a ful
 
 Overlays: **device detail** (photo, specs, confirm), **inactivity** countdown, and a **hidden admin panel** (5× tap on the clock) with Borrow/Return/Sync/Register/Export/End-Session shortcuts.
 
-**Theme:** Phoenix Contact signature green (`#009641`) on a dark charcoal background (`#181d24`); Space Grotesk display font, Inter body font; smooth screen transitions and staggered card entrance animations.
+**Theme:** green (`#009641`) on dark charcoal (`#181d24`).
 
 ## Web Dashboard
 
@@ -254,4 +254,4 @@ The system stores a barcode value per device. The planned workflow:
 python -m pytest tests/ -v
 ```
 
-All 132 tests run without NFC hardware (in-memory SQLite, no reader needed).
+All tests run without NFC hardware (in-memory SQLite, no reader needed).

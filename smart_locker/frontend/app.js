@@ -2,11 +2,10 @@
  * @fileoverview Client-side state machine for the kiosk touch UI. Manages screen
  *               transitions, API communication, SSE event handling, and user
  *               interaction flow across idle, auth, menu, borrow, return, detail,
- *               registration, and admin screens.
+ *               registration, admin, and software-update overlay.
  * @project smart_locker/frontend
- * @description Includes demo mode with mock data, landonorris.com-inspired
- *              animations (circle reveals, character-split text, magnetic hover,
- *              image parallax), inactivity countdown, and self-registration flow.
+ * @description Demo mode (?demo), circle-reveal transitions, split text,
+ *              inactivity countdown, and self-registration.
  */
 
 /* ============================================================
@@ -54,6 +53,7 @@ const S = {
   lastClickX: null,     // track click origin for circle reveal
   lastClickY: null,
   adminRegistration: false, // true when admin-initiated manual registration is in progress
+  updating:   false,    // software-update overlay is up; SSE must not navigate
 };
 
 /** @type {string|null} Currently selected registrant name from the name list */
@@ -458,6 +458,7 @@ setInterval(tickClock, 1000);
 function armIdle() {
   clearTimeout(S.idleTimer);
   if (S.screen === 'idle') return;
+  if (S.updating) return;
   S.idleTimer = setTimeout(showInactivity, (S.cdSeconds - S.cdWarnAt) * 1000);
 }
 
@@ -466,6 +467,7 @@ function armIdle() {
  * When the countdown reaches zero, the session ends automatically.
  */
 function showInactivity() {
+  if (S.updating) return;
   S.prevScreen = S.screen;
   const overlay = document.getElementById('overlay-inactivity');
   overlay.style.display = '';
@@ -1523,81 +1525,277 @@ async function adminExportExcel() {
   }
 }
 
+/** @type {number} Bumped to cancel in-flight update / health polling. */
+let updatePollGen = 0;
+
+/** Terminal states that never stop the service (refuse / nothing to apply). */
+const UPDATE_DISMISS_STATES = ['up_to_date', 'idle', 'failed'];
+/** Terminal states after a swap that failed and rolled back — show, don't reload. */
+const UPDATE_ROLLBACK_STATES = ['rolled_back', 'rollback_unhealthy'];
+
 /**
- * Trigger a software update from the admin panel. POSTs to the update endpoint,
- * which launches the safe update script out-of-process on the Pi (snapshot ->
- * apply release from the M: share -> migrate -> restart -> health-gate ->
- * auto-rollback on failure). On a dev/non-Pi host the endpoint returns 503 with
- * a clear message. After a successful launch we briefly poll the update status
- * to surface "nothing to do" / early failures; once the service actually
- * restarts the poll simply stops (the kiosk reconnects on its own).
- * @returns {Promise<void>}
+ * Parse the `at` timestamp from `/api/admin/update-status` (ISO-8601, often
+ * with a colon-less timezone offset such as `+0200`).
+ * @param {string|null|undefined} at - Timestamp from update-status.json.
+ * @returns {number|null} Epoch milliseconds, or null if missing/unparseable.
  */
-async function adminUpdate() {
-  const btn = document.getElementById('admin-update');
-  const label = btn.querySelector('.admin-btn-label');
-  const origText = label.textContent;
+function parseUpdateAt(at) {
+  if (!at || typeof at !== 'string') return null;
+  const normalized = at.replace(/([+-]\d{2})(\d{2})$/, '$1:$2');
+  const t = Date.parse(normalized);
+  return Number.isFinite(t) ? t : null;
+}
 
-  if (!confirm('Apply a software update now? The kiosk restarts briefly; a failed update rolls back automatically.')) return;
+/**
+ * Whether a status payload was written for this launch (not a leftover file).
+ * @param {Object} data - JSON from `/api/admin/update-status`.
+ * @param {number} launchedAt - `Date.now()` just before POST `/api/admin/update`.
+ * @returns {boolean}
+ */
+function isFreshUpdateStatus(data, launchedAt) {
+  const t = parseUpdateAt(data && data.at);
+  if (t == null) return false;
+  return t >= launchedAt - 15000; // 15s slack for systemd-run + truncated seconds
+}
 
-  label.textContent = 'Starting…';
-  btn.style.pointerEvents = 'none';
-  const restore = () => { label.textContent = origText; btn.style.pointerEvents = ''; };
+/**
+ * Show the full-screen software-update overlay over the admin panel and
+ * reset copy to the in-progress "Updating / Do not power off" state.
+ */
+function showUpdateOverlay() {
+  updatePollGen += 1;
+  S.updating = true;
+  clearTimeout(S.idleTimer);
+  clearInterval(S.cdTimer);
+  const overlay = document.getElementById('overlay-update');
+  const title = document.getElementById('update-title');
+  const sub = document.getElementById('update-sub');
+  const spinner = document.getElementById('update-spinner');
+  const dismiss = document.getElementById('update-dismiss');
+  if (title) title.textContent = 'Updating';
+  if (sub) sub.classList.remove('hidden');
+  if (spinner) spinner.classList.remove('hidden');
+  if (dismiss) dismiss.classList.add('hidden');
+  setUpdateStatusLine('Starting…', '');
+  overlay.style.display = '';
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    overlay.classList.add('visible');
+  }));
+}
 
-  try {
-    const res = await fetch('/api/admin/update', { method: 'POST' });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      showToast(data.detail || 'Update could not start', 'error');
-      restore();
-      return;
-    }
-    showToast(data.message || 'Update started', 'success');
-    pollUpdateStatus(restore);
-  } catch (_) {
-    showToast('Update request failed', 'error');
-    restore();
+/**
+ * Hide the software-update overlay with the same left wipe as inactivity.
+ */
+function hideUpdateOverlay() {
+  const overlay = document.getElementById('overlay-update');
+  if (!overlay.classList.contains('visible')) {
+    overlay.style.display = 'none';
+    return;
+  }
+  overlay.classList.add('hidden-left');
+  setTimeout(() => {
+    overlay.classList.remove('visible', 'hidden-left');
+    overlay.style.display = 'none';
+  }, 710);
+}
+
+/**
+ * Set the overlay status line and optional version caption.
+ * @param {string} message - Text for the status line.
+ * @param {string} [version] - Version string to show, or `''` to hide.
+ */
+function setUpdateStatusLine(message, version) {
+  const statusEl = document.getElementById('update-status');
+  if (statusEl && message != null) statusEl.textContent = message;
+  if (arguments.length > 1) {
+    const verEl = document.getElementById('update-version');
+    if (!verEl) return;
+    const text = version ? String(version) : '';
+    verEl.textContent = text ? ('Version ' + text) : '';
+    verEl.style.display = text ? '' : 'none';
   }
 }
 
 /**
- * Briefly poll the update-status endpoint after launching an update. Reflects
- * terminal states (up to date / success / rolled back / failed) in a toast and
- * the admin footer. Tolerates the service restart that an in-progress update
- * triggers — a failed fetch is treated as "kiosk restarting" and ends polling.
- * @param {Function} restore - Callback to restore the button to its idle label.
+ * Switch the overlay to a dismissible terminal result. Stops polling. The
+ * overlay stays up until the user taps OK (no cancel of an in-flight update).
+ * @param {string} message - Status line to show.
+ * @param {{failed?: boolean, title?: string}} [opts] - Failure styling / title.
+ */
+function enterUpdateTerminal(message, opts) {
+  opts = opts || {};
+  updatePollGen += 1;
+  S.updating = false;
+  const spinner = document.getElementById('update-spinner');
+  const sub = document.getElementById('update-sub');
+  const dismiss = document.getElementById('update-dismiss');
+  const title = document.getElementById('update-title');
+  if (opts.title && title) title.textContent = opts.title;
+  else if (opts.failed && title) title.textContent = 'Update failed';
+  if (spinner) spinner.classList.add('hidden');
+  if (sub) sub.classList.add('hidden');
+  setUpdateStatusLine(message);
+  if (dismiss) dismiss.classList.remove('hidden');
+}
+
+/**
+ * Dismiss a terminal update result, clear `S.updating`, and restore the
+ * admin panel (or idle underneath it). Does not reload.
+ */
+function dismissUpdateOverlay() {
+  S.updating = false;
+  updatePollGen += 1;
+  hideUpdateOverlay();
+}
+
+/**
+ * Trigger a software update from the admin panel. Confirms first, then shows
+ * the full-screen overlay, then POSTs `/api/admin/update`. Demo mode never
+ * POSTs — it shows a dismissible "Pi only" message after a brief overlay.
  * @returns {Promise<void>}
  */
-async function pollUpdateStatus(restore) {
-  const footer = document.getElementById('admin-sync-status');
-  const MAX_POLLS = 8;
-  const POLL_INTERVAL_MS = 1500;
-  const TERMINAL = ['idle', 'up_to_date', 'success', 'rolled_back', 'failed', 'rollback_unhealthy'];
-  // Only a genuinely-applied (or already-current) update is a success. A
-  // rolled-back or failed update is an error toast — the new version did NOT
-  // take, even though the kiosk safely reverted.
-  const SUCCESS = ['idle', 'up_to_date', 'success'];
-  for (let i = 0; i < MAX_POLLS; i++) {
-    await sleep(POLL_INTERVAL_MS);
+async function adminUpdate() {
+  if (S.updating) return;
+  if (!confirm('Apply a software update now? The kiosk will show an update screen and restart briefly; a failed update rolls back automatically.')) {
+    return;
+  }
+
+  showUpdateOverlay();
+
+  if (USE_DEMO) {
+    setUpdateStatusLine('Demo preview — on the Pi this screen stays until the update finishes.');
+    const dismiss = document.getElementById('update-dismiss');
+    if (dismiss) dismiss.classList.remove('hidden');
+    return;
+  }
+
+  const launchedAt = Date.now();
+  const gen = updatePollGen;
+  try {
+    const res = await fetch('/api/admin/update', { method: 'POST' });
+    const data = await res.json().catch(() => ({}));
+    if (gen !== updatePollGen) return;
+    if (!res.ok) {
+      const msg = data.detail || 'Update could not start';
+      enterUpdateTerminal(msg, { failed: true, title: 'Update failed' });
+      showToast(msg, 'error');
+      return;
+    }
+    setUpdateStatusLine(data.message || 'Starting…');
+    pollUpdateStatus(launchedAt, gen);
+  } catch (_) {
+    if (gen !== updatePollGen) return;
+    const msg = 'Update request failed';
+    enterUpdateTerminal(msg, { failed: true, title: 'Update failed' });
+    showToast(msg, 'error');
+  }
+}
+
+/**
+ * Poll `/api/admin/update-status` while the API is up. Terminal-before-swap
+ * (`up_to_date` / `idle` / `failed`) and rollback results stay on the overlay
+ * with a dismiss button. `success` reloads. A failed fetch means the service
+ * stopped for the swap — switch to `/api/health` polling.
+ * @param {number} launchedAt - Epoch ms when the POST was sent.
+ * @param {number} gen - `updatePollGen` snapshot; mismatch cancels this loop.
+ * @returns {Promise<void>}
+ */
+async function pollUpdateStatus(launchedAt, gen) {
+  while (S.updating && gen === updatePollGen) {
+    await sleep(1500);
+    if (!S.updating || gen !== updatePollGen) return;
+
     let data;
     try {
       const res = await fetch('/api/admin/update-status');
-      if (!res.ok) throw new Error('status');
+      if (!res.ok) {
+        // 401/403 after a restart: session died with the process, not "still
+        // swapping". Connection errors also land here. Both → health poll.
+        setUpdateStatusLine('Installing…');
+        await pollHealthAfterUpdate(gen);
+        return;
+      }
       data = await res.json();
     } catch (_) {
-      // Service is restarting on the new version — the kiosk will reconnect.
-      if (footer) footer.textContent = 'Update applying — kiosk restarting…';
-      restore();
+      setUpdateStatusLine('Installing…');
+      await pollHealthAfterUpdate(gen);
       return;
     }
-    if (footer && data.message) footer.textContent = data.message;
-    if (TERMINAL.includes(data.state)) {
-      showToast(data.message || data.state, SUCCESS.includes(data.state) ? 'success' : 'error');
-      restore();
+
+    const state = data.state || '';
+    const message = data.message || state;
+    const version = data.version || data.current_version || '';
+    if (message) setUpdateStatusLine(message, version);
+
+    const fresh = isFreshUpdateStatus(data, launchedAt);
+    if (!fresh && (UPDATE_DISMISS_STATES.includes(state)
+        || UPDATE_ROLLBACK_STATES.includes(state)
+        || state === 'success')) {
+      continue; // leftover status file from a previous run
+    }
+
+    if (state === 'success') {
+      setUpdateStatusLine('Restarting…', version);
+      await sleep(400);
+      if (gen !== updatePollGen) return;
+      location.reload();
+      return;
+    }
+    if (UPDATE_DISMISS_STATES.includes(state)) {
+      enterUpdateTerminal(message, { failed: state === 'failed' });
+      return;
+    }
+    if (UPDATE_ROLLBACK_STATES.includes(state)) {
+      enterUpdateTerminal(message, { failed: true, title: 'Update failed' });
       return;
     }
   }
-  restore();
+}
+
+/**
+ * Poll `/api/health` every ~2s after the update service has gone down.
+ * Verdict comes from the public ``update`` field (no admin session). Reload
+ * only on ``success``; rollback/failed stay on this overlay. Bound so a dead
+ * API does not spin "Installing…" forever.
+ * @param {number} gen - `updatePollGen` snapshot; mismatch cancels this loop.
+ * @returns {Promise<void>}
+ */
+async function pollHealthAfterUpdate(gen) {
+  const deadline = Date.now() + 180000;
+  while (S.updating && gen === updatePollGen) {
+    await sleep(2000);
+    if (!S.updating || gen !== updatePollGen) return;
+    if (Date.now() > deadline) {
+      enterUpdateTerminal('Update is taking too long. Check logs/update.log on the Pi.', { failed: true });
+      return;
+    }
+    try {
+      const res = await fetch('/api/health');
+      if (!res.ok) continue;
+      const data = await res.json();
+      const verdict = data && data.update;
+      const state = (verdict && verdict.state) || '';
+      const message = (verdict && verdict.message) || state;
+      const version = (verdict && (verdict.version || verdict.current_version)) || '';
+
+      if (UPDATE_ROLLBACK_STATES.includes(state) || state === 'failed') {
+        enterUpdateTerminal(message, { failed: true, title: 'Update failed' });
+        return;
+      }
+      if (state === 'success' && data.status === 'ok') {
+        setUpdateStatusLine('Restarting…', version);
+        await sleep(400);
+        if (gen !== updatePollGen) return;
+        location.reload();
+        return;
+      }
+      // Health can be ok while status is still "updating" (written after the
+      // health-gate). Keep waiting for success or rollback.
+      if (data.status === 'ok') {
+        setUpdateStatusLine(message || 'Installing…', version);
+      }
+    } catch (_) { /* service still down */ }
+  }
 }
 
 /**
@@ -1718,6 +1916,7 @@ document.getElementById('admin-register-user').addEventListener('click', () => {
 document.getElementById('admin-export-excel').addEventListener('click', () => { clickSound(); adminExportExcel(); });
 document.getElementById('admin-update').addEventListener('click', () => { clickSound(); adminUpdate(); });
 document.getElementById('admin-end-session').addEventListener('click', () => { clickSound(); adminEndSession(); });
+document.getElementById('update-dismiss').addEventListener('click', () => { clickSound(); dismissUpdateOverlay(); });
 
 /* ============================================================
    INIT
@@ -1734,6 +1933,7 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 document.getElementById('overlay-inactivity').style.display    = 'none';
 document.getElementById('overlay-device-detail').style.display = 'none';
 document.getElementById('overlay-admin').style.display         = 'none';
+document.getElementById('overlay-update').style.display        = 'none';
 
 // Enhancement E: split text on initial page load
 initSplitText();
@@ -1799,6 +1999,7 @@ function connectSSE() {
   const source = new EventSource('/api/events');
 
   source.addEventListener('auth_success', e => {
+    if (S.updating) return;
     const data = JSON.parse(e.data);
     S.user = data.user;
     fillMainMenu(data.user);
@@ -1807,31 +2008,38 @@ function connectSSE() {
   });
 
   source.addEventListener('auth_failed', () => {
+    if (S.updating) return;
     showAuthFailed();
   });
 
   source.addEventListener('session_ended', () => {
+    if (S.updating) return;
     endSession(false, true);
   });
 
   source.addEventListener('session_timeout', () => {
+    if (S.updating) return;
     endSession(true, true);
   });
 
   source.addEventListener('reader_disconnected', () => {
+    if (S.updating) return;
     showToast('NFC reader disconnected', 'error');
   });
 
   source.addEventListener('reader_connected', () => {
+    if (S.updating) return;
     showToast('NFC reader reconnected', 'success');
   });
 
   source.addEventListener('registration_success', e => {
+    if (S.updating) return;
     const data = JSON.parse(e.data);
     handleRegistrationSuccess(data);
   });
 
   source.addEventListener('registration_failed', e => {
+    if (S.updating) return;
     const data = JSON.parse(e.data);
     handleRegistrationFailed(data);
   });

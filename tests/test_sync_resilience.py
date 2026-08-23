@@ -3,7 +3,7 @@ File: test_sync_resilience.py
 Description: Resilience tests for the sync subsystem. The Pi appliance sits
              unattended in a locker, so a sync failure must NEVER crash the
              running kiosk. These tests lock in that contract: an Excel export
-             whose target is unreachable (the M: network share is down) and a
+             whose target is unreachable (the locker share is down) and a
              source import whose file is missing both degrade gracefully —
              logging and returning — instead of raising.
 Project: smart_locker/tests
@@ -21,7 +21,7 @@ class TestExportResilience:
 
     def test_export_to_unreachable_drive_does_not_raise(self, db_session):
         """A down network share (unmapped drive) is skipped, not fatal."""
-        # Z: is an unmapped drive on the CI/dev box — stands in for the M:
+        # Z: is an unmapped drive on the CI/dev box — stands in for the locker share
         # CIFS share being offline. The call must return without raising.
         export_to_excel(get_engine(), "Z:/__offline__/locker_data.xlsx")
 
@@ -44,6 +44,6 @@ class TestImportResilience:
 
     def test_import_missing_file_returns_error(self, db_session):
         """A missing source file (wrong path / share down) yields errors >= 1."""
-        result = import_from_source_excel(get_engine(), "Z:/__offline__/Messmittelliste.xlsx")
+        result = import_from_source_excel(get_engine(), "Z:/__offline__/device-list.xlsx")
         assert result.errors >= 1
         # No exception propagated — the kiosk keeps serving from the local DB.

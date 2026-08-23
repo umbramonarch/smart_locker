@@ -16,11 +16,8 @@ venv/
 .pytest_cache/
 .mypy_cache/
 logs
-docs/Smart Locker Notes/
 .obsidian/
-smart_locker/frontend/PROMPTING_GUIDE.md
-
-# Node test tooling (local @playwright/cli for the frontend explainer)
+.playwright-cli/
 node_modules/
 test-results/
 playwright-report/
@@ -37,3 +34,7 @@ deploy/system-packages/*.deb
 # regenerated on every deployment, never committed. Keep only static UI assets.
 smart_locker/frontend/images/*
 !smart_locker/frontend/images/hero_bg.jpg
+
+# Operator-built release tarballs (pack_release default output is the repo cwd)
+smart-locker-*.tar.gz
+smart-locker-*.tar.gz.hmac

@@ -1,8 +1,7 @@
 # Smart Locker — Setup & Usage Guide (Raspberry Pi)
 
-This guide explains, in plain English, what the Smart Locker is, how it runs on a
-Raspberry Pi 4, and exactly how to set it up from a blank SD card to a working kiosk —
-including the case where the Pi will **never** have internet access, anywhere, ever.
+This guide is the setup and operating notes for the Smart Locker on a Raspberry Pi 4,
+including a fully offline install.
 
 ---
 
@@ -17,7 +16,7 @@ It runs on a **Raspberry Pi 4** as a self-contained kiosk:
 ```
 Raspberry Pi 4 (Raspberry Pi OS, 64-bit) — no internet needed at runtime
   ├─ pcscd .................. the Linux service that talks to the ACR1252U NFC reader
-  ├─ /mnt/locker ............ the company M: drive, mounted over the network (CIFS/SMB)
+  ├─ /mnt/locker ............ locker file share, mounted over the network (CIFS/SMB)
   ├─ smart-locker service ... the Python backend: a small web server on port 8000
   │                           plus a background listener for card taps
   └─ Chromium (kiosk mode) .. a fullscreen browser on the touch display, showing
@@ -26,17 +25,14 @@ Raspberry Pi 4 (Raspberry Pi OS, 64-bit) — no internet needed at runtime
 
 Three things are worth understanding up front:
 
-- **No internet at runtime.** The Pi only needs the company network to reach the **M:
-  drive** (a normal Windows file share). Everything else runs locally. Installation pulls
-  software from the SD card, not the web. (OneDrive is no longer involved — the M: drive
-  is now the single place the device list lives.)
-- **The M: drive is both source and destination.** The Pi *imports* the company device
-  master list from M:, and *writes* an up-to-date Excel workbook back to M: so colleagues
-  can read the current borrow/return state.
-- **The database stays on the Pi.** The SQLite database lives on the Pi's local SD card,
-  never on M: (network shares don't handle SQLite's locking reliably).
+- **No internet at runtime.** The Pi only needs the company LAN to reach the locker file
+  share. Everything else runs locally. Installation comes from the USB stick, not the web.
+- **The share is both source and destination.** The Pi imports the device master list from
+  the share, and writes a status workbook back so colleagues can open it on their PCs.
+- **The database stays on the Pi.** SQLite lives on the SD card. Do not put it on the
+  network share — locking over CIFS is unreliable.
 
-If your Pi will genuinely **never** touch a network except the eventual M: share — not
+If your Pi will genuinely **never** touch a network except the locker share — not
 even briefly, not even at your own desk — read Section 3 carefully before you do anything
 else. Every "just apt install X" or "just pip install Y" instinct needs a different answer
 in that scenario, and this guide is written for it.
@@ -72,7 +68,7 @@ in that scenario, and this guide is written for it.
    bus-powered) is a known-good example if you want a specific model to buy rather than
    picking one yourself.
 6. NFC work cards (MIFARE Classic, Ultralight, NTAG, DESFire — any card with a UID).
-7. Network access to the company **M:** share (wired Ethernet is most reliable) —
+7. Network access to the company locker share (wired Ethernet is most reliable) —
    **connected last**, after everything else is working. See Section 6.
 
 **A note on the OS account password:** whatever you choose for the Pi's login, treat it
@@ -89,7 +85,7 @@ that sets up everything. See **Section 3c**.
 **Manual path (recommended the first time, to understand each piece):** do each step by
 hand. See **Section 4**.
 
-Either way, you finish by filling in a few secrets (encryption keys, the M: share login)
+Either way, you finish by filling in a few secrets (encryption keys, the share login)
 and enrolling your first card. But **first the Pi needs an operating system and an offline
 install kit** — Steps 0 and 0b, below.
 
@@ -126,7 +122,7 @@ USB stick full of files. Neither has touched the Pi yet.
    Windows.
 6. From this point on, every remaining command runs **on the Pi**, in a terminal there:
    installing packages, building the Python environment, filling in `.env`, running the
-   app, and setting up kiosk autostart (Sections 4–5). The M: share is connected **last**
+   app, and setting up kiosk autostart (Sections 4–5). The locker share is connected **last**
    (Section 6), once all of that is already working.
 
 So: the SD card is written to exactly once, on your PC, before anything else happens. The
@@ -259,18 +255,18 @@ used — this trips people up because most of them are only ever invoked *indire
 
 | File | What it is | When it's used |
 |---|---|---|
-| `.env.pi.example` | Environment template pre-filled for the Pi (M: paths, etc.) | You manually copy it to `.env` and fill in your keys — Section 4.4 |
+| `.env.pi.example` | Environment template pre-filled for the Pi (share paths, etc.) | You manually copy it to `.env` and fill in your keys — Section 4.4 |
 | `install/install.sh` | The one-shot provisioner — packages, venv, service, mount scaffolding, kiosk autostart | You run it once, as root, on the Pi — Section 3c |
 | `install/build-wheelhouse.sh` | Downloads Python packages as offline wheels **and** auto-downloads the `python3-pyscard` `.deb` | You run it **once, on your PC**, before ever touching the Pi — Step 0b |
 | `wheelhouse/` | Where those downloaded `.whl` files sit | Read automatically by `install.sh`/`update.sh` — you never touch it directly |
 | `system-packages/` | Holds the `python3-pyscard` `.deb` (auto-filled by `build-wheelhouse.sh`, see Step 0b) | Read automatically by `install.sh` if offline; installed via plain `apt` if online |
 | `systemd/smart-locker.service` | Defines the backend as a systemd service (auto-restart, boot-start) | Installed by `install.sh`; started manually the first time — Section 5 |
-| `install/sudoers-smart-locker` | Grants the app account passwordless sudo for *only* restarting its own service and running updates | Installed by `install.sh`; powers the admin panel's "Update now" button — Section 9 |
+| `install/sudoers-smart-locker` | Grants the app account passwordless sudo for *only* restarting its own service and running updates | Installed by `install.sh`; powers the admin panel's **Software Update** button — Section 9 |
 | `install/update.sh` | Applies a signed release tarball with backup + health-check + auto-rollback | Runs later, whenever you ship an update — Section 9 |
 | `kiosk/start-kiosk.sh` | Launches Chromium fullscreen once the backend is up | Installed by `install.sh`; runs automatically at every graphical login — Section 5 |
 | `kiosk/smart-locker-kiosk.desktop` | The autostart entry that triggers `start-kiosk.sh` | Installed by `install.sh` into the app user's autostart folder |
-| `mount/fstab.snippet` | The `/etc/fstab` line template for the M: CIFS mount | You copy/edit it by hand — Section 6 (done **last**) |
-| `mount/cifs-credentials.example` | Template for the M: share's login, stored root-only | You copy/edit it by hand — Section 6 |
+| `mount/fstab.snippet` | The `/etc/fstab` line template for the CIFS mount | You copy/edit it by hand — Section 6 (done **last**) |
+| `mount/cifs-credentials.example` | Template for the locker share's login, stored root-only | You copy/edit it by hand — Section 6 |
 | `PI-VALIDATION-CHECKLIST.md` | A sign-off checklist for things a no-hardware simulation can't test (real reader, real GPU, real network share) | Run through once, after the Pi is fully set up |
 | `README.md` | A short technical index of this table, for quick reference without opening this guide | Reference only |
 
@@ -299,9 +295,9 @@ your local copy of the project, which you then carry over via the USB stick.
 
 **`install/update.sh`** is what actually runs, weeks or months later, when you ship a new
 version. You never run this by hand during initial setup — it's what the admin panel's
-"Update now" button calls (via the sudoers rule from `install.sh`), and what
-`SMART_LOCKER_UPDATE_DIR`/`SMART_LOCKER_UPDATE_HMAC_KEY` in `.env` configure. Full mechanism
-in Section 9.
+**Software Update** button calls (via the sudoers rule from `install.sh`), and what
+`SMART_LOCKER_UPDATE_DIR`/`SMART_LOCKER_UPDATE_HMAC_KEY` in `.env` configure. Pack the
+release on Windows with `python -m scripts.pack_release` (Section 9).
 
 **Why is `PI-VALIDATION-CHECKLIST.md` a separate file instead of being folded into this
 guide?** Two reasons: (1) it's a different *kind* of document — a fill-in-the-blanks
@@ -324,12 +320,10 @@ folder by hand (rather than a clean `git archive`/release tarball), here's the r
 | Goes on the Pi | Stays off (dev-only, or created fresh) |
 |---|---|
 | `smart_locker/`, `config/`, `scripts/`, `deploy/` | `venv/` — not portable, see the note below |
-| `requirements.txt`, `GUIDE.md`, `README.md` | `.env` — the Pi gets its own from `deploy/.env.pi.example` |
+| `requirements.txt`, `GUIDE.md`, `README.md`, `PROJECT-NOTES.md` | `.env` — the Pi gets its own from `deploy/.env.pi.example` |
 | | `smart_locker.db` / `.db-wal` / `.db-shm` — the Pi creates its own via `scripts.init_db` |
-| | `sim/` — a no-hardware development/testing harness, not part of the running appliance |
 | | `tests/` — optional, only needed if you want to run the test suite somewhere |
-| | `docs/` (besides this guide), `node_modules/`, `package.json` — documentation/tooling for the explainer page, not the kiosk |
-| | Anything gitignored: `.obsidian/`, `logs/`, `.pytest_cache/` — local development tooling, never part of the shipped app |
+| | Anything gitignored: `logs/`, `.pytest_cache/`, `venv/` — never part of the shipped app |
 
 **Why you can't just copy `venv/` instead of building the wheelhouse:** a venv isn't
 portable code — it's a thin wrapper tied to the *exact* OS, CPU architecture, and Python
@@ -368,12 +362,12 @@ directly via apt if online, or via the `.deb` you staged in `deploy/system-packa
 not — see Section 3a), builds the Python environment (with `--system-site-packages` so it
 can see the apt-installed `pyscard`, and from the offline wheelhouse if present), enables
 the NFC service, installs the auto-start service and the kiosk browser, and scaffolds the
-M: mount (but does **not** connect it — that's Section 6, done last). When it finishes it
+share mount (but does **not** connect it — that's Section 6, done last). When it finishes it
 prints the few manual steps that remain (filling `.env`, enrolling a card). Those are
 covered below.
 
 Then jump to **Section 4.4** (keys & `.env`), **4.5**–**4.6** (database, admin card),
-**4.7** (test run), and **Section 5** (kiosk autostart). Section 6 (M: share, real device
+**4.7** (test run), and **Section 5** (kiosk autostart). Section 6 (locker share, real device
 data) comes **last**, once everything else is verified working.
 
 ---
@@ -381,7 +375,7 @@ data) comes **last**, once everything else is verified working.
 ## 4. Step-by-step setup (manual)
 
 These steps assume a terminal on the Pi and the project at `~/smart_locker`. **Notice what's
-*not* here:** connecting the M: share and importing real device data — that's Section 6,
+*not* here:** connecting the locker share and importing real device data — that's Section 6,
 deliberately done last, after the kiosk itself is proven working. This matches how the
 share typically gets provisioned in practice: IT connects it once everything else is ready,
 not before.
@@ -443,7 +437,7 @@ just end up with the project at `~/smart_locker` either way.)
 ### 4.2 System packages and the NFC reader
 
 The NFC reader talks to Linux through the **PC/SC daemon** (`pcscd`) plus the CCID driver.
-You also need the CIFS tools (for the M: mount, connected later), Chromium (for the kiosk
+You also need the CIFS tools (for the share mount, connected later), Chromium (for the kiosk
 display), and `python3-pyscard` (the reader's Python bindings — see Section 3a for why this
 comes from a `.deb`, not pip). Run these from the terminal, still inside `~/smart_locker`:
 
@@ -518,7 +512,7 @@ cp deploy/.env.pi.example .env
 nano .env          # paste SMART_LOCKER_ENC_KEY, SMART_LOCKER_HMAC_KEY, and SMART_LOCKER_UPDATE_HMAC_KEY
 ```
 
-The template already points the Excel paths at the M: mount (`/mnt/locker/...`, connected
+The template already points the Excel paths at /mnt/locker (`/mnt/locker/...`, connected
 later in Section 6) and keeps the database local. Adjust the
 `SMART_LOCKER_SOURCE_EXCEL_PATH` filename to match your real workbook. **Keep `.env`
 secret** — it holds the encryption keys (it is already gitignored).
@@ -533,11 +527,11 @@ is Section 11 — this is the same information, walked through in the order it a
   card UID, so the app can look up "have I seen this card before?" by comparing
   fingerprints, without ever decrypting every stored UID to check. Also just generated.
 - `SMART_LOCKER_UPDATE_HMAC_KEY` — a *third*, unrelated key that has nothing to do with
-  cards. It signs/verifies release tarballs so `update.sh` refuses to apply anything that
-  wasn't produced by someone who has this exact key (Section 9). Also generated by the same
+  cards. `python -m scripts.pack_release` uses it to HMAC the tarball; `update.sh` refuses
+  anything that doesn't match this exact key (Section 9). Also generated by the same
   command; paste in the third value.
 - `SMART_LOCKER_DB_PATH` — where the SQLite database file lives. Leave this pointing at the
-  Pi's local disk (the template already does) — never move it onto the M: share.
+  Pi's local disk (the template already does) — never move it onto the locker share.
 - `SMART_LOCKER_READER_NAME` — a text filter used to pick the right reader if more than one
   PC/SC device is plugged in. `ACR1252` (the default) matches the ACR1252U; you shouldn't
   need to touch this unless you use a different reader model.
@@ -550,34 +544,35 @@ is Section 11 — this is the same information, walked through in the order it a
   on. `0.0.0.0:8000` (the default) means "every network interface, port 8000" — this is
   what lets you reach `http://<pi-address>:8000/dashboard` from another computer on the
   same network. You almost never need to change this.
-- `SMART_LOCKER_SOURCE_EXCEL_PATH` — the company device master list to **import from** M:.
+- `SMART_LOCKER_SOURCE_EXCEL_PATH` — the company device master list to **import from** the share.
   Empty disables automatic import entirely. Point this at the real filename once you know
   it (Section 6.2) — until then it can stay as the template's placeholder.
-- `SMART_LOCKER_EXCEL_PATH` — the workbook the app **writes back to** M: (devices,
+- `SMART_LOCKER_EXCEL_PATH` — the workbook the app **writes back to** the share (devices,
   transactions, users). Different from the line above — one is read-from, this one is
   written-to.
 - `SMART_LOCKER_EXCEL_AUTO_EXPORT` — `1` means "refresh that exported workbook
   automatically after every import/photo change." The Pi template sets this to `1`; your
-  dev machine's `.env.example` leaves it off, since there's no M: share to write to there.
+  dev machine's `.env.example` leaves it off, since there's no locker share to write to there.
 - `SMART_LOCKER_SOURCE_SYNC_HOUR` / `SMART_LOCKER_SOURCE_SYNC_MINUTE` — what time of day
-  (24-hour clock) the automatic daily re-import from M: runs. `6` / `0` means 06:00.
-- `SMART_LOCKER_SOURCE_POLL_SECONDS` — only matters because M: is a network share: Linux
+  (24-hour clock) the automatic daily re-import from the share runs. `6` / `0` means 06:00.
+- `SMART_LOCKER_SOURCE_POLL_SECONDS` — only matters because this is a network share: Linux
   can't get an instant "this file changed" notification for edits made by *other* computers
   on a CIFS mount, so instead the app checks the file's last-modified time this often
   (seconds) as a fallback, on top of the daily import. 30 is a reasonable default; don't set
   it below 5.
-- `SMART_LOCKER_PHOTO_INPUT_PATH` — a folder (can be on M: or local) the app scans for
+- `SMART_LOCKER_PHOTO_INPUT_PATH` — a folder (can be on the share or local) the app scans for
   device photos, matched by filename to the device model. Empty disables photo import
   entirely.
-- `SMART_LOCKER_UPDATE_DIR` — the M: folder `update.sh` watches for a new signed release
-  tarball. Change this one value if you want updates picked up from a different M: folder —
-  no script edits needed anywhere else.
+- `SMART_LOCKER_UPDATE_DIR` — the share folder where you drop the signed pair from
+  `python -m scripts.pack_release` (`.tar.gz` + `.hmac`). `update.sh` picks it up from here.
+  Change this one value if you want updates from a different share folder — no script edits
+  needed anywhere else.
 - `SMART_LOCKER_KEEP_BACKUPS` — how many old code+database backup pairs `update.sh` keeps
   under `./backups` before deleting the oldest. `5` by default.
 
 *(This is a different file from the repo-root `.env.example` you may have used for
-development — that one has empty/local defaults meant for a Windows dev machine with no M:
-share and no update mechanism. Always use `deploy/.env.pi.example` on the Pi.)*
+development — that one has empty/local defaults meant for a Windows dev machine with no
+locker share and no update mechanism. Always use `deploy/.env.pi.example` on the Pi.)*
 
 ### 4.5 Initialize the database
 
@@ -651,12 +646,12 @@ is rotated, set the display rotation in `/boot/firmware/config.txt` (e.g. `displ
 or a `video=` line) and reboot.
 
 At this point the kiosk is fully working end-to-end, just with no real device inventory yet
-(the empty database from Section 4.5). That's intentional — **connect the M: share now**,
+(the empty database from Section 4.5). That's intentional — **connect the locker share now**,
 Section 6, typically once IT is ready to provision it.
 
 ---
 
-## 6. Connect the M: share and load your real data (do this last)
+## 6. Connect the locker share and load your real data (do this last)
 
 Everything up to here works with **zero** network access. This section is the one place the
 Pi needs the company network — and it's deliberately the *last* thing you set up, matching
@@ -665,9 +660,19 @@ proven working, not before). The mount is a **soft dependency**: if the share is
 after this point, borrow/return keeps working from the local database — only import/export
 pause until it's back (see Section 5's systemd unit comments, and Section 9).
 
-### 6.1 Mount the M: network share (CIFS)
+### 6.1 Mount the locker share (CIFS)
 
-The Pi reaches the M: drive as a CIFS (SMB) network mount at `/mnt/locker`.
+The Pi mounts the locker file share at `/mnt/locker` (CIFS/SMB). On a Windows PC that is
+whatever drive letter or UNC path IT mapped for this locker. Keep the Excel file, photos,
+and updates in the **root of that share**, not inside a git working copy.
+
+```
+/mnt/locker/                    (same folder your PC sees as the locker share)
+  device-list.xlsx          import — device master list
+  photos/                       optional; filename = model, e.g. 87V.jpg
+  locker-updates/               signed smart-locker-<id>.tar.gz + .hmac (from pack_release)
+  smart_locker_data.xlsx        written by the Pi; open it, don't edit it
+```
 
 1. Create the mount point and a root-only credentials file (skip if `install.sh` already
    scaffolded these):
@@ -695,17 +700,17 @@ The line uses `nofail` and `x-systemd.automount`, so the Pi still boots and the 
 works even if the share is temporarily unreachable — it just can't import/export until the
 share comes back.
 
-### 6.2 Load devices from the M: Excel list
+### 6.2 Load devices from the Excel list
 
-The company device master list lives on M:. Import it (it filters to the locker/"schrank"
+The company device master list lives on the share. Import it (it filters to the locker/"schrank"
 rows and auto-numbers slots 1…N). German and English column headers are auto-detected.
 
 ```bash
 # Preview without writing anything:
-python -m scripts.import_devices --file "/mnt/locker/Messmittelliste.xlsx" --dry-run
+python -m scripts.import_devices --file "/mnt/locker/device-list.xlsx" --dry-run
 
 # Import for real:
-python -m scripts.import_devices --file "/mnt/locker/Messmittelliste.xlsx"
+python -m scripts.import_devices --file "/mnt/locker/device-list.xlsx"
 ```
 
 | Excel column | German | Maps to | Required? |
@@ -722,8 +727,9 @@ python -m scripts.import_devices --file "/mnt/locker/Messmittelliste.xlsx"
 
 If auto-detection picks the wrong column, override it, e.g.
 `--pm-col "Equipment" --type-col "Kategorie"`. Re-importing is safe — devices are matched by
-PM number, and a re-import **never** overwrites `locker_slot`, `image_path`, `description`,
-`status`, or `borrower`.
+PM number. A re-import **never** overwrites `locker_slot`, `image_path`, or `description`.
+It **does** update `status` and the current borrower from the Excel "Aktueller Einsatzort"
+column (a person name → borrowed; empty / contains "schrank" → available).
 
 Once running as a service, this same import also happens **automatically**: once on startup,
 once a day at 06:00, and on demand from the hidden admin panel. (See Section 8 for why the
@@ -743,7 +749,7 @@ python -m scripts.update_device --pm PM-042 --image scope.jpg --description "4-c
 
 Or drop images into the **photo folder** set by `SMART_LOCKER_PHOTO_INPUT_PATH`, named after
 the device **model** (e.g. `87V.jpg` applies to every "87V" device). If that folder is on
-the M: share, photos present at startup are applied automatically; photos added later are
+the locker share, photos present at startup are applied automatically; photos added later are
 picked up on the next restart or by re-running `update_device --auto`.
 
 ---
@@ -774,7 +780,8 @@ authenticate. After that, everything happens on the touch display.
 - **Device detail** (overlay) — photo, specs, and a confirm button.
 - **Inactivity warning** (overlay) — a countdown with a "Stay Active" button.
 - **Hidden admin panel** (overlay) — opened by tapping the idle clock 5 times. Shortcuts for
-  Borrow, Return, **Sync source**, Register user, **Export to Excel**, End Session.
+  Borrow, Return, **Sync source**, Register user, **Export to Excel**, **Software Update**,
+  End Session.
 
 ### The rules
 
@@ -783,19 +790,82 @@ authenticate. After that, everything happens on the touch display.
   on anyone's behalf (the log records both people).
 - **Open-access locker:** there is no physical lock — the system tracks *who has what*.
 
+### Hidden operator access (do not put this on a user-facing poster)
+
+These are unpublished on purpose. Anyone who can touch the kiosk screen or reach the
+Pi on the LAN can use them — the lock is **physical access**, not a password.
+
+**Admin panel on the kiosk**
+
+1. Be on the idle screen — the one that says **TAP YOUR CARD**, with the live clock.
+2. Tap the **clock** (the time/date at the top) **five times within three seconds**.
+3. The dark admin overlay slides in. The kiosk signs in as the **first enrolled admin**
+   in the database — no card tap. If no admin has been enrolled yet, the panel cannot
+   open (`POST /api/admin/session` returns "no admin").
+4. What the buttons do:
+   - **Borrow Screen / Return Screen** — jump into those flows as that admin.
+   - **Sync Source** — first tap *previews* Excel changes from the share; second tap *applies* them.
+   - **Register User** — type any name, then tap a card (skips the approved-name list).
+   - **Export to Excel** — download a snapshot of devices / transactions / users.
+   - **Software Update** — apply the newest signed tarball from `locker-updates` on the
+     share. Full-screen updating overlay, then the kiosk reloads.
+   - **End Session** or **X** — close. End Session also logs the admin out.
+5. Tap the clock five times again to toggle the panel if it is still on the idle screen.
+
+**Dashboard and health (any PC on the same network, no login)**
+
+| What | URL |
+|---|---|
+| Live inventory (devices, last 500 transactions, users) | `http://<pi-address>:8000/dashboard` |
+| Is the appliance alive? | `http://<pi-address>:8000/api/health` |
+| Kiosk UI (only needed if Chromium is not already fullscreen) | `http://localhost:8000/?lite` on the Pi |
+
+`<pi-address>` is the Pi's LAN IP (`hostname -I` on the Pi, or the address IT assigned).
+
 ---
 
-## 8. Excel, the M: share, and the dashboard
+## 8. Excel, the locker share, and the dashboard
 
-There are two ways to see live data — a web dashboard and the Excel workbook on M:.
+There are two ways to see live data — a web dashboard and the Excel workbook on the share.
+
+### How the locker reads Excel
+
+The Pi does not keep Excel open. On each import it copies the `.xlsx` to a temp file, then
+reads that copy (`openpyxl`). If someone has the workbook open on a PC, the copy still
+usually succeeds.
+
+1. `.env` names the file:
+
+   `SMART_LOCKER_SOURCE_EXCEL_PATH=/mnt/locker/device-list.xlsx`
+
+   That is the master list sitting in the locker share root. Change the filename in `.env`
+   if yours is different.
+
+2. Import runs when the service starts, about every 30 seconds if the file's modification
+   time changed, every day at 06:00, and when you use **Sync Source** in the admin panel.
+   Linux cannot see "file changed" events for a file another computer wrote on a CIFS
+   share, which is why this is a timestamp poll instead of a live watch.
+
+3. Only rows whose slot cell starts with `schrank` become locker devices. They are numbered
+   1…N in sheet order (the number in "Schrank 7" is ignored).
+
+4. Values in **Aktueller Einsatzort** that are not schrank locations are treated as person
+   names and added to the self-register list.
+
+5. If `SMART_LOCKER_EXCEL_AUTO_EXPORT=1`, after a real import the Pi writes
+   `smart_locker_data.xlsx` next to the source file (Devices, Transactions, Users). Don't
+   edit that file by hand.
+
+Re-import matches devices by PM number. It leaves `locker_slot`, `image_path`, and
+`description` alone. It does update status and borrower from Aktueller Einsatzort.
 
 **Web dashboard** — open `http://<pi-address>:8000/dashboard` from any browser on the
 network (no login). It shows three tables, auto-refreshing every 30 seconds: **Devices**
 (slot, PM number, status, borrower, calibration due — filterable/sortable), **Transactions**
 (last 500), and **Users**.
 
-**Excel on M:** the device list is **imported from** M:, and an up-to-date workbook
-(Devices + Transactions + Users) is **written back to** M: at `SMART_LOCKER_EXCEL_PATH`.
+**Status workbook on the share:** after import the Pi can write `smart_locker_data.xlsx`
+at `SMART_LOCKER_EXCEL_PATH` (Devices + Transactions + Users).
 With `SMART_LOCKER_EXCEL_AUTO_EXPORT=1` (set in the Pi template), that workbook is refreshed
 automatically after every source import — on startup, at the daily 06:00 import, and
 whenever an admin uses **Sync source**. You can also download a snapshot any time from the
@@ -853,7 +923,7 @@ tail -f logs/smart_locker.log                  # the app's own rotating log file
   with internet (it targets Python 3.13 / cp313), recopy `deploy/wheelhouse/` and
   `deploy/system-packages/` onto the Pi, re-run the installer.
 
-**The M: share won't mount:**
+**The locker share won't mount:**
 - `sudo mount /mnt/locker` prints the error. A "permission denied" usually means the
   credentials file is wrong; a "host is down"/timeout means the network or server path is
   wrong.
@@ -877,7 +947,7 @@ The Pi lives in the locker, far from you, so it is built to heal itself:
   `StartLimitIntervalSec=0`, so if the app ever dies it comes back within a few seconds and keeps
   retrying *forever* — a transient fault clears itself with no one on site. It also starts on boot
   and after a power cut.
-- **A down M: share doesn't stop the kiosk.** The share is a *soft* dependency: borrow/return keep
+- **A down locker share doesn't stop the kiosk.** The share is a *soft* dependency: borrow/return keep
   working from the local database; only import/export pause until the share returns.
 - **Sync never crashes the app.** If the Excel file is left open/locked, or the share drops, the
   import/export is logged and skipped — the kiosk stays up and the next scheduled or manual sync
@@ -891,42 +961,72 @@ The Pi lives in the locker, far from you, so it is built to heal itself:
 - If `/api/health` doesn't load at all, the Pi is off or off the network (power / cable / Wi-Fi) —
   the one situation that needs someone physically there.
 
-### Updating the software (the Pi never needs the internet)
+### Updating the software (no internet)
 
-You author releases on your company **git host** as usual — but the **Pi never talks to git host**. The
-release rides the **M:** share you already have, so git host's internet access is irrelevant to the Pi.
-There is **no git on the Pi, and none is needed** — this mechanism replaces it entirely. Manually
-syncing/copying files onto the Pi instead of using this mechanism is **not supported**: it wouldn't
-be picked up (wrong filename/no signature), it bypasses the rollback and health-check safety net
-below entirely, and copying files into the app's live working directory while `smart-locker.service`
-is running risks a crash or a partially-overwritten file — the service has to be stopped first, which
-this script already does correctly.
+There is one update path: pack a signed tarball on Windows, copy **both** files onto the
+locker share, then apply it on the Pi. Do not copy files into the live app folder while
+`smart-locker.service` is running. Do not `git reset` on the appliance — that is not a
+full update.
 
-1. **At work** (where you have git host): download the release tarball for the tag — git host's
-   "Download source" gives exactly this — named `smart-locker-<version>.tar.gz`. **Sign it** with
-   `python -m scripts.sign_update smart-locker-<version>.tar.gz` (needs `SMART_LOCKER_UPDATE_HMAC_KEY`
-   in your `.env` — generate it once with `python -m scripts.generate_key` and keep the same value in
-   the Pi's `.env`). This writes a `.hmac` sidecar next to the tarball. Drop **both files** in
-   `M:\locker-updates\` (this folder is `SMART_LOCKER_UPDATE_DIR` in `.env` — change it there if you
-   want releases picked up from a different M: folder; no script edits needed). The Pi refuses to
-   apply a tarball that isn't signed with the matching key — this isn't optional, since the M: share
-   has broader write access than "people who should be able to push a Pi update."
-2. **On the kiosk:** open the hidden admin panel (tap the clock 5× within 3 s) → **Software Update**
-   → confirm.
-3. The Pi then: snapshots the database **and** the current code, swaps in the new version, installs
-   any new dependencies from the offline wheelhouse, runs database migrations, restarts, and
-   health-checks the new version. **If the new version doesn't come up healthy it automatically
-   rolls back** to the previous code and database — a bad update cannot leave the locker stuck.
+**1. Pack on Windows**
 
-The kiosk is briefly unavailable during the restart (seconds — invisible between card taps). A
-single-reader kiosk can't update with *zero* downtime (one process owns the NFC reader and the
-SQLite database), so the design trades that short restart for a **safe, self-reverting** update on a
-box no one is standing next to. Progress and the result are written to `logs/update.log` and
-`logs/update-status.json` (the latter drives the button's status text).
+From a git checkout of this repo, with `SMART_LOCKER_UPDATE_HMAC_KEY` in `.env` (the same
+value as the Pi):
 
-**SSH fallback** (only if you ever need it): `sudo /home/locker/smart_locker/deploy/install/update.sh`.
-The button relies on the sudoers drop-in that `install.sh` writes to `/etc/sudoers.d/smart-locker`;
-if that step was skipped, use the SSH command above.
+```bash
+python -m scripts.pack_release
+```
+
+Optional arguments: `python -m scripts.pack_release <ref> <output-dir>`. Default ref is
+`HEAD`; default output directory is the current working directory.
+
+That packs a snapshot of the files git is tracking (the committed project, not your
+`.env`, `venv`, or database) as `smart-locker-<id>.tar.gz`, then writes
+`smart-locker-<id>.tar.gz.hmac` (HMAC-SHA256 via `SMART_LOCKER_UPDATE_HMAC_KEY`).
+
+**2. Copy onto the share**
+
+Copy **both** files into `/mnt/locker/locker-updates/` (`SMART_LOCKER_UPDATE_DIR`). Wait
+until the copy has fully finished before applying — this is CIFS; a truncated tarball fails
+the HMAC check (fail closed). The share is writable by more people than should be able to
+update the Pi, which is why HMAC is required.
+
+**3. Apply on the Pi**
+
+**First apply of this `update.sh`:** copy only `deploy/install/update.sh` onto the Pi
+(keep LF — do not open it in Notepad), then SSH:
+
+`sudo bash /home/locker/smart_locker/deploy/install/update.sh`
+
+The old script on the Pi does not preserve `deploy/system-packages/*.deb`. Leave only the
+new `.tar.gz` + `.hmac` pair in `locker-updates/` (the newest file by date is applied).
+
+Later applies: admin panel → **Software Update** (full-screen overlay, then the kiosk
+reloads), or the same SSH command. If the app is not running, the button is unavailable —
+use SSH. The button relies on the sudoers drop-in that `install.sh` writes to
+`/etc/sudoers.d/smart-locker`.
+
+`update.sh` still: stops the service, snapshots code + database, rsyncs the new tree
+(`--delete`, with preserve), installs wheels from the **existing** Pi wheelhouse, runs
+`scripts.migrate_db`, starts the service, and checks `/api/health`. If the new version does
+not come up, it restores the snapshot. HMAC is required; unsigned or mismatched releases
+are refused.
+
+The backend restarts for a few seconds. The kiosk stays on the updating overlay,
+then reloads. Progress is in `logs/update.log` and `logs/update-status.json`.
+
+**Leave these on the Pi forever (never copy them from a Windows tree)**
+
+- `.env`
+- `smart_locker.db` (plus `-wal` / `-shm`)
+- `venv/`
+- `deploy/wheelhouse/`
+- `deploy/system-packages/`
+- `logs/`
+- `backups/`
+- `.git/`
+- device photos under `smart_locker/frontend/images/` (rsync without `--delete`, so
+  `hero_bg.jpg` from a release can update)
 
 ---
 
@@ -950,20 +1050,20 @@ All settings live in `.env` (loaded by `config/settings.py`). The Pi template
 |---|---|---|
 | `SMART_LOCKER_ENC_KEY` | (required) | AES-256-GCM key, base64 — from `generate_key` |
 | `SMART_LOCKER_HMAC_KEY` | (required) | HMAC-SHA256 key, base64 — from `generate_key` |
-| `SMART_LOCKER_UPDATE_HMAC_KEY` | (required on the Pi) | HMAC-SHA256 key, base64 — from `generate_key`; verifies signed release tarballs, see "Updating the software" in Section 9 |
+| `SMART_LOCKER_UPDATE_HMAC_KEY` | (required on the Pi) | HMAC-SHA256 key, base64 — from `generate_key`; same value `pack_release` uses to sign tarballs, see "Updating the software" in Section 9 |
 | `SMART_LOCKER_DB_PATH` | `smart_locker.db` | SQLite path — keep on the Pi's local disk |
 | `SMART_LOCKER_READER_NAME` | `ACR1252` | Substring filter for the NFC reader name |
 | `SMART_LOCKER_SESSION_TIMEOUT` | `120` | Idle session timeout (seconds) |
 | `SMART_LOCKER_MAX_BORROWS` | `5` | Max devices a user can hold at once |
 | `SMART_LOCKER_API_HOST` | `0.0.0.0` | Web server bind address |
 | `SMART_LOCKER_API_PORT` | `8000` | Web server port |
-| `SMART_LOCKER_SOURCE_EXCEL_PATH` | (empty) | Device master list on M: to import; empty disables auto-import |
-| `SMART_LOCKER_EXCEL_PATH` | `smart_locker_data.xlsx` | Where the exported workbook is written (the M: path on the Pi) |
+| `SMART_LOCKER_SOURCE_EXCEL_PATH` | (empty) | Device master list on the share to import; empty disables auto-import |
+| `SMART_LOCKER_EXCEL_PATH` | `smart_locker_data.xlsx` | Where the exported workbook is written (the share path on the Pi) |
 | `SMART_LOCKER_EXCEL_AUTO_EXPORT` | (off) | `1` = auto-refresh the exported workbook after each import/photo change |
 | `SMART_LOCKER_SOURCE_SYNC_HOUR` / `_MINUTE` | `6` / `0` | Daily source-import time (24h) |
 | `SMART_LOCKER_SOURCE_POLL_SECONDS` | `30` | Mtime-poll interval (seconds, min `5`) used only when the source path is a network share — see Section 9 |
 | `SMART_LOCKER_PHOTO_INPUT_PATH` | (empty) | Folder watched for device photos; empty disables |
-| `SMART_LOCKER_UPDATE_DIR` | `/mnt/locker/locker-updates` | M: folder `update.sh` watches for release tarballs — see "Updating the software" below in Section 9 |
+| `SMART_LOCKER_UPDATE_DIR` | `/mnt/locker/locker-updates` | share folder for the signed pair from `pack_release` (`.tar.gz` + `.hmac`); `update.sh` picks it up — see "Updating the software" in Section 9 |
 | `SMART_LOCKER_KEEP_BACKUPS` | `5` | How many old code+DB backup pairs `update.sh` keeps under `./backups` before pruning |
 
 ---
@@ -976,7 +1076,7 @@ per-user limits, self-service registration, Excel import (schrank filter, DE/EN 
 on-demand/auto export, photo assignment, the read-only `/dashboard`, the FastAPI REST API +
 SSE bridge, the 6-screen kiosk UI, **Raspberry Pi appliance deployment** (systemd service,
 CIFS mount, Chromium kiosk, fully offline install including the no-PyPI-wheel `pyscard`
-case), and 132 hardware-free tests.
+case), and a hardware-free pytest suite.
 
 **Next:** barcode scanner for shared lockers (Section 15), calibration-due notifications, a
 full admin web panel, MIFARE sector reading, and multi-reader support.
@@ -1037,7 +1137,7 @@ an id. **CSS variables** at the top let you change the whole look in one line:
 
 ```css
 :root {
-  --accent: #009641;   /* Phoenix Contact green — change once, the whole UI follows */
+  --accent: #009641;   /* kiosk green — change once, the whole UI follows */
   --danger: #ef4444;
 }
 color: var(--accent);

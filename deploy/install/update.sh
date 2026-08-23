@@ -1,15 +1,12 @@
 #!/usr/bin/env bash
 #
 # File: update.sh
-# Description: Safe, offline software update for the Smart Locker Pi appliance.
-#              Picks up a release tarball delivered onto the M: share (the Pi
-#              never contacts git host/the internet), then applies it with a full
-#              rollback safety net: snapshot the DB + current code, swap in the
-#              new code, install deps from the offline wheelhouse, run DB
-#              migrations, restart the service, and HEALTH-GATE on /api/health.
-#              If the new version does not come up healthy, the previous code
-#              and database are restored automatically and the service is
-#              restarted on the old version.
+# Description: Offline software update for the Smart Locker Pi appliance.
+#              Picks up a signed release tarball from the locker share, then
+#              snapshots DB + code, swaps in the new tree, installs deps from
+#              the wheelhouse, runs DB migrations, restarts the service, and
+#              health-checks /api/health. If the new version does not come up,
+#              the previous code and database are restored.
 # Project: smart_locker/deploy
 # Notes: Run on the Pi as: sudo bash deploy/install/update.sh   (the admin-panel
 #        "Update now" button runs exactly this). Use `sudo bash <script>` — copying
@@ -19,6 +16,9 @@
 #        restart (seconds, invisible between card taps) for a SAFE, self-reverting
 #        update on a box no one is standing next to.
 #        Must stay LF (enforced by .gitattributes); CRLF breaks it on the Pi.
+#        PRESERVE keeps runtime files (.env, DB, venv, logs, backups, wheelhouse,
+#        deploy/system-packages, device photos) across rsync --delete; committed
+#        UI images from the release are overlaid afterwards without --delete.
 #
 set -Eeuo pipefail
 
@@ -26,7 +26,7 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_DIR="${SMART_LOCKER_DIR:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 
-# Load the operator's .env so this script honors the same M:/service knobs the
+# Load the operator's .env so this script honors the same share/service knobs the
 # app uses everywhere else (SMART_LOCKER_UPDATE_DIR, SMART_LOCKER_KEEP_BACKUPS,
 # ...) — one config file to edit, not a second one. The transient systemd-run
 # unit that launches this script carries no environment of its own, so without
@@ -53,10 +53,9 @@ SERVICE="${SMART_LOCKER_SERVICE:-smart-locker}"
 HEALTH_URL="${SMART_LOCKER_HEALTH_URL:-http://127.0.0.1:8000/api/health}"
 HEALTH_TIMEOUT="${SMART_LOCKER_HEALTH_TIMEOUT:-45}"   # seconds to wait for a healthy boot
 
-# Where releases are dropped (a folder on the M: CIFS share). Each release is a
-# tarball named smart-locker-<version>.tar.gz (exactly what git host's "Download
-# source" gives you for a tag). The Pi reads this folder over the LAN; it never
-# needs git host or the internet.
+# Where releases are dropped (a folder on the locker share). Each release is a
+# tarball named smart-locker-<version>.tar.gz. The Pi reads this folder over
+# the LAN; it does not need the internet.
 UPDATE_DIR="${SMART_LOCKER_UPDATE_DIR:-/mnt/locker/locker-updates}"
 
 DB_PATH="${SMART_LOCKER_DB_PATH:-$APP_DIR/smart_locker.db}"
@@ -69,8 +68,8 @@ KEEP_BACKUPS="${SMART_LOCKER_KEEP_BACKUPS:-5}"
 
 # Runtime paths preserved across the code swap (never overwritten by a release).
 PRESERVE=(".env" "smart_locker.db" "smart_locker.db-wal" "smart_locker.db-shm"
-          "logs" "venv" "deploy/wheelhouse" "backups" ".update-staging" ".git"
-          "smart_locker/frontend/images" "VERSION")
+          "logs" "venv" "deploy/wheelhouse" "deploy/system-packages" "backups"
+          ".update-staging" ".git" "smart_locker/frontend/images" "VERSION")
 
 mkdir -p "$BACKUP_DIR" "$APP_DIR/logs"
 
@@ -163,8 +162,21 @@ OLD_VERSION="$CUR_VERSION"
 log "=== Smart Locker update check (current version: $CUR_VERSION) ==="
 write_status "checking" "Looking for a new release on the share."
 
+# Fail closed before stop/backup: later HMAC verify needs openssl, the code
+# swap needs rsync. Missing either would leave the kiosk down with no swap.
+if ! command -v rsync >/dev/null 2>&1; then
+  log "rsync not found on PATH — refusing to update (needed to swap in the new tree). Service was NOT stopped; still running $CUR_VERSION."
+  write_status "failed" "rsync not found; update refused; still on $CUR_VERSION."
+  exit 1
+fi
+if ! command -v openssl >/dev/null 2>&1; then
+  log "openssl not found on PATH — refusing to update (needed to verify the release HMAC). Service was NOT stopped; still running $CUR_VERSION."
+  write_status "failed" "openssl not found; update refused; still on $CUR_VERSION."
+  exit 1
+fi
+
 if [ ! -d "$UPDATE_DIR" ]; then
-  log "Update folder $UPDATE_DIR is not reachable (M: share down?) — nothing to do."
+  log "Update folder $UPDATE_DIR is not reachable (share down?) — nothing to do."
   write_status "idle" "Update share not reachable; staying on $CUR_VERSION."
   exit 0
 fi
@@ -173,7 +185,9 @@ fi
 # 2. Find the newest release tarball and decide whether it is newer
 # ============================================================================
 # Newest by version-sorted filename: smart-locker-<version>.tar.gz
-TARBALL="$(ls -1 "$UPDATE_DIR"/smart-locker-*.tar.gz 2>/dev/null | sort -V | tail -n1 || true)"
+# Newest by mtime (not sort -V): pack_release names files from git describe,
+# which may be a short hash that does not version-sort.
+TARBALL="$(ls -1t "$UPDATE_DIR"/smart-locker-*.tar.gz 2>/dev/null | head -n1 || true)"
 if [ -z "$TARBALL" ]; then
   log "No release tarball in $UPDATE_DIR — nothing to do."
   write_status "idle" "No release found on the share; staying on $CUR_VERSION."
@@ -190,16 +204,16 @@ log "New release available: $CUR_VERSION -> $NEW_VERSION ($TARBALL)"
 write_status "updating" "Applying $NEW_VERSION."
 
 # Mandatory integrity + authenticity check. A plain checksum sitting next to the
-# tarball on the same M: share only proves self-consistency -- anyone with SMB
+# tarball on the same share only proves self-consistency -- anyone with SMB
 # write access to the share could forge both files together. Instead this
 # requires an HMAC-SHA256 sidecar keyed with SMART_LOCKER_UPDATE_HMAC_KEY, a
-# secret shared only between whoever signs releases (scripts.sign_update) and
+# secret shared only between whoever signs releases (scripts.pack_release) and
 # this Pi's .env -- so a tarball dropped without the key cannot pass. Missing
 # key, missing sidecar, or a mismatch all refuse the update (fail closed).
 [ -n "${SMART_LOCKER_UPDATE_HMAC_KEY:-}" ] \
   || { log "SMART_LOCKER_UPDATE_HMAC_KEY not set — refusing to apply an unverifiable release. Generate one with: python -m scripts.generate_key"; write_status "failed" "Update HMAC key not configured; refused."; rm -rf "$STAGING_DIR"; exit 1; }
 [ -f "$TARBALL.hmac" ] \
-  || { log "No $TARBALL.hmac sidecar — refusing to apply an unsigned release. Sign it with: python -m scripts.sign_update"; write_status "failed" "Release is unsigned; refused."; rm -rf "$STAGING_DIR"; exit 1; }
+  || { log "No $TARBALL.hmac sidecar — refusing to apply an unsigned release. Pack it with: python -m scripts.pack_release"; write_status "failed" "Release is unsigned; refused."; rm -rf "$STAGING_DIR"; exit 1; }
 
 log "Verifying release signature..."
 EXPECTED_HMAC="$(tr -d '[:space:]' < "$TARBALL.hmac")"
@@ -277,6 +291,13 @@ rsync -a --delete "${RSYNC_EXCLUDES[@]}" "$STAGING_DIR"/ "$APP_DIR"/
 # The transient update unit runs as root, so newly written files are root-owned;
 # hand the tree back to the service account (runtime dirs were preserved anyway).
 chown -R "$APP_USER":"$APP_USER" "$APP_DIR" 2>/dev/null || true
+# PRESERVE skipped this dir so gitignored device photos survive --delete.
+# Overlay committed UI assets from the staged release without removing photos.
+if [ -d "$STAGING_DIR/smart_locker/frontend/images" ]; then
+  mkdir -p "$APP_DIR/smart_locker/frontend/images"
+  rsync -a "$STAGING_DIR/smart_locker/frontend/images/" "$APP_DIR/smart_locker/frontend/images/"
+  chown -R "$APP_USER":"$APP_USER" "$APP_DIR/smart_locker/frontend/images" 2>/dev/null || true
+fi
 log "New code in place."
 
 # ============================================================================

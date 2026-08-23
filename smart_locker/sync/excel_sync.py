@@ -200,7 +200,7 @@ def export_to_excel(engine, output_path: str | Path) -> None:
 
     # The export is best-effort and must NEVER raise: the database is the source
     # of truth, and the kiosk must not crash because a backup workbook couldn't be
-    # written. Any OSError — an unreachable/down M: share (mkstemp can't stage the
+    # written. Any OSError — an unreachable/down locker share (mkstemp can't stage the
     # temp file), the share vanishing mid-write (wb.save), or the replace failing
     # for a reason other than a lock — is logged and skipped here in one place; the
     # next scheduled/manual sync retries once the share is back.

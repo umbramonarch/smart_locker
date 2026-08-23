@@ -7,11 +7,3 @@
 *.desktop   text eol=lf
 *.snippet   text eol=lf
 deploy/**   text eol=lf
-
-# The simulation harness mirrors the deploy artifacts (shell, env, conf, yaml run
-# in QEMU / are sourced by bash), so keep its text files LF too. Binary assets
-# (sample workbook, photos) are excluded so they are never line-ending mangled.
-sim/**          text=auto eol=lf
-sim/**/*.xlsx   binary
-sim/**/*.jpg    binary
-sim/**/*.png    binary
