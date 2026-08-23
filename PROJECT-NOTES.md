@@ -9,7 +9,7 @@ Filled from `D:\projects\guide\templates\PROJECT-NOTES.md`. No placeholders.
 ## Project
 
 - **Name:** smart_locker
-- **Purpose (one sentence):** Offline Raspberry Pi kiosk: tap an NFC work card, then borrow or return equipment; SQLite on the Pi, Excel on the locker file share.
+- **Purpose (one sentence):** Offline Raspberry Pi kiosk: tap an NFC work card, then borrow or return equipment (NFC sticker on the same reader, or pick on screen); SQLite on the Pi, Excel on the locker file share.
 - **Kind:** mixed — FastAPI service + vanilla kiosk UI + Raspberry Pi appliance (`deploy/`)
 
 ## Stack
@@ -30,7 +30,7 @@ python -m scripts.init_db
 python -m scripts.enroll_card --name "Name" --role admin
 python -m smart_locker.app           # kiosk API + UI on :8000
 
-python -m pytest tests/ -v           # ~168 items, 13 files, no NFC hardware
+python -m pytest tests/ -v           # ~221 items, 15 files, no NFC hardware
 
 # Pi (offline): copy tree + wheelhouse + .debs, then
 sudo bash deploy/install/install.sh
@@ -38,7 +38,7 @@ sudo bash deploy/install/install.sh
 ```
 
 - **CI:** none in this repo. Pytest on the work branch is the merge gate for `main`.
-- **Manual verification:** real ACR1252U tap, Riverdi touch screen, CIFS import/export. Checklist: `deploy/PI-VALIDATION-CHECKLIST.md`.
+- **Manual verification:** real ACR1252U work-card tap, then device-sticker borrow/return, Riverdi touch screen, CIFS import/export. Checklist: `deploy/PI-VALIDATION-CHECKLIST.md`.
 
 ## Hardware risk
 
@@ -52,7 +52,7 @@ sudo bash deploy/install/install.sh
 - Keep diffs on-Issue. New dependencies need an explicit why, pin, and license.
 - Work on a short-lived branch from `main` (`feature/`, `fix/`, `refactor/`, `docs/`, `chore/`, `hotfix/`, `spike/`). MR into `main`. Delete the branch after merge.
 - Keep `deploy/*.sh`, `*.service`, `*.desktop` LF (`.gitattributes`). Run Pi scripts as `sudo bash …`.
-- Log card events as "Card inserted on \<reader\>" — never a raw UID.
+- Log card events as "Card inserted on \<reader\>" and sticker taps as "Device tag on \<reader\>" — never a raw UID.
 
 ## Don't
 
@@ -71,11 +71,12 @@ sudo bash deploy/install/install.sh
 
 - **Secrets:** `.env` (gitignored). Three keys: `SMART_LOCKER_ENC_KEY` (AES-256-GCM), `SMART_LOCKER_HMAC_KEY` (HMAC-SHA256 card lookup), `SMART_LOCKER_UPDATE_HMAC_KEY` (release HMAC; openssl uses the env **string**, not decoded 32 bytes).
 - **Locker share (Pi: `/mnt/locker`):** Excel import, Excel export, photos, and signed updates live at the share root (`deploy/.env.pi.example`). Share down ≠ kiosk down.
-- **Excel import:** `smart_locker/sync/source_import.py` — schrank rows only, slots 1–N, DE/EN headers. Re-import never overwrites `locker_slot` / `image_path` / `description`. It **does** overwrite `status` and `current_borrower_id` from `Aktueller Einsatzort`.
+- **Excel import:** `smart_locker/sync/source_import.py` — schrank rows only, slots 1–N, DE/EN headers. Re-import never overwrites `locker_slot` / `image_path` / `description` / `tag_hmac`. It **does** overwrite `status` and `current_borrower_id` from `Aktueller Einsatzort` (and Excel `barcode`).
+- **NFC device tags:** same ACR1252U as work cards. Store `devices.tag_hmac` only (same HMAC key as `users.uid_hmac`). Do **not** reuse `devices.barcode`. Kiosk `GET /api/devices` may expose `has_tag: bool`, never the digest; dashboard JSON and Excel export omit `tag_hmac`.
 - **Excel auto-export** only if `SMART_LOCKER_EXCEL_AUTO_EXPORT=1`.
 - **Photos:** filename stem = device **model**. `scripts/update_device.py --auto` matches **PM number** — different scheme.
 - **Pi updates:** signed tarball from `python -m scripts.pack_release` only (copy `.tar.gz` + `.hmac` to `/mnt/locker/locker-updates`). `update.sh` still does stop / backup / pip / migrate / health / rollback. Git reset is not a full update.
-- **Hidden admin:** idle screen, tap the **clock 5× within 3 s**. Dashboard: `http://<pi>:8000/dashboard` (no login). Health: `/api/health`.
+- **Hidden admin:** idle screen, tap the **clock 5× within 3 s**. **Register Device** binds an NFC sticker to an existing schrank row (list shows **name + PM**; does not create devices). CLI: `python -m scripts.enroll_device_tag --pm PM-001`. Dashboard: `http://<pi>:8000/dashboard` (no login). Health: `/api/health`.
 - **Entry / layout:** `smart_locker/app.py`, `config/`, `scripts/`, `deploy/`, `tests/`, `GUIDE.md`. Frontend: `smart_locker/frontend/`.
 - **Logging:** `config/logging_config.py` → `logs/smart_locker.log` (5 MB × 5) + stdout INFO.
 - **Style:** every Python/JS/CSS/HTML file has a `File:` / `Description:` / `Project:` / `Notes:` header. Python: Google docstrings. JS: JSDoc.
