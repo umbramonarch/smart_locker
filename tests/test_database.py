@@ -12,6 +12,8 @@ from datetime import date
 import pytest
 
 from smart_locker.database.models import DeviceStatus, TransactionType, UserRole
+from sqlalchemy.exc import IntegrityError
+
 from smart_locker.database.repositories import (
     DeviceRepository,
     TransactionRepository,
@@ -149,6 +151,77 @@ class TestDeviceRepository:
         assert found.barcode == "4900123456789"
         assert found.calibration_due == date(2026, 9, 15)
         assert found.serial_number == "MY12345678"
+
+    def test_bind_lookup_unbind_tag(self, db_session, hmac_key):
+        """Bind stores tag_hmac; lookup finds the row; unbind clears it."""
+        device = DeviceRepository.create(
+            db_session, name="Fluke 87V", device_type="Multimeter",
+            pm_number="PM-TAG-1",
+        )
+        digest = compute_uid_hmac("AABBCCDD", hmac_key)
+        DeviceRepository.bind_tag(db_session, device, digest)
+        found = DeviceRepository.find_by_tag_hmac(db_session, digest)
+        assert found is not None
+        assert found.id == device.id
+        assert found.tag_hmac == digest
+
+        DeviceRepository.unbind_tag(db_session, device)
+        assert device.tag_hmac is None
+        assert DeviceRepository.find_by_tag_hmac(db_session, digest) is None
+
+    def test_tag_hmac_null_uniqueness(self, db_session):
+        """SQLite UNIQUE on tag_hmac allows many unbound (NULL) devices."""
+        DeviceRepository.create(
+            db_session, name="A", device_type="t", pm_number="PM-NULL-1",
+        )
+        DeviceRepository.create(
+            db_session, name="B", device_type="t", pm_number="PM-NULL-2",
+        )
+        db_session.commit()
+        assert DeviceRepository.find_by_pm(db_session, "PM-NULL-1").tag_hmac is None
+        assert DeviceRepository.find_by_pm(db_session, "PM-NULL-2").tag_hmac is None
+
+    def test_rebind_replaces_hmac(self, db_session, hmac_key):
+        """Re-bind replaces the HMAC on that device; the old digest no longer matches."""
+        device = DeviceRepository.create(
+            db_session, name="Scope", device_type="t", pm_number="PM-REBIND",
+        )
+        first = compute_uid_hmac("11111111", hmac_key)
+        second = compute_uid_hmac("22222222", hmac_key)
+        DeviceRepository.bind_tag(db_session, device, first)
+        DeviceRepository.bind_tag(db_session, device, second)
+        assert DeviceRepository.find_by_tag_hmac(db_session, first) is None
+        found = DeviceRepository.find_by_tag_hmac(db_session, second)
+        assert found is not None
+        assert found.id == device.id
+
+    def test_tag_hmac_unique_constraint(self, db_session, hmac_key):
+        """Two devices cannot share the same tag_hmac."""
+        digest = compute_uid_hmac("DEADBEEF", hmac_key)
+        d1 = DeviceRepository.create(
+            db_session, name="A", device_type="t", pm_number="PM-U1",
+        )
+        d2 = DeviceRepository.create(
+            db_session, name="B", device_type="t", pm_number="PM-U2",
+        )
+        DeviceRepository.bind_tag(db_session, d1, digest)
+        db_session.flush()
+        d2.tag_hmac = digest
+        with pytest.raises(IntegrityError):
+            db_session.flush()
+
+    def test_update_metadata_ignores_tag_hmac(self, db_session, hmac_key):
+        """Source-import ALLOWED set must not overwrite tag_hmac."""
+        device = DeviceRepository.create(
+            db_session, name="Old", device_type="t", pm_number="PM-META",
+        )
+        digest = compute_uid_hmac("CAFEBABE", hmac_key)
+        DeviceRepository.bind_tag(db_session, device, digest)
+        DeviceRepository.update_metadata(
+            db_session, device, tag_hmac="should-not-apply", name="New",
+        )
+        assert device.tag_hmac == digest
+        assert device.name == "New"
 
     def test_create_device_without_serial(self, db_session):
         device = DeviceRepository.create(

@@ -25,8 +25,8 @@ from config.settings import (
     SOURCE_SYNC_HOUR,
     SOURCE_SYNC_MINUTE,
 )
-from smart_locker.auth.authenticator import Authenticator
 from smart_locker.auth.session_manager import SessionManager
+from smart_locker.auth.tap_router import handle_insert
 from smart_locker.database.engine import get_engine, get_session, init_db
 from smart_locker.database.repositories import DeviceRepository
 from smart_locker.nfc.card_observer import CardEvent, CardEventType
@@ -34,7 +34,6 @@ from smart_locker.nfc.exceptions import NFCError
 from smart_locker.nfc.factory import create_reader
 from smart_locker.nfc.reader_observer import ReaderEvent, ReaderEventType
 from smart_locker.security.key_manager import key_manager
-from smart_locker.services.locker_service import LockerService
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +84,6 @@ class SmartLockerApp:
 
     def __init__(self) -> None:
         self._reader = create_reader()
-        self._authenticator = Authenticator(hmac_key=key_manager.hmac_key)
         self._session_mgr = SessionManager(timeout_seconds=SESSION_TIMEOUT_SECONDS)
         self._running = False
 
@@ -194,12 +192,11 @@ class SmartLockerApp:
             self._on_card_removed(event)
 
     def _on_card_inserted(self, event: CardEvent) -> None:
-        """Authenticate user on card insert, or end session on second tap.
+        """Route an NFC insert through the shared tap router.
 
-        If no session is active, the card UID is authenticated via HMAC lookup
-        and a new session is started. If a session is already active, a second
-        tap ends the session (logout). Displays borrowed and available devices
-        after successful authentication.
+        A work card starts a session when idle and logs out when a session is
+        already active (does not start the new user on the same tap). A device
+        tag borrows or returns while logged in and does not end the session.
 
         Args:
             event: The card-inserted event containing the card UID.
@@ -211,25 +208,27 @@ class SmartLockerApp:
             print("Could not read card. Please try tapping again.")
             return
 
-        # Second tap while a session is active → log out
-        if self._session_mgr.has_active_session:
-            active_session = self._session_mgr.current_session
-            if active_session is not None:
-                user_name = active_session.user.display_name
-                self._session_mgr.end_session()
-                print(f"\nGoodbye, {user_name}!")
-                print("Tap your card to begin.\n")
-            return
-
         with get_session() as db_session:
-            user = self._authenticator.authenticate(db_session, event.uid)
+            result = handle_insert(
+                db_session,
+                event.uid,
+                key_manager.hmac_key,
+                self._session_mgr,
+                admin_overlay_open=False,
+                reader_name=event.reader_name,
+            )
+            if result.cli_message:
+                print(f"\n{result.cli_message}")
 
-            if user is None:
-                print("Unknown card. Please contact an administrator to enroll.")
+            if result.event != "auth_success":
+                if result.event == "session_ended":
+                    print()
                 return
 
-            self._session_mgr.start_session(user)
-            print(f"\nWelcome, {user.display_name}!")
+            active = self._session_mgr.current_session
+            if active is None:
+                return
+            user = active.user
 
             # Show user's borrowed devices
             borrowed = DeviceRepository.get_borrowed_by_user(db_session, user.id)
@@ -245,7 +244,10 @@ class SmartLockerApp:
                 for d in available:
                     print(f"  [{d.id}] {d.name} ({d.device_type})")
 
-            print("\nTap your card again or wait to time out to end session.")
+            print(
+                "\nTap a device tag to borrow or return, "
+                "or tap your work card to end the session."
+            )
 
     def _on_card_removed(self, event: CardEvent) -> None:
         """Handle card removal (no-op — session persists on touch display).
@@ -258,7 +260,7 @@ class SmartLockerApp:
         """
         # Card removal does not end the session — the user interacts with
         # the touch display after tapping. Session ends via timeout or a
-        # second tap (handled in _on_card_inserted).
+        # work-card tap (handled in _on_card_inserted).
         pass
 
 

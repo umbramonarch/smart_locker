@@ -8,8 +8,9 @@ including a fully offline install.
 ## 1. What it is and how it runs
 
 The Smart Locker is a small appliance for borrowing and returning equipment. A colleague
-taps their NFC work card on a reader, then borrows or returns devices by touching a screen.
-Everything is tracked in a local database; nobody needs a login or the internet.
+taps their NFC work card on a reader, then either taps an NFC sticker on the device (same
+reader) or picks the unit on the touch screen. Everything is tracked in a local database;
+nobody needs a login or the internet.
 
 It runs on a **Raspberry Pi 4** as a self-contained kiosk:
 
@@ -68,6 +69,8 @@ in that scenario, and this guide is written for it.
    bus-powered) is a known-good example if you want a specific model to buy rather than
    picking one yourself.
 6. NFC work cards (MIFARE Classic, Ultralight, NTAG, DESFire — any card with a UID).
+   Cheap NTAG stickers on devices use the same reader (on-metal / ferrite tags on metal
+   chassis).
 7. Network access to the company locker share (wired Ethernet is most reliable) —
    **connected last**, after everything else is working. See Section 6.
 
@@ -596,6 +599,15 @@ When you see `Place card on reader...`, tap your card and hold it steady for 1�
 The card UID is masked in the output (e.g. `A1****D4`) and stored encrypted — only admins
 can ever decrypt it. Enroll regular users the same way with `--role user`.
 
+To bind a sticker to a locker device after Excel import (optional CLI; the admin panel
+**Register Device** is the usual path):
+
+```bash
+python -m scripts.enroll_device_tag --pm PM-001
+# or without a reader:
+python -m scripts.enroll_device_tag --pm PM-001 --uid AABBCCDD
+```
+
 ### 4.7 Run it (test before making it permanent)
 
 ```bash
@@ -758,30 +770,35 @@ picked up on the next restart or by re-running `update_device --auto`.
 
 ### Session flow (tap-and-go)
 
-The card is **tapped and removed** — it is not left on the reader. Its only job is to
-authenticate. After that, everything happens on the touch display.
+The **work card** is **tapped and removed** — it is not left on the reader. After login,
+tap a **device sticker** on the same reader to borrow or return, or pick the unit on
+the touch display. Do not present the sticker while the work card is still on the reader.
 
-1. **Tap your card** → the reader reads the UID → the system authenticates you → the welcome
-   screen appears.
-2. **Use the touch display** → borrow devices, return devices, view device info.
-3. **The session ends** via the **End Session** button, a **second card tap**, or the
-   **inactivity timeout** (120 seconds of no touch — a silent security backstop).
+1. **Tap your work card** → the reader reads the UID → the system authenticates you → the
+   scan-first main menu appears.
+2. **Tap the NFC sticker on the device** (auto borrow/return) **or** use Borrow / Return
+   on screen. The session stays open so several devices can be tagged in one login.
+3. **The session ends** via the **End Session** button, a **work-card tap** (a device
+   sticker does not log you out), or the **inactivity timeout** (120 seconds of no touch —
+   a silent security backstop).
 
 ### The screens
 
 - **Idle** — animated NFC ring, "Tap your card", live clock, a "Register your card" entry.
 - **Register (self-service)** — search and pick your approved name, then tap your card to
   enrol it under that name.
-- **Authentication failed** — red "Card Not Recognized", auto-returns to idle.
-- **Main menu** — "Welcome, [Name]!" with **Borrow**, **Return**, **End Session**.
+- **Authentication failed** — red "Card Not Recognized", auto-returns to idle. A bound
+  device sticker at idle is **not** this screen — it asks you to tap your work card first.
+- **Main menu** — welcome + name; **Tap the device** to borrow or return; **Borrow** /
+  **Return** stay as *or pick on screen*; **End Session**.
 - **Borrow** — a grid of devices by locker slot; available ones are tappable, borrowed ones
-  show who has them.
+  show who has them. A sticker tap still auto-intents and refreshes this grid.
 - **Return** — the same grid, with your own borrowed items highlighted.
 - **Device detail** (overlay) — photo, specs, and a confirm button.
 - **Inactivity warning** (overlay) — a countdown with a "Stay Active" button.
 - **Hidden admin panel** (overlay) — opened by tapping the idle clock 5 times. Shortcuts for
-  Borrow, Return, **Sync source**, Register user, **Export to Excel**, **Software Update**,
-  End Session.
+  Borrow, Return, **Sync source**, Register user, **Register Device**, **Export to Excel**,
+  **Software Update**, End Session.
 
 ### The rules
 
@@ -806,10 +823,13 @@ Pi on the LAN can use them — the lock is **physical access**, not a password.
    - **Borrow Screen / Return Screen** — jump into those flows as that admin.
    - **Sync Source** — first tap *previews* Excel changes from the share; second tap *applies* them.
    - **Register User** — type any name, then tap a card (skips the approved-name list).
+   - **Register Device** — bind (or re-bind) an NFC sticker to an existing locker
+     device. The list shows **name + PM** (and slot). Does not create devices.
    - **Export to Excel** — download a snapshot of devices / transactions / users.
    - **Software Update** — apply the newest signed tarball from `locker-updates` on the
      share. Full-screen updating overlay, then the kiosk reloads.
-   - **End Session** or **X** — close. End Session also logs the admin out.
+   - **End Session** or **X** — close the panel and return to idle. Both end
+     the admin session so a leftover overlay session cannot check a tool out.
 5. Tap the clock five times again to toggle the panel if it is still on the idle screen.
 
 **Dashboard and health (any PC on the same network, no login)**
@@ -1071,15 +1091,16 @@ All settings live in `.env` (loaded by `config/settings.py`). The Pi template
 ## 12. What's built vs. what's next
 
 **Built:** NFC enrollment & authentication (AES-256-GCM + HMAC), single-user sessions with
-timeout, device tracking with the full schema, borrow/return with admin overrides and
-per-user limits, self-service registration, Excel import (schrank filter, DE/EN headers) and
-on-demand/auto export, photo assignment, the read-only `/dashboard`, the FastAPI REST API +
-SSE bridge, the 6-screen kiosk UI, **Raspberry Pi appliance deployment** (systemd service,
-CIFS mount, Chromium kiosk, fully offline install including the no-PyPI-wheel `pyscard`
-case), and a hardware-free pytest suite.
+timeout, device tracking with the full schema, NFC **device tags** (same ACR1252U; auto
+borrow/return after login), borrow/return with admin overrides and per-user limits,
+self-service registration, Excel import (schrank filter, DE/EN headers) and on-demand/auto
+export, photo assignment, the read-only `/dashboard`, the FastAPI REST API + SSE bridge, the
+6-screen kiosk UI, **Raspberry Pi appliance deployment** (systemd service, CIFS mount,
+Chromium kiosk, fully offline install including the no-PyPI-wheel `pyscard` case), and a
+hardware-free pytest suite.
 
-**Next:** barcode scanner for shared lockers (Section 15), calibration-due notifications, a
-full admin web panel, MIFARE sector reading, and multi-reader support.
+**Next:** calibration-due notifications, a full admin web panel, MIFARE sector reading, and
+multi-reader support.
 
 ---
 
@@ -1122,7 +1143,7 @@ visible at a time, and JavaScript decides which:
 | `screen-idle` | "Tap your card" screen |
 | `screen-register` | Self-service registration |
 | `screen-auth-failed` | Red error screen |
-| `screen-main-menu` | Welcome + Borrow / Return |
+| `screen-main-menu` | Welcome + tap-the-device + Borrow / Return |
 | `screen-borrow` | Device grid for borrowing |
 | `screen-return` | Device grid for returning |
 | `overlay-device-detail` | Device detail popup |
@@ -1203,6 +1224,8 @@ that bridges card taps to the browser.
 | `GET` | `/api/registrants` | Approved names for self-registration |
 | `POST` | `/api/admin/session` | Start the hidden admin-panel session |
 | `POST` | `/api/admin/register` | Admin manual enrolment (skips name check) |
+| `POST` | `/api/admin/devices/{id}/bind-tag` | 60s window to bind the next sticker to that device |
+| `POST` | `/api/admin/devices/{id}/unbind-tag` | Clear the sticker HMAC on that device |
 | `POST` | `/api/admin/sync-source` | Trigger the source Excel import now |
 | `GET` | `/api/admin/export-excel` | Download the full database as `.xlsx` |
 | `GET` | `/api/dashboard/devices` | Public device inventory (no auth) |
@@ -1212,7 +1235,8 @@ that bridges card taps to the browser.
 
 `GET /api/devices` returns per device: `id`, `pm_number`, `name`, `device_type`,
 `serial_number`, `manufacturer`, `model`, `barcode`, `locker_slot`, `description`,
-`image_path`, `calibration_due`, `status`, `borrower_name`.
+`image_path`, `calibration_due`, `status`, `borrower_name`, `has_tag` (bool — no HMAC
+digest). Device-tag HMAC is never on this payload, the public dashboard, or Excel export.
 
 **The NFC → browser bridge:** the background NFC listener detects a tap and puts an event on
 a queue; `GET /api/events` streams it to the browser, which then runs the auth/registration
@@ -1221,17 +1245,22 @@ flow. FastAPI serves the kiosk UI (`index.html`) and the dashboard as static fil
 
 ---
 
-## 15. Barcode scanner plan (not yet built)
+## 15. NFC device tags
 
-Each device stores a `barcode` value (imported from the Excel "Barcode" column). The planned
-use: a **shared locker** holds several identical devices (e.g. 5 current probes) instead of
-one per slot, and a USB barcode scanner identifies the specific unit being taken or returned.
+Each locker device can have a cheap NFC sticker (NTAG213/215, same ACR1252U as work cards).
+The sticker UID is stored only as `devices.tag_hmac` (HMAC-SHA256, same key as work cards).
+The raw UID is never stored or logged. Excel `barcode` remains an imported string; re-import
+overwrites barcode but **not** `tag_hmac` (locker-local, like slot).
 
-The flow would be: tap NFC → choose Borrow/Return → scan the device barcode → the system
-matches `devices.barcode` → the transaction is recorded for that exact unit. Implementation:
-a barcode listener in `app.js` (USB scanners type the digits then Enter) plus a
-`GET /api/devices/barcode/{barcode}` endpoint. The barcode field is already imported and
-included in the API and the export.
+**Flow:** tap work card → tap the sticker (or pick on screen). Auto-intent: available →
+borrow; borrowed by you → return; borrowed by someone else → fail for a normal user, or
+admin return-on-behalf; maintenance → fail. The session stays open. A **work-card** tap
+still logs out; a device tag does not. An unknown UID while logged in stays logged in.
+
+**Register Device** (hidden admin panel) binds a sticker to an existing schrank row. The
+list shows **name + PM** so duplicate names stay distinct. CLI: `python -m
+scripts.enroll_device_tag --pm PM-001` (or `--uid HEX`, `--force` to replace). There is no
+USB barcode scanner and no `GET /api/devices/barcode/{barcode}`.
 
 ---
 

@@ -3,9 +3,9 @@ File: migrate_db.py
 Description: Database migration script. Adds columns and tables introduced after
              the initial schema. Handles column additions (locker_slot,
              description, image_path, pm_number, manufacturer, model, barcode,
-             calibration_due) and table creation (registrants for self-service
-             registration name list). Safe to run multiple times — skips
-             columns and tables that already exist.
+             calibration_due, tag_hmac) and table creation (registrants for
+             self-service registration name list). Safe to run multiple times
+             — skips columns, indexes, and tables that already exist.
 Project: smart_locker/scripts
 Notes: Usage: python -m scripts.migrate_db
        Uses raw SQLite PRAGMA introspection, not SQLAlchemy Alembic.
@@ -57,6 +57,23 @@ def _table_exists(cursor: sqlite3.Cursor, table_name: str) -> bool:
     return cursor.fetchone() is not None
 
 
+def _index_exists(cursor: sqlite3.Cursor, index_name: str) -> bool:
+    """Check whether a named index already exists.
+
+    Args:
+        cursor: An open SQLite cursor.
+        index_name: Name of the index to look for.
+
+    Returns:
+        True if the index exists, False otherwise.
+    """
+    cursor.execute(
+        "SELECT name FROM sqlite_master WHERE type='index' AND name=?",
+        (index_name,),
+    )
+    return cursor.fetchone() is not None
+
+
 def migrate() -> None:
     """Apply pending column migrations to the Smart Locker database.
 
@@ -81,6 +98,7 @@ def migrate() -> None:
         ("devices", "model", "VARCHAR(100)"),
         ("devices", "barcode", "VARCHAR(100)"),
         ("devices", "calibration_due", "DATE"),
+        ("devices", "tag_hmac", "VARCHAR(64)"),
     ]
 
     for table, column, col_type in migrations:
@@ -89,6 +107,15 @@ def migrate() -> None:
         else:
             cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
             print(f"  ADD   {table}.{column} {col_type}")
+
+    # Unique index: many unbound devices may share NULL tag_hmac.
+    if _index_exists(cur, "ix_devices_tag_hmac"):
+        print("  SKIP  ix_devices_tag_hmac (already exists)")
+    else:
+        cur.execute(
+            "CREATE UNIQUE INDEX ix_devices_tag_hmac ON devices (tag_hmac)"
+        )
+        print("  CREATE UNIQUE INDEX ix_devices_tag_hmac")
 
     # --- Table creation: registrants (self-service registration name list) ---
     if _table_exists(cur, "registrants"):

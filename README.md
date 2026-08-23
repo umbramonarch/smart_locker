@@ -59,7 +59,8 @@ smart_locker/
 │   │   └── exceptions.py        # NFC-specific exceptions
 │   ├── auth/
 │   │   ├── authenticator.py     # Card UID → user lookup via HMAC
-│   │   └── session_manager.py   # Single-user session lifecycle + inactivity timeout
+│   │   ├── session_manager.py   # Single-user session lifecycle + inactivity timeout
+│   │   └── tap_router.py        # Classify UID (work card / device tag / unknown); auto-intent
 │   ├── security/
 │   │   ├── encryption.py        # AES-256-GCM encrypt/decrypt
 │   │   ├── hashing.py           # HMAC-SHA256 for card UID fingerprinting
@@ -89,6 +90,7 @@ smart_locker/
 │   ├── init_db.py               # Create database tables
 │   ├── migrate_db.py            # Add columns/tables to an existing DB (run after schema changes)
 │   ├── enroll_card.py           # Enroll a new NFC card user (reader tap, or --uid HEX for no hardware)
+│   ├── enroll_device_tag.py     # Bind an NFC sticker to an existing device (--pm, optional --uid / --force)
 │   ├── import_devices.py        # Bulk device import from Excel (German + English headers)
 │   ├── update_device.py         # Update device fields / match photos by PM number
 │   ├── sync_source.py           # Manually trigger source Excel import
@@ -118,8 +120,8 @@ smart_locker/
 | Photo import | ✅ Done | By PM number (`update_device`) or by model (photo watcher) |
 | Web dashboard | ✅ Done | Read-only `/dashboard` — devices, transactions, users; 30s auto-refresh |
 | Frontend UI | ✅ Done | 6-screen kiosk UI + overlays |
-| Unit tests | ✅ Done | ~168 tests across 13 modules, all hardware-free |
-| Barcode scanner | 🔲 Planned | Barcode stored per device; USB scanner (keyboard emulation) to identify devices in shared lockers |
+| Unit tests | ✅ Done | ~221 tests across 15 modules, all hardware-free |
+| NFC device tags | ✅ Done | Same ACR1252U; `devices.tag_hmac`; auto borrow/return after login |
 | Calibration alerts | 🔲 Future | Calibration dates stored; notification system not yet built |
 | Kiosk deployment | ✅ Done | Raspberry Pi appliance: systemd service, CIFS mount, Chromium kiosk, offline install (`deploy/`) |
 
@@ -187,18 +189,18 @@ See **GUIDE.md** for detailed step-by-step instructions.
 
 The system runs as a kiosk: FastAPI serves the frontend as static files in a fullscreen Chromium browser. The NFC reader listens in the background; card taps push an event to the browser via Server-Sent Events (SSE), which drives the authentication and registration flows.
 
-**Session model — tap-and-go:** the card is tapped briefly to authenticate (not left on the reader). After authentication, all interaction happens on the touch display. Sessions end via the "End Session" button, the inactivity timeout, or a new card tap.
+**Session model — tap-and-go:** the **work card** is tapped briefly to authenticate (not left on the reader). After login, tap an **NFC sticker on the device** (same reader) to borrow or return, or pick the unit on screen. Sessions end via the "End Session" button, the inactivity timeout, or a **work-card** tap (a device tag does not log you out).
 
 **Screens (6 + overlays):**
 
 1. **Idle** — animated NFC ring, "Tap your card to begin", marquee ticker, live clock, "Register your card" entry
 2. **Register** — self-service: search/select your approved name → tap card → success/error
 3. **Auth failed** — red flash, "Card not recognized", auto-dismisses
-4. **Main menu** — "Welcome, [Name]!" with Borrow / Return / End Session
+4. **Main menu** — welcome + **Tap the device**; Borrow / Return as *or pick on screen*; End Session
 5. **Borrow** — device grid; available = tappable, borrowed/maintenance show borrower info
 6. **Return** — device grid; the user's borrowed items highlighted
 
-Overlays: **device detail** (photo, specs, confirm), **inactivity** countdown, and a **hidden admin panel** (5× tap on the clock) with Borrow/Return/Sync/Register/Export/End-Session shortcuts.
+Overlays: **device detail** (photo, specs, confirm), **inactivity** countdown, and a **hidden admin panel** (5× tap on the clock) with Borrow/Return/Sync/Register User/**Register Device**/Export/End-Session shortcuts.
 
 **Theme:** green (`#009641`) on dark charcoal (`#181d24`).
 
@@ -239,14 +241,14 @@ python -m scripts.update_device --batch updates.txt           # batch from file
 
 A background **photo watcher** also auto-assigns photos by **device model**: drop an image named exactly after the model (e.g. `87V.jpg` matches every model "87V" device) into the folder set by `SMART_LOCKER_PHOTO_INPUT_PATH`. The watcher is disabled when that variable is empty.
 
-## Barcode Scanner Plan
+## NFC Device Tags
 
-The system stores a barcode value per device. The planned workflow:
+Cheap NFC stickers on locker devices use the same ACR1252U as work cards (no USB barcode scanner).
 
-- **Shared lockers**: multiple devices of the same type (e.g. 5 current probes) share one locker; the barcode identifies the specific device.
-- **Hardware**: USB barcode scanner (keyboard emulation) on the kiosk Pi.
-- **Flow**: NFC authenticate → Borrow/Return → scan barcode → match `devices.barcode` → complete transaction.
-- **Implementation**: barcode listener in `app.js` (detects rapid keystrokes ending in Enter) + a `GET /api/devices/barcode/{barcode}` endpoint.
+- **Storage:** `devices.tag_hmac` (HMAC-SHA256 of the sticker UID, same key as work cards). The raw UID is never stored or logged.
+- **Flow:** tap work card → tap sticker (or pick on screen). Auto-intent from device status: borrow if available, return if you hold it. Session stays open for several devices. A work-card tap still logs out.
+- **Register Device** (hidden admin panel) binds a sticker to an existing Excel/schrank row. The list shows **name + PM** because duplicate names exist. CLI: `python -m scripts.enroll_device_tag --pm PM-001` (or `--uid HEX`).
+- Excel `barcode` is still imported and exported; re-import does **not** overwrite `tag_hmac`.
 
 ## Running Tests
 

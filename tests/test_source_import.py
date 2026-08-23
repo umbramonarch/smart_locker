@@ -17,6 +17,7 @@ from openpyxl import Workbook
 
 from smart_locker.database.models import DeviceStatus
 from smart_locker.database.repositories import DeviceRepository, RegistrantRepository, UserRepository
+from smart_locker.security.hashing import compute_uid_hmac
 from smart_locker.sync.source_import import (
     ImportResult,
     find_column,
@@ -326,6 +327,48 @@ class TestLocationColumn:
 
             device = DeviceRepository.find_by_pm(db_session, "PM-001")
             assert device.status == DeviceStatus.AVAILABLE
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_reimport_preserves_tag_hmac(self, db_session, hmac_key):
+        """Re-import must not overwrite tag_hmac even when barcode/status change."""
+        anna = UserRepository.create(
+            db_session,
+            display_name="Anna Schmidt",
+            uid_hmac="aa" * 16,
+            encrypted_card_uid="enc_anna",
+            role="user",
+        )
+        device = DeviceRepository.create(
+            db_session,
+            name="Fluke 87V",
+            device_type="general",
+            pm_number="PM-001",
+            manufacturer="Fluke",
+            model="87V",
+            barcode="OLD-BC",
+        )
+        digest = compute_uid_hmac("AABBCCDD", hmac_key)
+        DeviceRepository.bind_tag(db_session, device, digest)
+        db_session.commit()
+
+        path = _create_test_excel([
+            ["Equipment", "Hersteller", "Typbezeichnung", "Barcodenummer",
+             "Platz Messmittelschrank", "Aktueller Einsatzort"],
+            ["PM-001", "Fluke", "87V", "NEW-BC", "Schrank 1", "Anna Schmidt"],
+        ])
+        try:
+            from smart_locker.database.engine import get_engine
+            result = import_from_source_excel(get_engine(), path)
+            assert result.updated == 1
+
+            # Import uses a different Session; expire so we read committed state.
+            db_session.expire_all()
+            device = DeviceRepository.find_by_pm(db_session, "PM-001")
+            assert device.tag_hmac == digest
+            assert device.barcode == "NEW-BC"
+            assert device.status == DeviceStatus.BORROWED
+            assert device.current_borrower_id == anna.id
         finally:
             path.unlink(missing_ok=True)
 

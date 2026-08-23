@@ -327,6 +327,16 @@ body::after {
   40%, 60% { clip-path: ellipse(100% 100% at 50% 50%); opacity: 0.35; }
 }
 
+/* clip-path:0% still composites descendants. Extra rings on the scan-first
+   menu were running on idle and could trip the FPS probe into lite, which
+   froze the bottom marquee. */
+.screen:not(.active) .nfc-ring-outer,
+.screen:not(.active) .nfc-ring-mid,
+.screen:not(.active) .nfc-core,
+.screen:not(.active) .nfc-texture-reveal {
+  animation: none;
+}
+
 .nfc-svg {
   width: 68px;
   height: 68px;
@@ -538,11 +548,11 @@ body::after {
 .role-pill.admin { background: rgba(245,158,11,0.12); color: var(--warning); }
 
 .menu-header {
-  flex: 1;
+  flex: 0 0 auto;
   display: flex;
   flex-direction: column;
   justify-content: flex-end;
-  padding-bottom: 2rem;
+  padding-bottom: 0.75rem;
 }
 .menu-greeting {
   font-family: var(--font-display);
@@ -555,7 +565,7 @@ body::after {
 }
 .menu-username {
   font-family: var(--font-display);
-  font-size: clamp(4rem, 10vw, 8.5rem);
+  font-size: clamp(2.4rem, 6vw, 5rem);
   font-weight: 800;
   color: var(--accent);
   letter-spacing: -0.02em;
@@ -563,11 +573,54 @@ body::after {
   text-transform: uppercase;
 }
 
+.menu-scan {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  min-height: 0;
+}
+.menu-nfc {
+  margin-bottom: 0.4rem;
+}
+.menu-nfc.nfc-wrapper-sm .nfc-ring-outer { width: 140px; height: 140px; }
+.menu-nfc.nfc-wrapper-sm .nfc-ring-mid   { width: 112px; height: 112px; }
+.menu-nfc.nfc-wrapper-sm .nfc-core        { width: 84px; height: 84px; }
+.menu-nfc.nfc-wrapper-sm .nfc-svg         { width: 38px; height: 38px; }
+.menu-scan-title {
+  font-family: var(--font-display);
+  font-size: clamp(1.1rem, 2.4vw, 1.6rem);
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text);
+  margin: 0;
+}
+.menu-scan-sub {
+  font-size: 0.95rem;
+  color: var(--text-muted);
+  margin: 0;
+}
+.menu-borrow-count {
+  font-family: var(--font-display);
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin: 0.35rem 0 0;
+}
+
 /* Enhancement B: staggered button entrance */
 .menu-actions {
   display: flex;
   gap: 1.25rem;
   flex-shrink: 0;
+}
+.action-btn.pick-btn {
+  min-height: 110px;
 }
 .action-btn {
   flex: 1;
@@ -1747,6 +1800,8 @@ body::after {
 .admin-action-btn:nth-child(4) { --i: 3; }
 .admin-action-btn:nth-child(5) { --i: 4; }
 .admin-action-btn:nth-child(6) { --i: 5; }
+.admin-action-btn:nth-child(7) { --i: 6; }
+.admin-action-btn:nth-child(8) { --i: 7; }
 
 .admin-action-btn:hover {
   border-color: rgba(245,158,11,0.3);
@@ -1829,6 +1884,101 @@ body::after {
   color: var(--text-muted);
   opacity: 0.5;
 }
+
+/* ============================================================
+   OVERLAY — REGISTER DEVICE (admin bind)
+============================================================ */
+#overlay-register-device {
+  background: rgba(24,29,36,0.92);
+  backdrop-filter: blur(20px);
+  z-index: 56;
+  align-items: center;
+  justify-content: center;
+}
+.bind-panel {
+  width: 92%;
+  max-width: 640px;
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+.bind-step { display: flex; flex-direction: column; align-items: center; gap: 0.9rem; }
+.bind-step.hidden { display: none; }
+.bind-hint {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  text-align: center;
+  margin: 0;
+  max-width: 36rem;
+  line-height: 1.4;
+}
+.bind-search-group { max-width: 100%; width: 100%; }
+.bind-device-list {
+  width: 100%;
+  max-height: 52vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 4px 2px;
+}
+.bind-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.7rem 0.85rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  text-align: left;
+}
+.bind-row-info { flex: 1; min-width: 0; }
+.bind-row-name {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 0.95rem;
+  color: var(--text);
+}
+.bind-row-meta {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin-top: 0.15rem;
+}
+.bind-tag-pill {
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 0.12rem 0.45rem;
+  border-radius: 999px;
+  background: var(--accent-dim);
+  color: var(--accent);
+  flex-shrink: 0;
+}
+.bind-tag-pill.unbound {
+  background: var(--surface-3);
+  color: var(--text-muted);
+}
+.bind-row-actions { display: flex; gap: 0.4rem; flex-shrink: 0; }
+.bind-row-actions button {
+  font-family: var(--font-display);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 0.45rem 0.7rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  cursor: pointer;
+}
+.bind-row-actions button.bind-go {
+  border-color: var(--border-accent);
+  color: var(--accent);
+}
+.bind-row-actions button.bind-unbind { color: var(--text-muted); }
 
 /* ============================================================
    OVERLAY — SOFTWARE UPDATE
@@ -1923,11 +2073,9 @@ html.lite .nfc-texture-reveal,
 html.lite .nfc-ring-outer,
 html.lite .nfc-ring-mid,
 html.lite .nfc-core,
-html.lite .marquee-track,
 html.lite .register-icon-circle { animation: none !important; }
-/* The marquee element is also pre-promoted via will-change; with the animation
-   off, drop the standing compositor layer too. */
-html.lite .marquee-track { will-change: auto; }
+/* Marquee is one cheap translateX; keep it moving in lite so the idle bar
+   does not freeze when extra NFC rings trip the FPS probe. */
 
 /* — Expensive blur filters → flat fallbacks — */
 html.lite .hero-bg          { filter: none; opacity: 0.05; transform: none; }
@@ -1945,6 +2093,7 @@ html.lite .card-slot,
 html.lite .card-hover-icon,
 html.lite #overlay-inactivity,
 html.lite #overlay-admin,
+html.lite #overlay-register-device,
 html.lite #overlay-update {
   backdrop-filter: none !important;
   -webkit-backdrop-filter: none !important;
@@ -1952,6 +2101,7 @@ html.lite #overlay-update {
 html.lite .card-slot         { background: rgba(24,29,36,0.92); }
 html.lite #overlay-inactivity { background: rgba(24,29,36,0.97); }
 html.lite #overlay-admin      { background: rgba(24,29,36,0.97); }
+html.lite #overlay-register-device { background: rgba(24,29,36,0.97); }
 html.lite #overlay-update     { background: rgba(24,29,36,0.97); }
 
 /* — Custom cursor off; restore the native pointer — */
