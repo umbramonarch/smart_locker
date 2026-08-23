@@ -3,8 +3,9 @@ File: routes.py
 Description: REST API endpoints and SSE event stream for the Smart Locker kiosk.
              Provides session management, device listing, borrow/return operations,
              user self-registration (with registrant name validation), admin-only
-             manual registration, registrant list retrieval, source sync, public
-             dashboard data endpoints, and an admin-only Excel export download.
+             manual registration and device-tag bind/unbind, registrant list
+             retrieval, source sync, public dashboard data endpoints, and an
+             admin-only Excel export download.
 Project: smart_locker/api
 Notes: All device/session endpoints require an active kiosk session enforced by
        the require_session dependency. SSE stream at /api/events pushes NFC and
@@ -27,7 +28,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 import smart_locker.api.app_context as ctx_module
-from smart_locker.api.app_context import PendingRegistration
+from smart_locker.api.app_context import PendingRegistration, PendingTagBind
 from smart_locker.auth.session_manager import UserSession
 from config.settings import BASE_DIR
 from smart_locker.database.engine import get_session, get_session_factory
@@ -290,9 +291,8 @@ def dev_tap(body: TapRequest):
     """Inject a simulated card tap (simulation mode only).
 
     Enqueues a ``CardEvent(INSERTED)`` so the normal NFC bridge runs exactly as
-    for a real tap — starting a session, ending one on a second tap, or
-    completing a pending registration, depending on current state. The UID is
-    never logged.
+    for a real tap — work-card login/logout, device-tag auto-intent, or a
+    pending registration / tag-bind intercept. The UID is never logged.
 
     Args:
         body: TapRequest with an optional ``uid`` (falls back to the
@@ -324,17 +324,19 @@ def get_session_status():
     """Check current session state (used on page load to restore state).
 
     Returns:
-        dict: ``{"active": bool, "user": dict|None}`` with user id, name,
-              and role if a session is active.
+        dict: ``{"active": bool, "user": dict|None, "overlay": bool}`` with
+              user id, name, and role if a session is active. ``overlay`` is
+              True while the hidden admin / Register Device UI owns auto-intent.
     """
     if ctx_module.context is None or not ctx_module.context.session_mgr.has_active_session:
-        return {"active": False, "user": None}
+        return {"active": False, "user": None, "overlay": False}
     session = ctx_module.context.session_mgr.current_session
     if session is None:
-        return {"active": False, "user": None}
+        return {"active": False, "user": None, "overlay": False}
     user = session.user
     return {
         "active": True,
+        "overlay": bool(ctx_module.context.admin_overlay_open),
         "user": {
             "id": user.id,
             "name": user.display_name,
@@ -357,6 +359,8 @@ def end_session(user_session: UserSession = Depends(require_session)):
         dict: ``{"success": True}``.
     """
     ctx_module.context.session_mgr.end_session()
+    ctx_module.context.admin_overlay_open = False
+    ctx_module.context.pending_tag_bind = None
     # Push SSE event so other tabs / SSE listeners know
     try:
         ctx_module.context.sse_queue.put_nowait(
@@ -430,6 +434,7 @@ def list_devices(
             "calibration_due": d.calibration_due.isoformat() if d.calibration_due else None,
             "status": d.status.value,
             "borrower_name": borrower_name,
+            "has_tag": d.tag_hmac is not None,
         })
 
     return result
@@ -539,6 +544,7 @@ def start_registration(body: RegisterRequest, db: Session = Depends(get_db)):
             detail="Name not found in approved list. Contact an admin for manual registration.",
         )
 
+    ctx_module.context.pending_tag_bind = None
     ctx_module.context.pending_registration = PendingRegistration(
         display_name=body.name.strip(),
     )
@@ -563,8 +569,12 @@ def cancel_registration():
     if ctx_module.context is None:
         raise HTTPException(status_code=503, detail="System not ready.")
 
-    was_pending = ctx_module.context.pending_registration is not None
+    was_pending = (
+        ctx_module.context.pending_registration is not None
+        or ctx_module.context.pending_tag_bind is not None
+    )
     ctx_module.context.pending_registration = None
+    ctx_module.context.pending_tag_bind = None
     return {"success": True, "cancelled": was_pending}
 
 
@@ -608,7 +618,10 @@ def get_registrants(db: Session = Depends(get_db)):
 # --- Admin Endpoints --------------------------------------------------------
 
 @router.post("/api/admin/session")
-def start_admin_session(db: Session = Depends(get_db)):
+def start_admin_session(
+    overlay: bool = True,
+    db: Session = Depends(get_db),
+):
     """Start a backend session for the admin panel (triggered by 5x clock tap).
 
     The hidden admin panel on the kiosk UI allows physical-access admin control
@@ -617,9 +630,14 @@ def start_admin_session(db: Session = Depends(get_db)):
     (borrow, return, sync, etc.) pass the ``require_session`` check.
 
     Unlike NFC-based authentication, this bypasses card tap — security relies on
-    physical kiosk access and the hidden 5-tap gesture.
+    physical kiosk access and the hidden 5-tap gesture. ``overlay=true`` (the
+    default) blocks auto-intent on device tags while the admin panel is open.
+    If a session is already active, only the overlay flag is updated (the
+    logged-in user is not replaced).
 
     Args:
+        overlay: When True, device-tag taps do not borrow/return. Pass False
+            after jumping to the kiosk Borrow/Return screens.
         db: Active database session (injected by ``get_db``).
 
     Returns:
@@ -641,14 +659,29 @@ def start_admin_session(db: Session = Depends(get_db)):
         .limit(1)
     )
     admin_user = db.execute(stmt).scalars().first()
+    if ctx_module.context.session_mgr.has_active_session:
+        ctx_module.context.admin_overlay_open = overlay
+        session = ctx_module.context.session_mgr.current_session
+        user = session.user if session is not None else None
+        if user is None:
+            raise HTTPException(status_code=401, detail="No active session.")
+        return {
+            "success": True,
+            "user": {
+                "id": user.id,
+                "name": user.display_name,
+                "role": user.role.value,
+            },
+        }
+
     if admin_user is None:
         raise HTTPException(
             status_code=404,
             detail="No active admin users found. Enroll an admin card first.",
         )
 
-    # Create a real backend session so require_session passes on future calls
     ctx_module.context.session_mgr.start_session(admin_user)
+    ctx_module.context.admin_overlay_open = overlay
     logger.info("Admin panel session started for %s (id=%d)", admin_user.display_name, admin_user.id)
 
     return {
@@ -694,6 +727,7 @@ def start_admin_registration(
     if user_session.user.role != UserRole.ADMIN:
         raise HTTPException(status_code=403, detail="Admin access required.")
 
+    ctx_module.context.pending_tag_bind = None
     ctx_module.context.pending_registration = PendingRegistration(
         display_name=body.name.strip(),
     )
@@ -702,6 +736,86 @@ def start_admin_registration(
         body.name.strip(), user_session.user.display_name,
     )
     return {"success": True, "message": "Tap the new user's NFC card to complete registration."}
+
+
+@router.post("/api/admin/devices/{device_id}/bind-tag")
+def start_device_tag_bind(
+    device_id: int,
+    db: Session = Depends(get_db),
+    user_session: UserSession = Depends(require_session),
+):
+    """Start a 60s window to bind the next NFC insert to this device (admin).
+
+    Does not create a device. The next sticker tap binds ``tag_hmac`` on this
+    row (re-bind replaces). A work card or another device's tag fails the bind.
+
+    Args:
+        device_id: Primary key of the locker device to bind.
+        db: Database session (injected by ``get_db``).
+        user_session: The active admin session (injected by ``require_session``).
+
+    Returns:
+        dict: ``{"success": True, "message": str}``.
+
+    Raises:
+        HTTPException: 503 if system not ready, 403 if not admin, 404 if
+            the device does not exist.
+    """
+    if ctx_module.context is None:
+        raise HTTPException(status_code=503, detail="System not ready.")
+
+    if user_session.user.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Admin access required.")
+
+    device = DeviceRepository.find_by_id(db, device_id)
+    if device is None:
+        raise HTTPException(status_code=404, detail="Device not found.")
+
+    ctx_module.context.pending_registration = None
+    ctx_module.context.pending_tag_bind = PendingTagBind(device_id=device_id)
+    logger.info(
+        "Device tag bind started for %s (pm=%s) by admin %s. Awaiting sticker.",
+        device.name,
+        device.pm_number,
+        user_session.user.display_name,
+    )
+    return {"success": True, "message": "Tap the sticker to bind it."}
+
+
+@router.post("/api/admin/devices/{device_id}/unbind-tag")
+def unbind_device_tag(
+    device_id: int,
+    db: Session = Depends(get_db),
+    user_session: UserSession = Depends(require_session),
+):
+    """Clear the NFC sticker HMAC on a device (admin).
+
+    Args:
+        device_id: Primary key of the locker device to unbind.
+        db: Database session (injected by ``get_db``).
+        user_session: The active admin session (injected by ``require_session``).
+
+    Returns:
+        dict: ``{"success": True}``.
+
+    Raises:
+        HTTPException: 403 if not admin, 404 if the device does not exist.
+    """
+    if user_session.user.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Admin access required.")
+
+    device = DeviceRepository.find_by_id(db, device_id)
+    if device is None:
+        raise HTTPException(status_code=404, detail="Device not found.")
+
+    DeviceRepository.unbind_tag(db, device)
+    logger.info(
+        "Unbound device tag for %s (pm=%s) by admin %s.",
+        device.name,
+        device.pm_number,
+        user_session.user.display_name,
+    )
+    return {"success": True}
 
 
 @router.post("/api/admin/sync-source")

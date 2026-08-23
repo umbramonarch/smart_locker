@@ -14,7 +14,8 @@ import pytest
 from openpyxl import load_workbook
 
 from smart_locker.database.engine import get_engine
-from smart_locker.database.repositories import UserRepository
+from smart_locker.database.repositories import DeviceRepository, UserRepository
+from smart_locker.security.hashing import compute_uid_hmac
 from smart_locker.sync.excel_sync import export_to_excel
 
 
@@ -89,6 +90,33 @@ class TestUsersSheet:
                     cell_str = str(cell) if cell else ""
                     assert "c" * 64 not in cell_str
                     assert "encrypted_charlie" not in cell_str
+            wb.close()
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_devices_sheet_omits_tag_hmac(self, db_session, hmac_key):
+        """Devices sheet headers and cells must not include tag_hmac."""
+        device = DeviceRepository.create(
+            db_session,
+            name="Fluke 87V",
+            device_type="Multimeter",
+            pm_number="PM-001",
+        )
+        digest = compute_uid_hmac("AABBCCDD", hmac_key)
+        DeviceRepository.bind_tag(db_session, device, digest)
+        db_session.commit()
+
+        path = Path(tempfile.mktemp(suffix=".xlsx"))
+        try:
+            export_to_excel(get_engine(), path)
+            wb = load_workbook(path, read_only=True)
+            ws = wb["Devices"]
+            rows = list(ws.iter_rows(values_only=True))
+            headers_lower = [str(h).lower() for h in rows[0]]
+            assert not any("tag_hmac" in h or h == "hmac" for h in headers_lower)
+            for row in rows:
+                for cell in row:
+                    assert digest not in str(cell or "")
             wb.close()
         finally:
             path.unlink(missing_ok=True)

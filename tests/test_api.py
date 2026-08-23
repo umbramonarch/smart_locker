@@ -15,11 +15,13 @@ from unittest.mock import MagicMock
 import pytest
 from fastapi.testclient import TestClient
 
+from smart_locker.api.app_context import PendingRegistration, PendingTagBind
 from smart_locker.api.routes import router, get_db, require_session
 from smart_locker.auth.session_manager import SessionManager, UserSession
 from smart_locker.database.engine import get_session_factory, init_db, reset_engine
 from smart_locker.database.models import DeviceStatus, UserRole
 from smart_locker.database.repositories import DeviceRepository, RegistrantRepository, UserRepository
+from smart_locker.security.hashing import compute_uid_hmac
 from smart_locker.services.locker_service import LockerService
 
 import smart_locker.api.app_context as ctx_module
@@ -145,6 +147,9 @@ def mock_context(session_mgr):
     mock_ctx = MagicMock()
     mock_ctx.session_mgr = session_mgr
     mock_ctx.sse_queue = asyncio.Queue()
+    mock_ctx.admin_overlay_open = False
+    mock_ctx.pending_tag_bind = None
+    mock_ctx.pending_registration = None
     ctx_module.context = mock_ctx
     yield mock_ctx
     ctx_module.context = None
@@ -173,6 +178,7 @@ class TestSessionEndpoints:
         data = resp.json()
         assert data["active"] is False
         assert data["user"] is None
+        assert data["overlay"] is False
 
     def test_get_session_active(self, client, mock_context, test_user):
         """Verify GET /api/session returns user data when a session is active."""
@@ -184,14 +190,19 @@ class TestSessionEndpoints:
         assert data["user"]["id"] == test_user.id
         assert data["user"]["name"] == "Test User"
         assert data["user"]["role"] == "user"
+        assert data["overlay"] is False
 
     def test_end_session(self, client, mock_context, test_user):
         """Verify POST /api/session/end terminates the active session."""
         mock_context.session_mgr.start_session(test_user)
+        mock_context.pending_tag_bind = PendingTagBind(device_id=1)
+        mock_context.admin_overlay_open = True
         resp = client.post("/api/session/end")
         assert resp.status_code == 200
         assert resp.json()["success"] is True
         assert not mock_context.session_mgr.has_active_session
+        assert mock_context.pending_tag_bind is None
+        assert mock_context.admin_overlay_open is False
 
     def test_end_session_no_active(self, client):
         """Verify POST /api/session/end returns 401 when no session exists."""
@@ -242,6 +253,8 @@ class TestDeviceEndpoints:
         assert "model" in cam
         assert "barcode" in cam
         assert "calibration_due" in cam
+        assert cam["has_tag"] is False
+        assert "tag_hmac" not in cam
 
     def test_list_devices_borrower_name_you(
         self, client, mock_context, test_user, test_devices, db_session
@@ -442,10 +455,12 @@ class TestRegistrantEndpoints:
         """POST /api/admin/register accepts any name without registrant validation."""
         mock_context.session_mgr.start_session(admin_user)
         mock_context.pending_registration = None
+        mock_context.pending_tag_bind = PendingTagBind(device_id=1)
 
         resp = client.post("/api/admin/register", json={"name": "Not In List"})
         assert resp.status_code == 200
         assert resp.json()["success"] is True
+        assert mock_context.pending_tag_bind is None
 
     def test_admin_register_rejects_non_admin(
         self, client, db_session, mock_context, test_user
@@ -460,6 +475,187 @@ class TestRegistrantEndpoints:
         """POST /api/admin/register requires an active session."""
         resp = client.post("/api/admin/register", json={"name": "Someone"})
         assert resp.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Admin device-tag bind / unbind
+# ---------------------------------------------------------------------------
+
+class TestDeviceTagBindApi:
+    """Auth gates for bind/unbind, has_tag on the kiosk list, duplicate names."""
+
+    def test_bind_tag_requires_session(self, client, mock_context, test_devices):
+        """POST /api/admin/devices/{id}/bind-tag returns 401 without a session."""
+        resp = client.post(f"/api/admin/devices/{test_devices[0].id}/bind-tag")
+        assert resp.status_code == 401
+
+    def test_bind_tag_rejects_non_admin(
+        self, client, mock_context, test_user, test_devices
+    ):
+        """POST /api/admin/devices/{id}/bind-tag returns 403 for a normal user."""
+        mock_context.session_mgr.start_session(test_user)
+        resp = client.post(f"/api/admin/devices/{test_devices[0].id}/bind-tag")
+        assert resp.status_code == 403
+
+    def test_bind_tag_accepts_admin(
+        self, client, mock_context, admin_user, test_devices
+    ):
+        """Admin bind-tag sets pending_tag_bind for the chosen device."""
+        mock_context.session_mgr.start_session(admin_user)
+        mock_context.pending_registration = PendingRegistration("Someone")
+        mock_context.pending_tag_bind = None
+        resp = client.post(f"/api/admin/devices/{test_devices[0].id}/bind-tag")
+        assert resp.status_code == 200
+        assert resp.json()["success"] is True
+        assert mock_context.pending_registration is None
+        assert mock_context.pending_tag_bind.device_id == test_devices[0].id
+        assert mock_context.pending_tag_bind.is_expired is False
+
+    def test_bind_tag_unknown_device(self, client, mock_context, admin_user):
+        """POST bind-tag returns 404 when the device id does not exist."""
+        mock_context.session_mgr.start_session(admin_user)
+        resp = client.post("/api/admin/devices/99999/bind-tag")
+        assert resp.status_code == 404
+
+    def test_unbind_tag_requires_session(self, client, mock_context, test_devices):
+        """POST /api/admin/devices/{id}/unbind-tag returns 401 without a session."""
+        resp = client.post(f"/api/admin/devices/{test_devices[0].id}/unbind-tag")
+        assert resp.status_code == 401
+
+    def test_unbind_tag_rejects_non_admin(
+        self, client, mock_context, test_user, test_devices
+    ):
+        """POST /api/admin/devices/{id}/unbind-tag returns 403 for a normal user."""
+        mock_context.session_mgr.start_session(test_user)
+        resp = client.post(f"/api/admin/devices/{test_devices[0].id}/unbind-tag")
+        assert resp.status_code == 403
+
+    def test_unbind_tag_accepts_admin(
+        self, client, mock_context, admin_user, test_devices, db_session, hmac_key
+    ):
+        """Admin unbind-tag clears tag_hmac; GET list has has_tag False."""
+        DeviceRepository.bind_tag(
+            db_session,
+            test_devices[0],
+            compute_uid_hmac("AABBCCDD", hmac_key),
+        )
+        db_session.commit()
+        mock_context.session_mgr.start_session(admin_user)
+        resp = client.post(f"/api/admin/devices/{test_devices[0].id}/unbind-tag")
+        assert resp.status_code == 200
+        assert resp.json()["success"] is True
+        db_session.expire_all()
+        assert test_devices[0].tag_hmac is None
+        listed = client.get("/api/devices").json()
+        cam = next(d for d in listed if d["name"] == "Camera")
+        assert cam["has_tag"] is False
+        assert "tag_hmac" not in cam
+
+    def test_unbind_tag_unknown_device(self, client, mock_context, admin_user):
+        """POST unbind-tag returns 404 when the device id does not exist."""
+        mock_context.session_mgr.start_session(admin_user)
+        resp = client.post("/api/admin/devices/99999/unbind-tag")
+        assert resp.status_code == 404
+
+    def test_admin_session_defaults_overlay_true(
+        self, client, mock_context, admin_user
+    ):
+        """POST /api/admin/session defaults admin_overlay_open to True."""
+        resp = client.post("/api/admin/session")
+        assert resp.status_code == 200
+        assert mock_context.admin_overlay_open is True
+        assert mock_context.session_mgr.has_active_session
+        assert mock_context.session_mgr.current_session.user.id == admin_user.id
+
+    def test_admin_session_overlay_false(
+        self, client, mock_context, admin_user
+    ):
+        """POST /api/admin/session?overlay=false clears the overlay flag."""
+        resp = client.post("/api/admin/session?overlay=false")
+        assert resp.status_code == 200
+        assert mock_context.admin_overlay_open is False
+
+    def test_admin_session_existing_keeps_user(
+        self, client, mock_context, test_user, admin_user
+    ):
+        """Overlay flag update does not replace an already-logged-in user."""
+        mock_context.session_mgr.start_session(test_user)
+        mock_context.admin_overlay_open = True
+        resp = client.post("/api/admin/session?overlay=false")
+        assert resp.status_code == 200
+        assert mock_context.admin_overlay_open is False
+        assert mock_context.session_mgr.current_session.user.id == test_user.id
+
+    def test_register_cancel_clears_pending_tag_bind(self, client, mock_context):
+        """POST /api/register/cancel clears a pending device-tag bind."""
+        mock_context.pending_tag_bind = PendingTagBind(device_id=1)
+        resp = client.post("/api/register/cancel")
+        assert resp.status_code == 200
+        assert mock_context.pending_tag_bind is None
+
+    def test_list_devices_duplicate_name_distinct_pm(
+        self, client, mock_context, test_user, db_session
+    ):
+        """Same name, different PM — both rows in the bind-list payload."""
+        DeviceRepository.create(
+            db_session,
+            name="Fluke 87V",
+            device_type="Multimeter",
+            pm_number="PM-101",
+            locker_slot=1,
+        )
+        DeviceRepository.create(
+            db_session,
+            name="Fluke 87V",
+            device_type="Multimeter",
+            pm_number="PM-102",
+            locker_slot=2,
+        )
+        db_session.commit()
+        mock_context.session_mgr.start_session(test_user)
+        resp = client.get("/api/devices")
+        assert resp.status_code == 200
+        rows = [d for d in resp.json() if d["name"] == "Fluke 87V"]
+        assert len(rows) == 2
+        pms = {d["pm_number"] for d in rows}
+        assert pms == {"PM-101", "PM-102"}
+        for d in rows:
+            assert d["name"] == "Fluke 87V"
+            assert "pm_number" in d
+            assert "has_tag" in d
+            assert "tag_hmac" not in d
+
+    def test_list_devices_has_tag_true(
+        self, client, mock_context, test_user, test_devices, db_session, hmac_key
+    ):
+        """has_tag is True when tag_hmac is set; digest is not in the payload."""
+        DeviceRepository.bind_tag(
+            db_session,
+            test_devices[0],
+            compute_uid_hmac("AABBCCDD", hmac_key),
+        )
+        db_session.commit()
+        mock_context.session_mgr.start_session(test_user)
+        resp = client.get("/api/devices")
+        cam = next(d for d in resp.json() if d["name"] == "Camera")
+        assert cam["has_tag"] is True
+        assert "tag_hmac" not in cam
+
+    def test_dashboard_devices_omits_tag_hmac(
+        self, client, test_devices, db_session, hmac_key
+    ):
+        """Public dashboard JSON must not include tag_hmac after a bind."""
+        digest = compute_uid_hmac("AABBCCDD", hmac_key)
+        DeviceRepository.bind_tag(db_session, test_devices[0], digest)
+        db_session.commit()
+        resp = client.get("/api/dashboard/devices")
+        assert resp.status_code == 200
+        rows = resp.json()
+        assert rows
+        for row in rows:
+            assert "tag_hmac" not in row
+            dumped = str(row)
+            assert digest not in dumped
 
 
 # ---------------------------------------------------------------------------

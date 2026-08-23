@@ -71,7 +71,7 @@ const DEMO_USERS = [
 let demoUserIdx = 0;
 
 const DEMO_DEVICES = [
-  { id:1, pm_number:'PM-001', name:'PM-001 Keysight DSOX3054T',  device_type:'Oscilloscope',   serial_number:'MY12345678',  manufacturer:'Keysight',       model:'DSOX3054T',   barcode:'490001', locker_slot:1,  description:null, image_path:null, calibration_due:'2026-09-15', status:'available',   borrower_name:null       },
+  { id:1, pm_number:'PM-001', name:'PM-001 Keysight DSOX3054T',  device_type:'Oscilloscope',   serial_number:'MY12345678',  manufacturer:'Keysight',       model:'DSOX3054T',   barcode:'490001', locker_slot:1,  description:null, image_path:null, calibration_due:'2026-09-15', status:'available',   borrower_name:null, has_tag:false },
   { id:2, pm_number:'PM-002', name:'PM-002 Rohde & Schwarz HMC8043', device_type:'Power Supply', serial_number:'RS-HMC-042', manufacturer:'Rohde & Schwarz', model:'HMC8043',    barcode:'490002', locker_slot:2,  description:null, image_path:null, calibration_due:'2026-11-01', status:'borrowed',    borrower_name:'Sarah K.' },
   { id:3, pm_number:'PM-003', name:'PM-003 Fluke 87V',           device_type:'Multimeter',     serial_number:'FL-87V-007',  manufacturer:'Fluke',          model:'87V',         barcode:'490003', locker_slot:3,  description:null, image_path:null, calibration_due:'2026-06-30', status:'available',   borrower_name:null       },
   { id:4, pm_number:'PM-004', name:'PM-004 Keysight 34465A',     device_type:'Multimeter',     serial_number:'MY98765432',  manufacturer:'Keysight',       model:'34465A',      barcode:'490004', locker_slot:4,  description:null, image_path:null, calibration_due:null,         status:'available',   borrower_name:null       },
@@ -561,6 +561,9 @@ async function endSession(fromTimeout = false, fromSSE = false) {
   S.user     = null;
   S.devices  = [];
   S.selected = null;
+  adminSessionActive = false;
+  closeAdminPanel();
+  hideRegisterDeviceOverlay();
   navigate('idle');
 }
 
@@ -586,6 +589,60 @@ function fillMainMenu(user) {
   pill.className   = 'role-pill' + (user.role === 'admin' ? ' admin' : '');
   // Enhancement E: re-split the dynamic text
   splitMenuText();
+  updateMenuBorrowCount();
+}
+
+/**
+ * Refresh the optional N/5 borrowed line on the scan-first main menu.
+ * @returns {Promise<void>}
+ */
+async function updateMenuBorrowCount() {
+  const el = document.getElementById('menu-borrow-count');
+  if (!el) return;
+  try {
+    const devices = await apiGetDevices();
+    S.devices = devices;
+    const n = devices.filter(d => d.borrower_name === 'You').length;
+    el.textContent = `${n} / 5 borrowed`;
+  } catch (_) { /* leave the last count */ }
+}
+
+/**
+ * After a sticker auto-intent, toast is already shown; refresh an open grid
+ * or detail overlay so the UI matches locker state.
+ * @param {Object} data - SSE device_action payload.
+ * @returns {Promise<void>}
+ */
+async function refreshAfterDeviceAction(data) {
+  await updateMenuBorrowCount();
+  const devices = S.devices || [];
+  const detailOpen = S.screen === 'device-detail';
+  const gridScreen = detailOpen ? S.prevScreen : S.screen;
+  if (gridScreen === 'borrow') {
+    const myCount = devices.filter(d => d.borrower_name === 'You').length;
+    document.getElementById('borrow-badge').textContent = `${myCount} / 5 borrowed`;
+    buildGrid('borrow-grid', devices, 'borrow');
+  } else if (gridScreen === 'return') {
+    const mine = devices.filter(d => d.borrower_name === 'You').length;
+    document.getElementById('return-badge').textContent =
+      `${mine} item${mine !== 1 ? 's' : ''} to return`;
+    buildGrid('return-grid', devices, 'return');
+  }
+  if (detailOpen && S.selected) {
+    const updated = devices.find(d => d.id === S.selected.id);
+    if (updated) openDetail(updated, S.mode);
+  }
+}
+
+/**
+ * Re-arm the kiosk inactivity UI after a tag tap (backend touch() is not enough).
+ */
+function keepSessionAliveFromTag() {
+  dismissInactivity();
+  armIdle();
+  if (!USE_DEMO && S.user) {
+    fetch('/api/session/touch', { method: 'POST' }).catch(() => {});
+  }
 }
 
 /* ============================================================
@@ -775,7 +832,12 @@ function buildGrid(gridId, devices, mode) {
 function openDetail(dev, mode) {
   S.selected   = dev;
   S.mode       = mode;
-  S.prevScreen = S.screen;
+  // Re-opening while detail is already up must keep the grid id. Otherwise a
+  // sticker refresh sets prevScreen to device-detail, later taps skip the grid,
+  // and closeDetail restores a hidden overlay as the current screen.
+  if (S.screen !== 'device-detail') {
+    S.prevScreen = S.screen;
+  }
 
   const avail = dev.status === 'available';
   const mine  = dev.borrower_name === 'You';
@@ -1191,13 +1253,15 @@ async function submitRegistrationName() {
 
 /**
  * Navigate to the appropriate screen after registration completes or fails.
- * In admin mode, returns to the main menu (admin session persists). In
- * self-service mode, returns to the idle screen.
+ * In admin mode, returns to the main menu with overlay auto-intent enabled.
+ * In self-service mode, returns to the idle screen.
  */
-function navigateAfterRegistration() {
+async function navigateAfterRegistration() {
   if (S.adminRegistration) {
     S.adminRegistration = false;
+    await adminStartSession(false);
     navigate('main-menu');
+    armIdle();
   } else {
     navigate('idle');
   }
@@ -1284,7 +1348,7 @@ function checkAdminTapSequence() {
 function toggleAdminPanel() {
   const overlay = document.getElementById('overlay-admin');
   if (overlay.classList.contains('visible')) {
-    closeAdminPanel();
+    dismissAdminToIdle();
   } else {
     openAdminPanel();
   }
@@ -1311,14 +1375,27 @@ async function openAdminPanel() {
 
 /**
  * Close the admin panel overlay with a slide-left exit animation.
+ * Does not end the session (Borrow/Return/Register keep it).
  */
 function closeAdminPanel() {
   const overlay = document.getElementById('overlay-admin');
+  if (!overlay || overlay.style.display === 'none') return;
   overlay.classList.add('hidden-left');
   setTimeout(() => {
     overlay.classList.remove('visible', 'hidden-left');
     overlay.style.display = 'none';
   }, 710);
+}
+
+/**
+ * X / 5× toggle off: hide admin UI and end the overlay session so idle is idle.
+ */
+function dismissAdminToIdle() {
+  closeAdminPanel();
+  hideRegisterDeviceOverlay();
+  apiCancelRegistration();
+  adminSessionActive = false;
+  endSession();
 }
 
 /**
@@ -1329,7 +1406,7 @@ function closeAdminPanel() {
  * USE_DEMO is true.
  * @returns {Promise<boolean>} True if the admin session was created, false on failure.
  */
-async function adminStartSession() {
+async function adminStartSession(overlay = true) {
   if (USE_DEMO) {
     // Demo mode — no backend, use synthetic admin user
     adminSessionActive = true;
@@ -1339,7 +1416,8 @@ async function adminStartSession() {
   }
 
   try {
-    const res = await fetch('/api/admin/session', { method: 'POST' });
+    const url = overlay ? '/api/admin/session' : '/api/admin/session?overlay=false';
+    const res = await fetch(url, { method: 'POST' });
     const data = await res.json();
     if (!res.ok) {
       // Backend rejected — show error and stay on current screen
@@ -1366,7 +1444,7 @@ async function adminStartSession() {
  */
 async function adminGotoBorrow() {
   closeAdminPanel();
-  const ok = await adminStartSession();
+  const ok = await adminStartSession(false);
   if (!ok) return; // session creation failed — stay on current screen
   await sleep(300); // wait for panel close animation
   navigate('main-menu');
@@ -1384,7 +1462,7 @@ async function adminGotoBorrow() {
  */
 async function adminGotoReturn() {
   closeAdminPanel();
-  const ok = await adminStartSession();
+  const ok = await adminStartSession(false);
   if (!ok) return; // session creation failed — stay on current screen
   await sleep(300); // wait for panel close animation
   navigate('main-menu');
@@ -1811,6 +1889,240 @@ async function adminRegisterUser() {
   openRegister();
 }
 
+/** @type {number|null} Bind-window countdown interval. */
+let bindCountdownTimer = null;
+
+/**
+ * Show a Register Device overlay step and hide the others.
+ * @param {string} stepId - Element id of the step to show.
+ */
+function showBindStep(stepId) {
+  document.querySelectorAll('#overlay-register-device .bind-step').forEach(el => {
+    el.classList.toggle('hidden', el.id !== stepId);
+  });
+}
+
+/**
+ * Hide the Register Device overlay without ending the admin session.
+ */
+function hideRegisterDeviceOverlay() {
+  clearInterval(bindCountdownTimer);
+  const overlay = document.getElementById('overlay-register-device');
+  if (!overlay || overlay.style.display === 'none') return;
+  overlay.classList.add('hidden-left');
+  setTimeout(() => {
+    overlay.classList.remove('visible', 'hidden-left');
+    overlay.style.display = 'none';
+  }, 710);
+}
+
+/**
+ * Close Register Device, cancel a pending bind, return toward admin/idle.
+ */
+function closeRegisterDevice() {
+  clearInterval(bindCountdownTimer);
+  apiCancelRegistration();
+  hideRegisterDeviceOverlay();
+  openAdminPanel();
+}
+
+/**
+ * Open the admin Register Device list (bind only — does not create devices).
+ * @returns {Promise<void>}
+ */
+async function adminRegisterDevice() {
+  closeAdminPanel();
+  await sleep(300);
+  const overlay = document.getElementById('overlay-register-device');
+  overlay.style.display = '';
+  showBindStep('bind-step-list');
+  document.getElementById('bind-search').value = '';
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    overlay.classList.add('visible');
+  }));
+  await populateBindList();
+}
+
+/**
+ * Fetch devices and render the bind list: name + PM (+ slot), unbound first.
+ * Duplicate names stay as distinct rows (PM identifies the unit).
+ * @returns {Promise<void>}
+ */
+async function populateBindList() {
+  const list = document.getElementById('bind-device-list');
+  if (!list) return;
+  const devices = await apiGetDevices();
+  S.devices = devices;
+  const query = (document.getElementById('bind-search').value || '').toLowerCase().trim();
+  const filtered = devices.filter(d => {
+    if (!query) return true;
+    const name = (d.name || '').toLowerCase();
+    const pm = (d.pm_number || '').toLowerCase();
+    return name.includes(query) || pm.includes(query);
+  });
+  filtered.sort((a, b) => {
+    const at = a.has_tag ? 1 : 0;
+    const bt = b.has_tag ? 1 : 0;
+    if (at !== bt) return at - bt;
+    const n = (a.name || '').localeCompare(b.name || '');
+    if (n !== 0) return n;
+    return (a.pm_number || '').localeCompare(b.pm_number || '');
+  });
+  list.innerHTML = '';
+  filtered.forEach(dev => {
+    const row = document.createElement('div');
+    row.className = 'bind-row';
+    const tagged = !!dev.has_tag;
+
+    const info = document.createElement('div');
+    info.className = 'bind-row-info';
+    const nameEl = document.createElement('div');
+    nameEl.className = 'bind-row-name';
+    nameEl.textContent = dev.name || '';
+    const metaEl = document.createElement('div');
+    metaEl.className = 'bind-row-meta';
+    const slot = dev.locker_slot != null ? ` · Slot ${dev.locker_slot}` : '';
+    metaEl.textContent = `${dev.pm_number || '—'}${slot}`;
+    info.appendChild(nameEl);
+    info.appendChild(metaEl);
+
+    const pill = document.createElement('span');
+    pill.className = 'bind-tag-pill' + (tagged ? '' : ' unbound');
+    pill.textContent = tagged ? 'Tagged' : 'No tag';
+
+    const actions = document.createElement('div');
+    actions.className = 'bind-row-actions';
+    const bindBtn = document.createElement('button');
+    bindBtn.type = 'button';
+    bindBtn.className = 'bind-go';
+    bindBtn.textContent = 'Bind';
+    bindBtn.addEventListener('click', () => { clickSound(); startDeviceTagBind(dev); });
+    actions.appendChild(bindBtn);
+    if (tagged) {
+      const unbindBtn = document.createElement('button');
+      unbindBtn.type = 'button';
+      unbindBtn.className = 'bind-unbind';
+      unbindBtn.textContent = 'Unbind';
+      unbindBtn.addEventListener('click', () => { clickSound(); unbindDeviceTag(dev); });
+      actions.appendChild(unbindBtn);
+    }
+
+    row.appendChild(info);
+    row.appendChild(pill);
+    row.appendChild(actions);
+    list.appendChild(row);
+  });
+}
+
+/**
+ * Start the 60s tap-the-sticker window for one locker device.
+ * @param {Object} dev - Device row (id, name, pm_number).
+ * @returns {Promise<void>}
+ */
+async function startDeviceTagBind(dev) {
+  document.getElementById('bind-confirm-name').textContent =
+    `${dev.name} (${dev.pm_number})`;
+  showBindStep('bind-step-tap');
+  clearInterval(bindCountdownTimer);
+  try {
+    const res = await fetch(`/api/admin/devices/${dev.id}/bind-tag`, { method: 'POST' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      apiCancelRegistration();
+      showBindStep('bind-step-error');
+      document.getElementById('bind-error-msg').textContent =
+        data.detail || 'Could not start bind.';
+      setTimeout(() => {
+        showBindStep('bind-step-list');
+        populateBindList();
+      }, 2500);
+      return;
+    }
+  } catch (_) {
+    apiCancelRegistration();
+    showBindStep('bind-step-error');
+    document.getElementById('bind-error-msg').textContent = 'Could not start bind.';
+    setTimeout(() => {
+      showBindStep('bind-step-list');
+      populateBindList();
+    }, 2500);
+    return;
+  }
+  let secs = 60;
+  const cdEl = document.getElementById('bind-countdown');
+  cdEl.textContent = secs + 's';
+  bindCountdownTimer = setInterval(() => {
+    secs--;
+    cdEl.textContent = secs + 's';
+    if (secs <= 0) {
+      clearInterval(bindCountdownTimer);
+      apiCancelRegistration();
+      showBindStep('bind-step-error');
+      document.getElementById('bind-error-msg').textContent =
+        'Bind timed out. Please try again.';
+      setTimeout(() => {
+        showBindStep('bind-step-list');
+        populateBindList();
+      }, 2500);
+    }
+  }, 1000);
+}
+
+/**
+ * Clear tag_hmac on a device and refresh the bind list.
+ * @param {Object} dev - Device row.
+ * @returns {Promise<void>}
+ */
+async function unbindDeviceTag(dev) {
+  try {
+    const res = await fetch(`/api/admin/devices/${dev.id}/unbind-tag`, { method: 'POST' });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok) {
+      showToast(`Unbound ${dev.name} (${dev.pm_number})`, 'success');
+      await populateBindList();
+    } else {
+      showToast(data.detail || 'Unbind failed', 'error');
+    }
+  } catch (_) {
+    showToast('Unbind failed', 'error');
+  }
+}
+
+/**
+ * Handle tag_bind_success SSE: show success, then return to the list.
+ * @param {Object} data - SSE payload with device_name / pm_number.
+ */
+function handleTagBindSuccess(data) {
+  const overlay = document.getElementById('overlay-register-device');
+  if (!overlay || overlay.style.display === 'none') return;
+  clearInterval(bindCountdownTimer);
+  showBindStep('bind-step-success');
+  const name = data.device_name || 'Device';
+  const pm = data.pm_number ? ` (${data.pm_number})` : '';
+  document.getElementById('bind-success-msg').textContent = `Bound ${name}${pm}.`;
+  setTimeout(() => {
+    showBindStep('bind-step-list');
+    populateBindList();
+  }, 2500);
+}
+
+/**
+ * Handle tag_bind_failed SSE: show the reason, then return to the list.
+ * @param {Object} data - SSE payload with reason.
+ */
+function handleTagBindFailed(data) {
+  const overlay = document.getElementById('overlay-register-device');
+  if (!overlay || overlay.style.display === 'none') return;
+  clearInterval(bindCountdownTimer);
+  showBindStep('bind-step-error');
+  document.getElementById('bind-error-msg').textContent =
+    data.reason || 'Bind failed. Please try again.';
+  setTimeout(() => {
+    showBindStep('bind-step-list');
+    populateBindList();
+  }, 2500);
+}
+
 /**
  * End the admin session from the admin panel. Closes the panel, clears the
  * admin session flag, and calls the standard session end flow.
@@ -1908,11 +2220,14 @@ document.querySelector('.clock').addEventListener('click', e => {
   checkAdminTapSequence();
 });
 
-document.getElementById('admin-close').addEventListener('click', () => { clickSound(); closeAdminPanel(); });
+document.getElementById('admin-close').addEventListener('click', () => { clickSound(); dismissAdminToIdle(); });
 document.getElementById('admin-goto-borrow').addEventListener('click', () => { clickSound(); adminGotoBorrow(); });
 document.getElementById('admin-goto-return').addEventListener('click', () => { clickSound(); adminGotoReturn(); });
 document.getElementById('admin-sync-source').addEventListener('click', () => { clickSound(); adminSyncSource(); });
 document.getElementById('admin-register-user').addEventListener('click', () => { clickSound(); adminRegisterUser(); });
+document.getElementById('admin-register-device').addEventListener('click', () => { clickSound(); adminRegisterDevice(); });
+document.getElementById('bind-device-close').addEventListener('click', () => { clickSound(); closeRegisterDevice(); });
+document.getElementById('bind-search').addEventListener('input', () => { populateBindList(); });
 document.getElementById('admin-export-excel').addEventListener('click', () => { clickSound(); adminExportExcel(); });
 document.getElementById('admin-update').addEventListener('click', () => { clickSound(); adminUpdate(); });
 document.getElementById('admin-end-session').addEventListener('click', () => { clickSound(); adminEndSession(); });
@@ -1933,6 +2248,7 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 document.getElementById('overlay-inactivity').style.display    = 'none';
 document.getElementById('overlay-device-detail').style.display = 'none';
 document.getElementById('overlay-admin').style.display         = 'none';
+document.getElementById('overlay-register-device').style.display = 'none';
 document.getElementById('overlay-update').style.display        = 'none';
 
 // Enhancement E: split text on initial page load
@@ -1942,9 +2258,9 @@ initSplitText();
 // on the touch kiosk and in lite mode.
 if (canHover && !PERF.lite) initMagneticHover();
 
-// Seamless marquee: clone tracks to fill any viewport width. The scroll
-// animation is disabled in lite mode, so cloning is pointless there.
-if (!PERF.lite) initMarquee();
+// Seamless marquee: clone tracks to fill any viewport width. Kept in lite —
+// the bar is a cheap translateX, and hiding it looked like a frozen ticker.
+initMarquee();
 
 /* ============================================================
    RUNTIME FPS PROBE — auto-downgrade to lite on a janky host
@@ -2044,6 +2360,38 @@ function connectSSE() {
     handleRegistrationFailed(data);
   });
 
+  source.addEventListener('device_action', e => {
+    if (S.updating) return;
+    const data = JSON.parse(e.data);
+    keepSessionAliveFromTag();
+    showToast(data.message || '', data.success ? 'success' : 'error');
+    refreshAfterDeviceAction(data);
+  });
+
+  source.addEventListener('device_tag_idle', e => {
+    if (S.updating) return;
+    const data = JSON.parse(e.data);
+    keepSessionAliveFromTag();
+    showToast(data.message || 'Tap your work card first.');
+  });
+
+  source.addEventListener('unknown_tag', e => {
+    if (S.updating) return;
+    const data = JSON.parse(e.data);
+    keepSessionAliveFromTag();
+    showToast(data.message || 'Unknown tag.');
+  });
+
+  source.addEventListener('tag_bind_success', e => {
+    if (S.updating) return;
+    handleTagBindSuccess(JSON.parse(e.data));
+  });
+
+  source.addEventListener('tag_bind_failed', e => {
+    if (S.updating) return;
+    handleTagBindFailed(JSON.parse(e.data));
+  });
+
   source.onerror = () => {
     source.close();
     setTimeout(connectSSE, 3000); // 3s delay before reconnecting after SSE error
@@ -2064,6 +2412,7 @@ async function checkExistingSession() {
       fillMainMenu(data.user);
       navigate('main-menu');
       armIdle();
+      await fetch('/api/admin/session?overlay=false', { method: 'POST' }).catch(() => {});
     }
   } catch (_) { /* server not reachable — stay on idle */ }
 }
@@ -2088,7 +2437,7 @@ if (USE_DEMO) {
    is zero visible footprint. Provides a floating "Simulate tap"
    button plus the F2 keyboard shortcut; both POST /api/dev/tap, which
    flows through the real NFC bridge exactly like a physical card tap
-   (auth, second-tap logout, or registration — driven by server state).
+   (work-card login/logout, device-tag auto-intent, or pending bind).
 ============================================================ */
 (function initDevTap() {
   fetch('/api/dev/status')

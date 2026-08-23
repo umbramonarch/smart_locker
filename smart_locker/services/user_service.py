@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from sqlalchemy.orm import Session
 
 from smart_locker.database.models import User, UserRole
-from smart_locker.database.repositories import UserRepository
+from smart_locker.database.repositories import DeviceRepository, UserRepository
 from smart_locker.security.encryption import encrypt, decrypt
 from smart_locker.security.hashing import compute_uid_hmac
 
@@ -87,9 +87,15 @@ class UserService:
 
         Returns:
             Created User object.
+
+        Raises:
+            ValueError: If the UID HMAC is already bound to a device sticker.
         """
         card_uid_hex = card_uid_hex.upper().strip()
         uid_hmac = compute_uid_hmac(card_uid_hex, self._hmac_key)
+        if DeviceRepository.find_by_tag_hmac(db_session, uid_hmac) is not None:
+            logger.warning("Enrollment rejected: UID is already a device tag.")
+            raise ValueError("This tag is already bound to a device.")
         encrypted_uid = encrypt(card_uid_hex, self._enc_key)
 
         user = UserRepository.create(

@@ -2,7 +2,8 @@
   File: index.html
   Description: Kiosk touch-display UI with six screens (Idle, Auth Failed,
     Main Menu, Borrow Grid, Return Grid, Device Detail) plus overlays for
-    inactivity warning, self-registration, admin panel, and software update.
+    inactivity warning, self-registration, admin panel, Register Device,
+    and software update.
   Project: smart_locker/frontend
   Notes: Served as a static file by FastAPI. Requires app.js and style.css.
     All interactivity is in app.js. Offline: system fonts only.
@@ -88,7 +89,7 @@
         <span class="reveal-wrap"><span class="reveal-inner">TAP YOUR CARD</span></span>
       </h1>
       <p class="idle-sub">
-        <span class="reveal-wrap"><span class="reveal-inner" style="transition-delay:0.22s">to access the equipment locker</span></span>
+        <span class="reveal-wrap"><span class="reveal-inner" style="transition-delay:0.22s">then tap a device to borrow or return</span></span>
       </p>
     </div>
 
@@ -255,8 +256,27 @@
       </h1>
     </div>
 
+    <div class="menu-scan">
+      <div class="nfc-wrapper nfc-wrapper-sm menu-nfc">
+        <div class="nfc-ring-outer"></div>
+        <div class="nfc-ring-mid"></div>
+        <div class="nfc-core">
+          <div class="nfc-texture-reveal"></div>
+          <svg class="nfc-svg" viewBox="0 0 64 64">
+            <path d="M32 22 C39 22 44 27 44 32 C44 37 39 42 32 42" stroke-linecap="round"/>
+            <path d="M32 14 C43 14 52 22 52 32 C52 42 43 50 32 50" stroke-linecap="round"/>
+            <path d="M32 30 C34.8 30 36 31 36 32 C36 33 34.8 34 32 34" stroke-linecap="round"/>
+            <circle cx="24" cy="32" r="5" fill="currentColor" stroke="none" style="color:var(--accent)"/>
+          </svg>
+        </div>
+      </div>
+      <p class="menu-scan-title">Tap the device</p>
+      <p class="menu-scan-sub">to borrow or return</p>
+      <p class="menu-borrow-count" id="menu-borrow-count">0 / 5 borrowed</p>
+    </div>
+
     <div class="menu-actions">
-      <button class="action-btn primary" id="btn-borrow">
+      <button class="action-btn pick-btn" id="btn-borrow">
         <div class="btn-reveal-img" style="background-image:url('images/camera.jpg')"></div>
         <div class="btn-reveal-tint"></div>
         <div class="btn-icon">
@@ -264,10 +284,10 @@
         </div>
         <div class="btn-texts">
           <span class="btn-label">Borrow</span>
-          <span class="btn-desc">Take equipment from the locker</span>
+          <span class="btn-desc">or pick on screen</span>
         </div>
       </button>
-      <button class="action-btn primary" id="btn-return">
+      <button class="action-btn pick-btn" id="btn-return">
         <div class="btn-reveal-img" style="background-image:url('images/drone.jpg')"></div>
         <div class="btn-reveal-tint"></div>
         <div class="btn-icon">
@@ -275,7 +295,7 @@
         </div>
         <div class="btn-texts">
           <span class="btn-label">Return</span>
-          <span class="btn-desc">Bring back your equipment</span>
+          <span class="btn-desc">or pick on screen</span>
         </div>
       </button>
       <button class="action-btn end-btn" id="btn-end">
@@ -431,6 +451,16 @@
           </div>
         </button>
 
+        <button class="admin-action-btn" id="admin-register-device">
+          <div class="admin-btn-icon register-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 7V5a2 2 0 00-2-2h-4a2 2 0 00-2 2v2"/><path d="M12 12v4"/></svg>
+          </div>
+          <div class="admin-btn-text">
+            <span class="admin-btn-label">Register Device</span>
+            <span class="admin-btn-desc">Bind an NFC sticker</span>
+          </div>
+        </button>
+
         <button class="admin-action-btn" id="admin-export-excel">
           <div class="admin-btn-icon">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -474,6 +504,70 @@
       <div class="admin-footer">
         <span class="admin-footer-hint" id="admin-sync-status">Last sync: —</span>
         <span class="admin-footer-hint">5× tap clock to toggle</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================================================================
+       OVERLAY — REGISTER DEVICE (admin bind, not create)
+  ================================================================ -->
+  <div id="overlay-register-device" class="overlay" style="display:none">
+    <div class="bind-panel">
+      <div class="admin-header">
+        <div class="admin-badge">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 7V5a2 2 0 00-2-2h-4a2 2 0 00-2 2v2"/></svg>
+          <span>REGISTER DEVICE</span>
+        </div>
+        <button class="admin-close" id="bind-device-close">
+          <svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+
+      <div class="bind-step" id="bind-step-list">
+        <p class="bind-hint">Pick a locker device, then tap its sticker. Rows with the same name are different units — use the PM number.</p>
+        <div class="register-search-group bind-search-group">
+          <svg class="register-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+          <input type="text" id="bind-search" class="register-input register-search-input" placeholder="Search name or PM…" autocomplete="off" spellcheck="false">
+          <div class="register-input-glow"></div>
+        </div>
+        <div class="bind-device-list" id="bind-device-list"></div>
+      </div>
+
+      <div class="bind-step hidden" id="bind-step-tap">
+        <div class="nfc-wrapper nfc-wrapper-sm">
+          <div class="nfc-ring-outer"></div>
+          <div class="nfc-ring-mid"></div>
+          <div class="nfc-core">
+            <div class="nfc-texture-reveal"></div>
+            <svg class="nfc-svg" viewBox="0 0 64 64">
+              <path d="M32 22 C39 22 44 27 44 32 C44 37 39 42 32 42" stroke-linecap="round"/>
+              <path d="M32 14 C43 14 52 22 52 32 C52 42 43 50 32 50" stroke-linecap="round"/>
+              <path d="M32 30 C34.8 30 36 31 36 32 C36 33 34.8 34 32 34" stroke-linecap="round"/>
+              <circle cx="24" cy="32" r="5" fill="currentColor" stroke="none" style="color:var(--accent)"/>
+            </svg>
+          </div>
+        </div>
+        <h1 class="register-title register-title-sm">TAP THE STICKER</h1>
+        <p class="register-sub">
+          Binding <strong id="bind-confirm-name">—</strong>
+        </p>
+        <div class="register-countdown" id="bind-countdown">60s</div>
+      </div>
+
+      <div class="bind-step hidden" id="bind-step-success">
+        <div class="register-icon-circle success-circle">
+          <svg viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5"/></svg>
+        </div>
+        <h1 class="register-title register-title-success">BOUND</h1>
+        <p class="register-sub" id="bind-success-msg">Sticker bound.</p>
+      </div>
+
+      <div class="bind-step hidden" id="bind-step-error">
+        <div class="register-icon-circle error-circle">
+          <svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </div>
+        <h1 class="register-title register-title-error">FAILED</h1>
+        <p class="register-sub" id="bind-error-msg">Bind failed.</p>
       </div>
     </div>
   </div>

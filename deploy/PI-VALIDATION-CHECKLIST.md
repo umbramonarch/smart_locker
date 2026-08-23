@@ -34,9 +34,10 @@ table at the end.
 ## 3. NFC reader — REAL hardware (QEMU cannot test this)
 
 - [ ] `pcscd` running; `pcsc_scan` (or app log) detects `ACR1252U`.
-- [ ] Tap an enrolled card → kiosk authenticates and shows the user's main menu.
-- [ ] Second tap → session ends (logout).
-- [ ] Tap an **unenrolled** card → "not registered" screen (no crash).
+- [ ] Tap an enrolled **work card** → kiosk authenticates and shows the scan-first main menu.
+- [ ] Second **work-card** tap → session ends (logout). A device sticker does not log out.
+- [ ] After login, tap an NTAG/sticker bound to a locker device → borrow (or return if already yours); session stays open.
+- [ ] Tap an **unenrolled** card → "not registered" screen (no crash). Bound device tag at idle → short "tap your work card first" (not auth-failed).
 - [ ] Unplug the reader mid-session → UI shows "reader disconnected"; replug → recovers.
 - [ ] **Security:** `grep -ri <the card's UID> logs/` returns **nothing** — raw UIDs are never logged.
 

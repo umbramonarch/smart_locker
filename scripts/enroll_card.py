@@ -97,12 +97,16 @@ def _enroll(uid: str, name: str, role: str) -> None:
         hmac_key=key_manager.hmac_key,
     )
     with get_session() as session:
-        user = user_svc.enroll_user(
-            session,
-            display_name=name,
-            card_uid_hex=uid,
-            role=role,
-        )
+        try:
+            user = user_svc.enroll_user(
+                session,
+                display_name=name,
+                card_uid_hex=uid,
+                role=role,
+            )
+        except ValueError as e:
+            print(f"ERROR: {e}")
+            raise SystemExit(1)
         print(
             f"Enrolled: {user.display_name} "
             f"(id={user.id}, role={role}, UID={_mask_uid(uid)})"

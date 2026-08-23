@@ -290,14 +290,52 @@ class DeviceRepository:
         return session.execute(stmt).scalar_one_or_none()
 
     @staticmethod
+    def find_by_tag_hmac(session: Session, tag_hmac: str) -> Device | None:
+        """Look up a device by the HMAC of its NFC sticker UID.
+
+        Args:
+            session: Active database session.
+            tag_hmac: HMAC-SHA256 digest of the sticker UID.
+
+        Returns:
+            Device object or None if no sticker is bound to that digest.
+        """
+        stmt = select(Device).where(Device.tag_hmac == tag_hmac)
+        return session.execute(stmt).scalar_one_or_none()
+
+    @staticmethod
+    def bind_tag(session: Session, device: Device, tag_hmac: str) -> None:
+        """Set or replace the NFC sticker HMAC on a device.
+
+        Args:
+            session: Active database session.
+            device: Device row to bind.
+            tag_hmac: HMAC-SHA256 digest of the sticker UID.
+        """
+        device.tag_hmac = tag_hmac
+        session.flush()
+
+    @staticmethod
+    def unbind_tag(session: Session, device: Device) -> None:
+        """Clear the NFC sticker HMAC on a device.
+
+        Args:
+            session: Active database session.
+            device: Device row to unbind.
+        """
+        device.tag_hmac = None
+        session.flush()
+
+    @staticmethod
     def update_metadata(session: Session, device: Device, **kwargs) -> bool:
         """Update source-managed metadata fields on a device.
 
         Only updates fields that differ from the current value. Restricted
-        to the ALLOWED set — slot, image, and description are never
-        overwritten by source imports. Status and current_borrower_id ARE
-        updated because the source Excel "Aktueller Einsatzort" column is
-        the authoritative record of who has the device.
+        to the ALLOWED set — slot, image, description, and tag_hmac are
+        never overwritten by source imports (tag bindings are locker-local).
+        Status and current_borrower_id ARE updated because the source Excel
+        "Aktueller Einsatzort" column is the authoritative record of who
+        has the device.
 
         Args:
             session: Active database session.
@@ -307,7 +345,6 @@ class DeviceRepository:
         Returns:
             True if any field was changed, False if all values matched.
         """
-        # Fields that the source import is allowed to modify
         ALLOWED = {
             "name", "device_type", "serial_number", "manufacturer",
             "model", "barcode", "calibration_due",

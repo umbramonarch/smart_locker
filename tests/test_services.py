@@ -209,6 +209,20 @@ class TestUserService:
         assert info is not None
         assert info.card_uid == "BBBB2222"
 
+    def test_enroll_rejects_device_tag_uid(self, db_session, enc_key, hmac_key):
+        """Enrollment fails when the UID HMAC is already bound to a device."""
+        device = DeviceRepository.create(
+            db_session, name="Fluke 87V", device_type="Multimeter",
+            pm_number="PM-COLLIDE",
+        )
+        uid = "AABBCCDD"
+        DeviceRepository.bind_tag(
+            db_session, device, compute_uid_hmac(uid, hmac_key)
+        )
+        svc = UserService(enc_key=enc_key, hmac_key=hmac_key)
+        with pytest.raises(ValueError, match="already bound"):
+            svc.enroll_user(db_session, "Alice", uid)
+
     def test_get_admin_user_info_denied_for_non_admin(self, db_session, enc_key, hmac_key):
         """Verify non-admin users are denied access to admin user info."""
         svc = UserService(enc_key=enc_key, hmac_key=hmac_key)
