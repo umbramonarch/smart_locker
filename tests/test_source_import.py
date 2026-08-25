@@ -331,14 +331,7 @@ class TestLocationColumn:
             path.unlink(missing_ok=True)
 
     def test_reimport_preserves_tag_hmac(self, db_session, hmac_key):
-        """Re-import must not overwrite tag_hmac even when barcode/status change."""
-        anna = UserRepository.create(
-            db_session,
-            display_name="Anna Schmidt",
-            uid_hmac="aa" * 16,
-            encrypted_card_uid="enc_anna",
-            role="user",
-        )
+        """Re-import must not overwrite tag_hmac even when barcode changes."""
         device = DeviceRepository.create(
             db_session,
             name="Fluke 87V",
@@ -362,22 +355,20 @@ class TestLocationColumn:
             result = import_from_source_excel(get_engine(), path)
             assert result.updated == 1
 
-            # Import uses a different Session; expire so we read committed state.
             db_session.expire_all()
             device = DeviceRepository.find_by_pm(db_session, "PM-001")
             assert device.tag_hmac == digest
             assert device.barcode == "NEW-BC"
-            assert device.status == DeviceStatus.BORROWED
-            assert device.current_borrower_id == anna.id
+            assert device.status == DeviceStatus.AVAILABLE
+            assert device.current_borrower_id is None
         finally:
             path.unlink(missing_ok=True)
 
-    def test_update_existing_device_status(self, db_session):
-        """Re-importing with a changed location updates an existing device's status."""
-        # Create an AVAILABLE device
+    def test_reimport_does_not_overwrite_existing_status(self, db_session):
+        """Stale Excel Einsatzort must not replace locker status on an existing PM."""
         DeviceRepository.create(
             db_session,
-            name="PM-001 Fluke 87V",
+            name="Fluke 87V",
             device_type="general",
             pm_number="PM-001",
             manufacturer="Fluke",
@@ -385,7 +376,6 @@ class TestLocationColumn:
         )
         db_session.commit()
 
-        # Import with a person's name in location → should become BORROWED
         path = _create_test_excel([
             ["Equipment", "Hersteller", "Typbezeichnung",
              "Platz Messmittelschrank", "Aktueller Einsatzort"],
@@ -394,10 +384,51 @@ class TestLocationColumn:
         try:
             from smart_locker.database.engine import get_engine
             result = import_from_source_excel(get_engine(), path)
+            assert result.unchanged == 1
+
+            db_session.expire_all()
+            device = DeviceRepository.find_by_pm(db_session, "PM-001")
+            assert device.status == DeviceStatus.AVAILABLE
+            assert device.current_borrower_id is None
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_reimport_does_not_undo_kiosk_borrow(self, db_session):
+        """A kiosk borrow survives re-import of a sheet that still says Schrank."""
+        user = UserRepository.create(
+            db_session,
+            display_name="Anna Schmidt",
+            uid_hmac="dd" * 16,
+            encrypted_card_uid="enc_anna",
+            role="user",
+        )
+        device = DeviceRepository.create(
+            db_session,
+            name="Fluke 87V",
+            device_type="general",
+            pm_number="PM-001",
+            manufacturer="Fluke",
+            model="87V",
+            barcode="OLD-BC",
+        )
+        DeviceRepository.borrow(db_session, device, user.id)
+        db_session.commit()
+
+        path = _create_test_excel([
+            ["Equipment", "Hersteller", "Typbezeichnung", "Barcodenummer",
+             "Platz Messmittelschrank", "Aktueller Einsatzort"],
+            ["PM-001", "Fluke", "87V", "NEW-BC", "Schrank 1", "Messmittelschrank"],
+        ])
+        try:
+            from smart_locker.database.engine import get_engine
+            result = import_from_source_excel(get_engine(), path)
             assert result.updated == 1
 
+            db_session.expire_all()
             device = DeviceRepository.find_by_pm(db_session, "PM-001")
             assert device.status == DeviceStatus.BORROWED
+            assert device.current_borrower_id == user.id
+            assert device.barcode == "NEW-BC"
         finally:
             path.unlink(missing_ok=True)
 

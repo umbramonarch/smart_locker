@@ -220,9 +220,9 @@ Admin UI is required in this slice (binding tens of stickers over SSH is not acc
 
 ## 12. Excel import
 
-`source_import.py` must not pass `tag_hmac` into `update_metadata`. Add an explicit test: bind a tag, re-import a row that changes barcode/status/borrower, assert `tag_hmac` unchanged.
+`source_import.py` must not pass `tag_hmac` into `update_metadata`. Add an explicit test: bind a tag, re-import a row that changes barcode, assert `tag_hmac` unchanged.
 
-Re-import still overwrites `status` and `current_borrower_id` from Aktueller Einsatzort (existing rule).
+Re-import never overwrites `status` or `current_borrower_id`. New PMs still take Aktueller Einsatzort on first insert.
 
 ---
 

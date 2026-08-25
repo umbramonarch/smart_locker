@@ -223,6 +223,30 @@ class TestDeviceRepository:
         assert device.tag_hmac == digest
         assert device.name == "New"
 
+    def test_update_metadata_ignores_status_and_borrower(self, db_session):
+        """Re-import must not overwrite locker status or current borrower."""
+        user = UserRepository.create(
+            db_session,
+            display_name="Anna",
+            uid_hmac="ab" * 16,
+            encrypted_card_uid="enc_anna",
+            role="user",
+        )
+        device = DeviceRepository.create(
+            db_session, name="Old", device_type="t", pm_number="PM-LOC",
+        )
+        DeviceRepository.borrow(db_session, device, user.id)
+        DeviceRepository.update_metadata(
+            db_session,
+            device,
+            status=DeviceStatus.AVAILABLE,
+            current_borrower_id=None,
+            name="New",
+        )
+        assert device.status == DeviceStatus.BORROWED
+        assert device.current_borrower_id == user.id
+        assert device.name == "New"
+
     def test_create_device_without_serial(self, db_session):
         device = DeviceRepository.create(
             db_session,

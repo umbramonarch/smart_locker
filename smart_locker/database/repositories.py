@@ -331,11 +331,9 @@ class DeviceRepository:
         """Update source-managed metadata fields on a device.
 
         Only updates fields that differ from the current value. Restricted
-        to the ALLOWED set — slot, image, description, and tag_hmac are
-        never overwritten by source imports (tag bindings are locker-local).
-        Status and current_borrower_id ARE updated because the source Excel
-        "Aktueller Einsatzort" column is the authoritative record of who
-        has the device.
+        to the ALLOWED set — slot, image, description, tag_hmac, status, and
+        current_borrower_id are never overwritten by source imports (locker
+        borrow state and tag bindings are locker-local).
 
         Args:
             session: Active database session.
@@ -348,7 +346,6 @@ class DeviceRepository:
         ALLOWED = {
             "name", "device_type", "serial_number", "manufacturer",
             "model", "barcode", "calibration_due",
-            "status", "current_borrower_id",
         }
         changed = False
         for key, value in kwargs.items():

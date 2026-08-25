@@ -71,7 +71,7 @@ sudo bash deploy/install/install.sh
 
 - **Secrets:** `.env` (gitignored). Three keys: `SMART_LOCKER_ENC_KEY` (AES-256-GCM), `SMART_LOCKER_HMAC_KEY` (HMAC-SHA256 card lookup), `SMART_LOCKER_UPDATE_HMAC_KEY` (release HMAC; openssl uses the env **string**, not decoded 32 bytes).
 - **Locker share (Pi: `/mnt/locker`):** Excel import, Excel export, photos, and signed updates live at the share root (`deploy/.env.pi.example`). Share down ≠ kiosk down.
-- **Excel import:** `smart_locker/sync/source_import.py` — schrank rows only, slots 1–N, DE/EN headers. Re-import never overwrites `locker_slot` / `image_path` / `description` / `tag_hmac`. It **does** overwrite `status` and `current_borrower_id` from `Aktueller Einsatzort` (and Excel `barcode`).
+- **Excel import:** `smart_locker/sync/source_import.py` — schrank rows only, slots 1–N, DE/EN headers. Re-import never overwrites `locker_slot` / `image_path` / `description` / `tag_hmac` / `status` / `current_borrower_id`. Excel `barcode` and other catalog fields still update. New PMs still take Einsatzort on first insert.
 - **NFC device tags:** same ACR1252U as work cards. Store `devices.tag_hmac` only (same HMAC key as `users.uid_hmac`). Do **not** reuse `devices.barcode`. Kiosk `GET /api/devices` may expose `has_tag: bool`, never the digest; dashboard JSON and Excel export omit `tag_hmac`.
 - **Excel auto-export** only if `SMART_LOCKER_EXCEL_AUTO_EXPORT=1`.
 - **Photos:** filename stem = device **model**. `scripts/update_device.py --auto` matches **PM number** — different scheme.

@@ -220,8 +220,8 @@ def import_from_source_excel(
     """Import new devices and update existing ones from the company source Excel.
 
     Only devices with a slot column value starting with "schrank" are imported.
-    Existing devices (matched by PM number) get metadata updated; status, borrower,
-    locker_slot, image_path, and description are never overwritten.
+    Existing devices (matched by PM number) get catalog metadata updated; status,
+    borrower, locker_slot, image_path, description, and tag_hmac are never overwritten.
 
     Args:
         engine: SQLAlchemy engine.
@@ -430,27 +430,21 @@ def import_from_source_excel(
     try:
         for d in parsed_devices:
             try:
-                # Resolve the borrower name (from "Aktueller Einsatzort")
-                # to a user ID.  If the name doesn't match any registered
-                # user, the device is still marked BORROWED but without a
-                # linked borrower so the kiosk UI reflects that it is not
-                # physically in the locker.
-                borrower_id = None
-                if d["borrower_name"]:
-                    user = UserRepository.find_by_display_name(
-                        session, d["borrower_name"]
-                    )
-                    if user is not None:
-                        borrower_id = user.id
-                    else:
-                        logger.warning(
-                            "Borrower '%s' for PM %s not found in user database.",
-                            d["borrower_name"], d["pm_number"],
-                        )
-
                 existing = DeviceRepository.find_by_pm(session, d["pm_number"])
                 if existing is None:
-                    # New device — insert
+                    # New device — insert. Einsatzort applies only on first insert.
+                    borrower_id = None
+                    if d["borrower_name"]:
+                        user = UserRepository.find_by_display_name(
+                            session, d["borrower_name"]
+                        )
+                        if user is not None:
+                            borrower_id = user.id
+                        else:
+                            logger.warning(
+                                "Borrower '%s' for PM %s not found in user database.",
+                                d["borrower_name"], d["pm_number"],
+                            )
                     DeviceRepository.create(
                         session,
                         name=d["name"],
@@ -469,7 +463,6 @@ def import_from_source_excel(
                     )
                     result.imported += 1
                 else:
-                    # Existing device — update metadata and location status
                     changed = DeviceRepository.update_metadata(
                         session,
                         existing,
@@ -480,8 +473,6 @@ def import_from_source_excel(
                         model=d["model"],
                         barcode=d["barcode"],
                         calibration_due=d["calibration_due"],
-                        status=DeviceStatus(d["device_status"]),
-                        current_borrower_id=borrower_id,
                     )
                     if changed:
                         result.updated += 1

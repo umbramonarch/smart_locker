@@ -739,9 +739,10 @@ python -m scripts.import_devices --file "/mnt/locker/device-list.xlsx"
 
 If auto-detection picks the wrong column, override it, e.g.
 `--pm-col "Equipment" --type-col "Kategorie"`. Re-importing is safe — devices are matched by
-PM number. A re-import **never** overwrites `locker_slot`, `image_path`, or `description`.
-It **does** update `status` and the current borrower from the Excel "Aktueller Einsatzort"
-column (a person name → borrowed; empty / contains "schrank" → available).
+PM number. A re-import **never** overwrites `locker_slot`, `image_path`, `description`,
+`status`, or the current borrower. Catalog fields (name, type, serial, manufacturer, model,
+barcode, calibration) still update. New PMs still take "Aktueller Einsatzort" on first insert
+(a person name → borrowed; empty / contains "schrank" → available).
 
 Once running as a service, this same import also happens **automatically**: once on startup,
 once a day at 06:00, and on demand from the hidden admin panel. (See Section 8 for why the
@@ -876,8 +877,9 @@ usually succeeds.
    `smart_locker_data.xlsx` next to the source file (Devices, Transactions, Users). Don't
    edit that file by hand.
 
-Re-import matches devices by PM number. It leaves `locker_slot`, `image_path`, and
-`description` alone. It does update status and borrower from Aktueller Einsatzort.
+Re-import matches devices by PM number. It leaves `locker_slot`, `image_path`,
+`description`, `status`, and the current borrower alone. Catalog fields still update.
+New PMs still take Aktueller Einsatzort on first insert.
 
 **Web dashboard** — open `http://<pi-address>:8000/dashboard` from any browser on the
 network (no login). It shows three tables, auto-refreshing every 30 seconds: **Devices**
