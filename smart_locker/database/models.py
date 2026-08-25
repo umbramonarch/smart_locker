@@ -150,7 +150,7 @@ class Device(Base):
     """Physical device stored in the locker system.
 
     Identified by ``pm_number`` (the company equipment/PM number — unique business
-    key). Tracks inventory metadata (manufacturer, model, serial, barcode),
+    key). Tracks inventory metadata (manufacturer, model, serial),
     optional NFC sticker HMAC (``tag_hmac``), locker placement, calibration
     schedule, and current borrow state. The ``status`` field controls
     availability; ``current_borrower_id`` links to the User who currently
@@ -168,6 +168,7 @@ class Device(Base):
     )
     manufacturer: Mapped[str | None] = mapped_column(String(100), nullable=True)
     model: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # Unused leftover; not imported, exported, or shown.
     barcode: Mapped[str | None] = mapped_column(String(100), nullable=True)
     # HMAC-SHA256 of the sticker UID (never the raw UID).
     tag_hmac: Mapped[str | None] = mapped_column(String(64), nullable=True)

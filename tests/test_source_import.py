@@ -238,8 +238,8 @@ class TestImportFromSourceExcel:
             device = DeviceRepository.find_by_pm(db_session, "PM-001")
             assert device.manufacturer == "Rohde & Schwarz"
             assert device.serial_number == "SN-12345"
-            assert device.barcode == "BC-001"
             assert device.device_type == "Oscilloscope"
+            assert device.barcode is None
         finally:
             path.unlink(missing_ok=True)
 
@@ -331,7 +331,7 @@ class TestLocationColumn:
             path.unlink(missing_ok=True)
 
     def test_reimport_preserves_tag_hmac(self, db_session, hmac_key):
-        """Re-import must not overwrite tag_hmac even when barcode changes."""
+        """Re-import must not overwrite tag_hmac; leftover barcode is ignored."""
         device = DeviceRepository.create(
             db_session,
             name="Fluke 87V",
@@ -339,6 +339,7 @@ class TestLocationColumn:
             pm_number="PM-001",
             manufacturer="Fluke",
             model="87V",
+            serial_number="SN-OLD",
             barcode="OLD-BC",
         )
         digest = compute_uid_hmac("AABBCCDD", hmac_key)
@@ -346,9 +347,9 @@ class TestLocationColumn:
         db_session.commit()
 
         path = _create_test_excel([
-            ["Equipment", "Hersteller", "Typbezeichnung", "Barcodenummer",
-             "Platz Messmittelschrank", "Aktueller Einsatzort"],
-            ["PM-001", "Fluke", "87V", "NEW-BC", "Schrank 1", "Anna Schmidt"],
+            ["Equipment", "Hersteller", "Typbezeichnung", "Hersteller-Serialnummer",
+             "Barcodenummer", "Platz Messmittelschrank", "Aktueller Einsatzort"],
+            ["PM-001", "Fluke", "87V", "SN-NEW", "NEW-BC", "Schrank 1", "Anna Schmidt"],
         ])
         try:
             from smart_locker.database.engine import get_engine
@@ -358,7 +359,8 @@ class TestLocationColumn:
             db_session.expire_all()
             device = DeviceRepository.find_by_pm(db_session, "PM-001")
             assert device.tag_hmac == digest
-            assert device.barcode == "NEW-BC"
+            assert device.serial_number == "SN-NEW"
+            assert device.barcode == "OLD-BC"
             assert device.status == DeviceStatus.AVAILABLE
             assert device.current_borrower_id is None
         finally:
@@ -409,15 +411,16 @@ class TestLocationColumn:
             pm_number="PM-001",
             manufacturer="Fluke",
             model="87V",
+            serial_number="SN-OLD",
             barcode="OLD-BC",
         )
         DeviceRepository.borrow(db_session, device, user.id)
         db_session.commit()
 
         path = _create_test_excel([
-            ["Equipment", "Hersteller", "Typbezeichnung", "Barcodenummer",
+            ["Equipment", "Hersteller", "Typbezeichnung", "Hersteller-Serialnummer",
              "Platz Messmittelschrank", "Aktueller Einsatzort"],
-            ["PM-001", "Fluke", "87V", "NEW-BC", "Schrank 1", "Messmittelschrank"],
+            ["PM-001", "Fluke", "87V", "SN-NEW", "Schrank 1", "Messmittelschrank"],
         ])
         try:
             from smart_locker.database.engine import get_engine
@@ -428,7 +431,8 @@ class TestLocationColumn:
             device = DeviceRepository.find_by_pm(db_session, "PM-001")
             assert device.status == DeviceStatus.BORROWED
             assert device.current_borrower_id == user.id
-            assert device.barcode == "NEW-BC"
+            assert device.serial_number == "SN-NEW"
+            assert device.barcode == "OLD-BC"
         finally:
             path.unlink(missing_ok=True)
 

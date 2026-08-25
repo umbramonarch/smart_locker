@@ -251,7 +251,7 @@ class TestDeviceEndpoints:
         # New fields present (None for test fixtures without values)
         assert "manufacturer" in cam
         assert "model" in cam
-        assert "barcode" in cam
+        assert "barcode" not in cam
         assert "calibration_due" in cam
         assert cam["has_tag"] is False
         assert "tag_hmac" not in cam
@@ -654,6 +654,7 @@ class TestDeviceTagBindApi:
         assert rows
         for row in rows:
             assert "tag_hmac" not in row
+            assert "barcode" not in row
             dumped = str(row)
             assert digest not in dumped
 

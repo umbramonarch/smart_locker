@@ -26,7 +26,7 @@ from sqlalchemy import select
 # Device columns that can be modified via this script (excludes status, borrower, etc.)
 UPDATABLE_FIELDS = {
     "name", "device_type", "serial_number", "manufacturer", "model",
-    "barcode", "locker_slot", "description", "image_path", "calibration_due",
+    "locker_slot", "description", "image_path", "calibration_due",
 }
 
 

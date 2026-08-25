@@ -62,9 +62,6 @@ MODEL_CANDIDATES = [
     "model", "model name", "type designation",
     "typbezeichnung", "typ", "modell",
 ]
-BARCODE_CANDIDATES = [
-    "barcode", "bar code", "barcodenummer",
-]
 CALIBRATION_CANDIDATES = [
     "calibration due", "calibration_due", "next calibration",
     "datum der nächsten kalibrierung", "datum der nachsten kalibrierung",
@@ -182,7 +179,6 @@ def _detect_columns(
         "image":        find_column(headers, IMAGE_CANDIDATES),
         "manufacturer": find_column(headers, [ov["manufacturer"]] if ov.get("manufacturer") else MANUFACTURER_CANDIDATES),
         "model":        find_column(headers, [ov["model"]] if ov.get("model") else MODEL_CANDIDATES),
-        "barcode":      find_column(headers, [ov["barcode"]] if ov.get("barcode") else BARCODE_CANDIDATES),
         "calibration":  find_column(headers, [ov["calibration"]] if ov.get("calibration") else CALIBRATION_CANDIDATES),
         "location":     find_column(headers, [ov["location"]] if ov.get("location") else LOCATION_CANDIDATES),
     }
@@ -375,7 +371,6 @@ def import_from_source_excel(
 
         description = _cell_str(row, cols["desc"])
         image_path = _cell_str(row, cols["image"])
-        barcode = _cell_str(row, cols["barcode"])
 
         calibration_due = None
         if cols["calibration"] is not None:
@@ -403,7 +398,6 @@ def import_from_source_excel(
             "image_path": image_path,
             "manufacturer": manufacturer,
             "model": model_val,
-            "barcode": barcode,
             "calibration_due": calibration_due,
             "borrower_name": borrower_name,
             "device_status": device_status,
@@ -456,7 +450,6 @@ def import_from_source_excel(
                         image_path=d["image_path"],
                         manufacturer=d["manufacturer"],
                         model=d["model"],
-                        barcode=d["barcode"],
                         calibration_due=d["calibration_due"],
                         status=d["device_status"],
                         current_borrower_id=borrower_id,
@@ -471,7 +464,6 @@ def import_from_source_excel(
                         serial_number=d["serial_number"],
                         manufacturer=d["manufacturer"],
                         model=d["model"],
-                        barcode=d["barcode"],
                         calibration_due=d["calibration_due"],
                     )
                     if changed:

@@ -114,6 +114,7 @@ class TestUsersSheet:
             rows = list(ws.iter_rows(values_only=True))
             headers_lower = [str(h).lower() for h in rows[0]]
             assert not any("tag_hmac" in h or h == "hmac" for h in headers_lower)
+            assert "barcode" not in headers_lower
             for row in rows:
                 for cell in row:
                     assert digest not in str(cell or "")

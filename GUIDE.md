@@ -733,7 +733,6 @@ python -m scripts.import_devices --file "/mnt/locker/device-list.xlsx"
 | Manufacturer | Hersteller | `manufacturer` | No |
 | Type designation | Typbezeichnung | `model` | No |
 | Serial number | Hersteller-serialnummer | `serial_number` | No |
-| Barcode | Barcode | `barcode` | No |
 | Locker placement | Platz Messmittelschrank | `locker_slot` | No |
 | Calibration date | Datum der nächsten Kalibrierung | `calibration_due` | No |
 
@@ -741,8 +740,8 @@ If auto-detection picks the wrong column, override it, e.g.
 `--pm-col "Equipment" --type-col "Kategorie"`. Re-importing is safe — devices are matched by
 PM number. A re-import **never** overwrites `locker_slot`, `image_path`, `description`,
 `status`, or the current borrower. Catalog fields (name, type, serial, manufacturer, model,
-barcode, calibration) still update. New PMs still take "Aktueller Einsatzort" on first insert
-(a person name → borrowed; empty / contains "schrank" → available).
+calibration) still update. Barcode is not imported. New PMs still take "Aktueller Einsatzort"
+on first insert (a person name → borrowed; empty / contains "schrank" → available).
 
 Once running as a service, this same import also happens **automatically**: once on startup,
 once a day at 06:00, and on demand from the hidden admin panel. (See Section 8 for why the
@@ -1236,7 +1235,7 @@ that bridges card taps to the browser.
 | `GET` | `/api/events` | SSE stream — card-tap, auth, and session events |
 
 `GET /api/devices` returns per device: `id`, `pm_number`, `name`, `device_type`,
-`serial_number`, `manufacturer`, `model`, `barcode`, `locker_slot`, `description`,
+`serial_number`, `manufacturer`, `model`, `locker_slot`, `description`,
 `image_path`, `calibration_due`, `status`, `borrower_name`, `has_tag` (bool — no HMAC
 digest). Device-tag HMAC is never on this payload, the public dashboard, or Excel export.
 
@@ -1251,8 +1250,8 @@ flow. FastAPI serves the kiosk UI (`index.html`) and the dashboard as static fil
 
 Each locker device can have a cheap NFC sticker (NTAG213/215, same ACR1252U as work cards).
 The sticker UID is stored only as `devices.tag_hmac` (HMAC-SHA256, same key as work cards).
-The raw UID is never stored or logged. Excel `barcode` remains an imported string; re-import
-overwrites barcode but **not** `tag_hmac` (locker-local, like slot).
+The raw UID is never stored or logged. `devices.barcode` is an unused leftover column
+(not imported, not exported, not on the API).
 
 **Flow:** tap work card → tap the sticker (or pick on screen). Auto-intent: available →
 borrow; borrowed by you → return; borrowed by someone else → fail for a normal user, or

@@ -76,7 +76,7 @@ def _build_workbook(engine) -> Workbook:
         ws.title = "Devices"
         headers = [
             "PM Number", "Name", "Type", "Manufacturer", "Model",
-            "Serial Number", "Barcode", "Locker Slot", "Status",
+            "Serial Number", "Locker Slot", "Status",
             "Current Borrower", "Description", "Calibration Due",
         ]
         ws.append(headers)
@@ -95,7 +95,6 @@ def _build_workbook(engine) -> Workbook:
                 d.manufacturer,
                 d.model,
                 d.serial_number,
-                d.barcode,
                 d.locker_slot,
                 d.status.value,
                 borrower,

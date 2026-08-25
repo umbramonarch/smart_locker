@@ -248,7 +248,7 @@ Cheap NFC stickers on locker devices use the same ACR1252U as work cards (no USB
 - **Storage:** `devices.tag_hmac` (HMAC-SHA256 of the sticker UID, same key as work cards). The raw UID is never stored or logged.
 - **Flow:** tap work card → tap sticker (or pick on screen). Auto-intent from device status: borrow if available, return if you hold it. Session stays open for several devices. A work-card tap still logs out.
 - **Register Device** (hidden admin panel) binds a sticker to an existing Excel/schrank row. The list shows **name + PM** because duplicate names exist. CLI: `python -m scripts.enroll_device_tag --pm PM-001` (or `--uid HEX`).
-- Excel `barcode` is still imported and exported; re-import does **not** overwrite `tag_hmac`, locker status, or the current borrower.
+- Excel barcode is unused leftover; re-import does **not** overwrite `tag_hmac`, locker status, or the current borrower.
 
 ## Running Tests
 

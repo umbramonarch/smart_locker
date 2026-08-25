@@ -241,7 +241,7 @@ class DeviceRepository:
             image_path: Path to device photo relative to frontend/images/ (optional).
             manufacturer: Device manufacturer name (optional).
             model: Model/type designation (optional).
-            barcode: Barcode value for future scanner integration (optional).
+            barcode: Unused leftover column (optional). Not imported or shown.
             calibration_due: Next calibration date (optional).
             status: Device status string (AVAILABLE, BORROWED, MAINTENANCE).
                 Defaults to AVAILABLE if not provided.
@@ -345,7 +345,7 @@ class DeviceRepository:
         """
         ALLOWED = {
             "name", "device_type", "serial_number", "manufacturer",
-            "model", "barcode", "calibration_due",
+            "model", "calibration_due",
         }
         changed = False
         for key, value in kwargs.items():

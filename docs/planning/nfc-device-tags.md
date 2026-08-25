@@ -46,7 +46,7 @@ GUIDE §15 (not built) was: tap card → Borrow/Return → USB scanner types dig
 
 That extra HID device fights the Chromium kiosk (focus, “types into the wrong field”) and uses another USB port. The ACR1252U already returns a UID for NTAG/Ultralight/Classic via `GET_UID` (`FF CA 00 00 00`). Cheap stickers are another UID on the same pipeline.
 
-`devices.barcode` stays an Excel string. Re-import **does** overwrite it. Tag bindings are locker-local, like slot.
+`devices.barcode` is unused leftover (not imported). Tag bindings are locker-local, like slot.
 
 ---
 
@@ -220,7 +220,7 @@ Admin UI is required in this slice (binding tens of stickers over SSH is not acc
 
 ## 12. Excel import
 
-`source_import.py` must not pass `tag_hmac` into `update_metadata`. Add an explicit test: bind a tag, re-import a row that changes barcode, assert `tag_hmac` unchanged.
+`source_import.py` must not pass `tag_hmac` into `update_metadata`. Add an explicit test: bind a tag, re-import a row that changes serial, assert `tag_hmac` unchanged.
 
 Re-import never overwrites `status` or `current_borrower_id`. New PMs still take Aktueller Einsatzort on first insert.
 

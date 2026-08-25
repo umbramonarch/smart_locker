@@ -49,7 +49,6 @@ def main() -> None:
     parser.add_argument("--slot-col", default=None, help="Column header for locker slot")
     parser.add_argument("--manufacturer-col", default=None, help="Column header for manufacturer")
     parser.add_argument("--model-col", default=None, help="Column header for model/type designation")
-    parser.add_argument("--barcode-col", default=None, help="Column header for barcode")
     parser.add_argument("--calibration-col", default=None, help="Column header for calibration due date")
     # Defaults
     parser.add_argument(
@@ -75,7 +74,6 @@ def main() -> None:
         ("slot", args.slot_col),
         ("manufacturer", args.manufacturer_col),
         ("model", args.model_col),
-        ("barcode", args.barcode_col),
         ("calibration", args.calibration_col),
     ]:
         if arg_val:
