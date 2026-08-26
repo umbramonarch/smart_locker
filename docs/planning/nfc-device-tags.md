@@ -109,7 +109,8 @@ Pending intercepts run **before** classify (same pattern as `pending_registratio
 |---|---|
 | Active work card | `auth_success` → scan-first main menu |
 | Unknown / inactive card | `auth_failed` → “Card Not Recognized” (unchanged) |
-| Bound device tag | **Not** auth-failed. Short idle message: tap your work card first. No session. |
+| Bound device tag, **available** | **Not** auth-failed. Short idle message: tap your work card first. No session. Does not borrow. |
+| Bound device tag, **borrowed** | Returns without a work card (`device_action`, `action: return`). Log keeps the original borrower; notes `returned at kiosk without card`. SSE includes `locker_slot`. Kiosk shows a large "Put in slot N" overlay. |
 
 ### Logged in (main menu, borrow, return, detail)
 
@@ -186,8 +187,8 @@ SSE (extend `connectSSE()` in `app.js`):
 
 | Event | When |
 |---|---|
-| `device_action` | `{success, action: "borrow"\|"return", message, device_id, device_name}` |
-| `device_tag_idle` | Bound tag at idle |
+| `device_action` | `{success, action: "borrow"\|"return", message, device_id, device_name, locker_slot}` |
+| `device_tag_idle` | Bound **available** tag at idle (borrow still needs a work card) |
 | `unknown_tag` | Unknown UID while logged in |
 | `tag_bind_success` / `tag_bind_failed` | Admin bind window |
 
@@ -252,7 +253,7 @@ Tests from the acceptance in this file only. No drive-by refactors. No new depen
 ### Tests that must exist
 
 - Bind, lookup, NULL uniqueness, re-bind (`tests/test_database.py`).
-- Idle work card / idle device tag / idle unknown.
+- Idle work card / idle available device tag (no borrow) / idle borrowed device tag (unattended return + `locker_slot`) / idle unknown.
 - Session + available tag → borrow + transaction log.
 - Session + own borrowed tag → return.
 - Session + someone else’s tag as user → fail, session remains.

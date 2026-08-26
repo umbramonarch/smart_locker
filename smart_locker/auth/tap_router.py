@@ -1,9 +1,10 @@
 """
 File: tap_router.py
 Description: Classify an NFC UID as a work card, device tag, or unknown, and
-             apply idle login / logout / auto-intent borrow-return. Shared by
-             the web NFC bridge and the CLI event loop. Never includes the
-             raw UID in results or log lines.
+             apply idle login / logout / auto-intent borrow-return. Idle
+             borrowed tags return without a work card. Shared by the web NFC
+             bridge and the CLI event loop. Never includes the raw UID in
+             results or log lines.
 Project: smart_locker/auth
 Notes: Never includes the raw UID in results or log lines.
 """
@@ -132,6 +133,8 @@ def handle_insert(
 
     Returns:
         TapResult with SSE event name/payload and a CLI message. Never the UID.
+        Idle borrowed tags return without a session. Available tags at idle
+        do not borrow.
     """
     kind, user, device = classify_uid(db_session, card_uid_hex, hmac_key)
     reader = reader_name or "reader"
@@ -146,10 +149,29 @@ def handle_insert(
             admin_overlay_open=admin_overlay_open,
             reader_name=reader,
         )
-    return _handle_idle(session_mgr, kind, user, device, reader_name=reader)
+    return _handle_idle(
+        db_session, session_mgr, kind, user, device, reader_name=reader
+    )
+
+
+def _device_action(device: Device, *, success: bool, action: str, message: str) -> TapResult:
+    """SSE ``device_action`` payload. Includes ``locker_slot`` for the slot overlay."""
+    return TapResult(
+        event="device_action",
+        payload={
+            "success": success,
+            "action": action,
+            "message": message,
+            "device_id": device.id,
+            "device_name": device.name,
+            "locker_slot": device.locker_slot,
+        },
+        cli_message=message,
+    )
 
 
 def _handle_idle(
+    db_session: Session,
     session_mgr: SessionManager,
     kind: TapKind,
     user: User | None,
@@ -157,7 +179,7 @@ def _handle_idle(
     *,
     reader_name: str,
 ) -> TapResult:
-    """Idle (no session): work card logs in; device tag does not."""
+    """Idle: work card logs in; borrowed tag returns; available tag does not."""
     if kind == TapKind.WORK_CARD and user is not None:
         if not user.is_active:
             logger.warning(
@@ -184,6 +206,13 @@ def _handle_idle(
 
     if kind == TapKind.DEVICE_TAG and device is not None:
         logger.info("Device tag on %s", reader_name)
+        if device.status == DeviceStatus.BORROWED:
+            success = LockerService.return_unattended(db_session, device.id)
+            name = device.name
+            message = f"{name} returned." if success else f"Could not return {name}."
+            return _device_action(
+                device, success=success, action="return", message=message
+            )
         return TapResult(
             event="device_tag_idle",
             payload={"message": "Tap your work card first."},
@@ -262,42 +291,16 @@ def _auto_intent(
     if device.status == DeviceStatus.AVAILABLE:
         success = LockerService.borrow_device(db_session, user_session, device.id)
         message = f"{name} borrowed." if success else f"Could not borrow {name}."
-        return TapResult(
-            event="device_action",
-            payload={
-                "success": success,
-                "action": "borrow",
-                "message": message,
-                "device_id": device.id,
-                "device_name": name,
-            },
-            cli_message=message,
+        return _device_action(
+            device, success=success, action="borrow", message=message
         )
 
     if device.status == DeviceStatus.BORROWED:
         success = LockerService.return_device(db_session, user_session, device.id)
         message = f"{name} returned." if success else f"Could not return {name}."
-        return TapResult(
-            event="device_action",
-            payload={
-                "success": success,
-                "action": "return",
-                "message": message,
-                "device_id": device.id,
-                "device_name": name,
-            },
-            cli_message=message,
+        return _device_action(
+            device, success=success, action="return", message=message
         )
 
     message = f"Could not borrow {name}."
-    return TapResult(
-        event="device_action",
-        payload={
-            "success": False,
-            "action": "borrow",
-            "message": message,
-            "device_id": device.id,
-            "device_name": name,
-        },
-        cli_message=message,
-    )
+    return _device_action(device, success=False, action="borrow", message=message)

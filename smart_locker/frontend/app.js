@@ -2,7 +2,7 @@
  * @fileoverview Client-side state machine for the kiosk touch UI. Manages screen
  *               transitions, API communication, SSE event handling, and user
  *               interaction flow across idle, auth, menu, borrow, return, detail,
- *               registration, admin, and software-update overlay.
+ *               registration, admin, return-slot, and software-update overlay.
  * @project smart_locker/frontend
  * @description Demo mode (?demo), circle-reveal transitions, split text,
  *              inactivity countdown, and self-registration.
@@ -557,6 +557,7 @@ async function endSession(fromTimeout = false, fromSSE = false) {
   clearTimeout(S.idleTimer);
   clearInterval(S.cdTimer);
   dismissInactivity();
+  dismissSlotOverlay();
   if (!fromSSE) await apiEndSession();
   S.user     = null;
   S.devices  = [];
@@ -608,8 +609,9 @@ async function updateMenuBorrowCount() {
 }
 
 /**
- * After a sticker auto-intent, toast is already shown; refresh an open grid
- * or detail overlay so the UI matches locker state.
+ * After a sticker auto-intent, refresh an open grid or detail overlay so the
+ * UI matches locker state. Successful returns show the slot overlay instead
+ * of a toast.
  * @param {Object} data - SSE device_action payload.
  * @returns {Promise<void>}
  */
@@ -912,7 +914,8 @@ function closeDetail() {
 
 /**
  * Execute the borrow or return action for the currently selected device. Disables
- * the button during the request, shows a toast with the result, then refreshes the grid.
+ * the button during the request. Successful returns show the slot overlay;
+ * other outcomes show a toast. Then refreshes the grid.
  * @returns {Promise<void>}
  */
 async function confirmAction() {
@@ -927,8 +930,13 @@ async function confirmAction() {
     ? await apiBorrow(dev.id)
     : await apiReturn(dev.id);
 
+  const wasReturn = S.mode === 'return';
   closeDetail();
-  showToast(result.message, result.success ? 'success' : 'error');
+  if (wasReturn && result.success) {
+    showSlotOverlay(dev.name, dev.locker_slot);
+  } else {
+    showToast(result.message, result.success ? 'success' : 'error');
+  }
 
   if (S.mode === 'borrow') openBorrow();
   else                     openReturn();
@@ -951,6 +959,62 @@ function showToast(msg, type = '') {
   el.textContent = msg;
   el.className = `show${type ? ' toast-' + type : ''}`;
   toastTimer = setTimeout(() => { el.className = ''; }, 3200); // 3.2s display duration
+}
+
+/* ============================================================
+   RETURN SLOT OVERLAY — put the device in its locker slot
+============================================================ */
+/** @type {number|undefined} Timeout handle for auto-hiding the slot overlay */
+let slotOverlayTimer;
+/** @type {number|undefined} Timeout handle for the hide animation */
+let slotHideTimer;
+
+/**
+ * Show a full-screen overlay with the device name and locker slot after a
+ * successful return (idle tap, main-menu sticker, or Return screen confirm).
+ * @param {string} name - Device display name.
+ * @param {number|null|undefined} slot - Physical locker slot, if assigned.
+ */
+function showSlotOverlay(name, slot) {
+  const overlay = document.getElementById('overlay-slot');
+  if (!overlay) return;
+  document.getElementById('slot-return-name').textContent = name || 'Device';
+  const putEl = document.getElementById('slot-return-put');
+  const numEl = document.getElementById('slot-return-num');
+  if (slot != null) {
+    putEl.textContent = 'Put in slot';
+    putEl.style.display = '';
+    numEl.textContent = String(slot);
+    numEl.style.display = '';
+  } else {
+    putEl.style.display = 'none';
+    numEl.style.display = 'none';
+  }
+  clearTimeout(slotOverlayTimer);
+  clearTimeout(slotHideTimer);
+  overlay.classList.remove('hidden-left');
+  overlay.style.display = '';
+  requestAnimationFrame(() => requestAnimationFrame(() => overlay.classList.add('visible')));
+  slotOverlayTimer = setTimeout(dismissSlotOverlay, 8000);
+}
+
+/**
+ * Hide the return-slot overlay. Safe to call when it is already hidden.
+ */
+function dismissSlotOverlay() {
+  clearTimeout(slotOverlayTimer);
+  clearTimeout(slotHideTimer);
+  const overlay = document.getElementById('overlay-slot');
+  if (!overlay || overlay.style.display === 'none') return;
+  if (!overlay.classList.contains('visible')) {
+    overlay.style.display = 'none';
+    return;
+  }
+  overlay.classList.add('hidden-left');
+  slotHideTimer = setTimeout(() => {
+    overlay.classList.remove('visible', 'hidden-left');
+    overlay.style.display = 'none';
+  }, 710);
 }
 
 /* ============================================================
@@ -2212,6 +2276,7 @@ document.querySelectorAll('.back-btn').forEach(btn =>
 document.getElementById('detail-close').addEventListener('click',  () => { clickSound(); closeDetail();      });
 document.getElementById('confirm-btn').addEventListener('click',   () => { clickSound(); confirmAction();    });
 document.getElementById('stay-btn').addEventListener('click',      () => { clickSound(); dismissInactivity(); });
+document.getElementById('overlay-slot').addEventListener('click',  () => { clickSound(); dismissSlotOverlay(); });
 
 // Registration — self-service (name list selection)
 document.getElementById('idle-register-link').addEventListener('click', () => { clickSound(); openRegister(); });
@@ -2291,6 +2356,7 @@ document.getElementById('overlay-device-detail').style.display = 'none';
 document.getElementById('overlay-admin').style.display         = 'none';
 document.getElementById('overlay-register-device').style.display = 'none';
 document.getElementById('overlay-update').style.display        = 'none';
+document.getElementById('overlay-slot').style.display          = 'none';
 
 // Enhancement E: split text on initial page load
 initSplitText();
@@ -2358,6 +2424,7 @@ function connectSSE() {
   source.addEventListener('auth_success', e => {
     if (S.updating) return;
     clearAfterRegisterTimer();
+    dismissSlotOverlay();
     const data = JSON.parse(e.data);
     S.user = data.user;
     fillMainMenu(data.user);
@@ -2367,6 +2434,7 @@ function connectSSE() {
 
   source.addEventListener('auth_failed', () => {
     if (S.updating) return;
+    dismissSlotOverlay();
     showAuthFailed();
   });
 
@@ -2410,8 +2478,12 @@ function connectSSE() {
     if (S.updating) return;
     const data = JSON.parse(e.data);
     keepSessionAliveFromTag();
-    showToast(data.message || '', data.success ? 'success' : 'error');
-    refreshAfterDeviceAction(data);
+    if (data.success && data.action === 'return') {
+      showSlotOverlay(data.device_name, data.locker_slot);
+    } else {
+      showToast(data.message || '', data.success ? 'success' : 'error');
+    }
+    if (S.user) refreshAfterDeviceAction(data);
   });
 
   source.addEventListener('device_tag_idle', e => {

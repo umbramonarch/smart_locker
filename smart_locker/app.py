@@ -196,7 +196,8 @@ class SmartLockerApp:
 
         A work card starts a session when idle and logs out when a session is
         already active (does not start the new user on the same tap). A device
-        tag borrows or returns while logged in and does not end the session.
+        tag borrows or returns while logged in. A borrowed tag at idle returns
+        the device without a work card. A device tag does not end the session.
 
         Args:
             event: The card-inserted event containing the card UID.

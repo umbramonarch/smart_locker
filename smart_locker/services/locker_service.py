@@ -2,10 +2,12 @@
 File: locker_service.py
 Description: Borrow/return business logic for the Smart Locker system. Enforces
              per-user borrow limits, device availability checks, ownership rules,
-             and admin return-on-behalf capability with full transaction logging.
+             admin return-on-behalf, and unattended idle return with full
+             transaction logging.
 Project: smart_locker/services
 Notes: The borrow limit is configured via MAX_BORROWS in config/settings.py
-       (default 5). Admins can return any device on behalf of the original borrower.
+       (default 5). Admins can return any device on behalf of the original
+       borrower. Idle sticker taps use return_unattended (no work card).
 """
 
 import logging
@@ -24,9 +26,9 @@ class LockerService:
     """Business logic for device borrow and return operations.
 
     Enforces per-user borrow limits (MAX_BORROWS from config), device
-    availability checks, ownership rules for returns, and admin
-    return-on-behalf capability. All operations are logged to the
-    transaction audit trail.
+    availability checks, ownership rules for returns, admin
+    return-on-behalf, and unattended return from the idle kiosk. All
+    operations are logged to the transaction audit trail.
     """
 
     @staticmethod
@@ -163,6 +165,58 @@ class LockerService:
             user.display_name,
             device.name,
             device_id,
+        )
+        return True
+
+    @staticmethod
+    def return_unattended(db_session: Session, device_id: int) -> bool:
+        """Return a borrowed device without a work-card session.
+
+        Used when a borrowed device sticker is tapped on the idle kiosk.
+        The original borrower stays on the transaction log; notes record
+        that no card was presented.
+
+        Args:
+            db_session: Active database session.
+            device_id: ID of the device to return.
+
+        Returns:
+            True if return succeeded, False otherwise.
+        """
+        device = DeviceRepository.find_by_id(db_session, device_id)
+        if device is None:
+            logger.warning("Unattended return failed: device %d not found.", device_id)
+            return False
+
+        if device.status != DeviceStatus.BORROWED:
+            logger.warning(
+                "Unattended return failed: device %d (%s) is not borrowed.",
+                device_id,
+                device.name,
+            )
+            return False
+
+        original_borrower_id = device.current_borrower_id
+        if original_borrower_id is None:
+            logger.warning(
+                "Unattended return failed: device %d (%s) has no borrower.",
+                device_id,
+                device.name,
+            )
+            return False
+
+        DeviceRepository.return_device(db_session, device)
+        TransactionRepository.log_return(
+            db_session,
+            user_id=original_borrower_id,
+            device_id=device_id,
+            notes="returned at kiosk without card",
+        )
+        logger.info(
+            "Unattended return of %s (device=%d) for user %d",
+            device.name,
+            device_id,
+            original_borrower_id,
         )
         return True
 

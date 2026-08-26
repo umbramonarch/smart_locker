@@ -189,18 +189,18 @@ See **GUIDE.md** for detailed step-by-step instructions.
 
 The system runs as a kiosk: FastAPI serves the frontend as static files in a fullscreen Chromium browser. The NFC reader listens in the background; card taps push an event to the browser via Server-Sent Events (SSE), which drives the authentication and registration flows.
 
-**Session model — tap-and-go:** the **work card** is tapped briefly to authenticate (not left on the reader). After login, tap an **NFC sticker on the device** (same reader) to borrow or return, or pick the unit on screen. Sessions end via the "End Session" button, the inactivity timeout, or a **work-card** tap (a device tag does not log you out).
+**Session model — tap-and-go:** the **work card** is tapped briefly to authenticate (not left on the reader). After login, tap an **NFC sticker on the device** (same reader) to borrow or return, or pick the unit on screen. A **borrowed** sticker can also be returned from the idle screen without a work card (large "Put in slot N" overlay). Sessions end via the "End Session" button, the inactivity timeout, or a **work-card** tap (a device tag does not log you out).
 
 **Screens (6 + overlays):**
 
-1. **Idle** — animated NFC ring, "Tap your card to begin", marquee ticker, live clock, "Register your card" entry
+1. **Idle** — animated NFC ring, "Tap your card to begin", marquee ticker, live clock, "Register your card" entry; borrowed stickers return here
 2. **Register** — self-service: search/select your approved name → tap card → success/error
 3. **Auth failed** — red flash, "Card not recognized", auto-dismisses
 4. **Main menu** — welcome + **Tap the device**; Borrow / Return as *or pick on screen*; End Session
 5. **Borrow** — device grid; available = tappable, borrowed/maintenance show borrower info
 6. **Return** — device grid; the user's borrowed items highlighted
 
-Overlays: **device detail** (photo, specs, confirm), **inactivity** countdown, and a **hidden admin panel** (5× tap on the clock) with Borrow/Return/Sync/Register User/**Register Device**/Export/End-Session shortcuts.
+Overlays: **device detail** (photo, specs, confirm), **return slot** (put in slot N), **inactivity** countdown, and a **hidden admin panel** (5× tap on the clock) with Borrow/Return/Sync/Register User/**Register Device**/Export/End-Session shortcuts.
 
 **Theme:** green (`#009641`) on dark charcoal (`#181d24`).
 

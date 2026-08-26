@@ -2,7 +2,8 @@
  * File: style.css
  * Description: Kiosk stylesheet. Green accent (#009641) on charcoal (#181d24).
  *              Circle-reveal page transitions, wipe overlays, split text,
- *              slot-machine numbers, hover and cursor effects.
+ *              slot-machine numbers, hover and cursor effects. Return-slot
+ *              overlay after a successful return.
  * Project: smart_locker/frontend
  * Notes: Custom properties in :root control the colour theme. Designed for
  *        a fullscreen kiosk touch display at 1920x1080. System fonts only.
@@ -1253,6 +1254,62 @@ body::after {
 .stay-btn:active { transform: scale(0.96); }
 
 /* ============================================================
+   OVERLAY — RETURN SLOT
+============================================================ */
+#overlay-slot {
+  background: rgba(24,29,36,0.92);
+  backdrop-filter: blur(16px);
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1.25rem;
+  z-index: 65;
+}
+.slot-return-center {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1.1rem;
+  width: 100%;
+  padding: 2rem 1.5rem;
+}
+.slot-return-label {
+  font-family: var(--font-display);
+  font-size: 0.85rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--success);
+}
+.slot-return-name {
+  font-family: var(--font-display);
+  font-size: clamp(1.6rem, 4vw, 2.6rem);
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-align: center;
+  color: var(--text);
+  line-height: 1.15;
+  max-width: 90vw;
+}
+.slot-return-put {
+  font-family: var(--font-display);
+  font-size: 0.95rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.slot-return-number {
+  font-family: var(--font-display);
+  font-size: clamp(6rem, 16vw, 11rem);
+  font-weight: 800;
+  color: var(--accent);
+  line-height: 1;
+}
+.slot-return-hint {
+  font-size: 0.88rem;
+  color: var(--text-muted);
+}
+
+/* ============================================================
    TOAST NOTIFICATION
 ============================================================ */
 #toast {
@@ -2094,7 +2151,8 @@ html.lite .card-hover-icon,
 html.lite #overlay-inactivity,
 html.lite #overlay-admin,
 html.lite #overlay-register-device,
-html.lite #overlay-update {
+html.lite #overlay-update,
+html.lite #overlay-slot {
   backdrop-filter: none !important;
   -webkit-backdrop-filter: none !important;
 }
@@ -2103,6 +2161,7 @@ html.lite #overlay-inactivity { background: rgba(24,29,36,0.97); }
 html.lite #overlay-admin      { background: rgba(24,29,36,0.97); }
 html.lite #overlay-register-device { background: rgba(24,29,36,0.97); }
 html.lite #overlay-update     { background: rgba(24,29,36,0.97); }
+html.lite #overlay-slot       { background: rgba(24,29,36,0.97); }
 
 /* — Custom cursor off; restore the native pointer — */
 html.lite #cursor,

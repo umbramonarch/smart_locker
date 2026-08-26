@@ -2,7 +2,8 @@
 File: test_services.py
 Description: Tests for the services layer — LockerService borrow/return logic
              and UserService enrollment. Validates borrow limits, availability
-             checks, admin return-on-behalf, and user enrollment with encryption.
+             checks, admin return-on-behalf, unattended idle return, and user
+             enrollment with encryption.
 Project: smart_locker/tests
 Notes: Run with: python -m pytest tests/test_services.py -v
 """
@@ -149,6 +150,31 @@ class TestLockerService:
         assert result is True
         assert device.status == DeviceStatus.AVAILABLE
         assert device.current_borrower_id is None
+
+    def test_return_unattended(self, db_session, enc_key, hmac_key):
+        """Idle return logs the original borrower and the unattended note."""
+        user, device, session = self._setup(db_session, enc_key, hmac_key)
+        LockerService.borrow_device(db_session, session, device.id)
+
+        result = LockerService.return_unattended(db_session, device.id)
+        assert result is True
+        assert device.status == DeviceStatus.AVAILABLE
+        assert device.current_borrower_id is None
+
+        history = TransactionRepository.get_device_history(db_session, device.id)
+        return_txn = next(
+            t for t in history if t.transaction_type == TransactionType.RETURN
+        )
+        assert return_txn.user_id == user.id
+        assert return_txn.performed_by_id is None
+        assert return_txn.notes == "returned at kiosk without card"
+
+    def test_return_unattended_not_borrowed_fails(self, db_session, enc_key, hmac_key):
+        """Unattended return is rejected when the device is not borrowed."""
+        _, device, _ = self._setup(db_session, enc_key, hmac_key)
+        result = LockerService.return_unattended(db_session, device.id)
+        assert result is False
+        assert device.status == DeviceStatus.AVAILABLE
 
     def test_admin_return_logs_both_borrower_and_admin(self, db_session, enc_key, hmac_key):
         """Verify admin return logs the original borrower and the acting admin."""

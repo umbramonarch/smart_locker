@@ -774,10 +774,16 @@ The **work card** is **tapped and removed** — it is not left on the reader. Af
 tap a **device sticker** on the same reader to borrow or return, or pick the unit on
 the touch display. Do not present the sticker while the work card is still on the reader.
 
+**Return without logging in:** on the idle screen, tap the NFC sticker of a **borrowed**
+device. No work card is required. The kiosk shows a large overlay with the device name
+and **Put in slot N**. An available (or unknown) sticker at idle does **not** borrow —
+it still asks for a work card first.
+
 1. **Tap your work card** → the reader reads the UID → the system authenticates you → the
    scan-first main menu appears.
 2. **Tap the NFC sticker on the device** (auto borrow/return) **or** use Borrow / Return
-   on screen. The session stays open so several devices can be tagged in one login.
+   on screen. After a return, the same slot overlay appears. The session stays open so
+   several devices can be tagged in one login.
 3. **The session ends** via the **End Session** button, a **work-card tap** (a device
    sticker does not log you out), or the **inactivity timeout** (120 seconds of no touch —
    a silent security backstop).
@@ -785,16 +791,21 @@ the touch display. Do not present the sticker while the work card is still on th
 ### The screens
 
 - **Idle** — animated NFC ring, "Tap your card", live clock, a "Register your card" entry.
+  A borrowed device sticker returns it here (slot overlay). An available sticker asks
+  for a work card first.
 - **Register (self-service)** — search and pick your approved name, then tap your card to
   enrol it under that name.
 - **Authentication failed** — red "Card Not Recognized", auto-returns to idle. A bound
-  device sticker at idle is **not** this screen — it asks you to tap your work card first.
+  **available** device sticker at idle is **not** this screen — it asks you to tap your
+  work card first. A **borrowed** sticker at idle returns the device.
 - **Main menu** — welcome + name; **Tap the device** to borrow or return; **Borrow** /
   **Return** stay as *or pick on screen*; **End Session**.
 - **Borrow** — a grid of devices by locker slot; available ones are tappable, borrowed ones
   show who has them. A sticker tap still auto-intents and refreshes this grid.
-- **Return** — the same grid, with your own borrowed items highlighted.
+- **Return** — the same grid, with your own borrowed items highlighted. Confirming a
+  return shows the slot overlay.
 - **Device detail** (overlay) — photo, specs, and a confirm button.
+- **Return slot** (overlay) — after any successful return: device name and **Put in slot N**.
 - **Inactivity warning** (overlay) — a countdown with a "Stay Active" button.
 - **Hidden admin panel** (overlay) — opened by tapping the idle clock 5 times. Shortcuts for
   Borrow, Return, **Sync source**, Register user, **Register Device**, **Export to Excel**,
@@ -803,8 +814,10 @@ the touch display. Do not present the sticker while the work card is still on th
 ### The rules
 
 - **Borrow limit:** each user can hold up to `SMART_LOCKER_MAX_BORROWS` devices (default 5).
-- **Returns:** only the borrower can return their own device; an admin can return any device
-  on anyone's behalf (the log records both people).
+- **Returns:** on the idle screen, anyone can return a borrowed device by tapping its
+  sticker (the log keeps the original borrower). While logged in, only the borrower can
+  return their own device; an admin can return any device on anyone's behalf (the log
+  records both people). After every successful return the kiosk shows where to put it.
 - **Open-access locker:** there is no physical lock — the system tracks *who has what*.
 
 ### Hidden operator access (do not put this on a user-facing poster)
@@ -1151,6 +1164,7 @@ visible at a time, and JavaScript decides which:
 | `screen-return` | Device grid for returning |
 | `overlay-device-detail` | Device detail popup |
 | `overlay-inactivity` | Countdown warning |
+| `overlay-slot` | After return: put in slot N |
 | `overlay-admin` | Hidden admin panel (5× clock tap) |
 
 ### style.css — appearance

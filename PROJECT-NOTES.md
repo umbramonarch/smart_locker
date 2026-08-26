@@ -30,7 +30,7 @@ python -m scripts.init_db
 python -m scripts.enroll_card --name "Name" --role admin
 python -m smart_locker.app           # kiosk API + UI on :8000
 
-python -m pytest tests/ -v           # ~234 items, 16 files, no NFC hardware
+python -m pytest tests/ -v           # ~240 items, 16 files, no NFC hardware
 
 # Pi (offline): copy tree + wheelhouse + .debs, then
 sudo bash deploy/install/install.sh
@@ -72,7 +72,7 @@ sudo bash deploy/install/install.sh
 - **Secrets:** `.env` (gitignored). Three keys: `SMART_LOCKER_ENC_KEY` (AES-256-GCM), `SMART_LOCKER_HMAC_KEY` (HMAC-SHA256 card lookup), `SMART_LOCKER_UPDATE_HMAC_KEY` (release HMAC; openssl uses the env **string**, not decoded 32 bytes).
 - **Locker share (Pi: `/mnt/locker`):** Excel import, Excel export, photos, and signed updates live at the share root (`deploy/.env.pi.example`). Share down ≠ kiosk down.
 - **Excel import:** `smart_locker/sync/source_import.py` — schrank rows only, slots 1–N, DE/EN headers. Re-import never overwrites `locker_slot` / `image_path` / `description` / `tag_hmac` / `status` / `current_borrower_id`. Catalog fields (name, type, serial, manufacturer, model, calibration) still update. `devices.barcode` is unused leftover (not imported). New PMs still take Einsatzort on first insert. Scheduler: startup + every 6 hours (`SMART_LOCKER_SOURCE_SYNC_INTERVAL_HOURS`) + admin Sync; last-sync persisted next to the DB.
-- **NFC device tags:** same ACR1252U as work cards. Store `devices.tag_hmac` only (same HMAC key as `users.uid_hmac`). Kiosk `GET /api/devices` may expose `has_tag: bool`, never the digest; dashboard JSON and Excel export omit `tag_hmac`.
+- **NFC device tags:** same ACR1252U as work cards. Store `devices.tag_hmac` only (same HMAC key as `users.uid_hmac`). Kiosk `GET /api/devices` may expose `has_tag: bool`, never the digest; dashboard JSON and Excel export omit `tag_hmac`. Idle tap of a **borrowed** sticker returns it (no work card; slot overlay); available tags do not borrow from idle.
 - **Excel auto-export** only if `SMART_LOCKER_EXCEL_AUTO_EXPORT=1` (off in the Pi template; admin Export Excel stays).
 - **Photos:** filename stem = device **model**. `scripts/update_device.py --auto` matches **PM number** — different scheme.
 - **Pi updates:** signed tarball from `python -m scripts.pack_release` only (copy `.tar.gz` + `.hmac` to `/mnt/locker/locker-updates`). `update.sh` still does stop / backup / pip / migrate / health / rollback. Git reset is not a full update.

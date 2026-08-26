@@ -2,8 +2,8 @@
   File: index.html
   Description: Kiosk touch-display UI with six screens (Idle, Auth Failed,
     Main Menu, Borrow Grid, Return Grid, Device Detail) plus overlays for
-    inactivity warning, self-registration, admin panel, Register Device,
-    and software update.
+    inactivity warning, return slot, self-registration, admin panel,
+    Register Device, and software update.
   Project: smart_locker/frontend
   Notes: Served as a static file by FastAPI. Requires app.js and style.css.
     All interactivity is in app.js. Offline: system fonts only.
@@ -89,7 +89,7 @@
         <span class="reveal-wrap"><span class="reveal-inner">TAP YOUR CARD</span></span>
       </h1>
       <p class="idle-sub">
-        <span class="reveal-wrap"><span class="reveal-inner" style="transition-delay:0.22s">then tap a device to borrow or return</span></span>
+        <span class="reveal-wrap"><span class="reveal-inner" style="transition-delay:0.22s">or tap a borrowed device to return</span></span>
       </p>
     </div>
 
@@ -583,6 +583,19 @@
       <p class="update-status" id="update-status">Starting…</p>
       <p class="update-version" id="update-version" style="display:none"></p>
       <button class="stay-btn hidden" id="update-dismiss">OK</button>
+    </div>
+  </div>
+
+  <!-- ================================================================
+       OVERLAY — RETURN SLOT (put the device back)
+  ================================================================ -->
+  <div id="overlay-slot" class="overlay" style="display:none">
+    <div class="slot-return-center">
+      <p class="slot-return-label">Returned</p>
+      <h1 class="slot-return-name" id="slot-return-name">—</h1>
+      <p class="slot-return-put" id="slot-return-put">Put in slot</p>
+      <div class="slot-return-number" id="slot-return-num">—</div>
+      <p class="slot-return-hint">Tap to continue</p>
     </div>
   </div>
 
