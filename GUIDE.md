@@ -823,6 +823,9 @@ Pi on the LAN can use them — the lock is **physical access**, not a password.
    - **Borrow Screen / Return Screen** — jump into those flows as that admin.
    - **Sync Source** — first tap *previews* Excel changes from the share; second tap *applies* them.
    - **Register User** — type any name, then tap a card (skips the approved-name list).
+     After success, timeout, or cancel the kiosk returns to idle; the next
+     work-card tap logs that user in (a leftover admin session must not
+     treat the tap as logout).
    - **Register Device** — bind (or re-bind) an NFC sticker to an existing locker
      device. The list shows **name + PM** (and slot). Does not create devices.
    - **Export to Excel** — download a snapshot of devices / transactions / users.

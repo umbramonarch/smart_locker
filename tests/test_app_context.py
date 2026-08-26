@@ -1,8 +1,9 @@
 """
 File: test_app_context.py
 Description: Tests for NFC insert intercepts on AppContext — pending
-             registration vs pending tag-bind, bind success/fail, and
-             expired bind fall-through. In-memory SQLite, no hardware.
+             registration vs pending tag-bind, bind success/fail, expired
+             bind/registration fall-through, and leftover admin session
+             after enroll. In-memory SQLite, no hardware.
 Project: smart_locker/tests
 Notes: Run with: python -m pytest tests/test_app_context.py -v
 """
@@ -191,3 +192,88 @@ class TestDispatchRegistration:
         db_session.expire_all()
         assert DeviceRepository.find_by_id(db_session, device.id).tag_hmac is None
         assert UserRepository.find_by_display_name(db_session, "Bob") is not None
+
+    def test_admin_enroll_then_next_tap_logs_in(
+        self, db_session, enc_key, hmac_key, monkeypatch
+    ):
+        """After admin enroll, leftover session must not turn the next tap into logout."""
+        admin = UserRepository.create(
+            db_session,
+            display_name="Admin",
+            uid_hmac=compute_uid_hmac("AAAA1111", hmac_key),
+            encrypted_card_uid=encrypt("AAAA1111", enc_key),
+            role="admin",
+        )
+        db_session.commit()
+        ctx = _make_ctx(monkeypatch)
+        ctx.session_mgr.start_session(admin)
+        ctx.admin_overlay_open = True
+        ctx.pending_registration = PendingRegistration("Bob")
+        new_uid = "B0B0B0B0"
+        _run(ctx, new_uid)
+        events = _events(ctx)
+        assert events[0]["event"] == "registration_success"
+        assert events[0]["user"]["name"] == "Bob"
+        assert all(e["event"] != "session_ended" for e in events)
+        assert not ctx.session_mgr.has_active_session
+        assert ctx.admin_overlay_open is False
+
+        _run(ctx, new_uid)
+        events = _events(ctx)
+        assert events[0]["event"] == "auth_success"
+        assert events[0]["user"]["name"] == "Bob"
+        assert ctx.session_mgr.has_active_session
+
+    def test_expired_registration_falls_through_to_login(
+        self, db_session, enc_key, hmac_key, monkeypatch
+    ):
+        """Expired pending_registration must not consume the next work-card tap."""
+        uid = "A1B2C3D4"
+        UserRepository.create(
+            db_session,
+            display_name="Alice",
+            uid_hmac=compute_uid_hmac(uid, hmac_key),
+            encrypted_card_uid=encrypt(uid, enc_key),
+        )
+        db_session.commit()
+        ctx = _make_ctx(monkeypatch)
+        ctx.pending_registration = PendingRegistration(
+            "Bob", created_at=time.monotonic() - 61
+        )
+        _run(ctx, uid)
+        events = _events(ctx)
+        assert ctx.pending_registration is None
+        assert events[0]["event"] == "auth_success"
+        assert events[0]["user"]["name"] == "Alice"
+
+    def test_expired_registration_with_leftover_session_logs_in(
+        self, db_session, enc_key, hmac_key, monkeypatch
+    ):
+        """Expired admin register window plus leftover overlay session → login, not logout."""
+        uid = "A1B2C3D4"
+        UserRepository.create(
+            db_session,
+            display_name="Alice",
+            uid_hmac=compute_uid_hmac(uid, hmac_key),
+            encrypted_card_uid=encrypt(uid, enc_key),
+        )
+        admin = UserRepository.create(
+            db_session,
+            display_name="Admin",
+            uid_hmac=compute_uid_hmac("AAAA1111", hmac_key),
+            encrypted_card_uid=encrypt("AAAA1111", enc_key),
+            role="admin",
+        )
+        db_session.commit()
+        ctx = _make_ctx(monkeypatch)
+        ctx.session_mgr.start_session(admin)
+        ctx.admin_overlay_open = True
+        ctx.pending_registration = PendingRegistration(
+            "Bob", created_at=time.monotonic() - 61
+        )
+        _run(ctx, uid)
+        events = _events(ctx)
+        assert ctx.pending_registration is None
+        assert events[0]["event"] == "auth_success"
+        assert events[0]["user"]["name"] == "Alice"
+        assert ctx.session_mgr.current_session.user.display_name == "Alice"

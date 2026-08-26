@@ -217,7 +217,7 @@ New users can enroll their own card without an admin at the kiosk:
 3. Submit (`POST /api/register`). If your name isn't on the list, registration is refused ("Contact an admin").
 4. Tap your NFC card within the registration window (default 60s) — the card is enrolled under your approved name.
 
-Admins can also register anyone manually from the hidden admin panel (`POST /api/admin/register`), bypassing the approved-name check.
+Admins can also register anyone manually from the hidden admin panel (`POST /api/admin/register`), bypassing the approved-name check. After enroll the kiosk returns to idle; the next work-card tap logs that user in.
 
 ## Security Design
 

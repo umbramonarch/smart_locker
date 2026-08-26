@@ -198,12 +198,22 @@ class AppContext:
     ) -> None:
         """Route one insert through pending intercepts, then the tap router.
 
-        Expired bind windows are dropped so the tap is classified instead of
-        consumed as a failed bind.
+        Expired registration and bind windows are dropped so the tap is
+        classified instead of consumed as a failed enroll/bind. A leftover
+        overlay session is ended when a registration window expires so the
+        same tap can log in rather than log out.
         """
         if self.pending_registration is not None:
-            await self._handle_registration_tap(uid, get_session)
-            return
+            if self.pending_registration.is_expired:
+                logger.info(
+                    "Registration window expired for '%s'.",
+                    self.pending_registration.display_name,
+                )
+                self.pending_registration = None
+                self._end_leftover_session()
+            else:
+                await self._handle_registration_tap(uid, get_session)
+                return
 
         if self.pending_tag_bind is not None:
             if self.pending_tag_bind.is_expired:
@@ -243,7 +253,8 @@ class AppContext:
 
         Validates that the registration has not expired and the card is not
         already enrolled, then creates the user record and pushes a success
-        or failure SSE event to the frontend.
+        or failure SSE event to the frontend. Always ends a leftover overlay
+        session so the next work-card tap is login, not logout.
 
         Args:
             uid: Hex-encoded card UID from the NFC reader.
@@ -259,59 +270,83 @@ class AppContext:
 
         pending = self.pending_registration
         self.pending_registration = None
-
-        if pending.is_expired:
-            logger.info("Registration expired for '%s'.", pending.display_name)
-            await self.sse_queue.put({
-                "event": "registration_failed",
-                "reason": "Registration timed out. Please try again.",
-            })
-            return
-
-        user_svc = UserService(enc_key=key_manager.enc_key, hmac_key=key_manager.hmac_key)
-
         try:
-            with get_session() as db_session:
-                uid_hmac = compute_uid_hmac(uid, key_manager.hmac_key)
-                if DeviceRepository.find_by_tag_hmac(db_session, uid_hmac) is not None:
-                    logger.warning("Registration failed: UID is already a device tag.")
-                    await self.sse_queue.put({
-                        "event": "registration_failed",
-                        "reason": "This tag is already bound to a device.",
-                    })
-                    return
+            if pending is None:
+                return
 
-                # Check if card is already enrolled
-                existing = self.authenticator.authenticate(db_session, uid)
-                if existing is not None:
-                    logger.warning("Registration failed: card already enrolled to %s.", existing.display_name)
-                    await self.sse_queue.put({
-                        "event": "registration_failed",
-                        "reason": "This card is already registered.",
-                    })
-                    return
-
-                user = user_svc.enroll_user(
-                    db_session,
-                    display_name=pending.display_name,
-                    card_uid_hex=uid,
-                    role="user",
-                )
-                logger.info("Self-registered user: %s (id=%d)", user.display_name, user.id)
+            if pending.is_expired:
+                logger.info("Registration expired for '%s'.", pending.display_name)
                 await self.sse_queue.put({
-                    "event": "registration_success",
-                    "user": {
-                        "id": user.id,
-                        "name": user.display_name,
-                        "role": user.role.value,
-                    },
+                    "event": "registration_failed",
+                    "reason": "Registration timed out. Please try again.",
                 })
-        except Exception:
-            logger.exception("Registration failed for '%s'.", pending.display_name)
-            await self.sse_queue.put({
-                "event": "registration_failed",
-                "reason": "Registration failed. Please try again.",
-            })
+                return
+
+            user_svc = UserService(
+                enc_key=key_manager.enc_key, hmac_key=key_manager.hmac_key
+            )
+
+            try:
+                with get_session() as db_session:
+                    uid_hmac = compute_uid_hmac(uid, key_manager.hmac_key)
+                    if DeviceRepository.find_by_tag_hmac(db_session, uid_hmac) is not None:
+                        logger.warning("Registration failed: UID is already a device tag.")
+                        await self.sse_queue.put({
+                            "event": "registration_failed",
+                            "reason": "This tag is already bound to a device.",
+                        })
+                        return
+
+                    # Check if card is already enrolled
+                    existing = self.authenticator.authenticate(db_session, uid)
+                    if existing is not None:
+                        logger.warning(
+                            "Registration failed: card already enrolled to %s.",
+                            existing.display_name,
+                        )
+                        await self.sse_queue.put({
+                            "event": "registration_failed",
+                            "reason": "This card is already registered.",
+                        })
+                        return
+
+                    user = user_svc.enroll_user(
+                        db_session,
+                        display_name=pending.display_name,
+                        card_uid_hex=uid,
+                        role="user",
+                    )
+                    logger.info(
+                        "Self-registered user: %s (id=%d)",
+                        user.display_name,
+                        user.id,
+                    )
+                    await self.sse_queue.put({
+                        "event": "registration_success",
+                        "user": {
+                            "id": user.id,
+                            "name": user.display_name,
+                            "role": user.role.value,
+                        },
+                    })
+            except Exception:
+                logger.exception("Registration failed for '%s'.", pending.display_name)
+                await self.sse_queue.put({
+                    "event": "registration_failed",
+                    "reason": "Registration failed. Please try again.",
+                })
+        finally:
+            self._end_leftover_session()
+
+    def _end_leftover_session(self) -> None:
+        """Drop a leftover overlay session with no session_ended SSE.
+
+        After admin Register User the overlay session must not remain, or
+        the next work-card tap is logout instead of login. The register
+        success/fail screen stays until the frontend navigates to idle.
+        """
+        self.session_mgr.end_session()
+        self.admin_overlay_open = False
 
     async def _handle_tag_bind_tap(self, uid: str, get_session) -> None:
         """Bind the next insert to the device chosen in Register Device.

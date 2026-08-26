@@ -1093,6 +1093,30 @@ function initMarquee() {
 ============================================================ */
 /** @type {number|null} Interval handle for the registration countdown timer (60s) */
 let registerCountdownTimer = null;
+/** @type {number|null} Timeout that returns to idle after register success/fail. */
+let afterRegisterTimer = null;
+
+/**
+ * Cancel the delayed return-to-idle after registration.
+ */
+function clearAfterRegisterTimer() {
+  if (afterRegisterTimer !== null) {
+    clearTimeout(afterRegisterTimer);
+    afterRegisterTimer = null;
+  }
+}
+
+/**
+ * Schedule return-to-idle after a registration outcome. Replaces any prior wait.
+ * @param {number} ms - Delay in milliseconds.
+ */
+function scheduleAfterRegistration(ms) {
+  clearAfterRegisterTimer();
+  afterRegisterTimer = setTimeout(() => {
+    afterRegisterTimer = null;
+    navigateAfterRegistration();
+  }, ms);
+}
 
 /**
  * Show a specific step in the registration flow, hiding all other steps.
@@ -1121,6 +1145,7 @@ function showRegisterStep(stepId) {
 async function openRegister() {
   selectedRegistrantName = null;
   clearInterval(registerCountdownTimer);
+  clearAfterRegisterTimer();
 
   if (S.adminRegistration) {
     // Admin manual registration — show free-text input
@@ -1236,7 +1261,7 @@ async function submitRegistrationName() {
       showRegisterStep('register-step-error');
       document.getElementById('register-error-msg').textContent =
         'Registration timed out. Please try again.';
-      setTimeout(() => navigateAfterRegistration(), 3500);
+      scheduleAfterRegistration(3500);
     }
   }, 1000);
 
@@ -1247,24 +1272,35 @@ async function submitRegistrationName() {
     showRegisterStep('register-step-error');
     document.getElementById('register-error-msg').textContent =
       result.detail || result.message || 'Could not start registration.';
-    setTimeout(() => navigateAfterRegistration(), 3500);
+    scheduleAfterRegistration(3500);
   }
 }
 
 /**
- * Navigate to the appropriate screen after registration completes or fails.
- * In admin mode, returns to the main menu with overlay auto-intent enabled.
- * In self-service mode, returns to the idle screen.
+ * After registration succeeds or fails, return to idle so the next work-card
+ * tap is a login. Do not restart an admin session — that leftover session
+ * would treat the next tap as logout. If a work-card tap already started a
+ * new session (SSE may still be in flight), leave that session alone.
  */
 async function navigateAfterRegistration() {
-  if (S.adminRegistration) {
-    S.adminRegistration = false;
-    await adminStartSession(false);
-    navigate('main-menu');
-    armIdle();
-  } else {
-    navigate('idle');
+  S.adminRegistration = false;
+  apiCancelRegistration();
+  if (S.screen !== 'register') return;
+
+  if (!USE_DEMO) {
+    try {
+      const res = await fetch('/api/session');
+      if (S.screen !== 'register') return;
+      const data = await res.json();
+      if (S.screen !== 'register') return;
+      // overlay: leftover admin Register User session. A non-overlay
+      // session is a work-card login (SSE may still be in flight).
+      if (data.active && !data.overlay) return;
+    } catch (_) { /* go idle */ }
   }
+
+  if (S.screen !== 'register') return;
+  await endSession();
 }
 
 /**
@@ -1276,6 +1312,7 @@ async function navigateAfterRegistration() {
  */
 function cancelRegistration() {
   clearInterval(registerCountdownTimer);
+  clearAfterRegisterTimer();
   apiCancelRegistration();
   if (S.adminRegistration) {
     S.adminRegistration = false;
@@ -1299,7 +1336,7 @@ function handleRegistrationSuccess(data) {
   showRegisterStep('register-step-success');
   document.getElementById('register-success-msg').textContent =
     `Welcome, ${data.user.name}! You can now tap your card to log in.`;
-  setTimeout(() => navigateAfterRegistration(), 4000);
+  scheduleAfterRegistration(4000);
 }
 
 /**
@@ -1314,7 +1351,7 @@ function handleRegistrationFailed(data) {
   showRegisterStep('register-step-error');
   document.getElementById('register-error-msg').textContent =
     data.reason || 'Registration failed. Please try again.';
-  setTimeout(() => navigateAfterRegistration(), 4000);
+  scheduleAfterRegistration(4000);
 }
 
 /* ============================================================
@@ -1881,7 +1918,9 @@ async function pollHealthAfterUpdate(gen) {
 /**
  * Admin shortcut: close the admin panel and open the registration screen in
  * admin mode (free-text name entry, bypasses registrant list validation).
- * The admin session remains active so the backend accepts the registration.
+ * The admin session stays active until the card is tapped so the backend
+ * accepts POST /api/admin/register; after enroll the session is ended and
+ * the kiosk returns to idle.
  * @returns {Promise<void>}
  */
 async function adminRegisterUser() {
@@ -2318,6 +2357,7 @@ function connectSSE() {
 
   source.addEventListener('auth_success', e => {
     if (S.updating) return;
+    clearAfterRegisterTimer();
     const data = JSON.parse(e.data);
     S.user = data.user;
     fillMainMenu(data.user);
@@ -2337,6 +2377,10 @@ function connectSSE() {
 
   source.addEventListener('session_timeout', () => {
     if (S.updating) return;
+    // After admin enroll the backend drops the overlay session immediately so
+    // the next work-card tap is login. The NFC bridge then sees "session gone"
+    // and would emit timeout; ignore it while the welcome/error step is up.
+    if (S.screen === 'register') return;
     endSession(true, true);
   });
 

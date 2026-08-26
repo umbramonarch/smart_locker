@@ -38,6 +38,7 @@ table at the end.
 - [ ] Second **work-card** tap → session ends (logout). A device sticker does not log out.
 - [ ] After login, tap an NTAG/sticker bound to a locker device → borrow (or return if already yours); session stays open.
 - [ ] Tap an **unenrolled** card → "not registered" screen (no crash). Bound device tag at idle → short "tap your work card first" (not auth-failed).
+- [ ] Admin **Register User** → enroll a new card → kiosk returns to idle (welcome copy, then idle). That new card's **next** tap logs in (`auth_success`), not logout. An expired 60s register window must not steal the next work-card tap.
 - [ ] Unplug the reader mid-session → UI shows "reader disconnected"; replug → recovers.
 - [ ] **Security:** `grep -ri <the card's UID> logs/` returns **nothing** — raw UIDs are never logged.
 

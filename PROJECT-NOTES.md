@@ -76,7 +76,7 @@ sudo bash deploy/install/install.sh
 - **Excel auto-export** only if `SMART_LOCKER_EXCEL_AUTO_EXPORT=1` (off in the Pi template; admin Export Excel stays).
 - **Photos:** filename stem = device **model**. `scripts/update_device.py --auto` matches **PM number** — different scheme.
 - **Pi updates:** signed tarball from `python -m scripts.pack_release` only (copy `.tar.gz` + `.hmac` to `/mnt/locker/locker-updates`). `update.sh` still does stop / backup / pip / migrate / health / rollback. Git reset is not a full update.
-- **Hidden admin:** idle screen, tap the **clock 5× within 3 s**. **Register Device** binds an NFC sticker to an existing schrank row (list shows **name + PM**; does not create devices). CLI: `python -m scripts.enroll_device_tag --pm PM-001`. Dashboard: `http://<pi>:8000/dashboard` (no login). Health: `/api/health`.
+- **Hidden admin:** idle screen, tap the **clock 5× within 3 s**. **Register User** returns to idle after enroll (next work-card tap logs in). **Register Device** binds an NFC sticker to an existing schrank row (list shows **name + PM**; does not create devices). CLI: `python -m scripts.enroll_device_tag --pm PM-001`. Dashboard: `http://<pi>:8000/dashboard` (no login). Health: `/api/health`.
 - **Entry / layout:** `smart_locker/app.py`, `config/`, `scripts/`, `deploy/`, `tests/`, `GUIDE.md`. Frontend: `smart_locker/frontend/`.
 - **Logging:** `config/logging_config.py` → `logs/smart_locker.log` (5 MB × 5) + stdout INFO.
 - **Style:** every Python/JS/CSS/HTML file has a `File:` / `Description:` / `Project:` / `Notes:` header. Python: Google docstrings. JS: JSDoc.
