@@ -554,15 +554,15 @@ is Section 11 — this is the same information, walked through in the order it a
   transactions, users). Different from the line above — one is read-from, this one is
   written-to.
 - `SMART_LOCKER_EXCEL_AUTO_EXPORT` — `1` means "refresh that exported workbook
-  automatically after every import/photo change." The Pi template sets this to `1`; your
-  dev machine's `.env.example` leaves it off, since there's no locker share to write to there.
-- `SMART_LOCKER_SOURCE_SYNC_HOUR` / `SMART_LOCKER_SOURCE_SYNC_MINUTE` — what time of day
-  (24-hour clock) the automatic daily re-import from the share runs. `6` / `0` means 06:00.
-- `SMART_LOCKER_SOURCE_POLL_SECONDS` — only matters because this is a network share: Linux
-  can't get an instant "this file changed" notification for edits made by *other* computers
-  on a CIFS mount, so instead the app checks the file's last-modified time this often
-  (seconds) as a fallback, on top of the daily import. 30 is a reasonable default; don't set
-  it below 5.
+  automatically after every import/photo change." Off in the Pi template (status
+  lives on the dashboard and admin **Export Excel**). Existing Pi `.env` files
+  keep their old value across `update.sh` — set this to `0` by hand if it is still `1`.
+- `SMART_LOCKER_SOURCE_SYNC_INTERVAL_HOURS` — hours between automatic re-imports from
+  the share (default `6`). Startup import and admin **Sync Source** still run. Older
+  `SMART_LOCKER_SOURCE_SYNC_HOUR` / `_MINUTE` / `_POLL_SECONDS` keys are ignored.
+- `SMART_LOCKER_LAST_SYNC_PATH` — JSON snapshot for the admin "Last sync" line. Empty
+  stores `last_sync.json` next to the SQLite database (local disk, not the share).
+  `update.sh` keeps that file across code swaps.
 - `SMART_LOCKER_PHOTO_INPUT_PATH` — a folder (can be on the share or local) the app scans for
   device photos, matched by filename to the device model. Empty disables photo import
   entirely.
@@ -744,8 +744,8 @@ calibration) still update. Barcode is not imported. New PMs still take "Aktuelle
 on first insert (a person name → borrowed; empty / contains "schrank" → available).
 
 Once running as a service, this same import also happens **automatically**: once on startup,
-once a day at 06:00, and on demand from the hidden admin panel. (See Section 8 for why the
-live "watch the file" mode is off for network shares.)
+every 6 hours (configurable), and on demand from the hidden admin panel. (See Section 8 for
+why the live "watch the file" mode is off for network shares.)
 
 ### 6.3 Add device photos
 
@@ -861,10 +861,9 @@ usually succeeds.
    That is the master list sitting in the locker share root. Change the filename in `.env`
    if yours is different.
 
-2. Import runs when the service starts, about every 30 seconds if the file's modification
-   time changed, every day at 06:00, and when you use **Sync Source** in the admin panel.
-   Linux cannot see "file changed" events for a file another computer wrote on a CIFS
-   share, which is why this is a timestamp poll instead of a live watch.
+2. Import runs when the service starts, every 6 hours (`SMART_LOCKER_SOURCE_SYNC_INTERVAL_HOURS`),
+   and when you use **Sync Source** in the admin panel. Linux cannot see "file changed"
+   events for a file another computer wrote on a CIFS share, so there is no 30-second poll.
 
 3. Only rows whose slot cell starts with `schrank` become locker devices. They are numbered
    1…N in sheet order (the number in "Schrank 7" is ignored).
@@ -885,17 +884,17 @@ network (no login). It shows three tables, auto-refreshing every 30 seconds: **D
 (slot, PM number, status, borrower, calibration due — filterable/sortable), **Transactions**
 (last 500), and **Users**.
 
-**Status workbook on the share:** after import the Pi can write `smart_locker_data.xlsx`
-at `SMART_LOCKER_EXCEL_PATH` (Devices + Transactions + Users).
-With `SMART_LOCKER_EXCEL_AUTO_EXPORT=1` (set in the Pi template), that workbook is refreshed
-automatically after every source import — on startup, at the daily 06:00 import, and
-whenever an admin uses **Sync source**. You can also download a snapshot any time from the
-admin panel's **Export to Excel**.
+**Status workbook on the share:** the Pi can write `smart_locker_data.xlsx`
+at `SMART_LOCKER_EXCEL_PATH` (Devices + Transactions + Users) when
+`SMART_LOCKER_EXCEL_AUTO_EXPORT=1`. The Pi template leaves this **off** — live status is
+the dashboard, and you can download a snapshot any time from the admin panel's
+**Export Excel**. After `update.sh`, set `SMART_LOCKER_EXCEL_AUTO_EXPORT=0` in the live
+`.env` if it is still `1` (the tarball does not overwrite `.env`).
 
 **Why the import is scheduled, not instant:** the Pi can't reliably get a "file changed"
 notification for a file that lives on a network share (the Linux mechanism for this,
 *inotify*, doesn't see edits made by other computers on a CIFS/SMB mount). So instead of a
-live file-watch, the system imports on startup and once a day at 06:00. To pull changes in
+live file-watch, the system imports on startup and every 6 hours. To pull changes in
 immediately, use **Sync source** in the admin panel, or run
 `python -m scripts.sync_source`.
 
@@ -1081,8 +1080,8 @@ All settings live in `.env` (loaded by `config/settings.py`). The Pi template
 | `SMART_LOCKER_SOURCE_EXCEL_PATH` | (empty) | Device master list on the share to import; empty disables auto-import |
 | `SMART_LOCKER_EXCEL_PATH` | `smart_locker_data.xlsx` | Where the exported workbook is written (the share path on the Pi) |
 | `SMART_LOCKER_EXCEL_AUTO_EXPORT` | (off) | `1` = auto-refresh the exported workbook after each import/photo change |
-| `SMART_LOCKER_SOURCE_SYNC_HOUR` / `_MINUTE` | `6` / `0` | Daily source-import time (24h) |
-| `SMART_LOCKER_SOURCE_POLL_SECONDS` | `30` | Mtime-poll interval (seconds, min `5`) used only when the source path is a network share — see Section 9 |
+| `SMART_LOCKER_SOURCE_SYNC_INTERVAL_HOURS` | `6` | Hours between automatic source imports (startup + admin Sync still run) |
+| `SMART_LOCKER_LAST_SYNC_PATH` | `last_sync.json` next to the DB | Admin last-sync snapshot; keep on the Pi's local disk |
 | `SMART_LOCKER_PHOTO_INPUT_PATH` | (empty) | Folder watched for device photos; empty disables |
 | `SMART_LOCKER_UPDATE_DIR` | `/mnt/locker/locker-updates` | share folder for the signed pair from `pack_release` (`.tar.gz` + `.hmac`); `update.sh` picks it up — see "Updating the software" in Section 9 |
 | `SMART_LOCKER_KEEP_BACKUPS` | `5` | How many old code+DB backup pairs `update.sh` keeps under `./backups` before pruning |

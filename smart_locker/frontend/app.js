@@ -1486,7 +1486,9 @@ async function refreshSyncStatus() {
     if (!res.ok) return;
     const s = await res.json();
     if (!s.at) { el.textContent = 'Last sync: never'; return; }
-    const when = new Date(s.at).toLocaleString();
+    const when = s.at_local
+      ? `${s.at_local}${s.ago ? ' (' + s.ago + ')' : ''}`
+      : new Date(s.at).toLocaleString();
     const verdict = s.ok ? `${s.imported} new, ${s.updated} updated` : `failed${s.message ? ': ' + s.message : ''}`;
     el.textContent = `Last sync: ${when} (${s.trigger}) — ${verdict}`;
   } catch (_) { /* status unavailable — leave the line as-is */ }

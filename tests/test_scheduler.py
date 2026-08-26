@@ -1,9 +1,7 @@
 """
 File: test_scheduler.py
 Description: Tests for the sync scheduler module — startup import, file watcher
-             debounce, and locked-file resilience. Validates that the scheduler
-             runs an immediate import on startup, that the watchdog file handler
-             debounces rapid events, and that the daily cron job is registered.
+             debounce, 6-hour interval job, and no network-share mtime poll.
 Project: smart_locker/tests
 Notes: Run with: python -m pytest tests/test_scheduler.py -v
        Uses temporary directories and mock patches to avoid real file I/O.
@@ -11,12 +9,13 @@ Notes: Run with: python -m pytest tests/test_scheduler.py -v
 
 import tempfile
 import time
+from datetime import timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
 from openpyxl import Workbook
 
+import smart_locker.sync.scheduler as sched
 from smart_locker.sync.scheduler import (
     _SourceFileHandler,
     _run_source_import,
@@ -67,14 +66,14 @@ class TestStartupImport:
     """Tests for the immediate import on scheduler startup."""
 
     def test_startup_triggers_immediate_import(self, db_session):
-        """start_scheduler runs an import immediately before starting cron/watcher."""
+        """start_scheduler runs an import immediately before starting interval/watcher."""
         with tempfile.TemporaryDirectory() as tmpdir:
             source = Path(tmpdir) / "source.xlsx"
             _create_test_excel(source)
 
             from smart_locker.database.engine import get_engine
             try:
-                start_scheduler(get_engine(), source, hour=3, minute=0)
+                start_scheduler(get_engine(), source, interval_hours=6)
 
                 from smart_locker.database.repositories import DeviceRepository
                 device = DeviceRepository.find_by_pm(db_session, "PM-SCHED-001")
@@ -85,7 +84,7 @@ class TestStartupImport:
     def test_empty_source_path_disables_scheduler(self):
         """An empty source path skips scheduler setup entirely."""
         with patch("smart_locker.sync.scheduler.logger") as mock_logger:
-            start_scheduler(MagicMock(), "", hour=6, minute=0)
+            start_scheduler(MagicMock(), "", interval_hours=6)
             mock_logger.info.assert_any_call(
                 "Source Excel path not configured — scheduler disabled."
             )
@@ -152,6 +151,57 @@ class TestSourceFileHandler:
 
         handler.on_modified(mock_event)
         handler._schedule_debounced_import.assert_not_called()
+
+
+class TestIntervalSchedule:
+    """Tests for the periodic source-import interval (replaces daily cron + 30s poll)."""
+
+    def test_interval_job_defaults_to_six_hours(self, db_session):
+        """start_scheduler registers a 6-hour interval import, not a daily cron."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = Path(tmpdir) / "source.xlsx"
+            _create_test_excel(source)
+
+            from smart_locker.database.engine import get_engine
+            try:
+                start_scheduler(get_engine(), source, interval_hours=6)
+                job = sched._scheduler.get_job("source_excel_import")
+                assert job is not None
+                assert job.trigger.interval == timedelta(hours=6)
+                assert sched._scheduler.get_job("source_excel_mtime_poll") is None
+            finally:
+                stop_scheduler()
+
+    def test_interval_hours_is_configurable(self, db_session):
+        """The interval follows the value passed into start_scheduler."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = Path(tmpdir) / "source.xlsx"
+            _create_test_excel(source)
+
+            from smart_locker.database.engine import get_engine
+            try:
+                start_scheduler(get_engine(), source, interval_hours=12)
+                job = sched._scheduler.get_job("source_excel_import")
+                assert job.trigger.interval == timedelta(hours=12)
+            finally:
+                stop_scheduler()
+
+    def test_network_share_does_not_start_mtime_poll(self, db_session):
+        """CIFS/NFS sources do not get a 30-second mtime poll job."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = Path(tmpdir) / "source.xlsx"
+            _create_test_excel(source)
+
+            from smart_locker.database.engine import get_engine
+            try:
+                with patch("smart_locker.sync.scheduler.is_network_path", return_value=True):
+                    start_scheduler(get_engine(), source, interval_hours=6)
+                assert sched._scheduler.get_job("source_excel_mtime_poll") is None
+                job = sched._scheduler.get_job("source_excel_import")
+                assert job is not None
+                assert job.trigger.interval == timedelta(hours=6)
+            finally:
+                stop_scheduler()
 
 
 class TestStopScheduler:

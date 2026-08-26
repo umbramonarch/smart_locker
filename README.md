@@ -75,7 +75,7 @@ smart_locker/
 │   └── sync/
 │       ├── excel_sync.py        # On-demand / auto Excel export (Devices / Transactions / Users)
 │       ├── source_import.py     # Import company device master list (schrank only, DE/EN headers)
-│       ├── scheduler.py         # Source import: startup + daily cron (+ file-watch on local FS)
+│       ├── scheduler.py         # Source import: startup + 6h interval (+ file-watch on local FS)
 │       ├── photo_watcher.py     # Auto-assign device photos by model number
 │       └── fs_utils.py          # Detect network (CIFS/NFS) paths so watchers skip unreliable inotify
 ├── deploy/                      # Raspberry Pi provisioning: systemd, CIFS mount, kiosk, offline install
@@ -115,12 +115,12 @@ smart_locker/
 | FastAPI REST API | ✅ Done | Session, device, registration, admin, dashboard endpoints + SSE |
 | Self-registration | ✅ Done | Approved-name list + NFC tap; admin manual registration |
 | Excel export | ✅ Done | On-demand `.xlsx` (Devices + Transactions + Users) — replaces old auto-sync |
-| Source import | ✅ Done | Startup + file-watch + daily cron; schrank filter, DE/EN headers |
+| Source import | ✅ Done | Startup + 6h interval + file-watch on local FS; schrank filter, DE/EN headers |
 | Device import | ✅ Done | German + English Excel headers, PM-based dedup, schrank auto-numbering |
 | Photo import | ✅ Done | By PM number (`update_device`) or by model (photo watcher) |
 | Web dashboard | ✅ Done | Read-only `/dashboard` — devices, transactions, users; 30s auto-refresh |
 | Frontend UI | ✅ Done | 6-screen kiosk UI + overlays |
-| Unit tests | ✅ Done | ~221 tests across 15 modules, all hardware-free |
+| Unit tests | ✅ Done | ~234 tests across 16 modules, all hardware-free |
 | NFC device tags | ✅ Done | Same ACR1252U; `devices.tag_hmac`; auto borrow/return after login |
 | Calibration alerts | 🔲 Future | Calibration dates stored; notification system not yet built |
 | Kiosk deployment | ✅ Done | Raspberry Pi appliance: systemd service, CIFS mount, Chromium kiosk, offline install (`deploy/`) |

@@ -52,10 +52,8 @@ EXCEL_SYNC_PATH = os.getenv("SMART_LOCKER_EXCEL_PATH") or str(
 )
 
 # Auto-write the export to EXCEL_SYNC_PATH after each source import and photo change.
-# Off by default (export stays on-demand); enable on the Pi by setting
-# SMART_LOCKER_EXCEL_AUTO_EXPORT=1 so the workbook is refreshed on the locker share. Kept as
-# a dedicated flag (not merely "is a path set") so dev/test runs are never affected by
-# whatever SMART_LOCKER_EXCEL_PATH happens to hold.
+# Off by default (export stays on-demand via admin Export Excel). Set to 1 only if
+# you still want smart_locker_data.xlsx refreshed on the locker share automatically.
 EXCEL_AUTO_EXPORT = os.getenv("SMART_LOCKER_EXCEL_AUTO_EXPORT", "").strip().lower() in {
     "1", "true", "yes", "on",
 }
@@ -65,9 +63,9 @@ EXCEL_AUTO_EXPORT = os.getenv("SMART_LOCKER_EXCEL_AUTO_EXPORT", "").strip().lowe
 # is the mounted path, e.g. /mnt/locker/device-list.xlsx. Empty disables auto-import.
 SOURCE_EXCEL_PATH = os.getenv("SMART_LOCKER_SOURCE_EXCEL_PATH", "")
 
-# Daily source import schedule in 24-hour format (default: 06:00)
-SOURCE_SYNC_HOUR = int(os.getenv("SMART_LOCKER_SOURCE_SYNC_HOUR", "6"))
-SOURCE_SYNC_MINUTE = int(os.getenv("SMART_LOCKER_SOURCE_SYNC_MINUTE", "0"))
+# Hours between automatic source imports (startup import + admin Sync still run).
+# Minimum 1. Values below 1 are raised to 1 so a zero env cannot spin the importer.
+SOURCE_SYNC_INTERVAL_HOURS = max(1, int(os.getenv("SMART_LOCKER_SOURCE_SYNC_INTERVAL_HOURS", "6")))
 
 # --- Photo import ---
 # Input folder for device photos — filenames must match the device model/Typbezeichnung

@@ -16,7 +16,7 @@
 #        restart (seconds, invisible between card taps) for a SAFE, self-reverting
 #        update on a box no one is standing next to.
 #        Must stay LF (enforced by .gitattributes); CRLF breaks it on the Pi.
-#        PRESERVE keeps runtime files (.env, DB, venv, logs, backups, wheelhouse,
+#        PRESERVE keeps runtime files (.env, DB, last_sync.json, venv, logs, backups, wheelhouse,
 #        deploy/system-packages, device photos) across rsync --delete; committed
 #        UI images from the release are overlaid afterwards without --delete.
 #
@@ -68,8 +68,8 @@ KEEP_BACKUPS="${SMART_LOCKER_KEEP_BACKUPS:-5}"
 
 # Runtime paths preserved across the code swap (never overwritten by a release).
 PRESERVE=(".env" "smart_locker.db" "smart_locker.db-wal" "smart_locker.db-shm"
-          "logs" "venv" "deploy/wheelhouse" "deploy/system-packages" "backups"
-          ".update-staging" ".git" "smart_locker/frontend/images" "VERSION")
+          "last_sync.json" "logs" "venv" "deploy/wheelhouse" "deploy/system-packages"
+          "backups" ".update-staging" ".git" "smart_locker/frontend/images" "VERSION")
 
 mkdir -p "$BACKUP_DIR" "$APP_DIR/logs"
 

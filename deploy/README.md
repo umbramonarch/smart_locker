@@ -34,9 +34,10 @@ Pi boot
 ```
 
 `.env` (repo root) points `SMART_LOCKER_SOURCE_EXCEL_PATH` and `SMART_LOCKER_EXCEL_PATH`
-at `/mnt/locker/...`, so the device list is **imported from** the share and the workbook is
-**written back to** the share (with `SMART_LOCKER_EXCEL_AUTO_EXPORT=1`). The SQLite database
-stays on the Pi's **local** disk — never on the CIFS share (WAL mode is unreliable there).
+at `/mnt/locker/...`, so the device list is **imported from** the share. Auto-writing
+`smart_locker_data.xlsx` is **off** unless `SMART_LOCKER_EXCEL_AUTO_EXPORT=1`. The SQLite
+database stays on the Pi's **local** disk — never on the CIFS share (WAL mode is unreliable
+there).
 
 ## First-build command sequence
 

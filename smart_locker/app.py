@@ -22,8 +22,7 @@ from config.settings import (
     PHOTO_SERVE_DIR,
     SESSION_TIMEOUT_SECONDS,
     SOURCE_EXCEL_PATH,
-    SOURCE_SYNC_HOUR,
-    SOURCE_SYNC_MINUTE,
+    SOURCE_SYNC_INTERVAL_HOURS,
 )
 from smart_locker.auth.session_manager import SessionManager
 from smart_locker.auth.tap_router import handle_insert
@@ -45,16 +44,16 @@ def _start_background_sync() -> None:
     source files are doing. A failure to start either subsystem — the locker share
     is down at boot, a source/photo path is unreadable, or a watcher cannot be
     created — is logged and swallowed here so it can NEVER stop the web server
-    and NFC flow from coming up. Each missed sync is retried by the daily cron,
-    the network-share mtime poll, or the admin "Sync source" action once the
-    share is back. The two subsystems are guarded independently so one failing
-    does not disable the other.
+    and NFC flow from coming up. Each missed sync is retried by the interval
+    import or the admin "Sync source" action once the share is back. The two
+    subsystems are guarded independently so one failing does not disable the
+    other.
     """
     if SOURCE_EXCEL_PATH:
         try:
             from smart_locker.sync.scheduler import start_scheduler
             start_scheduler(
-                get_engine(), SOURCE_EXCEL_PATH, SOURCE_SYNC_HOUR, SOURCE_SYNC_MINUTE
+                get_engine(), SOURCE_EXCEL_PATH, SOURCE_SYNC_INTERVAL_HOURS
             )
         except Exception:
             logger.exception(
@@ -93,8 +92,9 @@ class SmartLockerApp:
         Initializes logging and the database. If a source Excel path is
         configured, runs an immediate import on startup (so the database
         is current before the first user interaction), starts a file
-        watcher for live source changes, and schedules a daily cron import
-        as a safety net. Then starts the NFC reader and enters a blocking
+        watcher for live source changes on a local filesystem, and
+        schedules an interval import as a safety net. Then starts the NFC
+        reader and enters a blocking
         event loop until Ctrl+C is pressed.
 
         Returns:
@@ -283,8 +283,9 @@ def run_server() -> None:
     Initializes logging and the database. If a source Excel path is
     configured, runs an immediate import on startup (so the database
     is current before the first request), starts a file watcher for
-    live source changes, and schedules a daily cron import as a safety
-    net. Then creates and runs the FastAPI application with uvicorn.
+    live source changes on a local filesystem, and schedules an interval
+    import as a safety net. Then creates and runs the FastAPI application
+    with uvicorn.
     This is the default mode.
 
     Returns:

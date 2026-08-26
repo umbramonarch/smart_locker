@@ -25,6 +25,16 @@ def _set_test_keys(monkeypatch):
     monkeypatch.setenv("SMART_LOCKER_HMAC_KEY", hmac_key)
 
 
+@pytest.fixture(autouse=True)
+def _isolate_last_sync(tmp_path, monkeypatch):
+    """Keep last-sync JSON off the repo disk and reset in-memory state per test."""
+    monkeypatch.setenv("SMART_LOCKER_LAST_SYNC_PATH", str(tmp_path / "last_sync.json"))
+    from smart_locker.sync import sync_status
+    sync_status.reset()
+    yield
+    sync_status.reset()
+
+
 @pytest.fixture()
 def db_session():
     """Provide an in-memory SQLite session for testing."""

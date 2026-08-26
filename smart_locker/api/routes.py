@@ -908,8 +908,9 @@ def get_sync_status(user_session: UserSession = Depends(require_session)):
     """Return the most recent source-import outcome (admin only).
 
     Powers the dashboard "last synced …" line. Reports when the last import
-    ran, what triggered it (startup/cron/watch/mtime-poll/manual), the
-    per-category counts, and whether it succeeded.
+    ran, what triggered it (startup/interval/watch/manual), the
+    per-category counts, and whether it succeeded. Includes ``at_local``
+    and ``ago`` for the admin footer clock.
 
     Args:
         user_session: The active session (injected by ``require_session``).

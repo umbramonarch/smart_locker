@@ -761,6 +761,23 @@ class TestAdminSyncAndUpdateEndpoints:
         resp = client.get("/api/admin/sync-status")
         assert resp.status_code == 200
 
+    def test_sync_status_includes_local_and_relative(self, client, mock_context, admin_user):
+        """Admin last-sync JSON includes at_local and ago for the footer clock."""
+        from types import SimpleNamespace
+
+        from smart_locker.sync import sync_status
+
+        sync_status.record_result(
+            "manual",
+            SimpleNamespace(imported=0, updated=1, unchanged=0, errors=0),
+        )
+        mock_context.session_mgr.start_session(admin_user)
+        row = client.get("/api/admin/sync-status").json()
+        assert row["at"]
+        assert row["at_local"]
+        assert row["ago"]
+        assert row["trigger"] == "manual"
+
     def test_update_status_requires_session(self, client, mock_context):
         resp = client.get("/api/admin/update-status")
         assert resp.status_code == 401
