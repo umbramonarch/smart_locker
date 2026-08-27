@@ -2,8 +2,8 @@
  * @fileoverview Client-side state machine for the kiosk touch UI. Manages screen
  *               transitions, API communication, SSE event handling, and user
  *               interaction flow across idle, auth, menu, locker availability,
- *               return, detail, registration, admin, return-slot, and
- *               software-update overlay.
+ *               return, detail, registration, admin, return-slot,
+ *               software-update, and appliance shutdown overlays.
  * @project smart_locker/frontend
  * @description Demo mode (?demo), circle-reveal transitions, split text,
  *              inactivity countdown, and self-registration.
@@ -2276,6 +2276,92 @@ function adminEndSession() {
   endSession();
 }
 
+/**
+ * Close Chromium kiosk (backend stays up). Confirm first. Demo never POSTs.
+ * @returns {Promise<void>}
+ */
+async function adminExitKiosk() {
+  if (S.updating) return;
+  if (!confirm('Close the kiosk browser? The locker service stays running. Chromium will not come back until the next login or reboot.')) {
+    return;
+  }
+  if (USE_DEMO) {
+    showToast('Demo preview — Exit kiosk is Pi only', 'success');
+    return;
+  }
+  try {
+    const res = await fetch('/api/admin/exit-kiosk', { method: 'POST' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      showToast(data.detail || 'Could not exit kiosk', 'error');
+      return;
+    }
+    showToast(data.message || 'Kiosk closing…', 'success');
+  } catch (_) {
+    showToast('Exit kiosk request failed', 'error');
+  }
+}
+
+/**
+ * Show the full-screen shutting-down overlay over the admin panel.
+ * Sets ``S.updating`` so SSE handlers ignore card taps until poweroff
+ * finishes or the overlay is dismissed (failed start / demo).
+ */
+function showPowerOverlay() {
+  S.updating = true;
+  clearTimeout(S.idleTimer);
+  clearInterval(S.cdTimer);
+  const overlay = document.getElementById('overlay-power');
+  if (!overlay) return;
+  overlay.style.display = '';
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    overlay.classList.add('visible');
+  }));
+}
+
+/**
+ * Hide the shutting-down overlay (used when poweroff could not start).
+ */
+function hidePowerOverlay() {
+  S.updating = false;
+  const overlay = document.getElementById('overlay-power');
+  if (!overlay) return;
+  overlay.classList.remove('visible');
+  overlay.style.display = 'none';
+  const dismiss = document.getElementById('power-dismiss');
+  if (dismiss) dismiss.classList.add('hidden');
+}
+
+/**
+ * Power off the Pi. Confirm first. Demo never POSTs.
+ * @returns {Promise<void>}
+ */
+async function adminShutdown() {
+  if (S.updating) return;
+  if (!confirm('Shut down the Raspberry Pi now? The locker will power off.')) {
+    return;
+  }
+  showPowerOverlay();
+  if (USE_DEMO) {
+    showToast('Demo preview — Shut down is Pi only', 'success');
+    const dismiss = document.getElementById('power-dismiss');
+    if (dismiss) dismiss.classList.remove('hidden');
+    return;
+  }
+  try {
+    const res = await fetch('/api/admin/shutdown', { method: 'POST' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      hidePowerOverlay();
+      showToast(data.detail || 'Could not shut down', 'error');
+      return;
+    }
+  } catch (_) {
+    hidePowerOverlay();
+    showToast('Shut down request failed', 'error');
+  }
+}
+
 /* ============================================================
    AUDIO CLICK FEEDBACK
 ============================================================ */
@@ -2374,8 +2460,11 @@ document.getElementById('bind-device-close').addEventListener('click', () => { c
 document.getElementById('bind-search').addEventListener('input', () => { populateBindList(); });
 document.getElementById('admin-export-excel').addEventListener('click', () => { clickSound(); adminExportExcel(); });
 document.getElementById('admin-update').addEventListener('click', () => { clickSound(); adminUpdate(); });
+document.getElementById('admin-exit-kiosk').addEventListener('click', () => { clickSound(); adminExitKiosk(); });
+document.getElementById('admin-shutdown').addEventListener('click', () => { clickSound(); adminShutdown(); });
 document.getElementById('admin-end-session').addEventListener('click', () => { clickSound(); adminEndSession(); });
 document.getElementById('update-dismiss').addEventListener('click', () => { clickSound(); dismissUpdateOverlay(); });
+document.getElementById('power-dismiss').addEventListener('click', () => { clickSound(); hidePowerOverlay(); });
 
 /* ============================================================
    INIT
@@ -2394,6 +2483,7 @@ document.getElementById('overlay-device-detail').style.display = 'none';
 document.getElementById('overlay-admin').style.display         = 'none';
 document.getElementById('overlay-register-device').style.display = 'none';
 document.getElementById('overlay-update').style.display        = 'none';
+document.getElementById('overlay-power').style.display         = 'none';
 document.getElementById('overlay-slot').style.display          = 'none';
 
 // Enhancement E: split text on initial page load

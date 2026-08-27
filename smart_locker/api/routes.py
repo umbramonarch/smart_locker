@@ -4,8 +4,8 @@ Description: REST API endpoints and SSE event stream for the Smart Locker kiosk.
              Provides session management, device listing, borrow/return operations,
              user self-registration (with registrant name validation), admin-only
              manual registration and device-tag bind/unbind, registrant list
-             retrieval, source sync, public dashboard data endpoints, and an
-             admin-only Excel export download.
+             retrieval, source sync, public dashboard data endpoints, an
+             admin-only Excel export download, and admin Exit kiosk / Shut down.
 Project: smart_locker/api
 Notes: All device/session endpoints require an active kiosk session enforced by
        the require_session dependency. SSE stream at /api/events pushes NFC and
@@ -42,6 +42,12 @@ from smart_locker.database.models import (
 )
 from smart_locker.database.repositories import DeviceRepository, RegistrantRepository
 from smart_locker.nfc.factory import fake_reader_enabled
+from smart_locker.services.appliance import (
+    ApplianceError,
+    ApplianceUnavailable,
+    exit_kiosk,
+    shutdown as appliance_shutdown,
+)
 from smart_locker.services.locker_service import LockerService
 from smart_locker.sync import sync_status
 
@@ -1061,6 +1067,65 @@ def trigger_update(user_session: UserSession = Depends(require_session)):
 
     logger.info("Software update launched by admin %s.", user_session.user.display_name)
     return {"started": True, "message": "Update started. The kiosk will restart briefly."}
+
+
+@router.post("/api/admin/exit-kiosk")
+def admin_exit_kiosk(user_session: UserSession = Depends(require_session)):
+    """Stop the Chromium kiosk browser (admin only). The backend stays up.
+
+    Chromium was started by graphical autostart; it does not come back until
+    the next login or reboot. On a Windows/dev host this returns 503.
+
+    Args:
+        user_session: The active session (injected by ``require_session``).
+
+    Returns:
+        dict: ``{"ok": True, "message": ...}`` after SIGTERM was sent.
+
+    Raises:
+        HTTPException: 403 if not admin; 503 if this host has no kiosk
+                       browser; 500 if the stop command failed.
+    """
+    if user_session.user.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Admin access required.")
+    try:
+        exit_kiosk()
+    except ApplianceUnavailable as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+    except ApplianceError as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+    logger.info("Kiosk browser stopped by admin %s.", user_session.user.display_name)
+    return {"ok": True, "message": "Kiosk browser closed. Service is still running."}
+
+
+@router.post("/api/admin/shutdown")
+def admin_shutdown(user_session: UserSession = Depends(require_session)):
+    """Power off the Raspberry Pi (admin only).
+
+    Runs ``sudo -n /usr/bin/systemctl poweroff``. On a Windows/dev host this
+    returns 503. A missing sudoers rule returns 500 with a hint to run
+    ``apply-sudoers.sh``.
+
+    Args:
+        user_session: The active session (injected by ``require_session``).
+
+    Returns:
+        dict: ``{"ok": True, "message": ...}`` once poweroff has been requested.
+
+    Raises:
+        HTTPException: 403 if not admin; 503 if systemd is absent; 500 if
+                       sudo/systemctl refused.
+    """
+    if user_session.user.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Admin access required.")
+    try:
+        appliance_shutdown()
+    except ApplianceUnavailable as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+    except ApplianceError as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+    logger.info("Appliance shutdown started by admin %s.", user_session.user.display_name)
+    return {"ok": True, "message": "Shutting down."}
 
 
 # --- Dashboard Endpoints (public, no auth) ----------------------------------

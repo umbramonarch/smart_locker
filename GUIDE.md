@@ -264,7 +264,8 @@ used — this trips people up because most of them are only ever invoked *indire
 | `wheelhouse/` | Where those downloaded `.whl` files sit | Read automatically by `install.sh`/`update.sh` — you never touch it directly |
 | `system-packages/` | Holds the `python3-pyscard` `.deb` (auto-filled by `build-wheelhouse.sh`, see Step 0b) | Read automatically by `install.sh` if offline; installed via plain `apt` if online |
 | `systemd/smart-locker.service` | Defines the backend as a systemd service (auto-restart, boot-start) | Installed by `install.sh`; started manually the first time — Section 5 |
-| `install/sudoers-smart-locker` | Grants the app account passwordless sudo for *only* restarting its own service and running updates | Installed by `install.sh`; powers the admin panel's **Software Update** button — Section 9 |
+| `install/sudoers-smart-locker` | Grants the app account passwordless sudo for *only* restarting its own service, running updates, and `systemctl poweroff` | Installed by `apply-sudoers.sh`; powers **Software Update** and **Shut down** — Section 9 |
+| `install/apply-sudoers.sh` | Renders the sudoers template to `/etc/sudoers.d/smart-locker` after `visudo -cf` | Called by `install.sh` and `update.sh`; SSH once on an existing Pi if Shut down 500s |
 | `install/update.sh` | Applies a signed release tarball with backup + health-check + auto-rollback | Runs later, whenever you ship an update — Section 9 |
 | `kiosk/start-kiosk.sh` | Launches Chromium fullscreen once the backend is up | Installed by `install.sh`; runs automatically at every graphical login — Section 5 |
 | `kiosk/smart-locker-kiosk.desktop` | The autostart entry that triggers `start-kiosk.sh` | Installed by `install.sh` into the app user's autostart folder |
@@ -285,7 +286,8 @@ present if offline; (2) installs `python3-pyscard` — via `apt` if online, or b
 with `--system-site-packages` and installs everything else from `wheelhouse/`; (4) enables
 `pcscd`; (5) copies `systemd/smart-locker.service` into place with your actual username/
 paths substituted in, and enables it (but doesn't start it yet — that needs `.env` filled
-in first); (6) installs the sudoers rule that lets the app restart itself for updates; (7)
+in first); (6) installs the sudoers rule that lets the app restart itself for updates
+and power off from the admin panel; (7)
 creates `/mnt/locker` and the credentials-file skeleton (but does **not** mount it — that's
 a manual step, done last, in Section 6); (8) installs the kiosk autostart entry. It's
 idempotent — re-running it after you've already done some steps by hand won't break
@@ -811,7 +813,7 @@ it still asks for a work card first.
 - **Inactivity warning** (overlay) — a countdown with a "Stay Active" button.
 - **Hidden admin panel** (overlay) — opened by tapping the idle clock 5 times. Shortcuts for
   Locker, Return, **Sync source**, Register user, **Register Device**, **Export to Excel**,
-  **Software Update**, End Session.
+  **Software Update**, **Exit kiosk**, **Shut down**, End Session.
 
 ### The rules
 
@@ -846,6 +848,10 @@ Pi on the LAN can use them — the lock is **physical access**, not a password.
    - **Export to Excel** — download a snapshot of devices / transactions / users.
    - **Software Update** — apply the newest signed tarball from `locker-updates` on the
      share. Full-screen updating overlay, then the kiosk reloads.
+   - **Exit kiosk** — close Chromium; the locker service stays up. Chromium does not
+     come back until the next graphical login or reboot. Confirm first.
+   - **Shut down** — `systemctl poweroff` the Pi. Confirm first. Needs the sudoers
+     drop-in (see Section 9 if the button errors after a first update).
    - **End Session** or **X** — close the panel and return to idle. Both end
      the admin session so a leftover overlay session cannot check a tool out.
 5. Tap the clock five times again to toggle the panel if it is still on the idle screen.
@@ -1041,8 +1047,17 @@ new `.tar.gz` + `.hmac` pair in `locker-updates/` (the newest file by date is ap
 
 Later applies: admin panel → **Software Update** (full-screen overlay, then the kiosk
 reloads), or the same SSH command. If the app is not running, the button is unavailable —
-use SSH. The button relies on the sudoers drop-in that `install.sh` writes to
+use SSH. The button relies on the sudoers drop-in that `apply-sudoers.sh` writes to
 `/etc/sudoers.d/smart-locker`.
+
+**First apply of Exit kiosk / Shut down:** the *old* `update.sh` on the Pi does not
+refresh sudoers. After this release is on disk, SSH once:
+
+`sudo bash /home/locker/smart_locker/deploy/install/apply-sudoers.sh`
+
+Without that, **Shut down** returns an error (sudoers still has only the update rule).
+**Exit kiosk** does not need sudo — it only stops Chromium. Later `update.sh` applies
+refresh sudoers themselves.
 
 `update.sh` still: stops the service, snapshots code + database, rsyncs the new tree
 (`--delete`, with preserve), installs wheels from the **existing** Pi wheelhouse, runs

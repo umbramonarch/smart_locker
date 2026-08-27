@@ -38,7 +38,7 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # Restore +x on this script (and siblings) so a future direct exec also works
 # after an exFAT copy. Harmless if already executable.
-chmod +x "$SCRIPT_DIR/install.sh" "$SCRIPT_DIR/update.sh" "$SCRIPT_DIR/build-wheelhouse.sh" 2>/dev/null || true
+chmod +x "$SCRIPT_DIR/install.sh" "$SCRIPT_DIR/update.sh" "$SCRIPT_DIR/build-wheelhouse.sh" "$SCRIPT_DIR/apply-sudoers.sh" 2>/dev/null || true
 APP_DIR="${SMART_LOCKER_DIR:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 APP_USER="${SMART_LOCKER_USER:-$(stat -c '%U' "$APP_DIR")}"
 APP_GROUP="$(id -gn "$APP_USER")"
@@ -287,22 +287,13 @@ systemctl daemon-reload
 systemctl enable smart-locker.service
 echo "    (start it with: sudo systemctl start smart-locker  — do this AFTER filling .env)"
 
-# --- 4b. Sudoers + update script (powers the in-app "Update now" button) ---
-echo "==> Installing sudoers drop-in for self-service updates"
-chmod +x "$APP_DIR/deploy/install/update.sh"
-SUDOERS_TMP="$(mktemp)"
-sed \
-  -e "s#__APP_USER__#$APP_USER#g" \
-  -e "s#__APP_DIR__#$APP_DIR#g" \
-  "$APP_DIR/deploy/install/sudoers-smart-locker" > "$SUDOERS_TMP"
-if visudo -cf "$SUDOERS_TMP" >/dev/null 2>&1; then
-  install -m 0440 -o root -g root "$SUDOERS_TMP" /etc/sudoers.d/smart-locker
-  echo "    installed /etc/sudoers.d/smart-locker (lets the app restart itself for updates)"
-else
-  echo "    WARNING: generated sudoers failed validation — NOT installed. The 'Update now'"
-  echo "             button will be disabled until this is fixed; updates can still run via SSH."
+# --- 4b. Sudoers + update script (powers in-app Update / Shut down) ---
+echo "==> Installing sudoers drop-in for self-service updates and poweroff"
+chmod +x "$APP_DIR/deploy/install/update.sh" "$APP_DIR/deploy/install/apply-sudoers.sh"
+if ! bash "$APP_DIR/deploy/install/apply-sudoers.sh"; then
+  echo "    WARNING: sudoers was NOT installed. Software Update and Shut down from the"
+  echo "             admin panel will fail until: sudo bash deploy/install/apply-sudoers.sh"
 fi
-rm -f "$SUDOERS_TMP"
 
 # --- 5. CIFS mount scaffolding ---
 echo "==> Scaffolding CIFS mount at $MOUNT_POINT"

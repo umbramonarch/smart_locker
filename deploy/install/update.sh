@@ -322,6 +322,15 @@ if wait_for_health; then
   log "=== Update OK: now running $NEW_VERSION (healthy). ==="
   write_status "success" "Updated to $NEW_VERSION and verified healthy."
   trap - ERR
+  # Refresh sudoers from the new tree (adds poweroff). Failure here must not
+  # roll back a healthy update — document SSH: sudo bash deploy/install/apply-sudoers.sh
+  if [ -f "$APP_DIR/deploy/install/apply-sudoers.sh" ]; then
+    if bash "$APP_DIR/deploy/install/apply-sudoers.sh"; then
+      log "Refreshed /etc/sudoers.d/smart-locker."
+    else
+      log "WARNING: sudoers refresh failed — Shut down from the admin panel needs: sudo bash deploy/install/apply-sudoers.sh"
+    fi
+  fi
   rm -rf "$STAGING_DIR"
   # Prune old backups, keep the most recent KEEP_BACKUPS of each kind.
   ls -1t "$BACKUP_DIR"/code-*.tar.gz 2>/dev/null | tail -n +"$((KEEP_BACKUPS+1))" | xargs -r rm -f

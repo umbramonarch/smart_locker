@@ -3,8 +3,8 @@ File: test_api.py
 Description: Tests for the REST API layer — session management, device listing,
              borrow/return endpoints, user self-registration (with registrant
              validation), admin manual registration, registrant list retrieval,
-             admin source sync, and SSE event stream. Uses FastAPI's TestClient
-             with mocked NFC context.
+             admin source sync, software update, Exit kiosk / Shut down, and
+             SSE event stream. Uses FastAPI's TestClient with mocked NFC context.
 Project: smart_locker/tests
 Notes: Run with: python -m pytest tests/test_api.py -v
 """
@@ -820,3 +820,69 @@ class TestAdminSyncAndUpdateEndpoints:
         mock_context.session_mgr.start_session(admin_user)
         resp = client.post("/api/admin/update")
         assert resp.status_code == 503
+
+    def test_exit_kiosk_requires_session(self, client, mock_context):
+        resp = client.post("/api/admin/exit-kiosk")
+        assert resp.status_code == 401
+
+    def test_exit_kiosk_rejects_non_admin(self, client, mock_context, test_user):
+        mock_context.session_mgr.start_session(test_user)
+        resp = client.post("/api/admin/exit-kiosk")
+        assert resp.status_code == 403
+
+    def test_exit_kiosk_unavailable_off_pi(self, client, mock_context, admin_user, monkeypatch):
+        """Dev/Windows hosts must not try to kill a browser — 503, not a hang."""
+        import smart_locker.api.routes as routes_module
+        from smart_locker.services.appliance import ApplianceUnavailable
+
+        def _boom():
+            raise ApplianceUnavailable(
+                "Kiosk exit runs on the Raspberry Pi appliance only."
+            )
+
+        monkeypatch.setattr(routes_module, "exit_kiosk", _boom)
+        mock_context.session_mgr.start_session(admin_user)
+        resp = client.post("/api/admin/exit-kiosk")
+        assert resp.status_code == 503
+
+    def test_exit_kiosk_accepts_admin(self, client, mock_context, admin_user, monkeypatch):
+        import smart_locker.api.routes as routes_module
+
+        monkeypatch.setattr(routes_module, "exit_kiosk", lambda: None)
+        mock_context.session_mgr.start_session(admin_user)
+        resp = client.post("/api/admin/exit-kiosk")
+        assert resp.status_code == 200
+        assert resp.json().get("ok") is True
+
+    def test_shutdown_requires_session(self, client, mock_context):
+        resp = client.post("/api/admin/shutdown")
+        assert resp.status_code == 401
+
+    def test_shutdown_rejects_non_admin(self, client, mock_context, test_user):
+        mock_context.session_mgr.start_session(test_user)
+        resp = client.post("/api/admin/shutdown")
+        assert resp.status_code == 403
+
+    def test_shutdown_unavailable_off_pi(self, client, mock_context, admin_user, monkeypatch):
+        """Dev/Windows hosts must not invoke poweroff — 503, not a hang."""
+        import smart_locker.api.routes as routes_module
+        from smart_locker.services.appliance import ApplianceUnavailable
+
+        def _boom():
+            raise ApplianceUnavailable(
+                "Shut down runs on the Raspberry Pi appliance only."
+            )
+
+        monkeypatch.setattr(routes_module, "appliance_shutdown", _boom)
+        mock_context.session_mgr.start_session(admin_user)
+        resp = client.post("/api/admin/shutdown")
+        assert resp.status_code == 503
+
+    def test_shutdown_accepts_admin(self, client, mock_context, admin_user, monkeypatch):
+        import smart_locker.api.routes as routes_module
+
+        monkeypatch.setattr(routes_module, "appliance_shutdown", lambda: None)
+        mock_context.session_mgr.start_session(admin_user)
+        resp = client.post("/api/admin/shutdown")
+        assert resp.status_code == 200
+        assert resp.json().get("ok") is True

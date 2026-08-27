@@ -3,7 +3,7 @@
   Description: Kiosk touch-display UI with six screens (Idle, Auth Failed,
     Main Menu, Locker availability, Return Grid, Device Detail) plus overlays
     for inactivity warning, return slot, self-registration, admin panel,
-    Register Device, and software update.
+    Register Device, software update, and appliance shut down.
   Project: smart_locker/frontend
   Notes: Served as a static file by FastAPI. Requires app.js and style.css.
     All interactivity is in app.js. Offline: system fonts only.
@@ -494,6 +494,33 @@
           </div>
         </button>
 
+        <button class="admin-action-btn danger" id="admin-exit-kiosk">
+          <div class="admin-btn-icon danger-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/>
+              <polyline points="16 17 21 12 16 7"/>
+              <line x1="21" y1="12" x2="9" y2="12"/>
+            </svg>
+          </div>
+          <div class="admin-btn-text">
+            <span class="admin-btn-label">Exit kiosk</span>
+            <span class="admin-btn-desc">Close Chromium · service stays</span>
+          </div>
+        </button>
+
+        <button class="admin-action-btn danger" id="admin-shutdown">
+          <div class="admin-btn-icon danger-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M18.36 6.64a9 9 0 11-12.73 0"/>
+              <line x1="12" y1="2" x2="12" y2="12"/>
+            </svg>
+          </div>
+          <div class="admin-btn-text">
+            <span class="admin-btn-label">Shut down</span>
+            <span class="admin-btn-desc">Power off the Pi</span>
+          </div>
+        </button>
+
         <button class="admin-action-btn danger" id="admin-end-session">
           <div class="admin-btn-icon danger-icon">
             <svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
@@ -587,6 +614,18 @@
       <p class="update-status" id="update-status">Starting…</p>
       <p class="update-version" id="update-version" style="display:none"></p>
       <button class="stay-btn hidden" id="update-dismiss">OK</button>
+    </div>
+  </div>
+
+  <!-- ================================================================
+       OVERLAY — SHUT DOWN (covers admin while the Pi powers off)
+  ================================================================ -->
+  <div id="overlay-power" class="overlay" style="display:none">
+    <div class="update-center">
+      <div class="update-spinner"></div>
+      <h1 class="update-title">Shutting down</h1>
+      <p class="update-sub">The locker will power off</p>
+      <button class="stay-btn hidden" id="power-dismiss">OK</button>
     </div>
   </div>
 

@@ -3,7 +3,8 @@
  * Description: Kiosk stylesheet. Green accent (#009641) on charcoal (#181d24).
  *              Circle-reveal page transitions, wipe overlays, split text,
  *              slot-machine numbers, hover and cursor effects. Locker
- *              availability cards, return-slot overlay after a successful return.
+ *              availability cards, return-slot overlay after a successful return,
+ *              admin Exit kiosk / Shut down.
  * Project: smart_locker/frontend
  * Notes: Custom properties in :root control the colour theme. Designed for
  *        a fullscreen kiosk touch display at 1920x1080. System fonts only.
@@ -1867,6 +1868,8 @@ body::after {
 .admin-action-btn:nth-child(6) { --i: 5; }
 .admin-action-btn:nth-child(7) { --i: 6; }
 .admin-action-btn:nth-child(8) { --i: 7; }
+.admin-action-btn:nth-child(9) { --i: 8; }
+.admin-action-btn:nth-child(10) { --i: 9; }
 
 .admin-action-btn:hover {
   border-color: rgba(245,158,11,0.3);
@@ -2048,7 +2051,8 @@ body::after {
 /* ============================================================
    OVERLAY — SOFTWARE UPDATE
 ============================================================ */
-#overlay-update {
+#overlay-update,
+#overlay-power {
   background: rgba(24,29,36,0.92);
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
@@ -2112,7 +2116,8 @@ body::after {
   color: var(--text-muted);
   text-align: center;
 }
-#overlay-update .stay-btn { margin-top: 0.25rem; }
+#overlay-update .stay-btn,
+#overlay-power .stay-btn { margin-top: 0.25rem; }
 
 /* ============================================================
    UTILITY
@@ -2160,6 +2165,7 @@ html.lite #overlay-inactivity,
 html.lite #overlay-admin,
 html.lite #overlay-register-device,
 html.lite #overlay-update,
+html.lite #overlay-power,
 html.lite #overlay-slot {
   backdrop-filter: none !important;
   -webkit-backdrop-filter: none !important;
@@ -2169,6 +2175,7 @@ html.lite #overlay-inactivity { background: rgba(24,29,36,0.97); }
 html.lite #overlay-admin      { background: rgba(24,29,36,0.97); }
 html.lite #overlay-register-device { background: rgba(24,29,36,0.97); }
 html.lite #overlay-update     { background: rgba(24,29,36,0.97); }
+html.lite #overlay-power      { background: rgba(24,29,36,0.97); }
 html.lite #overlay-slot       { background: rgba(24,29,36,0.97); }
 
 /* — Custom cursor off; restore the native pointer — */

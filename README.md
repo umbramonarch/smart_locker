@@ -200,7 +200,7 @@ The system runs as a kiosk: FastAPI serves the frontend as static files in a ful
 5. **Locker** — availability overlay; IN / OUT / YOURS / MAINT; PM number on each card; screen-pick borrow still works
 6. **Return** — device grid with PM on each card; the user's borrowed items highlighted
 
-Overlays: **device detail** (photo, PM, type, serial, confirm), **return slot** (put in slot N), **inactivity** countdown, and a **hidden admin panel** (5× tap on the clock) with Locker/Return/Sync/Register User/**Register Device**/Export/End-Session shortcuts.
+Overlays: **device detail** (photo, PM, type, serial, confirm), **return slot** (put in slot N), **inactivity** countdown, and a **hidden admin panel** (5× tap on the clock) with Locker/Return/Sync/Register User/**Register Device**/Export/**Exit kiosk**/**Shut down**/End-Session shortcuts.
 
 **Theme:** green (`#009641`) on dark charcoal (`#181d24`).
 
