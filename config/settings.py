@@ -59,7 +59,7 @@ EXCEL_AUTO_EXPORT = os.getenv("SMART_LOCKER_EXCEL_AUTO_EXPORT", "").strip().lowe
 }
 
 # --- Source Excel ---
-# Company device master list on the locker share (SMB/CIFS mount) — on the Pi this
+# Catalog spreadsheet on the locker share (SMB/CIFS mount) — on the Pi this
 # is the mounted path, e.g. /mnt/locker/device-list.xlsx. Empty disables auto-import.
 SOURCE_EXCEL_PATH = os.getenv("SMART_LOCKER_SOURCE_EXCEL_PATH", "")
 
@@ -67,8 +67,60 @@ SOURCE_EXCEL_PATH = os.getenv("SMART_LOCKER_SOURCE_EXCEL_PATH", "")
 # Minimum 1. Values below 1 are raised to 1 so a zero env cannot spin the importer.
 SOURCE_SYNC_INTERVAL_HOURS = max(1, int(os.getenv("SMART_LOCKER_SOURCE_SYNC_INTERVAL_HOURS", "6")))
 
+# Site overlay: display name and extra Excel header aliases. Storage/API stay
+# pm_number. Extra headers are merged with the built-in English lists.
+# Comma-separated, case-insensitive. Read on each use so tests can setenv.
+
+
+def parse_csv_aliases(raw: str | None) -> list[str]:
+    """Split a comma-separated header list into stripped lowercase names.
+
+    Args:
+        raw: Env value such as ``"Inventory No, Asset Tag"``.
+
+    Returns:
+        Lowercased aliases, empty strings dropped.
+    """
+    return [part.strip().lower() for part in (raw or "").split(",") if part.strip()]
+
+
+def asset_label() -> str:
+    """Kiosk/dashboard noun for the locker join key.
+
+    Returns:
+        Label from ``SMART_LOCKER_ASSET_LABEL``, or ``PM number``.
+    """
+    return (os.getenv("SMART_LOCKER_ASSET_LABEL") or "PM number").strip() or "PM number"
+
+
+def in_locker_token() -> str:
+    """Excel Location cell written when a locker device is not borrowed.
+
+    Returns:
+        Token from ``SMART_LOCKER_IN_LOCKER_TOKEN``, or ``Locker``.
+    """
+    return (os.getenv("SMART_LOCKER_IN_LOCKER_TOKEN") or "Locker").strip() or "Locker"
+
+
+def id_header_extras() -> list[str]:
+    """Extra Excel header aliases for the join key.
+
+    Returns:
+        Aliases from ``SMART_LOCKER_ID_HEADERS``.
+    """
+    return parse_csv_aliases(os.getenv("SMART_LOCKER_ID_HEADERS", ""))
+
+
+def location_header_extras() -> list[str]:
+    """Extra Excel header aliases for the Location column.
+
+    Returns:
+        Aliases from ``SMART_LOCKER_LOCATION_HEADERS``.
+    """
+    return parse_csv_aliases(os.getenv("SMART_LOCKER_LOCATION_HEADERS", ""))
+
 # --- Photo import ---
-# Input folder for device photos — filenames must match the device model/Typbezeichnung
+# Input folder for device photos — filenames must match the device model
 # (e.g., "87V.jpg" applies to all devices with model "87V"). Leave empty to disable.
 PHOTO_INPUT_PATH = os.getenv("SMART_LOCKER_PHOTO_INPUT_PATH", "")
 

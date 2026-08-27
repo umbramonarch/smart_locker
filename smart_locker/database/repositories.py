@@ -92,7 +92,7 @@ class UserRepository:
         """Case-insensitive lookup by display name.
 
         Used by the source import to match borrower names from the
-        "Aktueller Einsatzort" column to registered users.
+        "Location" column to registered users.
 
         Args:
             session: Active database session.
@@ -265,7 +265,7 @@ class DeviceRepository:
             calibration_due=calibration_due,
         )
         # Apply optional status and borrower (used by source import when
-        # the "Aktueller Einsatzort" column indicates a device is checked out)
+        # the "Location" column indicates a device is checked out)
         if status is not None:
             device.status = DeviceStatus(status)
         if current_borrower_id is not None:
@@ -281,7 +281,7 @@ class DeviceRepository:
 
         Args:
             session: Active database session.
-            pm_number: Company equipment/PM number string.
+            pm_number: Join-key string (unique business key).
 
         Returns:
             Device object or None if not found.
@@ -401,7 +401,7 @@ class DeviceRepository:
 
     @staticmethod
     def find_by_model(session: Session, model: str) -> list[Device]:
-        """Find all devices matching a model/Typbezeichnung (case-insensitive).
+        """Find all devices matching a model (case-insensitive).
 
         Used by the photo watcher to assign one image to every device that
         shares the same model string (e.g. all "87V" units).
@@ -549,8 +549,8 @@ class RegistrantRepository:
     """Data access layer for Registrant entities.
 
     Manages the approved-names list used by the self-service registration
-    screen. Names originate from the "Aktueller Einsatzort" column of the
-    company source Excel and are synced into the ``registrants`` table
+    screen. Names originate from the "Location" column of the
+    source Excel and are synced into the ``registrants`` table
     during each source import. The repository provides methods for
     retrieving the sorted name list, bulk-adding new names (skipping
     duplicates), and case-insensitive name lookup for validation.

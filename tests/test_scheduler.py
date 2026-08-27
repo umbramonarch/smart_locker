@@ -32,8 +32,8 @@ def _create_test_excel(path: Path) -> None:
     """
     wb = Workbook()
     ws = wb.active
-    ws.append(["Equipment", "Hersteller", "Typbezeichnung", "Platz Messmittelschrank"])
-    ws.append(["PM-SCHED-001", "TestMfr", "TestModel", "Schrank 1"])
+    ws.append(["Equipment", "Manufacturer", "Model", "Slot"])
+    ws.append(["PM-SCHED-001", "TestMfr", "TestModel", "Bay 1"])
     wb.save(path)
 
 

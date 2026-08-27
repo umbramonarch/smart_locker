@@ -1,8 +1,8 @@
 """
 File: photo_watcher.py
 Description: Watches a designated input folder for device photos and
-             automatically assigns them to matching devices by model number
-             (Typbezeichnung). When a photo is added or modified, the watcher
+             automatically assigns them to matching devices by model.
+             When a photo is added or modified, the watcher
              copies it to the frontend images directory and updates the
              ``image_path`` column on every device whose model matches the
              filename stem. Because many locker devices share the same model,

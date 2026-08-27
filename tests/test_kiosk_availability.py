@@ -71,7 +71,7 @@ class TestPmNumberOnCardsAndDetail:
         """Device detail overlay has a PM row filled from the API payload."""
         html = _html()
         assert 'id="detail-pm"' in html
-        assert '<span class="meta-label">PM</span>' in html
+        assert 'id="detail-pm-label"' in html
         js = _js()
         assert "detail-pm" in js
         assert "dev.pm_number" in js

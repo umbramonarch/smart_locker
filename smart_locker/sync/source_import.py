@@ -1,14 +1,14 @@
 """
 File: source_import.py
-Description: Source Excel import — reads the company device master list and
+Description: Source Excel import — reads the device catalog spreadsheet and
              refreshes catalog metadata on locker devices already in SQLite.
-             Never inserts a locker row (Register Device does that). Supports
-             German and English column headers.
+             Never inserts a locker row (Register Device does that). Column
+             headers are matched by common English names (and a few aliases).
 Project: smart_locker/sync
 Notes: Called by the scheduler, ``python -m scripts.sync_source``, or
        POST /api/admin/sync-source. Status, borrower, slot, image,
-       description, and tag_hmac are never overwritten. Platz/Schrank is
-       unused. lookup_catalog_by_pm is the Register Device Excel lookup.
+       description, and tag_hmac are never overwritten. A Slot/cabinet
+       column is unused. lookup_catalog_by_pm is the Register Device lookup.
 """
 
 import logging
@@ -20,55 +20,94 @@ from pathlib import Path
 
 from openpyxl import load_workbook
 
+from config.settings import id_header_extras, in_locker_token, location_header_extras
 from smart_locker.database.repositories import DeviceRepository
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Column auto-detection candidates (German + English)
+# Column auto-detection (English names, plus common spreadsheet aliases)
 # ---------------------------------------------------------------------------
 
 PM_CANDIDATES = [
     "equipment", "pm number", "pm", "pm_number", "equipment number",
-    "equipmentnumber", "inventarnummer",
+    "equipmentnumber", "asset number", "asset",
 ]
 NAME_CANDIDATES = [
     "name", "device name", "device", "equipment name", "item", "item name",
 ]
 SERIAL_CANDIDATES = [
     "serial", "serial number", "s/n", "sn", "serial no", "serial_number",
-    "serialnumber", "hersteller-serialnummer", "hersteller-seriennummer",
-    "herstellerseriennummer", "seriennummer",
+    "serialnumber",
 ]
 TYPE_CANDIDATES = [
-    "type", "device type", "category", "device_type", "kind", "kategorie",
+    "type", "device type", "category", "device_type", "kind",
 ]
 SLOT_CANDIDATES = [
-    "slot", "locker slot", "locker", "locker_slot", "bay",
-    "platz messmittelschrank", "platz", "messmittelschrank", "schrank",
+    "slot", "locker slot", "locker", "locker_slot", "bay", "cabinet",
 ]
 DESC_CANDIDATES = [
-    "description", "desc", "details", "notes", "beschreibung",
+    "description", "desc", "details", "notes",
 ]
 IMAGE_CANDIDATES = [
     "image", "photo", "image_path", "photo_path", "img", "picture", "filename",
 ]
 MANUFACTURER_CANDIDATES = [
-    "manufacturer", "make", "brand", "hersteller",
+    "manufacturer", "make", "brand",
 ]
 MODEL_CANDIDATES = [
     "model", "model name", "type designation",
-    "typbezeichnung", "typ", "modell",
 ]
 CALIBRATION_CANDIDATES = [
     "calibration due", "calibration_due", "next calibration",
-    "datum der nächsten kalibrierung", "datum der nachsten kalibrierung",
-    "datum der n\u00e4chsten kalibrierung",
-    "nächste kalibrierung", "kalibrierung", "kalibrierdatum",
+    "calibration date", "cal due",
 ]
 LOCATION_CANDIDATES = [
-    "aktueller einsatzort",
+    "location", "current location", "current owner", "owner",
+    "assigned to", "held by",
 ]
+
+# Location cell is "in the locker" (not a person) when it contains any of these,
+# or when it equals SMART_LOCKER_IN_LOCKER_TOKEN.
+_IN_LOCKER_MARKERS = ("locker", "cabinet")
+
+
+def _merge_aliases(base: list[str], extras: list[str]) -> list[str]:
+    """Return extras then built-in names, de-duplicated, lowercased.
+
+    Args:
+        base: Built-in candidate list.
+        extras: Site aliases from env.
+
+    Returns:
+        Combined candidate names for ``find_column``.
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for name in list(extras) + list(base):
+        key = (name or "").strip().lower()
+        if key and key not in seen:
+            seen.add(key)
+            out.append(key)
+    return out
+
+
+def pm_candidates() -> list[str]:
+    """Join-key header names: built-in English aliases plus env extras.
+
+    Returns:
+        Candidate list used by import, Register Device, and Location write-back.
+    """
+    return _merge_aliases(PM_CANDIDATES, id_header_extras())
+
+
+def location_candidates() -> list[str]:
+    """Location-column header names: built-in aliases plus env extras.
+
+    Returns:
+        Candidate list used by import (registrants) and Location write-back.
+    """
+    return _merge_aliases(LOCATION_CANDIDATES, location_header_extras())
 
 
 # ---------------------------------------------------------------------------
@@ -81,7 +120,7 @@ class ImportResult:
 
     ``imported`` stays 0 — Sync never inserts locker rows. ``non_locker_skipped``
     is Excel PMs that are not already in SQLite. Also records registrant names
-    extracted from Aktueller Einsatzort.
+    extracted from the Location column.
     """
     imported: int = 0
     updated: int = 0
@@ -113,6 +152,24 @@ class CatalogReadError(Exception):
 # Helpers
 # ---------------------------------------------------------------------------
 
+def is_in_locker_location(value: str) -> bool:
+    """Return True when a Location cell means the device is in the locker.
+
+    Args:
+        value: Location cell text.
+
+    Returns:
+        True if the text looks like a locker/cabinet location, not a person.
+    """
+    text = (value or "").strip().lower()
+    if not text:
+        return False
+    token = (in_locker_token() or "").strip().lower()
+    if token and text == token:
+        return True
+    return any(marker in text for marker in _IN_LOCKER_MARKERS)
+
+
 def find_column(headers: list[str], candidates: list[str]) -> int | None:
     """Find a column index by trying multiple possible header names (case-insensitive).
 
@@ -121,8 +178,7 @@ def find_column(headers: list[str], candidates: list[str]) -> int | None:
 
     Args:
         headers: List of column header strings from the Excel file.
-        candidates: Possible header names to match against (e.g. German
-                    and English variants).
+        candidates: Possible header names to match against.
 
     Returns:
         Zero-based column index if found, or None if no match.
@@ -183,7 +239,7 @@ def _detect_columns(
     """
     ov = overrides or {}
     return {
-        "pm":           find_column(headers, [ov["pm"]] if ov.get("pm") else PM_CANDIDATES),
+        "pm":           find_column(headers, [ov["pm"]] if ov.get("pm") else pm_candidates()),
         "name":         find_column(headers, [ov["name"]] if ov.get("name") else NAME_CANDIDATES),
         "serial":       find_column(headers, [ov["serial"]] if ov.get("serial") else SERIAL_CANDIDATES),
         "type":         find_column(headers, [ov["type"]] if ov.get("type") else TYPE_CANDIDATES),
@@ -193,7 +249,7 @@ def _detect_columns(
         "manufacturer": find_column(headers, [ov["manufacturer"]] if ov.get("manufacturer") else MANUFACTURER_CANDIDATES),
         "model":        find_column(headers, [ov["model"]] if ov.get("model") else MODEL_CANDIDATES),
         "calibration":  find_column(headers, [ov["calibration"]] if ov.get("calibration") else CALIBRATION_CANDIDATES),
-        "location":     find_column(headers, [ov["location"]] if ov.get("location") else LOCATION_CANDIDATES),
+        "location":     find_column(headers, [ov["location"]] if ov.get("location") else location_candidates()),
     }
 
 
@@ -320,7 +376,7 @@ def lookup_catalog_by_pm(
     default_type: str = "general",
     column_overrides: dict[str, str] | None = None,
 ) -> CatalogRow | None:
-    """Return catalog fields for one PM from the company Excel, or None.
+    """Return catalog fields for one PM from the source Excel, or None.
 
     Args:
         source_path: Path to ``device-list.xlsx``.
@@ -371,8 +427,8 @@ def import_from_source_excel(
     """Refresh catalog metadata on locker devices that already exist in SQLite.
 
     Excel PMs that are not already locker rows are counted as skipped and
-    never inserted. Platz/Schrank is ignored. Status, borrower, locker_slot,
-    image_path, description, and tag_hmac are never overwritten.
+    never inserted. A Slot/cabinet column is ignored. Status, borrower,
+    locker_slot, image_path, description, and tag_hmac are never overwritten.
 
     Args:
         engine: SQLAlchemy engine.
@@ -415,12 +471,12 @@ def import_from_source_excel(
     if cols["location"] is not None:
         for row in rows[1:]:
             location = _cell_str(row, cols["location"])
-            if location and "schrank" not in location.lower():
+            if location and not is_in_locker_location(location):
                 registrant_names.add(location.strip())
 
     if registrant_names:
         logger.info(
-            "Found %d unique registrant name(s) in 'Aktueller Einsatzort' column.",
+            "Found %d unique registrant name(s) in the Location column.",
             len(registrant_names),
         )
 

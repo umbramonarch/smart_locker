@@ -224,7 +224,7 @@ Admin UI is required in this slice (binding tens of stickers over SSH is not acc
 
 `source_import.py` must not pass `tag_hmac` into `update_metadata`. Add an explicit test: bind a tag, re-import a row that changes serial, assert `tag_hmac` unchanged.
 
-Re-import never overwrites `status` or `current_borrower_id`. New PMs still take Aktueller Einsatzort on first insert.
+Re-import never overwrites `status` or `current_borrower_id`. Register Device writes Location as `Locker` after insert.
 
 ---
 

@@ -30,7 +30,7 @@ locker file-share (CIFS) mount, and an offline Python install.
 ```
 Pi boot
   ├─ pcscd.service ............ talks to the ACR1252U NFC reader (PC/SC)
-  ├─ /mnt/locker (CIFS) ....... the company locker share, mounted via fstab (lazy automount)
+  ├─ /mnt/locker (CIFS) ....... the locker file share, mounted via fstab (lazy automount)
   ├─ smart-locker.service ..... uvicorn backend on :8000 + background NFC listener
   └─ graphical login (auto)
         └─ start-kiosk.sh ..... Chromium --kiosk -> http://localhost:8000 on the touch display

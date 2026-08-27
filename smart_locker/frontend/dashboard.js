@@ -38,6 +38,31 @@ let refreshInterval = null;
 const REFRESH_MS = 30_000;
 
 
+/**
+ * Apply the site join-key label to the devices table header.
+ * @param {string} label - Display noun from GET /api/config.
+ */
+function applyAssetLabel(label) {
+  const text = (label || '').trim();
+  if (!text) return;
+  const th = document.getElementById('col-asset-label');
+  if (th) th.textContent = text;
+}
+
+/**
+ * Load SMART_LOCKER_ASSET_LABEL from the public config endpoint.
+ * @returns {Promise<void>}
+ */
+async function loadSiteConfig() {
+  try {
+    const res = await fetch('/api/config');
+    if (!res.ok) return;
+    const data = await res.json();
+    if (data && typeof data.asset_label === 'string') applyAssetLabel(data.asset_label);
+  } catch (_) { /* keep built-in column title */ }
+}
+
+
 /* ── Data fetching ────────────────────────────────────────────────────────── */
 
 /**
@@ -347,6 +372,7 @@ function initEvents() {
 
 document.addEventListener('DOMContentLoaded', () => {
   initEvents();
+  loadSiteConfig();
   fetchAll();
   refreshInterval = setInterval(fetchAll, REFRESH_MS);
 });

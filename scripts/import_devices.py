@@ -1,8 +1,8 @@
 """
 File: import_devices.py
 Description: Refresh locker-device catalog fields from Excel. Does not insert
-             new locker rows (Register Device does that). Supports German and
-             English column headers with auto-detection.
+             new locker rows (Register Device does that). Auto-detects common
+             Excel column headers.
 Project: smart_locker/scripts
 Notes: Usage: python -m scripts.import_devices --file devices.xlsx [--dry-run]
        Column headers can be overridden via CLI flags (--pm-col, --serial-col,
@@ -28,7 +28,7 @@ from smart_locker.sync.source_import import (
 def main() -> None:
     """Parse CLI arguments and run a bulk device import from an Excel file.
 
-    Reads an Excel file, auto-detects column headers (German or English),
+    Reads an Excel file, auto-detects column headers (common header names),
     and updates catalog fields on locker devices that already exist. New PMs
     are skipped. Supports dry-run mode and column override flags.
 

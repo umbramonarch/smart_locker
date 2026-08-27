@@ -27,6 +27,50 @@ const USE_DEMO = new URLSearchParams(window.location.search).has('demo');
 const PERF = { lite: !!window.__LITE__ };
 const canHover = window.matchMedia('(hover: hover) and (pointer: fine)').matches;
 
+/** Site noun for the locker join key. API field stays pm_number. */
+let ASSET_LABEL = 'PM number';
+
+/**
+ * Apply the site join-key label to kiosk copy (Register Device, detail pane).
+ * @param {string} label - Display noun from GET /api/config.
+ */
+function applyAssetLabels(label) {
+  const text = (label || '').trim() || 'PM number';
+  ASSET_LABEL = text;
+  const detail = document.getElementById('detail-pm-label');
+  if (detail) detail.textContent = text;
+  const adminDesc = document.getElementById('admin-register-device-desc');
+  if (adminDesc) adminDesc.textContent = `${text}, slot, then tap NFC`;
+  const listHint = document.getElementById('bind-list-hint');
+  if (listHint) {
+    listHint.textContent =
+      `Add a unit from the Excel list (${text} + free slot), then tap its sticker. Existing rows can bind, unbind, or change slot.`;
+  }
+  const addHint = document.getElementById('bind-add-hint');
+  if (addHint) {
+    addHint.textContent =
+      `Enter the ${text} from the catalog spreadsheet, pick a free slot, then continue to tap the sticker.`;
+  }
+  const search = document.getElementById('bind-search');
+  if (search) search.placeholder = `Search name or ${text}…`;
+  const pmInput = document.getElementById('bind-pm-input');
+  if (pmInput) pmInput.placeholder = text;
+}
+
+/**
+ * Load SMART_LOCKER_ASSET_LABEL from the backend. Demo mode keeps the default.
+ * @returns {Promise<void>}
+ */
+async function loadSiteConfig() {
+  if (USE_DEMO) return;
+  try {
+    const res = await fetch('/api/config');
+    if (!res.ok) return;
+    const data = await res.json();
+    if (data && typeof data.asset_label === 'string') applyAssetLabels(data.asset_label);
+  } catch (_) { /* keep built-in label */ }
+}
+
 /**
  * Switch to lite mode at runtime (called by the FPS probe on a janky host).
  * Adds the html.lite class so the CSS strips the heavy effects, flips the
@@ -190,7 +234,7 @@ async function apiCancelRegistration() {
 
 /**
  * Fetch the list of approved registrant names from the backend. These names
- * come from the "Aktueller Einsatzort" column in the source Excel and are
+ * come from the Location column in the source Excel and are
  * stored in the registrants table. Already-registered users are excluded.
  * @returns {Promise<string[]>} Alphabetically sorted array of available names.
  */
@@ -2314,7 +2358,7 @@ async function submitRegisterDevice() {
   const err = document.getElementById('bind-add-error');
   err.textContent = '';
   if (!pm) {
-    err.textContent = 'Enter a PM number.';
+    err.textContent = `Enter the ${ASSET_LABEL}.`;
     return;
   }
   if (!selectedAddSlot) {
@@ -2866,6 +2910,7 @@ if (USE_DEMO) {
     handleTap();
   });
 } else {
+  loadSiteConfig();
   connectSSE();
   checkExistingSession();
 }

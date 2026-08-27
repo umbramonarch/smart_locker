@@ -405,22 +405,22 @@ class TestRegistrantEndpoints:
 
     def test_get_registrants_returns_names(self, client, db_session):
         """GET /api/registrants returns names from the registrants table."""
-        RegistrantRepository.add_names(db_session, {"Max Müller", "Anna Schmidt"})
+        RegistrantRepository.add_names(db_session, {"Alice", "Bob"})
         db_session.commit()
 
         resp = client.get("/api/registrants")
         assert resp.status_code == 200
         names = resp.json()["names"]
-        assert "Max Müller" in names
-        assert "Anna Schmidt" in names
+        assert "Alice" in names
+        assert "Bob" in names
 
     def test_get_registrants_excludes_registered_users(self, client, db_session):
         """GET /api/registrants excludes names that already have a User record."""
-        RegistrantRepository.add_names(db_session, {"Max Müller", "Anna Schmidt"})
-        # "Max Müller" is already registered as a user
+        RegistrantRepository.add_names(db_session, {"Alice", "Bob"})
+        # "Alice" is already registered as a user
         UserRepository.create(
             db_session,
-            display_name="Max Müller",
+            display_name="Alice",
             uid_hmac="mmhash" * 10 + "mmmm",
             encrypted_card_uid="encrypted_mm",
         )
@@ -428,9 +428,9 @@ class TestRegistrantEndpoints:
 
         resp = client.get("/api/registrants")
         names = resp.json()["names"]
-        # Max Müller should be excluded, Anna Schmidt should remain
-        assert "Max Müller" not in names
-        assert "Anna Schmidt" in names
+        # Alice should be excluded, Bob should remain
+        assert "Alice" not in names
+        assert "Bob" in names
 
     def test_register_validates_against_registrants(self, client, db_session, mock_context):
         """POST /api/register rejects names not in the registrants list."""
@@ -442,11 +442,11 @@ class TestRegistrantEndpoints:
 
     def test_register_accepts_approved_name(self, client, db_session, mock_context):
         """POST /api/register accepts a name that exists in the registrants list."""
-        RegistrantRepository.add_names(db_session, {"Max Müller"})
+        RegistrantRepository.add_names(db_session, {"Alice"})
         db_session.commit()
         mock_context.pending_registration = None
 
-        resp = client.post("/api/register", json={"name": "Max Müller"})
+        resp = client.post("/api/register", json={"name": "Alice"})
         assert resp.status_code == 200
         assert resp.json()["success"] is True
 
@@ -599,7 +599,7 @@ class TestRegisterDeviceApi:
     ):
         """Known PM + free slot inserts the locker row and arms the sticker bind."""
         path = _catalog_workbook(tmp_path, [
-            ["Equipment", "Hersteller", "Typbezeichnung"],
+            ["Equipment", "Manufacturer", "Model"],
             ["PM-XL", "Fluke", "87V"],
         ])
         monkeypatch.setattr("config.settings.SOURCE_EXCEL_PATH", str(path))
@@ -623,7 +623,7 @@ class TestRegisterDeviceApi:
         self, client, mock_context, admin_user, db_session, tmp_path, monkeypatch
     ):
         path = _catalog_workbook(tmp_path, [
-            ["Equipment", "Hersteller"],
+            ["Equipment", "Manufacturer"],
             ["PM-001", "Fluke"],
         ])
         monkeypatch.setattr("config.settings.SOURCE_EXCEL_PATH", str(path))
@@ -639,7 +639,7 @@ class TestRegisterDeviceApi:
         self, client, mock_context, admin_user, test_devices, tmp_path, monkeypatch
     ):
         path = _catalog_workbook(tmp_path, [
-            ["Equipment", "Hersteller"],
+            ["Equipment", "Manufacturer"],
             ["PM-NEW", "Keysight"],
         ])
         monkeypatch.setattr("config.settings.SOURCE_EXCEL_PATH", str(path))
@@ -1002,3 +1002,20 @@ class TestAdminSyncAndUpdateEndpoints:
         resp = client.post("/api/admin/shutdown")
         assert resp.status_code == 200
         assert resp.json().get("ok") is True
+
+
+class TestPublicConfig:
+    """Kiosk/dashboard read the site asset label from a public config endpoint."""
+
+    def test_config_default_asset_label(self, client, mock_context):
+        """Unset env keeps the built-in PM number label."""
+        resp = client.get("/api/config")
+        assert resp.status_code == 200
+        assert resp.json()["asset_label"] == "PM number"
+
+    def test_config_asset_label_from_env(self, client, mock_context, monkeypatch):
+        """SMART_LOCKER_ASSET_LABEL is returned without a kiosk session."""
+        monkeypatch.setenv("SMART_LOCKER_ASSET_LABEL", "Asset ID")
+        resp = client.get("/api/config")
+        assert resp.status_code == 200
+        assert resp.json()["asset_label"] == "Asset ID"

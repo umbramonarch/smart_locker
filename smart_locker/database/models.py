@@ -115,17 +115,17 @@ class User(Base):
 class Registrant(Base):
     """Approved name for self-service NFC card registration.
 
-    Stores unique person names extracted from the company's source Excel file
-    (specifically the "Aktueller Einsatzort" / current deployment location
-    column). During source import, every non-schrank value in that column is
-    treated as a person's name and added to this table.
+    Stores unique person names extracted from the source Excel file
+    (specifically the Location column). During source import, every value
+    that is not an in-locker token is treated as a person's name and added
+    to this table.
 
     The kiosk registration screen presents these names as a selectable list.
     Users whose names appear here may self-register by selecting their name
     and tapping an NFC card. Users whose names do NOT appear must request
     manual registration from an admin (available only in the hidden admin
-    panel). This acts as a lightweight authentication gate — only employees
-    listed in the company device master sheet can self-register.
+    panel). This acts as a lightweight authentication gate — only people
+    listed in the catalog spreadsheet can self-register.
 
     Names are deduplicated (unique constraint) and only grow over successive
     imports — an import never removes existing registrant rows.
@@ -136,7 +136,7 @@ class Registrant(Base):
     # Auto-incrementing primary key
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
 
-    # Person's name as it appears in the Excel "Aktueller Einsatzort" column.
+    # Person's name as it appears in the Excel "Location" column.
     # Unique constraint prevents duplicate entries across successive imports.
     display_name: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
 
@@ -149,7 +149,7 @@ class Registrant(Base):
 class Device(Base):
     """Physical device stored in the locker system.
 
-    Identified by ``pm_number`` (the company equipment/PM number — unique business
+    Identified by ``pm_number`` (the equipment/PM number — unique business
     key). Tracks inventory metadata (manufacturer, model, serial),
     optional NFC sticker HMAC (``tag_hmac``), locker placement, calibration
     schedule, and current borrow state. The ``status`` field controls

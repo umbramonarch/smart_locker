@@ -1,7 +1,7 @@
 """
 File: test_device_registration.py
-Description: Tests for admin Register Device: look up a PM in the company
-             Excel catalog, assign a free locker slot, and insert one SQLite
+Description: Tests for admin Register Device: look up a PM in the Excel
+             catalog, assign a free locker slot, and insert one SQLite
              row. Sync must never create locker devices.
 Project: smart_locker/tests
 Notes: Run with: python -m pytest tests/test_device_registration.py -v
@@ -41,8 +41,8 @@ def _create_excel(rows: list[list]) -> Path:
 
 
 _HEADERS = [
-    "Equipment", "Hersteller", "Typbezeichnung", "Hersteller-Serialnummer",
-    "Kategorie", "Datum der nächsten Kalibrierung",
+    "Equipment", "Manufacturer", "Model", "Serial Number",
+    "Category", "Calibration Due",
 ]
 
 
@@ -71,7 +71,7 @@ class TestLookupCatalogByPm:
     def test_unknown_pm_returns_none(self):
         """A PM that is not in the sheet is not a catalog hit."""
         path = _create_excel([
-            ["Equipment", "Hersteller"],
+            ["Equipment", "Manufacturer"],
             ["PM-001", "Fluke"],
         ])
         try:
@@ -126,7 +126,7 @@ class TestRegisterLockerDevice:
         )
         db_session.commit()
         path = _create_excel([
-            ["Equipment", "Hersteller", "Typbezeichnung"],
+            ["Equipment", "Manufacturer", "Model"],
             ["PM-NEW", "Fluke", "87V"],
         ])
         try:
@@ -138,7 +138,7 @@ class TestRegisterLockerDevice:
     def test_unknown_pm_fails_with_no_ghost_row(self, db_session):
         """Unknown PM errors; SQLite must not gain a placeholder device."""
         path = _create_excel([
-            ["Equipment", "Hersteller"],
+            ["Equipment", "Manufacturer"],
             ["PM-001", "Fluke"],
         ])
         try:
@@ -166,7 +166,7 @@ class TestRegisterLockerDevice:
         )
         db_session.commit()
         path = _create_excel([
-            ["Equipment", "Hersteller", "Typbezeichnung"],
+            ["Equipment", "Manufacturer", "Model"],
             ["PM-NEW", "Keysight", "34465A"],
         ])
         try:
@@ -185,7 +185,7 @@ class TestRegisterLockerDevice:
         )
         db_session.commit()
         path = _create_excel([
-            ["Equipment", "Hersteller"],
+            ["Equipment", "Manufacturer"],
             ["PM-001", "Fluke"],
         ])
         try:
@@ -197,7 +197,7 @@ class TestRegisterLockerDevice:
     def test_invalid_slot_fails(self, db_session):
         """Slot numbers must be >= 1."""
         path = _create_excel([
-            ["Equipment", "Hersteller"],
+            ["Equipment", "Manufacturer"],
             ["PM-001", "Fluke"],
         ])
         try:
@@ -207,11 +207,11 @@ class TestRegisterLockerDevice:
         finally:
             path.unlink(missing_ok=True)
 
-    def test_einsatzort_does_not_mark_new_row_borrowed(self, db_session):
+    def test_location_does_not_mark_new_row_borrowed(self, db_session):
         """Registering into the locker always starts AVAILABLE, even if Excel names a person."""
         path = _create_excel([
-            ["Equipment", "Hersteller", "Typbezeichnung", "Aktueller Einsatzort"],
-            ["PM-001", "Fluke", "87V", "Anna Schmidt"],
+            ["Equipment", "Manufacturer", "Model", "Location"],
+            ["PM-001", "Fluke", "87V", "Bob"],
         ])
         try:
             device = register_locker_device(db_session, path, "PM-001", locker_slot=1)

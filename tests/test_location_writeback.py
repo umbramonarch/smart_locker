@@ -1,10 +1,10 @@
 """
-File: test_einsatzort_writeback.py
-Description: Tests for Pi → Excel write-back of Aktueller Einsatzort only.
+File: test_location_writeback.py
+Description: Tests for Pi → Excel write-back of Location only.
              Locker available → in-locker token; borrowed → borrower name.
              A locked or missing workbook must not raise into the kiosk.
 Project: smart_locker/tests
-Notes: Run with: python -m pytest tests/test_einsatzort_writeback.py -v
+Notes: Run with: python -m pytest tests/test_location_writeback.py -v
        Uses temporary workbooks; no NFC hardware.
 """
 
@@ -20,10 +20,10 @@ from smart_locker.security.encryption import encrypt
 from smart_locker.security.hashing import compute_uid_hmac
 from smart_locker.services.device_registration import register_locker_device
 from smart_locker.services.locker_service import LockerService
-from smart_locker.sync.einsatzort_writeback import (
+from smart_locker.sync.location_writeback import (
     IN_LOCKER_TOKEN,
-    write_einsatzort,
-    write_einsatzort_with_engine,
+    write_location,
+    write_location_with_engine,
 )
 from smart_locker.sync.scheduler import _run_source_import
 
@@ -43,8 +43,8 @@ def _workbook(path: Path, rows: list[list], extra_sheet: str | None = None) -> P
     return path
 
 
-def _einsatzort_by_pm(path: Path) -> dict[str, str]:
-    """Read Equipment → Aktueller Einsatzort from the first sheet."""
+def _location_by_pm(path: Path) -> dict[str, str]:
+    """Read Equipment → Location from the first sheet."""
     wb = load_workbook(path, read_only=True, data_only=True)
     try:
         ws = wb.active
@@ -53,7 +53,7 @@ def _einsatzort_by_pm(path: Path) -> dict[str, str]:
         wb.close()
     headers = [str(h).strip() if h else "" for h in rows[0]]
     pm_i = headers.index("Equipment")
-    loc_i = headers.index("Aktueller Einsatzort")
+    loc_i = headers.index("Location")
     out: dict[str, str] = {}
     for row in rows[1:]:
         pm = str(row[pm_i]).strip() if row[pm_i] is not None else ""
@@ -74,13 +74,13 @@ def _add_user(db_session, enc_key, hmac_key, name: str = "Alice"):
     )
 
 
-class TestWriteEinsatzort:
-    """write_einsatzort maps locker SQLite state onto Aktueller Einsatzort by PM."""
+class TestWriteLocation:
+    """write_location maps locker SQLite state onto Location by PM."""
 
     def test_available_writes_in_locker_token(self, db_session, tmp_path):
         """An available locker device is written as the stable in-locker token."""
         path = _workbook(tmp_path / "device-list.xlsx", [
-            ["Equipment", "Hersteller", "Aktueller Einsatzort"],
+            ["Equipment", "Manufacturer", "Location"],
             ["PM-001", "Fluke", "Old Name"],
         ])
         DeviceRepository.create(
@@ -94,11 +94,11 @@ class TestWriteEinsatzort:
         )
         db_session.flush()
 
-        result = write_einsatzort(db_session, path)
+        result = write_location(db_session, path)
 
         assert result.written == 1
         assert result.saved is True
-        assert _einsatzort_by_pm(path)["PM-001"] == IN_LOCKER_TOKEN
+        assert _location_by_pm(path)["PM-001"] == IN_LOCKER_TOKEN
 
     def test_borrowed_writes_borrower_name(
         self, db_session, tmp_path, enc_key, hmac_key
@@ -106,8 +106,8 @@ class TestWriteEinsatzort:
         """A borrowed locker device is written as the borrower's display name."""
         user = _add_user(db_session, enc_key, hmac_key, "Alice")
         path = _workbook(tmp_path / "device-list.xlsx", [
-            ["Equipment", "Hersteller", "Aktueller Einsatzort"],
-            ["PM-002", "Keysight", "Schrank"],
+            ["Equipment", "Manufacturer", "Location"],
+            ["PM-002", "Keysight", "Locker"],
         ])
         DeviceRepository.create(
             db_session,
@@ -121,17 +121,17 @@ class TestWriteEinsatzort:
         )
         db_session.flush()
 
-        result = write_einsatzort(db_session, path)
+        result = write_location(db_session, path)
 
         assert result.written == 1
-        assert _einsatzort_by_pm(path)["PM-002"] == "Alice"
+        assert _location_by_pm(path)["PM-002"] == "Alice"
 
     def test_preserves_other_columns_and_sheets(self, db_session, tmp_path):
-        """Only Aktueller Einsatzort changes; catalog cells and extra sheets stay."""
+        """Only Location changes; catalog cells and extra sheets stay."""
         path = _workbook(
             tmp_path / "device-list.xlsx",
             [
-                ["Equipment", "Hersteller", "Typbezeichnung", "Aktueller Einsatzort"],
+                ["Equipment", "Manufacturer", "Model", "Location"],
                 ["PM-001", "Fluke", "87V", "Someone"],
             ],
             extra_sheet="Notes",
@@ -147,7 +147,7 @@ class TestWriteEinsatzort:
         )
         db_session.flush()
 
-        write_einsatzort(db_session, path)
+        write_location(db_session, path)
 
         wb = load_workbook(path)
         try:
@@ -163,9 +163,9 @@ class TestWriteEinsatzort:
             wb.close()
 
     def test_non_locker_pm_is_left_alone(self, db_session, tmp_path):
-        """Excel rows that are not locker devices keep their Einsatzort."""
+        """Excel rows that are not locker devices keep their Location."""
         path = _workbook(tmp_path / "device-list.xlsx", [
-            ["Equipment", "Aktueller Einsatzort"],
+            ["Equipment", "Location"],
             ["PM-LOCKER", "Stale"],
             ["PM-FIELD", "Bob"],
         ])
@@ -178,9 +178,9 @@ class TestWriteEinsatzort:
         )
         db_session.flush()
 
-        write_einsatzort(db_session, path)
+        write_location(db_session, path)
 
-        cells = _einsatzort_by_pm(path)
+        cells = _location_by_pm(path)
         assert cells["PM-LOCKER"] == IN_LOCKER_TOKEN
         assert cells["PM-FIELD"] == "Bob"
 
@@ -189,7 +189,7 @@ class TestWriteEinsatzort:
     ):
         """Write-back never inserts Excel rows for locker PMs the sheet lacks."""
         path = _workbook(tmp_path / "device-list.xlsx", [
-            ["Equipment", "Aktueller Einsatzort"],
+            ["Equipment", "Location"],
             ["PM-OTHER", "Desk"],
         ])
         DeviceRepository.create(
@@ -201,7 +201,7 @@ class TestWriteEinsatzort:
         )
         db_session.flush()
 
-        result = write_einsatzort(db_session, path)
+        result = write_location(db_session, path)
 
         assert result.skipped >= 1
         wb = load_workbook(path, read_only=True)
@@ -210,12 +210,12 @@ class TestWriteEinsatzort:
         finally:
             wb.close()
         assert len(rows) == 2
-        assert _einsatzort_by_pm(path)["PM-OTHER"] == "Desk"
+        assert _location_by_pm(path)["PM-OTHER"] == "Desk"
 
     def test_unchanged_location_does_not_rewrite(self, db_session, tmp_path):
         """When every locker cell already matches, the file mtime is left alone."""
         path = _workbook(tmp_path / "device-list.xlsx", [
-            ["Equipment", "Aktueller Einsatzort"],
+            ["Equipment", "Location"],
             ["PM-001", IN_LOCKER_TOKEN],
         ])
         DeviceRepository.create(
@@ -229,7 +229,7 @@ class TestWriteEinsatzort:
         os.utime(path, (1_700_000_000, 1_700_000_000))
         before = path.stat().st_mtime
 
-        result = write_einsatzort(db_session, path)
+        result = write_location(db_session, path)
 
         assert result.written == 0
         assert result.saved is False
@@ -241,13 +241,13 @@ class TestWritebackResilience:
 
     def test_missing_file_does_not_raise(self, db_session, tmp_path):
         """Share down / wrong path is skipped, not fatal."""
-        result = write_einsatzort(db_session, tmp_path / "no-such.xlsx")
+        result = write_location(db_session, tmp_path / "no-such.xlsx")
         assert result.saved is False
 
     def test_missing_location_column_does_not_raise(self, db_session, tmp_path):
-        """A sheet without Aktueller Einsatzort is skipped, not rewritten."""
+        """A sheet without Location is skipped, not rewritten."""
         path = _workbook(tmp_path / "device-list.xlsx", [
-            ["Equipment", "Hersteller"],
+            ["Equipment", "Manufacturer"],
             ["PM-001", "Fluke"],
         ])
         DeviceRepository.create(
@@ -260,15 +260,15 @@ class TestWritebackResilience:
         db_session.flush()
         mtime = path.stat().st_mtime
 
-        result = write_einsatzort(db_session, path)
+        result = write_location(db_session, path)
 
         assert result.saved is False
         assert path.stat().st_mtime == mtime
 
     def test_retries_when_catalog_changes_during_write(self, db_session, tmp_path):
-        """A catalog save during copy/edit is not reverted; Einsatzort still updates."""
+        """A catalog save during copy/edit is not reverted; Location still updates."""
         path = _workbook(tmp_path / "device-list.xlsx", [
-            ["Equipment", "Hersteller", "Aktueller Einsatzort"],
+            ["Equipment", "Manufacturer", "Location"],
             ["PM-001", "Fluke", "Old"],
         ])
         DeviceRepository.create(
@@ -298,10 +298,10 @@ class TestWritebackResilience:
                     wb.close()
 
         with patch(
-            "smart_locker.sync.einsatzort_writeback.shutil.copy2",
+            "smart_locker.sync.location_writeback.shutil.copy2",
             copy_then_edit_catalog,
         ):
-            result = write_einsatzort(db_session, path)
+            result = write_location(db_session, path)
 
         assert result.saved is True
         wb = load_workbook(path)
@@ -314,7 +314,7 @@ class TestWritebackResilience:
     def test_locked_replace_does_not_raise(self, db_session, tmp_path):
         """Excel holding the file open: log and skip, never raise."""
         path = _workbook(tmp_path / "device-list.xlsx", [
-            ["Equipment", "Aktueller Einsatzort"],
+            ["Equipment", "Location"],
             ["PM-001", "Old"],
         ])
         DeviceRepository.create(
@@ -326,17 +326,17 @@ class TestWritebackResilience:
         )
         db_session.flush()
 
-        with patch("smart_locker.sync.einsatzort_writeback.time.sleep"):
+        with patch("smart_locker.sync.location_writeback.time.sleep"):
             with patch.object(Path, "replace", side_effect=PermissionError("locked")):
-                result = write_einsatzort(db_session, path)
+                result = write_location(db_session, path)
 
         assert result.saved is False
-        assert _einsatzort_by_pm(path)["PM-001"] == "Old"
+        assert _location_by_pm(path)["PM-001"] == "Old"
 
     def test_retries_then_succeeds(self, db_session, tmp_path):
         """A momentary lock is retried; the cell is written on a later attempt."""
         path = _workbook(tmp_path / "device-list.xlsx", [
-            ["Equipment", "Aktueller Einsatzort"],
+            ["Equipment", "Location"],
             ["PM-001", "Old"],
         ])
         DeviceRepository.create(
@@ -356,25 +356,25 @@ class TestWritebackResilience:
                 raise PermissionError("locked")
             return original(self, target)
 
-        with patch("smart_locker.sync.einsatzort_writeback.time.sleep"):
+        with patch("smart_locker.sync.location_writeback.time.sleep"):
             with patch.object(Path, "replace", flaky):
-                result = write_einsatzort(db_session, path)
+                result = write_location(db_session, path)
 
         assert result.saved is True
-        assert _einsatzort_by_pm(path)["PM-001"] == IN_LOCKER_TOKEN
+        assert _location_by_pm(path)["PM-001"] == IN_LOCKER_TOKEN
 
 
 class TestWritebackWiring:
-    """Borrow/return, Register Device, and scheduled sync all write Einsatzort."""
+    """Borrow/return, Register Device, and scheduled sync all write Location."""
 
     def test_borrow_writes_borrower_name(
         self, db_session, tmp_path, enc_key, hmac_key, monkeypatch
     ):
-        """A successful kiosk borrow updates Aktueller Einsatzort to the user."""
+        """A successful kiosk borrow updates Location to the user."""
         from smart_locker.auth.session_manager import SessionManager
 
         path = _workbook(tmp_path / "device-list.xlsx", [
-            ["Equipment", "Aktueller Einsatzort"],
+            ["Equipment", "Location"],
             ["PM-001", IN_LOCKER_TOKEN],
         ])
         monkeypatch.setattr("config.settings.SOURCE_EXCEL_PATH", str(path))
@@ -390,7 +390,7 @@ class TestWritebackWiring:
         session = SessionManager(timeout_seconds=60).start_session(user)
 
         assert LockerService.borrow_device(db_session, session, device.id) is True
-        assert _einsatzort_by_pm(path)["PM-001"] == "Alice"
+        assert _location_by_pm(path)["PM-001"] == "Alice"
 
     def test_return_writes_in_locker_token(
         self, db_session, tmp_path, enc_key, hmac_key, monkeypatch
@@ -399,7 +399,7 @@ class TestWritebackWiring:
         from smart_locker.auth.session_manager import SessionManager
 
         path = _workbook(tmp_path / "device-list.xlsx", [
-            ["Equipment", "Aktueller Einsatzort"],
+            ["Equipment", "Location"],
             ["PM-001", "Alice"],
         ])
         monkeypatch.setattr("config.settings.SOURCE_EXCEL_PATH", str(path))
@@ -417,25 +417,25 @@ class TestWritebackWiring:
         session = SessionManager(timeout_seconds=60).start_session(user)
 
         assert LockerService.return_device(db_session, session, device.id) is True
-        assert _einsatzort_by_pm(path)["PM-001"] == IN_LOCKER_TOKEN
+        assert _location_by_pm(path)["PM-001"] == IN_LOCKER_TOKEN
 
     def test_register_device_writes_in_locker_token(self, db_session, tmp_path):
         """A newly registered locker PM is written as in-locker in Excel."""
         path = _workbook(tmp_path / "device-list.xlsx", [
-            ["Equipment", "Hersteller", "Typbezeichnung", "Aktueller Einsatzort"],
+            ["Equipment", "Manufacturer", "Model", "Location"],
             ["PM-NEW", "Fluke", "87V", "Desk"],
         ])
 
         register_locker_device(db_session, str(path), "PM-NEW", 4)
 
-        assert _einsatzort_by_pm(path)["PM-NEW"] == IN_LOCKER_TOKEN
+        assert _location_by_pm(path)["PM-NEW"] == IN_LOCKER_TOKEN
 
-    def test_scheduler_import_writes_einsatzort(self, db_session, tmp_path):
-        """Startup/interval import is followed by Einsatzort write-back."""
+    def test_scheduler_import_writes_location(self, db_session, tmp_path):
+        """Startup/interval import is followed by Location write-back."""
         from smart_locker.database.engine import get_engine
 
         path = _workbook(tmp_path / "device-list.xlsx", [
-            ["Equipment", "Hersteller", "Typbezeichnung", "Aktueller Einsatzort"],
+            ["Equipment", "Manufacturer", "Model", "Location"],
             ["PM-SCHED-001", "NewMfr", "NewModel", "Stale Person"],
         ])
         DeviceRepository.create(
@@ -454,14 +454,14 @@ class TestWritebackWiring:
         device = DeviceRepository.find_by_pm(db_session, "PM-SCHED-001")
         assert device is not None
         assert device.manufacturer == "NewMfr"
-        assert _einsatzort_by_pm(path)["PM-SCHED-001"] == IN_LOCKER_TOKEN
+        assert _location_by_pm(path)["PM-SCHED-001"] == IN_LOCKER_TOKEN
 
     def test_engine_helper_matches_session_write(self, db_session, tmp_path):
-        """write_einsatzort_with_engine sees committed locker state."""
+        """write_location_with_engine sees committed locker state."""
         from smart_locker.database.engine import get_engine
 
         path = _workbook(tmp_path / "device-list.xlsx", [
-            ["Equipment", "Aktueller Einsatzort"],
+            ["Equipment", "Location"],
             ["PM-001", "Old"],
         ])
         DeviceRepository.create(
@@ -473,6 +473,77 @@ class TestWritebackWiring:
         )
         db_session.commit()
 
-        result = write_einsatzort_with_engine(get_engine(), path)
+        result = write_location_with_engine(get_engine(), path)
         assert result.saved is True
-        assert _einsatzort_by_pm(path)["PM-001"] == IN_LOCKER_TOKEN
+        assert _location_by_pm(path)["PM-001"] == IN_LOCKER_TOKEN
+
+
+class TestSiteWritebackAliases:
+    """Write-back uses the same env header lists and in-locker token as import."""
+
+    def test_id_header_extra_finds_join_column(self, db_session, tmp_path, monkeypatch):
+        """SMART_LOCKER_ID_HEADERS lets write-back match a non-default ID column."""
+        monkeypatch.setenv("SMART_LOCKER_ID_HEADERS", "Inventory No")
+        path = _workbook(tmp_path / "inventory.xlsx", [
+            ["Inventory No", "Location"],
+            ["PM-001", "Old"],
+        ])
+        DeviceRepository.create(
+            db_session,
+            name="Meter",
+            device_type="general",
+            pm_number="PM-001",
+            locker_slot=1,
+        )
+        db_session.flush()
+        result = write_location(db_session, path)
+        assert result.saved is True
+        wb = load_workbook(path)
+        try:
+            assert wb.active["B2"].value == IN_LOCKER_TOKEN
+        finally:
+            wb.close()
+
+    def test_location_header_extra_finds_location_column(
+        self, db_session, tmp_path, monkeypatch
+    ):
+        """SMART_LOCKER_LOCATION_HEADERS lets write-back find Location under another name."""
+        monkeypatch.setenv("SMART_LOCKER_LOCATION_HEADERS", "Whereabouts")
+        path = _workbook(tmp_path / "inventory.xlsx", [
+            ["Equipment", "Whereabouts"],
+            ["PM-001", "Old"],
+        ])
+        DeviceRepository.create(
+            db_session,
+            name="Meter",
+            device_type="general",
+            pm_number="PM-001",
+            locker_slot=1,
+        )
+        db_session.flush()
+        result = write_location(db_session, path)
+        assert result.saved is True
+        wb = load_workbook(path)
+        try:
+            assert wb.active["B2"].value == IN_LOCKER_TOKEN
+        finally:
+            wb.close()
+
+    def test_custom_in_locker_token_written(self, db_session, tmp_path, monkeypatch):
+        """Available devices write SMART_LOCKER_IN_LOCKER_TOKEN, not the default Locker."""
+        monkeypatch.setenv("SMART_LOCKER_IN_LOCKER_TOKEN", "At base")
+        path = _workbook(tmp_path / "inventory.xlsx", [
+            ["Equipment", "Location"],
+            ["PM-001", "Old"],
+        ])
+        DeviceRepository.create(
+            db_session,
+            name="Meter",
+            device_type="general",
+            pm_number="PM-001",
+            locker_slot=1,
+        )
+        db_session.flush()
+        result = write_location(db_session, path)
+        assert result.saved is True
+        assert _location_by_pm(path)["PM-001"] == "At base"

@@ -1,7 +1,7 @@
 """
 File: sync_source.py
-Description: Manually trigger source Excel import from the company device
-             master list, then write locker Aktueller Einsatzort back.
+Description: Manually trigger source Excel import from the device catalog
+             spreadsheet, then write locker Location back.
              Updates catalog metadata on existing locker devices; never
              inserts new locker rows. Dry-run skips both DB and Excel writes.
 Project: smart_locker/scripts
@@ -24,7 +24,7 @@ from smart_locker.sync.source_import import import_from_source_excel
 def main() -> None:
     """Parse CLI arguments and trigger a source Excel import.
 
-    Reads the company device master list (from ``--file`` or the
+    Reads the device catalog spreadsheet (from ``--file`` or the
     ``SMART_LOCKER_SOURCE_EXCEL_PATH`` env var) and updates catalog
     metadata on locker devices already in SQLite. Supports dry-run preview.
 
@@ -57,9 +57,9 @@ def main() -> None:
     if args.dry_run:
         print("[DRY RUN] No changes written to database.")
     else:
-        from smart_locker.sync.einsatzort_writeback import write_einsatzort_with_engine
+        from smart_locker.sync.location_writeback import write_location_with_engine
 
-        write_einsatzort_with_engine(get_engine(), source_path)
+        write_location_with_engine(get_engine(), source_path)
 
     print(
         f"\nDone: {result.imported} imported, {result.updated} updated, "

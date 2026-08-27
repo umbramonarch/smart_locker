@@ -2,8 +2,8 @@
 File: test_source_import.py
 Description: Tests for the source Excel import module. Validates column
              auto-detection, catalog-only updates (never insert locker rows),
-             metadata-only updates, date parsing from German Excel formats,
-             and registrant name extraction from the "Aktueller Einsatzort"
+             metadata-only updates, date parsing from common Excel formats,
+             and registrant name extraction from the Location
              column for the self-service registration name list.
 Project: smart_locker/tests
 Notes: Run with: python -m pytest tests/test_source_import.py -v
@@ -54,17 +54,17 @@ class TestFindColumn:
 
     def test_multiple_candidates(self):
         """Verify the first matching candidate from the list is returned."""
-        assert find_column(["Hersteller", "Model"], ["manufacturer", "hersteller"]) == 0
+        assert find_column(["Make", "Model"], ["manufacturer", "make"]) == 0
 
 
 class TestParseDate:
-    """Tests for date parsing from German and ISO Excel formats."""
+    """Tests for date parsing from day-month-year and ISO Excel formats."""
     def test_none(self):
         """Verify None input returns None."""
         assert parse_date(None) is None
 
-    def test_german_format(self):
-        """Verify DD.MM.YYYY German date format is parsed correctly."""
+    def test_day_month_year_format(self):
+        """Verify DD.MM.YYYY day-month-year format is parsed correctly."""
         d = parse_date("15.03.2025")
         assert d is not None
         assert d.year == 2025 and d.month == 3 and d.day == 15
@@ -86,9 +86,9 @@ class TestImportFromSourceExcel:
     def test_new_pm_is_not_inserted(self, db_session):
         """Excel PMs that are not already locker devices are skipped, not inserted."""
         path = _create_test_excel([
-            ["Equipment", "Hersteller", "Typbezeichnung", "Platz Messmittelschrank"],
-            ["PM-001", "Fluke", "87V", "Schrank 1"],
-            ["PM-002", "Keysight", "34465A", "Labor 3"],
+            ["Equipment", "Manufacturer", "Model", "Slot"],
+            ["PM-001", "Fluke", "87V", "Bay 1"],
+            ["PM-002", "Keysight", "34465A", "Lab 3"],
         ])
         try:
             from smart_locker.database.engine import get_engine
@@ -101,8 +101,8 @@ class TestImportFromSourceExcel:
         finally:
             path.unlink(missing_ok=True)
 
-    def test_catalog_updates_without_schrank_column(self, db_session):
-        """Platz/Schrank is unused; an existing locker PM still gets catalog updates."""
+    def test_catalog_updates_without_slot_column(self, db_session):
+        """A Slot column is unused; an existing locker PM still gets catalog updates."""
         DeviceRepository.create(
             db_session,
             name="Fluke 87V",
@@ -115,7 +115,7 @@ class TestImportFromSourceExcel:
         db_session.commit()
 
         path = _create_test_excel([
-            ["Equipment", "Hersteller", "Typbezeichnung"],
+            ["Equipment", "Manufacturer", "Model"],
             ["PM-001", "Fluke", "87-V MAX"],
             ["PM-NEW", "Keysight", "34465A"],
         ])
@@ -153,7 +153,7 @@ class TestImportFromSourceExcel:
         db_session.commit()
 
         path = _create_test_excel([
-            ["Equipment", "Hersteller", "Typbezeichnung", "Hersteller-Serialnummer"],
+            ["Equipment", "Manufacturer", "Model", "Serial Number"],
             ["PM-001", "Fluke", "87-V MAX", "SN-SHARED"],
         ])
         try:
@@ -181,8 +181,8 @@ class TestImportFromSourceExcel:
         db_session.commit()
 
         path = _create_test_excel([
-            ["Equipment", "Hersteller", "Typbezeichnung", "Platz Messmittelschrank"],
-            ["PM-001", "Fluke", "87V", "Schrank 1"],
+            ["Equipment", "Manufacturer", "Model", "Slot"],
+            ["PM-001", "Fluke", "87V", "Bay 1"],
         ])
         try:
             from smart_locker.database.engine import get_engine
@@ -205,8 +205,8 @@ class TestImportFromSourceExcel:
         db_session.commit()
 
         path = _create_test_excel([
-            ["Equipment", "Hersteller", "Typbezeichnung", "Platz Messmittelschrank"],
-            ["PM-001", "Fluke", "87-V MAX", "Schrank 1"],
+            ["Equipment", "Manufacturer", "Model", "Slot"],
+            ["PM-001", "Fluke", "87-V MAX", "Bay 1"],
         ])
         try:
             from smart_locker.database.engine import get_engine
@@ -227,8 +227,8 @@ class TestImportFromSourceExcel:
     def test_dry_run_no_writes(self, db_session):
         """Dry run reports skipped new PMs and writes nothing."""
         path = _create_test_excel([
-            ["Equipment", "Platz Messmittelschrank"],
-            ["PM-001", "Schrank 1"],
+            ["Equipment", "Slot"],
+            ["PM-001", "Bay 1"],
         ])
         try:
             from smart_locker.database.engine import get_engine
@@ -252,9 +252,9 @@ class TestImportFromSourceExcel:
         db_session.commit()
 
         path = _create_test_excel([
-            ["Equipment", "Hersteller", "Typbezeichnung", "Platz Messmittelschrank"],
-            ["PM-001", "Fluke", "87-V MAX", "Schrank 1"],   # model changed -> would update
-            ["PM-002", "Keysight", "34465A", "Schrank 2"],  # not in locker -> skipped
+            ["Equipment", "Manufacturer", "Model", "Slot"],
+            ["PM-001", "Fluke", "87-V MAX", "Bay 1"],   # model changed -> would update
+            ["PM-002", "Keysight", "34465A", "Bay 2"],  # not in locker -> skipped
         ])
         try:
             from smart_locker.database.engine import get_engine
@@ -267,8 +267,8 @@ class TestImportFromSourceExcel:
         finally:
             path.unlink(missing_ok=True)
 
-    def test_german_column_headers(self, db_session):
-        """German column headers are auto-detected on an existing locker PM."""
+    def test_english_column_headers(self, db_session):
+        """Column headers are auto-detected on an existing locker PM."""
         DeviceRepository.create(
             db_session,
             name="Old",
@@ -281,9 +281,9 @@ class TestImportFromSourceExcel:
         db_session.commit()
 
         path = _create_test_excel([
-            ["Equipment", "Hersteller", "Typbezeichnung", "Hersteller-Serialnummer",
-             "Barcodenummer", "Platz Messmittelschrank", "Kategorie"],
-            ["PM-001", "Rohde & Schwarz", "RTB2004", "SN-12345", "BC-001", "Schrank 1", "Oscilloscope"],
+            ["Equipment", "Manufacturer", "Model", "Serial Number",
+             "Barcode", "Slot", "Category"],
+            ["PM-001", "Rohde & Schwarz", "RTB2004", "SN-12345", "BC-001", "Bay 1", "Oscilloscope"],
         ])
         try:
             from smart_locker.database.engine import get_engine
@@ -302,14 +302,14 @@ class TestImportFromSourceExcel:
 
 
 class TestLocationColumn:
-    """Einsatzort is not locker membership. Sync never inserts; status stays locker-local."""
+    """Location is not locker membership. Sync never inserts; status stays locker-local."""
 
-    def test_new_pm_not_inserted_even_with_einsatzort(self, db_session):
-        """A person name in Aktueller Einsatzort does not create a locker row."""
+    def test_new_pm_not_inserted_even_with_location(self, db_session):
+        """A person name in Location does not create a locker row."""
         path = _create_test_excel([
-            ["Equipment", "Hersteller", "Typbezeichnung",
-             "Platz Messmittelschrank", "Aktueller Einsatzort"],
-            ["PM-001", "Fluke", "87V", "Schrank 1", "Max Müller"],
+            ["Equipment", "Manufacturer", "Model",
+             "Slot", "Location"],
+            ["PM-001", "Fluke", "87V", "Bay 1", "Alice"],
         ])
         try:
             from smart_locker.database.engine import get_engine
@@ -336,9 +336,9 @@ class TestLocationColumn:
         db_session.commit()
 
         path = _create_test_excel([
-            ["Equipment", "Hersteller", "Typbezeichnung", "Hersteller-Serialnummer",
-             "Barcodenummer", "Platz Messmittelschrank", "Aktueller Einsatzort"],
-            ["PM-001", "Fluke", "87V", "SN-NEW", "NEW-BC", "Schrank 1", "Anna Schmidt"],
+            ["Equipment", "Manufacturer", "Model", "Serial Number",
+             "Barcode", "Slot", "Location"],
+            ["PM-001", "Fluke", "87V", "SN-NEW", "NEW-BC", "Bay 1", "Bob"],
         ])
         try:
             from smart_locker.database.engine import get_engine
@@ -356,7 +356,7 @@ class TestLocationColumn:
             path.unlink(missing_ok=True)
 
     def test_reimport_does_not_overwrite_existing_status(self, db_session):
-        """Stale Excel Einsatzort must not replace locker status on an existing PM."""
+        """Stale Excel Location must not replace locker status on an existing PM."""
         DeviceRepository.create(
             db_session,
             name="Fluke 87V",
@@ -368,9 +368,9 @@ class TestLocationColumn:
         db_session.commit()
 
         path = _create_test_excel([
-            ["Equipment", "Hersteller", "Typbezeichnung",
-             "Platz Messmittelschrank", "Aktueller Einsatzort"],
-            ["PM-001", "Fluke", "87V", "Schrank 1", "Anna Schmidt"],
+            ["Equipment", "Manufacturer", "Model",
+             "Slot", "Location"],
+            ["PM-001", "Fluke", "87V", "Bay 1", "Bob"],
         ])
         try:
             from smart_locker.database.engine import get_engine
@@ -385,12 +385,12 @@ class TestLocationColumn:
             path.unlink(missing_ok=True)
 
     def test_reimport_does_not_undo_kiosk_borrow(self, db_session):
-        """A kiosk borrow survives re-import of a sheet that still says Schrank."""
+        """A kiosk borrow survives re-import of a sheet that still says Locker."""
         user = UserRepository.create(
             db_session,
-            display_name="Anna Schmidt",
+            display_name="Bob",
             uid_hmac="dd" * 16,
-            encrypted_card_uid="enc_anna",
+            encrypted_card_uid="enc_bob",
             role="user",
         )
         device = DeviceRepository.create(
@@ -407,9 +407,9 @@ class TestLocationColumn:
         db_session.commit()
 
         path = _create_test_excel([
-            ["Equipment", "Hersteller", "Typbezeichnung", "Hersteller-Serialnummer",
-             "Platz Messmittelschrank", "Aktueller Einsatzort"],
-            ["PM-001", "Fluke", "87V", "SN-NEW", "Schrank 1", "Messmittelschrank"],
+            ["Equipment", "Manufacturer", "Model", "Serial Number",
+             "Slot", "Location"],
+            ["PM-001", "Fluke", "87V", "SN-NEW", "Bay 1", "Locker"],
         ])
         try:
             from smart_locker.database.engine import get_engine
@@ -426,11 +426,11 @@ class TestLocationColumn:
             path.unlink(missing_ok=True)
 
     def test_borrower_name_still_extracted_as_registrant(self, db_session):
-        """Einsatzort person names still feed the self-register list when Sync skips the PM."""
+        """Location person names still feed the self-register list when Sync skips the PM."""
         path = _create_test_excel([
-            ["Equipment", "Hersteller", "Typbezeichnung",
-             "Platz Messmittelschrank", "Aktueller Einsatzort"],
-            ["PM-001", "Fluke", "87V", "Schrank 1", "anna schmidt"],
+            ["Equipment", "Manufacturer", "Model",
+             "Slot", "Location"],
+            ["PM-001", "Fluke", "87V", "Bay 1", "bob"],
         ])
         try:
             from smart_locker.database.engine import get_engine
@@ -443,47 +443,47 @@ class TestLocationColumn:
 
 
 class TestRegistrantExtraction:
-    """Tests for registrant name extraction from the 'Aktueller Einsatzort' column.
+    """Tests for registrant name extraction from the 'Location' column.
 
-    During source import, unique person names (non-schrank values) from the
+    During source import, unique person names (not in-locker values) from the
     location column across ALL rows are added to the registrants table for
     use in the self-service registration name list.
     """
 
     def test_names_extracted_from_all_rows(self, db_session):
-        """Person names are extracted from ALL rows, not just schrank-filtered ones."""
+        """Person names are extracted from ALL rows, not only locker rows."""
         path = _create_test_excel([
-            ["Equipment", "Hersteller", "Typbezeichnung",
-             "Platz Messmittelschrank", "Aktueller Einsatzort"],
-            # Schrank device with person name
-            ["PM-001", "Fluke", "87V", "Schrank 1", "Max Müller"],
-            # Non-schrank device (skipped for device import but name still extracted)
-            ["PM-002", "Keysight", "34465A", "Labor 3", "Anna Schmidt"],
-            # Another schrank device with schrank location (not a person name)
-            ["PM-003", "Tektronix", "TBS2104X", "Schrank 2", "Messmittelschrank"],
+            ["Equipment", "Manufacturer", "Model",
+             "Slot", "Location"],
+            # Locker row with a person name
+            ["PM-001", "Fluke", "87V", "Bay 1", "Alice"],
+            # Non-locker device (skipped for device import but name still extracted)
+            ["PM-002", "Keysight", "34465A", "Lab 3", "Bob"],
+            # Locker location token (not a person name)
+            ["PM-003", "Tektronix", "TBS2104X", "Bay 2", "Locker"],
         ])
         try:
             from smart_locker.database.engine import get_engine
             result = import_from_source_excel(get_engine(), path)
 
-            # Both person names should be in registrants, schrank value should not
+            # Both person names should be in registrants, locker token should not
             assert result.registrants_added == 2
             registrants = RegistrantRepository.get_all(db_session)
             names = [r.display_name for r in registrants]
-            assert "Max Müller" in names
-            assert "Anna Schmidt" in names
-            assert "Messmittelschrank" not in names
+            assert "Alice" in names
+            assert "Bob" in names
+            assert "Locker" not in names
         finally:
             path.unlink(missing_ok=True)
 
     def test_duplicate_names_deduplicated(self, db_session):
         """Duplicate names in the Excel are stored only once in registrants."""
         path = _create_test_excel([
-            ["Equipment", "Hersteller", "Typbezeichnung",
-             "Platz Messmittelschrank", "Aktueller Einsatzort"],
-            ["PM-001", "Fluke", "87V", "Schrank 1", "Max Müller"],
-            ["PM-002", "Keysight", "34465A", "Schrank 2", "Max Müller"],
-            ["PM-003", "Tektronix", "TBS2104X", "Schrank 3", "Anna Schmidt"],
+            ["Equipment", "Manufacturer", "Model",
+             "Slot", "Location"],
+            ["PM-001", "Fluke", "87V", "Bay 1", "Alice"],
+            ["PM-002", "Keysight", "34465A", "Bay 2", "Alice"],
+            ["PM-003", "Tektronix", "TBS2104X", "Bay 3", "Bob"],
         ])
         try:
             from smart_locker.database.engine import get_engine
@@ -500,9 +500,9 @@ class TestRegistrantExtraction:
         """Subsequent imports add new names but keep existing ones."""
         # First import with two names
         path1 = _create_test_excel([
-            ["Equipment", "Platz Messmittelschrank", "Aktueller Einsatzort"],
-            ["PM-001", "Schrank 1", "Max Müller"],
-            ["PM-002", "Schrank 2", "Anna Schmidt"],
+            ["Equipment", "Slot", "Location"],
+            ["PM-001", "Bay 1", "Alice"],
+            ["PM-002", "Bay 2", "Bob"],
         ])
         try:
             from smart_locker.database.engine import get_engine
@@ -513,39 +513,39 @@ class TestRegistrantExtraction:
 
         # Second import with one new name and one existing
         path2 = _create_test_excel([
-            ["Equipment", "Platz Messmittelschrank", "Aktueller Einsatzort"],
-            ["PM-003", "Schrank 3", "Anna Schmidt"],
-            ["PM-004", "Schrank 4", "Lisa Weber"],
+            ["Equipment", "Slot", "Location"],
+            ["PM-003", "Bay 3", "Bob"],
+            ["PM-004", "Bay 4", "Carol"],
         ])
         try:
             result2 = import_from_source_excel(get_engine(), path2)
-            # Only Lisa Weber is new; Anna Schmidt already exists
+            # Only Carol is new; Bob already exists
             assert result2.registrants_added == 1
 
             registrants = RegistrantRepository.get_all(db_session)
             names = [r.display_name for r in registrants]
             assert len(names) == 3
-            assert "Max Müller" in names
-            assert "Anna Schmidt" in names
-            assert "Lisa Weber" in names
+            assert "Alice" in names
+            assert "Bob" in names
+            assert "Carol" in names
         finally:
             path2.unlink(missing_ok=True)
 
-    def test_schrank_values_excluded(self, db_session):
-        """Values containing 'schrank' are not treated as person names."""
+    def test_locker_location_values_excluded(self, db_session):
+        """In-locker Location values are not treated as person names."""
         path = _create_test_excel([
-            ["Equipment", "Platz Messmittelschrank", "Aktueller Einsatzort"],
-            ["PM-001", "Schrank 1", "Messmittelschrank"],
-            ["PM-002", "Schrank 2", "Schrank A"],
-            ["PM-003", "Schrank 3", "Max Müller"],
+            ["Equipment", "Slot", "Location"],
+            ["PM-001", "Bay 1", "Locker"],
+            ["PM-002", "Bay 2", "Cabinet A"],
+            ["PM-003", "Bay 3", "Alice"],
         ])
         try:
             from smart_locker.database.engine import get_engine
             result = import_from_source_excel(get_engine(), path)
 
-            # Only "Max Müller" should be added (schrank values excluded)
+            # Only "Alice" should be added (in-locker values excluded)
             assert result.registrants_added == 1
-            registrant = RegistrantRepository.find_by_name(db_session, "Max Müller")
+            registrant = RegistrantRepository.find_by_name(db_session, "Alice")
             assert registrant is not None
         finally:
             path.unlink(missing_ok=True)
@@ -553,8 +553,8 @@ class TestRegistrantExtraction:
     def test_no_location_column_no_registrants(self, db_session):
         """Without a location column, no registrant names are extracted."""
         path = _create_test_excel([
-            ["Equipment", "Hersteller", "Platz Messmittelschrank"],
-            ["PM-001", "Fluke", "Schrank 1"],
+            ["Equipment", "Manufacturer", "Slot"],
+            ["PM-001", "Fluke", "Bay 1"],
         ])
         try:
             from smart_locker.database.engine import get_engine
@@ -562,5 +562,94 @@ class TestRegistrantExtraction:
             assert result.registrants_added == 0
             registrants = RegistrantRepository.get_all(db_session)
             assert len(registrants) == 0
+        finally:
+            path.unlink(missing_ok=True)
+
+
+class TestSiteHeaderAliases:
+    """Extra Excel header names come from env; built-in English aliases still match."""
+
+    def test_id_header_extra_matches_inventory_column(self, db_session, monkeypatch):
+        """SMART_LOCKER_ID_HEADERS adds a join-key alias used by Sync."""
+        monkeypatch.setenv("SMART_LOCKER_ID_HEADERS", "Inventory No")
+        DeviceRepository.create(
+            db_session,
+            name="Old",
+            device_type="general",
+            pm_number="PM-001",
+            manufacturer="Old",
+            model="Old",
+            locker_slot=1,
+        )
+        db_session.commit()
+        path = _create_test_excel([
+            ["Inventory No", "Manufacturer", "Model"],
+            ["PM-001", "Fluke", "87V"],
+        ])
+        try:
+            from smart_locker.database.engine import get_engine
+            result = import_from_source_excel(get_engine(), path)
+            assert result.updated == 1
+            device = DeviceRepository.find_by_pm(db_session, "PM-001")
+            assert device.manufacturer == "Fluke"
+            assert device.model == "87V"
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_builtin_equipment_header_still_matches(self, db_session, monkeypatch):
+        """A site extra must not drop the built-in Equipment alias."""
+        monkeypatch.setenv("SMART_LOCKER_ID_HEADERS", "Inventory No")
+        DeviceRepository.create(
+            db_session,
+            name="Old",
+            device_type="general",
+            pm_number="PM-001",
+            manufacturer="Old",
+            model="Old",
+            locker_slot=1,
+        )
+        db_session.commit()
+        path = _create_test_excel([
+            ["Equipment", "Manufacturer", "Model"],
+            ["PM-001", "Keysight", "34465A"],
+        ])
+        try:
+            from smart_locker.database.engine import get_engine
+            result = import_from_source_excel(get_engine(), path)
+            assert result.updated == 1
+            assert DeviceRepository.find_by_pm(db_session, "PM-001").manufacturer == "Keysight"
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_location_header_extra_extracts_registrants(self, db_session, monkeypatch):
+        """SMART_LOCKER_LOCATION_HEADERS adds a Location-column alias."""
+        monkeypatch.setenv("SMART_LOCKER_LOCATION_HEADERS", "Whereabouts")
+        path = _create_test_excel([
+            ["Equipment", "Whereabouts"],
+            ["PM-001", "Alice"],
+        ])
+        try:
+            from smart_locker.database.engine import get_engine
+            result = import_from_source_excel(get_engine(), path)
+            assert result.registrants_added == 1
+            assert RegistrantRepository.find_by_name(db_session, "Alice") is not None
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_custom_in_locker_token_is_not_a_person(self, db_session, monkeypatch):
+        """SMART_LOCKER_IN_LOCKER_TOKEN is not added to the registrant list."""
+        monkeypatch.setenv("SMART_LOCKER_IN_LOCKER_TOKEN", "At base")
+        path = _create_test_excel([
+            ["Equipment", "Location"],
+            ["PM-001", "At base"],
+            ["PM-002", "Alice"],
+        ])
+        try:
+            from smart_locker.database.engine import get_engine
+            result = import_from_source_excel(get_engine(), path)
+            assert result.registrants_added == 1
+            names = [r.display_name for r in RegistrantRepository.get_all(db_session)]
+            assert "Alice" in names
+            assert "At base" not in names
         finally:
             path.unlink(missing_ok=True)

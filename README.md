@@ -74,8 +74,8 @@ smart_locker/
 │   │   └── user_service.py      # User enrollment, public/admin views
 │   └── sync/
 │       ├── excel_sync.py        # On-demand / auto Excel export (Devices / Transactions / Users)
-│       ├── source_import.py     # Catalog refresh for locker PMs (no insert, DE/EN headers)
-│       ├── einsatzort_writeback.py  # Pi → Excel: Aktueller Einsatzort by PM only
+│       ├── source_import.py     # Catalog refresh for locker PMs (no insert, English headers)
+│       ├── location_writeback.py    # Pi → Excel: Location by PM only
 │       ├── scheduler.py         # Source import + write-back: startup + 6h interval (+ local FS watch)
 │       ├── photo_watcher.py     # Auto-assign device photos by model number
 │       └── fs_utils.py          # Detect network (CIFS/NFS) paths so watchers skip unreliable inotify
@@ -92,7 +92,7 @@ smart_locker/
 │   ├── migrate_db.py            # Add columns/tables to an existing DB (run after schema changes)
 │   ├── enroll_card.py           # Enroll a new NFC card user (reader tap, or --uid HEX for no hardware)
 │   ├── enroll_device_tag.py     # Bind an NFC sticker to an existing device (--pm, optional --uid / --force)
-│   ├── import_devices.py        # Bulk device import from Excel (German + English headers)
+│   ├── import_devices.py        # Catalog refresh from Excel (English headers / aliases)
 │   ├── update_device.py         # Update device fields / match photos by PM number
 │   ├── sync_source.py           # Manually trigger source Excel import
 │   └── pack_release.py          # Pack a signed release (tracked-file snapshot + HMAC sidecar)
@@ -117,8 +117,8 @@ smart_locker/
 | Self-registration | ✅ Done | Approved-name list + NFC tap; admin manual registration |
 | Excel export | ✅ Done | On-demand `.xlsx` (Devices + Transactions + Users) — replaces old auto-sync |
 | Source import | ✅ Done | Startup + 6h interval + file-watch on local FS; catalog-only, no insert |
-| Einsatzort write-back | ✅ Done | Pi writes Aktueller Einsatzort by PM (`Schrank` / borrower); locked file skipped |
-| Device import | ✅ Done | German + English Excel headers, PM-based catalog update, no auto locker insert |
+| Location write-back | ✅ Done | Pi writes Location by PM (`Locker` / borrower); locked file skipped |
+| Device import | ✅ Done | English Excel headers and aliases, PM-based catalog update, no auto locker insert |
 | Photo import | ✅ Done | By PM number (`update_device`) or by model (photo watcher) |
 | Web dashboard | ✅ Done | Read-only `/dashboard` — devices, transactions, users; 30s auto-refresh |
 | Frontend UI | ✅ Done | 6-screen kiosk UI + overlays |
@@ -181,7 +181,7 @@ See **GUIDE.md** for detailed step-by-step instructions.
 │  ┌──────▼───────────┐  ┌──────▼──────────────┐  ┌──────▼────────────┐ │
 │  │ SQLite + ORM     │  │ NFC reader (ACR1252U)│  │ Excel sync        │ │
 │  │ users · devices  │  │ background listener  │  │ catalog import    │ │
-│  │ registrants      │  │ tap → HMAC → auth    │  │ Einsatzort back   │ │
+│  │ registrants      │  │ tap → HMAC → auth    │  │ Location back     │ │
 │  │ transaction_logs │  └──────────────────────┘  │ on-demand export  │ │
 │  └──────────────────┘                            └───────────────────┘ │
 └──────────────────────────────────────────────────────────────────────┘
@@ -215,7 +215,7 @@ A read-only dashboard is served at **`/dashboard`** for anyone on the local netw
 New users can enroll their own card without an admin at the kiosk:
 
 1. On the idle screen, tap **"Register your card"**.
-2. Search and select your name from the approved list (`GET /api/registrants`). Approved names come from the **"Aktueller Einsatzort"** column during source Excel import (stored in the `registrants` table).
+2. Search and select your name from the approved list (`GET /api/registrants`). Approved names come from the **Location** column during source Excel import (stored in the `registrants` table).
 3. Submit (`POST /api/register`). If your name isn't on the list, registration is refused ("Contact an admin").
 4. Tap your NFC card within the registration window (default 60s) — the card is enrolled under your approved name.
 
@@ -251,7 +251,7 @@ Cheap NFC stickers on locker devices use the same ACR1252U as work cards (no USB
 - **Flow:** tap work card → tap sticker (or pick on screen). Auto-intent from device status: borrow if available, return if you hold it. Session stays open for several devices. A work-card tap still logs out.
 - **Register Device** (hidden admin panel): **PM + free slot + NFC**. Catalog comes from Excel. Sync never inserts locker rows. The list shows **name + PM**. CLI bind: `python -m scripts.enroll_device_tag --pm PM-001` (or `--uid HEX`).
 - Excel barcode is unused leftover; re-import does **not** overwrite `tag_hmac`, locker status, or the current borrower.
-- After borrow/return (and after Register Device / Sync), the Pi writes **only** Aktueller Einsatzort in `device-list.xlsx` (`Schrank` in the locker, borrower name when out). Catalog columns stay. A locked workbook is skipped, not a kiosk crash.
+- After borrow/return (and after Register Device / Sync), the Pi writes **only** Location in the catalog workbook (`SMART_LOCKER_IN_LOCKER_TOKEN` in the locker, borrower name when out). Catalog columns stay. A locked workbook is skipped, not a kiosk crash. Extra Excel header names: `SMART_LOCKER_ID_HEADERS` / `SMART_LOCKER_LOCATION_HEADERS`. On-screen noun: `SMART_LOCKER_ASSET_LABEL`.
 
 ## Running Tests
 

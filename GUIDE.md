@@ -29,7 +29,7 @@ Three things are worth understanding up front:
 - **No internet at runtime.** The Pi only needs the company LAN to reach the locker file
   share. Everything else runs locally. Installation comes from the USB stick, not the web.
 - **The share is both source and destination.** The Pi imports catalog fields from
-  `device-list.xlsx` and writes locker **Aktueller Einsatzort** back into that same file.
+  `device-list.xlsx` and writes locker **Location** back into that same file.
   Download Excel (`smart_locker_data.xlsx`) is an on-demand snapshot.
 - **The database stays on the Pi.** SQLite lives on the SD card. Do not put it on the
   network share — locking over CIFS is unreliable.
@@ -899,15 +899,15 @@ usually succeeds.
    in SQLite. A device enters the locker only via admin **Register Device**
    (PM + free slot + NFC). Platz/Schrank is unused.
 
-4. After that import, the Pi writes **Aktueller Einsatzort** for locker PMs
-   back into the same workbook (available → `Schrank`, borrowed → the borrower's
+4. After that import, the Pi writes **Location** for locker PMs
+   back into the same workbook (available → `Locker`, borrowed → the borrower's
    name). Other columns and sheets are left alone. If someone has the file open
    in Excel, the write is skipped and retried on the next borrow/return or
-   sync — the kiosk keeps running. **Do not edit Aktueller Einsatzort in Excel**
+   sync — the kiosk keeps running. **Do not edit Location in Excel**
    for locker devices; the Pi owns that cell. Add new PMs and fix catalog
    columns (name, type, manufacturer, model, serial, calibration) in Excel as usual.
 
-5. Values in **Aktueller Einsatzort** that are not schrank locations are treated as person
+5. Values in **Location** that are not locker/cabinet locations are treated as person
    names and added to the self-register list.
 
 6. If `SMART_LOCKER_EXCEL_AUTO_EXPORT=1`, after a real import the Pi writes
@@ -916,7 +916,7 @@ usually succeeds.
 
 Re-import matches devices by PM number. It leaves `locker_slot`, `image_path`,
 `description`, `status`, and the current borrower alone. Catalog fields still update.
-Excel never inserts a locker row. After import, the Pi writes locker Einsatzort
+Excel never inserts a locker row. After import, the Pi writes locker Location
 back into the sheet.
 
 **Web dashboard** — open `http://<pi-address>:8000/dashboard` from any browser on the
@@ -1142,7 +1142,7 @@ All settings live in `.env` (loaded by `config/settings.py`). The Pi template
 **Built:** NFC enrollment & authentication (AES-256-GCM + HMAC), single-user sessions with
 timeout, device tracking with the full schema, NFC **device tags** (same ACR1252U; auto
 borrow/return after login), borrow/return with admin overrides and per-user limits,
-self-service registration, Excel catalog refresh (no locker insert), Einsatzort
+self-service registration, Excel catalog refresh (no locker insert), Location
 write-back into `device-list.xlsx`, on-demand/auto export, photo assignment, the
 read-only `/dashboard`, the FastAPI REST API + SSE bridge, the
 6-screen kiosk UI, **Raspberry Pi appliance deployment** (systemd service, CIFS mount,

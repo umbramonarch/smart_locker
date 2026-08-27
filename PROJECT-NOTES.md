@@ -1,11 +1,5 @@
 # PROJECT-NOTES.md
 
-Filled from `D:\projects\guide\templates\PROJECT-NOTES.md`. No placeholders.
-
----
-
-# PROJECT-NOTES.md
-
 ## Project
 
 - **Name:** smart_locker
@@ -15,7 +9,7 @@ Filled from `D:\projects\guide\templates\PROJECT-NOTES.md`. No placeholders.
 ## Stack
 
 - **Languages:** Python (backend, scripts, tests) + vanilla HTML/CSS/JS (kiosk and `/dashboard`)
-- **Language pack(s) to follow:** python (`D:\projects\guide\language-packs\python.md`), with this repo’s existing layout (`smart_locker/` package at repo root, `requirements.txt` not `pyproject.toml`)
+- **Conventions:** Google docstrings, existing layout (`smart_locker/` package at repo root, `requirements.txt` not `pyproject.toml`)
 - **Important versions:** Python 3.11+ on Windows/dev; **Python 3.13 / cp313** on Raspberry Pi OS trixie. pytest 8. No Node runtime for the product.
 
 ## How to build / test / flash
@@ -30,7 +24,7 @@ python -m scripts.init_db
 python -m scripts.enroll_card --name "Name" --role admin
 python -m smart_locker.app           # kiosk API + UI on :8000
 
-python -m pytest tests/ -v           # ~298 items, 22 files, no NFC hardware
+python -m pytest tests/ -v           # ~325 items, no NFC hardware
 
 # Pi (offline): copy tree + wheelhouse + .debs, then
 sudo bash deploy/install/install.sh
@@ -47,8 +41,7 @@ sudo bash deploy/install/install.sh
 
 ## Do
 
-- Follow the personal engineering playbook (work type → checklist). Full method: `D:\projects\guide\00-start-here.md`
-- Write tests from the human's stated acceptance / bug / current behavior only.
+- Write tests from the stated acceptance / bug / current behavior only.
 - Keep diffs on-Issue. New dependencies need an explicit why, pin, and license.
 - Work on a short-lived branch from `main` (`feature/`, `fix/`, `refactor/`, `docs/`, `chore/`, `hotfix/`, `spike/`). MR into `main`. Delete the branch after merge.
 - Keep `deploy/*.sh`, `*.service`, `*.desktop` LF (`.gitattributes`). Run Pi scripts as `sudo bash …`.
@@ -71,8 +64,9 @@ sudo bash deploy/install/install.sh
 
 - **Secrets:** `.env` (gitignored). Three keys: `SMART_LOCKER_ENC_KEY` (AES-256-GCM), `SMART_LOCKER_HMAC_KEY` (HMAC-SHA256 card lookup), `SMART_LOCKER_UPDATE_HMAC_KEY` (release HMAC; openssl uses the env **string**, not decoded 32 bytes).
 - **Locker share (Pi: `/mnt/locker`):** Excel import, Excel export, photos, and signed updates live at the share root (`deploy/.env.pi.example`). Share down ≠ kiosk down.
-- **Excel import:** `smart_locker/sync/source_import.py` — catalog refresh for PMs already in SQLite (never inserts locker rows). DE/EN headers. Re-import never overwrites `locker_slot` / `image_path` / `description` / `tag_hmac` / `status` / `current_borrower_id`. Catalog fields (name, type, serial, manufacturer, model, calibration) still update. `devices.barcode` is unused leftover (not imported). Platz/Schrank unused. Scheduler: startup + every 6 hours (`SMART_LOCKER_SOURCE_SYNC_INTERVAL_HOURS`) + admin Sync; last-sync persisted next to the DB.
-- **Excel write-back:** `smart_locker/sync/einsatzort_writeback.py` — after borrow/return, Register Device, and each source import, the Pi writes **only** Aktueller Einsatzort by PM. Available → `Schrank`; borrowed → borrower name. Other columns/sheets stay. Locked or missing workbook: log + retry, never crash the kiosk. Do not edit Aktueller Einsatzort in Excel for locker devices (the Pi overwrites that cell).
+- **Excel import:** `smart_locker/sync/source_import.py` — catalog refresh for PMs already in SQLite (never inserts locker rows). English headers and aliases (case-insensitive); extra aliases via `SMART_LOCKER_ID_HEADERS` / `SMART_LOCKER_LOCATION_HEADERS`. Re-import never overwrites `locker_slot` / `image_path` / `description` / `tag_hmac` / `status` / `current_borrower_id`. Catalog fields (name, type, serial, manufacturer, model, calibration) still update. `devices.barcode` is unused leftover (not imported). A Slot column is unused. Scheduler: startup + every 6 hours (`SMART_LOCKER_SOURCE_SYNC_INTERVAL_HOURS`) + admin Sync; last-sync persisted next to the DB.
+- **Excel write-back:** `smart_locker/sync/location_writeback.py` — after borrow/return, Register Device, and each source import, the Pi writes **only** the Location column by PM. Available → `SMART_LOCKER_IN_LOCKER_TOKEN` (default `Locker`); borrowed → borrower name. Other columns/sheets stay. Locked or missing workbook: log + retry, never crash the kiosk. Do not edit Location in Excel for locker devices (the Pi overwrites that cell).
+- **Asset label:** `SMART_LOCKER_ASSET_LABEL` (default `PM number`) is the kiosk/dashboard noun. Storage and JSON stay `pm_number`. Public `GET /api/config` returns `{ "asset_label": ... }`.
 - **NFC device tags:** same ACR1252U as work cards. Store `devices.tag_hmac` only (same HMAC key as `users.uid_hmac`). Kiosk `GET /api/devices` may expose `has_tag: bool`, never the digest; dashboard JSON and Excel export omit `tag_hmac`. Idle tap of a **borrowed** sticker returns it (no work card; slot overlay); available tags do not borrow from idle.
 - **Excel auto-export** only if `SMART_LOCKER_EXCEL_AUTO_EXPORT=1` (off in the Pi template; admin Export Excel stays).
 - **Photos:** filename stem = device **model**. `scripts/update_device.py --auto` matches **PM number** — different scheme.

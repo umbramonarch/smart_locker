@@ -65,3 +65,19 @@ class TestRegisterDeviceAddFromExcel:
         js = _js()
         assert "submitRegisterDevice" in js
         assert "Add from Excel is Pi only" in js
+
+    def test_js_loads_asset_label_from_config(self):
+        """Kiosk copy for the join-key label comes from GET /api/config."""
+        js = _js()
+        assert "/api/config" in js
+        assert "asset_label" in js
+        html = _html()
+        assert 'id="detail-pm-label"' in html
+        assert 'id="bind-pm-input"' in html
+
+    def test_dashboard_loads_asset_label_from_config(self):
+        """Dashboard column title comes from GET /api/config."""
+        js = (FRONTEND / "dashboard.js").read_text(encoding="utf-8")
+        html = (FRONTEND / "dashboard.html").read_text(encoding="utf-8")
+        assert "/api/config" in js
+        assert 'id="col-asset-label"' in html

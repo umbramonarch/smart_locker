@@ -6,7 +6,7 @@ Description: REST API endpoints and SSE event stream for the Smart Locker kiosk.
              manual registration, Register Device (PM + slot + NFC), device-tag
              bind/unbind, registrant list retrieval, source sync, public dashboard
              data endpoints, an admin-only Excel export download, admin Exit
-             kiosk / Shut down, and source sync that writes Einsatzort back.
+             kiosk / Shut down, and source sync that writes Location back.
 Project: smart_locker/api
 Notes: All device/session endpoints require an active kiosk session enforced by
        the require_session dependency. SSE stream at /api/events pushes NFC and
@@ -103,6 +103,21 @@ def serve_dashboard() -> FileResponse:
         FileResponse: the dashboard HTML page.
     """
     return FileResponse(_FRONTEND_DIR / "dashboard.html")
+
+
+@router.get("/api/config")
+def public_config() -> dict:
+    """Site overlay for the kiosk and dashboard (no auth).
+
+    Returns the display noun for the locker join key. Storage and JSON still
+    use ``pm_number``. Excel header extras are not needed in the browser.
+
+    Returns:
+        dict: ``asset_label`` from ``SMART_LOCKER_ASSET_LABEL``.
+    """
+    from config.settings import asset_label
+
+    return {"asset_label": asset_label()}
 
 
 @router.get("/api/health")
@@ -533,7 +548,7 @@ def start_registration(body: RegisterRequest, db: Session = Depends(get_db)):
     """Begin self-registration: validate name against approved list, await NFC tap.
 
     The submitted name must exist in the ``registrants`` table (populated from
-    the "Aktueller Einsatzort" column during source Excel import). If the name
+    the "Location" column during source Excel import). If the name
     is not found, the request is rejected with 403 — the user must contact an
     admin for manual registration. Creates a ``PendingRegistration`` that the
     NFC bridge loop will detect on the next card tap.
@@ -601,7 +616,7 @@ def cancel_registration():
 def get_registrants(db: Session = Depends(get_db)):
     """Return the list of approved names available for self-registration.
 
-    Reads the ``registrants`` table (populated from the "Aktueller Einsatzort"
+    Reads the ``registrants`` table (populated from the "Location"
     column during source Excel import) and filters out names that already have
     an active User record — those people are already registered and do not need
     to appear in the selection list. No session required; this is a public
@@ -966,11 +981,11 @@ def unbind_device_tag(
 def trigger_source_sync(
     user_session: UserSession = Depends(require_session),
 ):
-    """Manually trigger source Excel import then Einsatzort write-back (admin only).
+    """Manually trigger source Excel import then Location write-back (admin only).
 
-    Reads the company device master list and updates catalog fields on locker
+    Reads the device catalog spreadsheet and updates catalog fields on locker
     devices already in SQLite. After the import, locker locations are written
-    back into Aktueller Einsatzort. Only users with ADMIN role may invoke this.
+    back into Location. Only users with ADMIN role may invoke this.
 
     Args:
         user_session: The active session (injected by ``require_session``).
@@ -999,9 +1014,9 @@ def trigger_source_sync(
         raise HTTPException(status_code=500, detail=f"Import failed: {e}") from e
 
     sync_status.record_result("manual", result)
-    from smart_locker.sync.einsatzort_writeback import write_einsatzort_with_engine
+    from smart_locker.sync.location_writeback import write_location_with_engine
 
-    write_einsatzort_with_engine(get_engine(), SOURCE_EXCEL_PATH)
+    write_location_with_engine(get_engine(), SOURCE_EXCEL_PATH)
     return {
         "success": True,
         "imported": result.imported,

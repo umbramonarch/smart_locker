@@ -4,7 +4,7 @@ Description: Borrow/return business logic for the Smart Locker system. Enforces
              per-user borrow limits, device availability checks, ownership rules,
              admin return-on-behalf, and unattended idle return with full
              transaction logging. After a successful location change, writes
-             Aktueller Einsatzort back into the company Excel (best-effort).
+             Location back into the catalog Excel (best-effort).
 Project: smart_locker/services
 Notes: The borrow limit is configured via MAX_BORROWS in config/settings.py
        (default 5). Admins can return any device on behalf of the original
@@ -24,11 +24,11 @@ from smart_locker.database.repositories import DeviceRepository, TransactionRepo
 logger = logging.getLogger(__name__)
 
 
-def _write_einsatzort(db_session: Session) -> None:
-    """Best-effort Aktueller Einsatzort write-back. Never raises."""
-    from smart_locker.sync.einsatzort_writeback import maybe_write_einsatzort
+def _write_location(db_session: Session) -> None:
+    """Best-effort Location write-back. Never raises."""
+    from smart_locker.sync.location_writeback import maybe_write_location
 
-    maybe_write_einsatzort(db_session)
+    maybe_write_location(db_session)
 
 
 class LockerService:
@@ -90,7 +90,7 @@ class LockerService:
         DeviceRepository.borrow(db_session, device, user.id)
         TransactionRepository.log_borrow(db_session, user.id, device_id, notes)
         user_session.touch()
-        _write_einsatzort(db_session)
+        _write_location(db_session)
 
         logger.info(
             "%s borrowed %s (device=%d)",
@@ -157,7 +157,7 @@ class LockerService:
                 performed_by_id=user.id,
             )
             user_session.touch()
-            _write_einsatzort(db_session)
+            _write_location(db_session)
             logger.info(
                 "Admin %s returned %s (device=%d) on behalf of user %d",
                 user.display_name,
@@ -170,7 +170,7 @@ class LockerService:
         DeviceRepository.return_device(db_session, device)
         TransactionRepository.log_return(db_session, user.id, device_id, notes)
         user_session.touch()
-        _write_einsatzort(db_session)
+        _write_location(db_session)
 
         logger.info(
             "%s returned %s (device=%d)",
@@ -224,7 +224,7 @@ class LockerService:
             device_id=device_id,
             notes="returned at kiosk without card",
         )
-        _write_einsatzort(db_session)
+        _write_location(db_session)
         logger.info(
             "Unattended return of %s (device=%d) for user %d",
             device.name,

@@ -1,12 +1,12 @@
 """
 File: device_registration.py
-Description: Admin Register Device — look up a PM in the company Excel catalog,
+Description: Admin Register Device — look up a PM in the catalog Excel,
              assign a unique locker slot, and insert one SQLite row. Sync never
              creates locker devices; this module is the only insert path.
 Project: smart_locker/services
 Notes: Unknown PM or a missing/locked workbook leaves the database unchanged.
        New rows start AVAILABLE. NFC bind is armed by the API after insert.
-       After insert, Aktueller Einsatzort is written as the in-locker token.
+       After insert, Location is written as the in-locker token.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ import logging
 
 from sqlalchemy.orm import Session
 
+from config.settings import asset_label
 from smart_locker.database.models import Device, DeviceStatus
 from smart_locker.database.repositories import DeviceRepository
 from smart_locker.sync.source_import import CatalogReadError, lookup_catalog_by_pm
@@ -27,7 +28,7 @@ class CatalogUnavailable(Exception):
 
 
 class UnknownPm(Exception):
-    """The PM number is not in the company Excel catalog."""
+    """The PM number is not in the catalog spreadsheet."""
 
 
 class SlotTaken(Exception):
@@ -87,7 +88,7 @@ def register_locker_device(
     """
     pm = (pm_number or "").strip()
     if not pm:
-        raise UnknownPm("PM number is empty.")
+        raise UnknownPm(f"{asset_label()} is empty.")
 
     existing = DeviceRepository.find_by_pm(session, pm)
     if existing is not None:
@@ -101,7 +102,7 @@ def register_locker_device(
         raise CatalogUnavailable(str(e)) from e
 
     if catalog is None:
-        raise UnknownPm(f"PM '{pm}' was not found in the source Excel.")
+        raise UnknownPm(f"{asset_label()} '{pm}' was not found in the source Excel.")
 
     serial = catalog.serial_number
     if serial and DeviceRepository.find_by_serial(session, serial) is not None:
@@ -127,9 +128,9 @@ def register_locker_device(
                 device.image_path = sib.image_path
                 break
 
-    from smart_locker.sync.einsatzort_writeback import write_einsatzort
+    from smart_locker.sync.location_writeback import write_location
 
-    write_einsatzort(session, source_path)
+    write_location(session, source_path)
     logger.info(
         "Registered locker device %s (pm=%s, slot=%s).",
         device.name, device.pm_number, locker_slot,

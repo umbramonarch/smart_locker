@@ -26,13 +26,22 @@ def _set_test_keys(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _disable_einsatzort_writeback(monkeypatch):
+def _disable_location_writeback(monkeypatch):
     """Do not write a developer SOURCE_EXCEL_PATH during tests.
 
-    Borrow/return call maybe_write_einsatzort against settings. Tests that
+    Borrow/return call maybe_write_location against settings. Tests that
     need write-back monkeypatch SOURCE_EXCEL_PATH onto a temp workbook.
     """
     monkeypatch.setattr("config.settings.SOURCE_EXCEL_PATH", "")
+
+
+@pytest.fixture(autouse=True)
+def _default_site_overlay(monkeypatch):
+    """Ignore a developer .env overlay so tests see built-in Excel/UI defaults."""
+    monkeypatch.delenv("SMART_LOCKER_ASSET_LABEL", raising=False)
+    monkeypatch.delenv("SMART_LOCKER_ID_HEADERS", raising=False)
+    monkeypatch.delenv("SMART_LOCKER_LOCATION_HEADERS", raising=False)
+    monkeypatch.delenv("SMART_LOCKER_IN_LOCKER_TOKEN", raising=False)
 
 
 @pytest.fixture(autouse=True)

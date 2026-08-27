@@ -1,6 +1,6 @@
 """
-File: einsatzort_writeback.py
-Description: Pi → Excel write-back of Aktueller Einsatzort only, matched by PM.
+File: location_writeback.py
+Description: Pi → Excel write-back of the Location column only, matched by PM.
              Locker available (or any non-borrowed state) writes a stable
              in-locker token; borrowed writes the borrower's display name.
              Other columns and sheets are left untouched. Never inserts rows.
@@ -26,15 +26,16 @@ from pathlib import Path
 from openpyxl import load_workbook
 from sqlalchemy.orm import Session
 
+from config.settings import in_locker_token
 from smart_locker.database.models import Device, DeviceStatus
 from smart_locker.database.repositories import DeviceRepository
-from smart_locker.sync.source_import import LOCATION_CANDIDATES, PM_CANDIDATES, find_column
+from smart_locker.sync.source_import import find_column, location_candidates, pm_candidates
 
 logger = logging.getLogger(__name__)
 
-# Stable token written when a locker device is in the cabinet (not borrowed).
-# Must contain "schrank" so a later catalog import does not treat it as a person.
-IN_LOCKER_TOKEN = "Schrank"
+# Default in-locker token when SMART_LOCKER_IN_LOCKER_TOKEN is unset.
+# Live writes use config.settings.in_locker_token().
+IN_LOCKER_TOKEN = "Locker"
 
 _MAX_RETRIES = 3
 _RETRY_DELAY_SECONDS = 1.0
@@ -46,7 +47,7 @@ class _StaleWorkbook(Exception):
 
 @dataclass
 class WritebackResult:
-    """Outcome of one Einsatzort write-back. Never used to fail the kiosk."""
+    """Outcome of one Location write-back. Never used to fail the kiosk."""
 
     written: int = 0
     unchanged: int = 0
@@ -54,20 +55,20 @@ class WritebackResult:
     saved: bool = False
 
 
-def _einsatzort_value(device: Device) -> str:
+def _location_value(device: Device) -> str:
     """Map one locker device to the Excel location cell.
 
     Args:
         device: Locker row (status + optional borrower already loaded).
 
     Returns:
-        Borrower display name when borrowed, otherwise ``IN_LOCKER_TOKEN``.
+        Borrower display name when borrowed, otherwise the in-locker token.
     """
     if device.status == DeviceStatus.BORROWED and device.current_borrower is not None:
         name = (device.current_borrower.display_name or "").strip()
         if name:
             return name
-    return IN_LOCKER_TOKEN
+    return in_locker_token()
 
 
 def _cell_text(value) -> str:
@@ -85,7 +86,7 @@ def _cell_text(value) -> str:
 
 
 def _wanted_by_pm(session: Session) -> dict[str, str]:
-    """Build PM → Einsatzort text for every locker device.
+    """Build PM → Location text for every locker device.
 
     Args:
         session: Active database session (autoflush sees in-request borrows).
@@ -98,7 +99,7 @@ def _wanted_by_pm(session: Session) -> dict[str, str]:
         pm = (device.pm_number or "").strip()
         if not pm:
             continue
-        wanted[pm] = _einsatzort_value(device)
+        wanted[pm] = _location_value(device)
     return wanted
 
 
@@ -120,7 +121,7 @@ def _replace_into(tmp_path: Path, dest: Path) -> None:
         except PermissionError:
             if attempt < _MAX_RETRIES:
                 logger.debug(
-                    "Einsatzort write-back: %s is locked, retrying in %ss "
+                    "Location write-back: %s is locked, retrying in %ss "
                     "(attempt %d/%d)",
                     dest, _RETRY_DELAY_SECONDS, attempt, _MAX_RETRIES,
                 )
@@ -130,11 +131,11 @@ def _replace_into(tmp_path: Path, dest: Path) -> None:
 
 
 def _write_once(session: Session, path: Path) -> WritebackResult:
-    """Copy, edit Aktueller Einsatzort, and replace if anything changed.
+    """Copy, edit Location, and replace if anything changed.
 
     Args:
         session: Database session used to read locker devices.
-        path: Company ``device-list.xlsx``.
+        path: Source ``device-list.xlsx``.
 
     Returns:
         Counts of written / unchanged / skipped PMs and whether a save ran.
@@ -161,17 +162,17 @@ def _write_once(session: Session, path: Path) -> WritebackResult:
             str(cell.value).strip() if cell.value else ""
             for cell in ws[1]
         ]
-        pm_idx = find_column(headers, PM_CANDIDATES)
-        loc_idx = find_column(headers, LOCATION_CANDIDATES)
+        pm_idx = find_column(headers, pm_candidates())
+        loc_idx = find_column(headers, location_candidates())
         if pm_idx is None:
             logger.warning(
-                "Einsatzort write-back skipped — no PM column in %s (headers: %s).",
+                "Location write-back skipped — no PM column in %s (headers: %s).",
                 path, headers,
             )
             return result
         if loc_idx is None:
             logger.warning(
-                "Einsatzort write-back skipped — no Aktueller Einsatzort column "
+                "Location write-back skipped — no Location column "
                 "in %s (headers: %s).",
                 path, headers,
             )
@@ -214,7 +215,7 @@ def _write_once(session: Session, path: Path) -> WritebackResult:
         dest_path = None
         result.saved = True
         logger.info(
-            "Einsatzort write-back: %d written, %d unchanged, %d not in Excel (%s).",
+            "Location write-back: %d written, %d unchanged, %d not in Excel (%s).",
             result.written, result.unchanged, result.skipped, path,
         )
         return result
@@ -229,12 +230,12 @@ def _write_once(session: Session, path: Path) -> WritebackResult:
             dest_path.unlink(missing_ok=True)
 
 
-def write_einsatzort(session: Session, source_path: str | Path) -> WritebackResult:
-    """Write locker location into Aktueller Einsatzort. Never raises.
+def write_location(session: Session, source_path: str | Path) -> WritebackResult:
+    """Write locker location into the Location column. Never raises.
 
     Args:
         session: Active database session (reads devices; does not commit).
-        source_path: Path to the company ``device-list.xlsx``.
+        source_path: Path to the source ``device-list.xlsx``.
 
     Returns:
         WritebackResult. ``saved`` is False when nothing changed or the
@@ -245,7 +246,7 @@ def write_einsatzort(session: Session, source_path: str | Path) -> WritebackResu
     if path is None or not str(source_path).strip():
         return result
     if not path.exists():
-        logger.warning("Einsatzort write-back skipped — file not found: %s", path)
+        logger.warning("Location write-back skipped — file not found: %s", path)
         return result
 
     try:
@@ -255,58 +256,58 @@ def write_einsatzort(session: Session, source_path: str | Path) -> WritebackResu
             except _StaleWorkbook:
                 if attempt < _MAX_RETRIES:
                     logger.info(
-                        "Einsatzort write-back: %s changed during edit, "
+                        "Location write-back: %s changed during edit, "
                         "retrying (%d/%d).",
                         path, attempt, _MAX_RETRIES,
                     )
                     continue
                 logger.warning(
-                    "Einsatzort write-back skipped — %s kept changing during edit.",
+                    "Location write-back skipped — %s kept changing during edit.",
                     path,
                 )
                 return result
     except PermissionError:
         logger.warning(
-            "Einsatzort write-back skipped — %s is locked (open in Excel).",
+            "Location write-back skipped — %s is locked (open in Excel).",
             path,
         )
         return result
     except OSError as e:
         logger.warning(
-            "Einsatzort write-back skipped — %s unavailable or unwritable (%s).",
+            "Location write-back skipped — %s unavailable or unwritable (%s).",
             path, e,
         )
         return result
     except Exception:
         logger.exception(
-            "Einsatzort write-back failed for %s — locker database is unchanged.",
+            "Location write-back failed for %s — locker database is unchanged.",
             path,
         )
         return result
 
 
-def write_einsatzort_with_engine(engine, source_path: str | Path) -> WritebackResult:
-    """Write Einsatzort using a short-lived session on ``engine``. Never raises.
+def write_location_with_engine(engine, source_path: str | Path) -> WritebackResult:
+    """Write Location using a short-lived session on ``engine``. Never raises.
 
     Args:
         engine: SQLAlchemy engine (committed locker state).
         source_path: Path to ``device-list.xlsx``.
 
     Returns:
-        WritebackResult from ``write_einsatzort``.
+        WritebackResult from ``write_location``.
     """
     try:
         with Session(engine) as session:
-            return write_einsatzort(session, source_path)
+            return write_location(session, source_path)
     except Exception:
         logger.exception(
-            "Einsatzort write-back failed for %s — locker database is unchanged.",
+            "Location write-back failed for %s — locker database is unchanged.",
             source_path,
         )
         return WritebackResult()
 
 
-def maybe_write_einsatzort(session: Session) -> None:
+def maybe_write_location(session: Session) -> None:
     """Write-back when ``SOURCE_EXCEL_PATH`` is set. Never raises.
 
     Args:
@@ -321,8 +322,8 @@ def maybe_write_einsatzort(session: Session) -> None:
         path = settings.SOURCE_EXCEL_PATH
         if not path:
             return
-        write_einsatzort(session, path)
+        write_location(session, path)
     except Exception:
         logger.exception(
-            "Einsatzort write-back failed — locker database is unchanged."
+            "Location write-back failed — locker database is unchanged."
         )
