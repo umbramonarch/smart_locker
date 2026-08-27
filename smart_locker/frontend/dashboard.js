@@ -1,8 +1,8 @@
 /**
  * @fileoverview Public dashboard: Inventory (Excel), Locker (SQLite), and
  *               Display (kiosk snapshot). Sort, search, status filter, and
- *               polling. Anyone can change owner on Inventory and Locker
- *               after confirm. No login. No remote control of the kiosk.
+ *               polling. Owner change is Inventory only (not locker PMs).
+ *               No login. No remote control of the kiosk.
  * @project smart_locker/frontend
  * @description Tabs switch locally. Inventory errors (share down) leave
  *              the Locker tab usable. Asset-label text comes from /api/config.
@@ -36,8 +36,6 @@ const DISPLAY_MS = 2_000;
 
 /** Names for the owner datalist (users + registrants + in-locker token). */
 let ownerNames = [];
-/** In-locker Location token from GET /api/dashboard/owners. */
-let inLockerToken = 'Locker';
 /** PM currently open in the owner dialog, or ''. */
 let ownerEditPm = '';
 
@@ -136,9 +134,6 @@ async function fetchOwners() {
     if (!res.ok) return;
     const data = await res.json();
     ownerNames = Array.isArray(data.names) ? data.names : [];
-    if (typeof data.in_locker_token === 'string' && data.in_locker_token.trim()) {
-      inLockerToken = data.in_locker_token.trim();
-    }
     fillOwnerDatalist();
   } catch (_) { /* keep last names */ }
 }
@@ -289,7 +284,7 @@ function renderInventory() {
       <td>${esc(d.manufacturer)}</td>
       <td>${esc(d.model)}</td>
       <td>${esc(d.serial_number)}</td>
-      <td>${ownerCell(d.pm_number, d.location)}</td>
+      <td>${d.in_locker ? esc(d.location) : ownerCell(d.pm_number, d.location)}</td>
       <td>${esc(d.calibration_due)}</td>
     </tr>
   `).join('');
@@ -330,7 +325,7 @@ function renderDevices() {
       <td>${esc(d.name)}</td>
       <td>${esc(d.device_type ?? '')}</td>
       <td><span class="status-badge ${d.status}">${d.status}</span></td>
-      <td>${ownerCell(d.pm_number, d.borrower_name || (d.status === 'available' ? inLockerToken : ''))}</td>
+      <td>${esc(d.borrower_name ?? '')}</td>
       <td>${esc(d.calibration_due ?? '')}</td>
     </tr>
   `).join('');
@@ -450,7 +445,7 @@ async function confirmOwnerEdit() {
 /* ── Event wiring ─────────────────────────────────────────────────────────── */
 
 /**
- * Wire tabs, sort headers, Locker filters, Inventory search, and owner edit.
+ * Wire tabs, sort headers, Locker filters, Inventory search, and Inventory owner edit.
  */
 function initEvents() {
   document.querySelectorAll('.tab-btn').forEach(btn => {

@@ -921,11 +921,11 @@ back into the sheet.
 
 **Web dashboard** — open `http://<pi-address>:8000/dashboard` from any browser on the
 network (no login). Three tabs: **Inventory** (live `device-list.xlsx`, search/sort;
-click owner to change it — confirm writes Excel; locker PMs also update SQLite and
-log a transaction; share down errors that tab only), **Locker** (SQLite slot/status/borrower;
-same owner edit), **Display** (what the Riverdi is showing, plus the signed-in user —
-view only). Kiosk colours, desktop cursor and scroll. Users and transaction logs are
-not on this page.
+click owner to change it for PMs that are **not** in the locker — confirm writes Excel;
+locker PMs are not editable here; share down errors that tab only), **Locker** (SQLite
+slot/status/borrower; owner is set at the kiosk), **Display** (what the Riverdi is
+showing, plus the signed-in user — view only). Kiosk colours, desktop cursor and scroll.
+Users and transaction logs are not on this page.
 
 **Status workbook on the share:** the Pi can write `smart_locker_data.xlsx`
 at `SMART_LOCKER_EXCEL_PATH` (Devices + Transactions + Users) when
@@ -1020,7 +1020,7 @@ The Pi lives in the locker, far from you, so it is built to heal itself:
 
 - **Health:** open `http://<pi-address>:8000/api/health`. It returns a small JSON you can bookmark:
   `status` (`ok`/`degraded`), `uptime_seconds`, `database`, `nfc_reader`, and the last sync result.
-- **Dashboard:** open `http://<pi-address>:8000/dashboard` for Inventory / Locker / Display (owner edit on Inventory and Locker).
+- **Dashboard:** open `http://<pi-address>:8000/dashboard` for Inventory / Locker / Display (owner edit on Inventory for non-locker PMs).
 - If `/api/health` doesn't load at all, the Pi is off or off the network (power / cable / Wi-Fi) —
   the one situation that needs someone physically there.
 
@@ -1286,7 +1286,7 @@ that bridges card taps to the browser.
 | `GET` | `/api/dashboard/inventory` | Public company catalog (live Excel, no auth) |
 | `GET` | `/api/dashboard/display` | Public kiosk screen snapshot (no auth) |
 | `GET` | `/api/dashboard/owners` | Owner dropdown names (users + registrants + in-locker token) |
-| `POST` | `/api/dashboard/owner` | Change owner (Excel; SQLite + log if locker PM) |
+| `POST` | `/api/dashboard/owner` | Change owner of a non-locker PM (Excel only; 409 if in locker) |
 | `POST` | `/api/kiosk/display` | Kiosk heartbeat of the current screen |
 | `GET` | `/api/dashboard/transactions` | Transaction history, last 500 (API still public; not on the dashboard page) |
 | `GET` | `/api/dashboard/users` | Registered-users list (API still public; not on the dashboard page) |

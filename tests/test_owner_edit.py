@@ -1,9 +1,8 @@
 """
 File: test_owner_edit.py
-Description: Tests for public dashboard owner edit. Anyone may change owner
-             on Inventory and Locker after confirm. Non-locker PMs write
-             Excel only (no SQLite insert). Locker PMs write Excel + SQLite
-             and log a transaction.
+Description: Tests for public dashboard owner edit. Inventory tab only.
+             Non-locker PMs write Excel (no SQLite insert). Locker PMs are
+             refused — owner is set at the kiosk, not the dashboard.
 Project: smart_locker/tests
 Notes: Run with: python -m pytest tests/test_owner_edit.py -v
        Uses temporary workbooks; no NFC hardware.
@@ -11,10 +10,11 @@ Notes: Run with: python -m pytest tests/test_owner_edit.py -v
 
 from pathlib import Path
 
+import pytest
 from openpyxl import Workbook, load_workbook
 from sqlalchemy import select
 
-from smart_locker.database.models import Device, DeviceStatus, TransactionLog, TransactionType
+from smart_locker.database.models import DeviceStatus, TransactionLog
 from smart_locker.database.repositories import (
     DeviceRepository,
     RegistrantRepository,
@@ -22,7 +22,7 @@ from smart_locker.database.repositories import (
 )
 from smart_locker.security.encryption import encrypt
 from smart_locker.security.hashing import compute_uid_hmac
-from smart_locker.services.owner_edit import owner_choices, set_owner
+from smart_locker.services.owner_edit import LockerOwned, owner_choices, set_owner
 from smart_locker.sync.location_writeback import IN_LOCKER_TOKEN
 
 
@@ -116,14 +116,14 @@ class TestSetOwnerExcelOnly:
         assert db_session.execute(select(TransactionLog)).scalars().all() == []
 
 
-class TestSetOwnerLocker:
-    """Locker PMs write Excel and SQLite and log a transaction."""
+class TestSetOwnerLockerRefused:
+    """Locker devices stay kiosk-owned. Dashboard must not change them."""
 
-    def test_locker_writes_excel_and_sqlite(
+    def test_locker_pm_is_refused(
         self, db_session, tmp_path, enc_key, hmac_key
     ):
-        """Assigning a registered user borrows the locker device and writes Excel."""
-        user = _add_user(db_session, enc_key, hmac_key, "Alice")
+        """A locker PM is not written in Excel or SQLite from the dashboard."""
+        _add_user(db_session, enc_key, hmac_key, "Alice")
         path = _workbook(tmp_path / "device-list.xlsx", [
             ["Equipment", "Name", "Location"],
             ["PM-001", "Scope", "Locker"],
@@ -138,47 +138,11 @@ class TestSetOwnerLocker:
         )
         db_session.flush()
 
-        result = set_owner(db_session, path, "PM-001", "Alice")
+        with pytest.raises(LockerOwned):
+            set_owner(db_session, path, "PM-001", "Alice")
+
         db_session.refresh(device)
-
-        assert result.locker is True
-        assert _location_by_pm(path)["PM-001"] == "Alice"
-        assert device.status == DeviceStatus.BORROWED
-        assert device.current_borrower_id == user.id
-
-        logs = db_session.execute(select(TransactionLog)).scalars().all()
-        assert len(logs) == 1
-        assert logs[0].transaction_type == TransactionType.BORROW
-        assert logs[0].user_id == user.id
-        assert logs[0].device_id == device.id
-
-    def test_locker_return_to_in_locker_token(
-        self, db_session, tmp_path, enc_key, hmac_key
-    ):
-        """Setting owner to the in-locker token returns the device."""
-        user = _add_user(db_session, enc_key, hmac_key, "Alice")
-        path = _workbook(tmp_path / "device-list.xlsx", [
-            ["Equipment", "Name", "Location"],
-            ["PM-001", "Scope", "Alice"],
-        ])
-        device = DeviceRepository.create(
-            db_session,
-            name="Scope",
-            device_type="general",
-            pm_number="PM-001",
-            locker_slot=1,
-            status=DeviceStatus.BORROWED.value,
-            current_borrower_id=user.id,
-        )
-        db_session.flush()
-
-        set_owner(db_session, path, "PM-001", IN_LOCKER_TOKEN)
-        db_session.refresh(device)
-
-        assert _location_by_pm(path)["PM-001"] == IN_LOCKER_TOKEN
+        assert _location_by_pm(path)["PM-001"] == "Locker"
         assert device.status == DeviceStatus.AVAILABLE
         assert device.current_borrower_id is None
-        logs = db_session.execute(select(TransactionLog)).scalars().all()
-        assert len(logs) == 1
-        assert logs[0].transaction_type == TransactionType.RETURN
-        assert logs[0].user_id == user.id
+        assert db_session.execute(select(TransactionLog)).scalars().all() == []

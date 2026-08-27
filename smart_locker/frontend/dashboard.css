@@ -5,8 +5,8 @@
  *              not the kiosk hidden-cursor fullscreen.
  * Project: smart_locker/frontend
  * Notes: Tabs for Inventory / Locker / Display. Status badges stay
- *        colour-coded. Owner edit uses a confirm dialog. Responsive
- *        down to ~600px.
+ *        colour-coded. Inventory owner edit (non-locker PMs) uses a
+ *        confirm dialog. Responsive down to ~600px.
  */
 
 /* --- Reset & base -------------------------------------------------------- */

@@ -3,7 +3,7 @@ File: test_dashboard_tabs.py
 Description: Contract tests for the public dashboard tabs: Inventory (Excel),
              Locker (SQLite), Display (kiosk view-only). Kiosk colors, desktop
              cursor and scroll. Users and transaction logs stay off the public
-             page. Anyone can change owner on Inventory and Locker after confirm.
+             page. Owner change is Inventory only, and not for locker PMs.
 Project: smart_locker/tests
 Notes: Run with: python -m pytest tests/test_dashboard_tabs.py -v
        Frontend is vanilla HTML/JS/CSS; asserted as text.
@@ -78,10 +78,10 @@ class TestDashboardPublicTabs:
 
 
 class TestDashboardOwnerEdit:
-    """Anyone can change owner on Inventory and Locker after confirm."""
+    """Owner change is Inventory only; locker devices are not editable there."""
 
-    def test_inventory_and_locker_have_owner_controls(self):
-        """Both public catalog tabs expose an owner editor, not Display."""
+    def test_inventory_has_owner_controls_locker_does_not(self):
+        """Inventory can open the owner dialog; Locker rows stay plain text."""
         html = _html()
         js = _js()
         assert 'id="owner-dialog"' in html
@@ -90,6 +90,9 @@ class TestDashboardOwnerEdit:
         assert 'id="owner-names"' in html
         assert "/api/dashboard/owner" in js
         assert "/api/dashboard/owners" in js
+        assert "in_locker" in js
+        assert "ownerCell(d.pm_number, d.location)" in js
+        assert "ownerCell(d.pm_number, d.borrower_name" not in js
 
     def test_confirm_before_write(self):
         """Owner change requires an explicit Confirm control."""

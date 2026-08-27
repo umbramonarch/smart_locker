@@ -71,7 +71,7 @@ smart_locker/
 │   │   └── repositories.py      # CRUD: User / Registrant / Device / Transaction repositories
 │   ├── services/
 │   │   ├── locker_service.py    # Borrow/return rules (per-user limit, admin overrides)
-│   │   ├── owner_edit.py        # Dashboard owner change (Excel; SQLite if locker PM)
+│   │   ├── owner_edit.py        # Dashboard Inventory owner change (Excel; not locker PMs)
 │   │   └── user_service.py      # User enrollment, public/admin views
 │   └── sync/
 │       ├── excel_sync.py        # On-demand / auto Excel export (Devices / Transactions / Users)
@@ -124,7 +124,7 @@ smart_locker/
 | Photo import | ✅ Done | By PM number (`update_device`) or by model (photo watcher) |
 | Web dashboard | ✅ Done | `/dashboard` — Inventory (Excel), Locker (SQLite), Display (kiosk view); public owner edit |
 | Frontend UI | ✅ Done | 6-screen kiosk UI + overlays |
-| Unit tests | ✅ Done | ~357 tests, hardware-free |
+| Unit tests | ✅ Done | ~356 tests, hardware-free |
 | NFC device tags | ✅ Done | Same ACR1252U; `devices.tag_hmac`; auto borrow/return after login |
 | Calibration alerts | 🔲 Future | Calibration dates stored; notification system not yet built |
 | Kiosk deployment | ✅ Done | Raspberry Pi appliance: systemd service, CIFS mount, Chromium kiosk, offline install (`deploy/`) |
@@ -213,8 +213,8 @@ Overlays: **device detail** (photo, PM, type, serial, confirm), **return slot** 
 A dashboard is served at **`/dashboard`** for anyone on the local network — no login.
 Three tabs:
 
-- **Inventory** — live `device-list.xlsx` (full catalog). Search and sort. Click owner to change it (confirm). Share down shows an error here only.
-- **Locker** — SQLite devices registered into a slot (status, borrower, slot). Same owner edit; locker PMs also update SQLite and log a transaction.
+- **Inventory** — live `device-list.xlsx` (full catalog). Search and sort. Click owner to change it (confirm) for PMs that are **not** in the locker. Share down shows an error here only.
+- **Locker** — SQLite devices registered into a slot (status, borrower, slot). Owner is set at the kiosk (borrow/return), not here.
 - **Display** — what the kiosk is showing right now, plus the signed-in user. View only.
 
 Colours match the kiosk (`#181d24` / `#009641`); this is a normal desktop page (cursor, select, scroll). Users and transaction logs are not on the public page. Use **Export to Excel** from the kiosk admin panel for a downloadable snapshot.

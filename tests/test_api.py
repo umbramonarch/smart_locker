@@ -1045,6 +1045,9 @@ class TestDashboardInventoryAndDisplay:
         van = next(r for r in rows if r["pm_number"] == "PM-999")
         assert van["name"] == "Van kit"
         assert van["location"] == "Workshop"
+        assert van["in_locker"] is False
+        locker = next(r for r in rows if r["pm_number"] == "PM-001")
+        assert locker["in_locker"] is True
         assert "status" not in van
         assert "locker_slot" not in van
         assert "tag_hmac" not in van
@@ -1165,11 +1168,11 @@ class TestDashboardOwnerEditApi:
         )
         assert DeviceRepository.find_by_pm(db_session, "PM-VAN") is None
 
-    def test_locker_updates_sqlite_and_logs(
+    def test_locker_pm_is_refused(
         self, client, test_user, test_devices, tmp_path, monkeypatch, db_session
     ):
-        """Locker PM writes Excel + SQLite and logs a borrow."""
-        from smart_locker.database.models import TransactionLog, TransactionType
+        """Locker PMs cannot have owner changed from the dashboard."""
+        from smart_locker.database.models import TransactionLog
         from sqlalchemy import select
 
         path = _catalog_workbook(tmp_path, [
@@ -1182,14 +1185,13 @@ class TestDashboardOwnerEditApi:
             "/api/dashboard/owner",
             json={"pm_number": "PM-001", "owner": "Test User"},
         )
-        assert resp.status_code == 200
-        assert resp.json()["locker"] is True
+        assert resp.status_code == 409
         db_session.expire_all()
         device = DeviceRepository.find_by_pm(db_session, "PM-001")
-        assert device.status == DeviceStatus.BORROWED
-        assert device.current_borrower_id == test_user.id
+        assert device.status == DeviceStatus.AVAILABLE
+        assert device.current_borrower_id is None
         logs = db_session.execute(select(TransactionLog)).scalars().all()
-        assert any(t.transaction_type == TransactionType.BORROW for t in logs)
+        assert logs == []
 
     def test_owners_list_is_public(
         self, client, test_user, db_session

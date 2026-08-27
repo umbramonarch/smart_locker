@@ -54,6 +54,7 @@ from smart_locker.services.locker_service import LockerService
 from smart_locker.services.owner_edit import (
     CatalogUnavailable,
     InvalidOwnerRequest,
+    LockerOwned,
     UnknownPm,
     owner_choices,
     set_owner,
@@ -1389,11 +1390,16 @@ def dashboard_display() -> dict:
 
 
 @router.get("/api/dashboard/inventory")
-def dashboard_inventory():
+def dashboard_inventory(db: Session = Depends(get_db)):
     """Public company catalog from the live Excel file (not SQLite).
 
     Share down or an unreadable workbook is HTTP 503 so the Inventory tab
     can error while the Locker tab still uses ``/api/dashboard/devices``.
+    ``in_locker`` marks PMs that already have a SQLite locker row so the
+    Inventory tab does not offer owner edit for them.
+
+    Args:
+        db: Active database session (injected by ``get_db``).
 
     Returns:
         list[dict]: One dict per Excel PM row.
@@ -1411,6 +1417,11 @@ def dashboard_inventory():
         rows = read_inventory(SOURCE_EXCEL_PATH)
     except InventoryReadError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
+    locker_pms = {
+        (d.pm_number or "").strip()
+        for d in DeviceRepository.list_all(db)
+        if d.pm_number
+    }
     return [
         {
             "pm_number": r.pm_number,
@@ -1420,6 +1431,7 @@ def dashboard_inventory():
             "serial_number": r.serial_number,
             "location": r.location,
             "calibration_due": r.calibration_due,
+            "in_locker": r.pm_number in locker_pms,
         }
         for r in rows
     ]
@@ -1473,7 +1485,7 @@ def dashboard_owners(db: Session = Depends(get_db)):
     """Names for the public owner-edit dropdown. No session required.
 
     Combines the in-locker token, registered users, and registrant names
-    so Inventory and Locker can offer the same list plus free text.
+    so the Inventory owner dialog can offer the same list plus free text.
 
     Args:
         db: Active database session (injected by ``get_db``).
@@ -1491,11 +1503,10 @@ def dashboard_owners(db: Session = Depends(get_db)):
 
 @router.post("/api/dashboard/owner")
 def dashboard_set_owner(body: OwnerEditBody, db: Session = Depends(get_db)):
-    """Change owner for one PM. Public — no kiosk session.
+    """Change owner for one non-locker PM. Public — no kiosk session.
 
-    Writes the catalog Excel Location cell. SQLite is updated only when
-    that PM is already a locker device. A transaction is logged in that
-    locker case. Does not insert locker rows.
+    Writes the catalog Excel Location cell. Locker devices are refused
+    (owner stays with kiosk borrow/return). Does not insert locker rows.
 
     Args:
         body: PM number and new owner text.
@@ -1505,7 +1516,8 @@ def dashboard_set_owner(body: OwnerEditBody, db: Session = Depends(get_db)):
         dict: ``ok``, ``pm_number``, ``owner``, ``locker``.
 
     Raises:
-        HTTPException: 400 empty PM; 404 PM not in Excel; 503 share down.
+        HTTPException: 400 empty PM; 404 PM not in Excel; 409 locker PM;
+                       503 share down.
     """
     from config.settings import SOURCE_EXCEL_PATH
 
@@ -1515,6 +1527,8 @@ def dashboard_set_owner(body: OwnerEditBody, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail=str(e)) from e
     except UnknownPm as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
+    except LockerOwned as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
     except CatalogUnavailable as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
     return {
