@@ -26,6 +26,16 @@ def _set_test_keys(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _disable_einsatzort_writeback(monkeypatch):
+    """Do not write a developer SOURCE_EXCEL_PATH during tests.
+
+    Borrow/return call maybe_write_einsatzort against settings. Tests that
+    need write-back monkeypatch SOURCE_EXCEL_PATH onto a temp workbook.
+    """
+    monkeypatch.setattr("config.settings.SOURCE_EXCEL_PATH", "")
+
+
+@pytest.fixture(autouse=True)
 def _isolate_last_sync(tmp_path, monkeypatch):
     """Keep last-sync JSON off the repo disk and reset in-memory state per test."""
     monkeypatch.setenv("SMART_LOCKER_LAST_SYNC_PATH", str(tmp_path / "last_sync.json"))

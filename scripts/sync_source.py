@@ -1,8 +1,9 @@
 """
 File: sync_source.py
 Description: Manually trigger source Excel import from the company device
-             master list. Updates catalog metadata on existing locker devices;
-             never inserts new locker rows.
+             master list, then write locker Aktueller Einsatzort back.
+             Updates catalog metadata on existing locker devices; never
+             inserts new locker rows. Dry-run skips both DB and Excel writes.
 Project: smart_locker/scripts
 Notes: Usage: python -m scripts.sync_source [--file path] [--dry-run]
        Defaults to SMART_LOCKER_SOURCE_EXCEL_PATH from .env if --file is omitted.
@@ -55,6 +56,10 @@ def main() -> None:
 
     if args.dry_run:
         print("[DRY RUN] No changes written to database.")
+    else:
+        from smart_locker.sync.einsatzort_writeback import write_einsatzort_with_engine
+
+        write_einsatzort_with_engine(get_engine(), source_path)
 
     print(
         f"\nDone: {result.imported} imported, {result.updated} updated, "

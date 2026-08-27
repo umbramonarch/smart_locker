@@ -1,11 +1,11 @@
 """
 File: scheduler.py
-Description: Scheduled and reactive source Excel import. Combines three trigger
-             mechanisms: (1) an immediate import on application startup so the
-             database is always current before the first user interaction,
-             (2) a watchdog-based file system watcher that triggers an import
-             whenever the source Excel is modified on a local filesystem, and
-             (3) a periodic APScheduler interval job (default 6 hours).
+Description: Scheduled and reactive source Excel import, then Einsatzort
+             write-back. Combines three trigger mechanisms: (1) an immediate
+             import on application startup, (2) a watchdog file watcher on
+             local filesystems, and (3) a periodic APScheduler interval job
+             (default 6 hours). After each successful import the Pi writes
+             Aktueller Einsatzort for locker PMs back into the sheet.
 Project: smart_locker/sync
 Notes: Interval defaults to 6 hours, configurable via
        SMART_LOCKER_SOURCE_SYNC_INTERVAL_HOURS. Disabled when
@@ -14,6 +14,8 @@ Notes: Interval defaults to 6 hours, configurable via
        successive writes by Excel (save → temp → rename) collapse into a
        single import. Network shares skip the watcher (inotify never sees
        remote writes); catalog changes wait for the interval or admin Sync.
+       Write-back skips the save when nothing changed, so the watcher cannot
+       loop on our own Einsatzort updates.
 """
 
 import logging
@@ -41,13 +43,14 @@ _DEBOUNCE_SECONDS = 3.0
 
 
 def _run_source_import(engine, source_path: str | Path, trigger: str = "interval") -> None:
-    """Execute the source Excel import (called by scheduler, watcher, or startup).
+    """Execute the source Excel import, then Einsatzort write-back.
 
     Validates that the source file exists, then delegates to
     ``import_from_source_excel``. Logs the result summary or any errors and
     records the outcome in ``sync_status`` for the admin "last synced" display.
     A missing file is skipped without recording, so a persisted last-sync from
-    an earlier run is left in place (share down at boot).
+    an earlier run is left in place (share down at boot). After a successful
+    import, locker locations are written back into Aktueller Einsatzort.
 
     Args:
         engine: SQLAlchemy Engine for database operations.
@@ -73,6 +76,9 @@ def _run_source_import(engine, source_path: str | Path, trigger: str = "interval
             result.imported, result.updated, result.unchanged, result.errors,
         )
         sync_status.record_result(trigger, result)
+        from smart_locker.sync.einsatzort_writeback import write_einsatzort_with_engine
+
+        write_einsatzort_with_engine(engine, path)
     except Exception as e:
         logger.error("Source Excel import failed: %s", e)
         sync_status.record_error(trigger, str(e))

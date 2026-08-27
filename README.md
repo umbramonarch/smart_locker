@@ -75,7 +75,8 @@ smart_locker/
 │   └── sync/
 │       ├── excel_sync.py        # On-demand / auto Excel export (Devices / Transactions / Users)
 │       ├── source_import.py     # Catalog refresh for locker PMs (no insert, DE/EN headers)
-│       ├── scheduler.py         # Source import: startup + 6h interval (+ file-watch on local FS)
+│       ├── einsatzort_writeback.py  # Pi → Excel: Aktueller Einsatzort by PM only
+│       ├── scheduler.py         # Source import + write-back: startup + 6h interval (+ local FS watch)
 │       ├── photo_watcher.py     # Auto-assign device photos by model number
 │       └── fs_utils.py          # Detect network (CIFS/NFS) paths so watchers skip unreliable inotify
 ├── deploy/                      # Raspberry Pi provisioning: systemd, CIFS mount, kiosk, offline install
@@ -116,11 +117,12 @@ smart_locker/
 | Self-registration | ✅ Done | Approved-name list + NFC tap; admin manual registration |
 | Excel export | ✅ Done | On-demand `.xlsx` (Devices + Transactions + Users) — replaces old auto-sync |
 | Source import | ✅ Done | Startup + 6h interval + file-watch on local FS; catalog-only, no insert |
+| Einsatzort write-back | ✅ Done | Pi writes Aktueller Einsatzort by PM (`Schrank` / borrower); locked file skipped |
 | Device import | ✅ Done | German + English Excel headers, PM-based catalog update, no auto locker insert |
 | Photo import | ✅ Done | By PM number (`update_device`) or by model (photo watcher) |
 | Web dashboard | ✅ Done | Read-only `/dashboard` — devices, transactions, users; 30s auto-refresh |
 | Frontend UI | ✅ Done | 6-screen kiosk UI + overlays |
-| Unit tests | ✅ Done | ~298 tests, hardware-free |
+| Unit tests | ✅ Done | ~314 tests, hardware-free |
 | NFC device tags | ✅ Done | Same ACR1252U; `devices.tag_hmac`; auto borrow/return after login |
 | Calibration alerts | 🔲 Future | Calibration dates stored; notification system not yet built |
 | Kiosk deployment | ✅ Done | Raspberry Pi appliance: systemd service, CIFS mount, Chromium kiosk, offline install (`deploy/`) |
@@ -178,10 +180,10 @@ See **GUIDE.md** for detailed step-by-step instructions.
 │  └──────┬────────────────────┬───────────────────────┬─────────────┘ │
 │  ┌──────▼───────────┐  ┌──────▼──────────────┐  ┌──────▼────────────┐ │
 │  │ SQLite + ORM     │  │ NFC reader (ACR1252U)│  │ Excel sync        │ │
-│  │ users · devices  │  │ background listener  │  │ source import     │ │
-│  │ registrants      │  │ tap → HMAC → auth    │  │ on-demand export  │ │
-│  │ transaction_logs │  └──────────────────────┘  └───────────────────┘ │
-│  └──────────────────┘                                                   │
+│  │ users · devices  │  │ background listener  │  │ catalog import    │ │
+│  │ registrants      │  │ tap → HMAC → auth    │  │ Einsatzort back   │ │
+│  │ transaction_logs │  └──────────────────────┘  │ on-demand export  │ │
+│  └──────────────────┘                            └───────────────────┘ │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -249,6 +251,7 @@ Cheap NFC stickers on locker devices use the same ACR1252U as work cards (no USB
 - **Flow:** tap work card → tap sticker (or pick on screen). Auto-intent from device status: borrow if available, return if you hold it. Session stays open for several devices. A work-card tap still logs out.
 - **Register Device** (hidden admin panel): **PM + free slot + NFC**. Catalog comes from Excel. Sync never inserts locker rows. The list shows **name + PM**. CLI bind: `python -m scripts.enroll_device_tag --pm PM-001` (or `--uid HEX`).
 - Excel barcode is unused leftover; re-import does **not** overwrite `tag_hmac`, locker status, or the current borrower.
+- After borrow/return (and after Register Device / Sync), the Pi writes **only** Aktueller Einsatzort in `device-list.xlsx` (`Schrank` in the locker, borrower name when out). Catalog columns stay. A locked workbook is skipped, not a kiosk crash.
 
 ## Running Tests
 

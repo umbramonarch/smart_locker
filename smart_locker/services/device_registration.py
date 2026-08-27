@@ -6,6 +6,7 @@ Description: Admin Register Device — look up a PM in the company Excel catalog
 Project: smart_locker/services
 Notes: Unknown PM or a missing/locked workbook leaves the database unchanged.
        New rows start AVAILABLE. NFC bind is armed by the API after insert.
+       After insert, Aktueller Einsatzort is written as the in-locker token.
 """
 
 from __future__ import annotations
@@ -126,6 +127,9 @@ def register_locker_device(
                 device.image_path = sib.image_path
                 break
 
+    from smart_locker.sync.einsatzort_writeback import write_einsatzort
+
+    write_einsatzort(session, source_path)
     logger.info(
         "Registered locker device %s (pm=%s, slot=%s).",
         device.name, device.pm_number, locker_slot,

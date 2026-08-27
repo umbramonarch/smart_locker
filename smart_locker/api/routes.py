@@ -5,8 +5,8 @@ Description: REST API endpoints and SSE event stream for the Smart Locker kiosk.
              user self-registration (with registrant name validation), admin-only
              manual registration, Register Device (PM + slot + NFC), device-tag
              bind/unbind, registrant list retrieval, source sync, public dashboard
-             data endpoints, an admin-only Excel export download, and admin Exit
-             kiosk / Shut down.
+             data endpoints, an admin-only Excel export download, admin Exit
+             kiosk / Shut down, and source sync that writes Einsatzort back.
 Project: smart_locker/api
 Notes: All device/session endpoints require an active kiosk session enforced by
        the require_session dependency. SSE stream at /api/events pushes NFC and
@@ -966,10 +966,11 @@ def unbind_device_tag(
 def trigger_source_sync(
     user_session: UserSession = Depends(require_session),
 ):
-    """Manually trigger source Excel import (admin only).
+    """Manually trigger source Excel import then Einsatzort write-back (admin only).
 
-    Reads the company device master list and inserts/updates devices in
-    the database. Only users with ADMIN role may invoke this.
+    Reads the company device master list and updates catalog fields on locker
+    devices already in SQLite. After the import, locker locations are written
+    back into Aktueller Einsatzort. Only users with ADMIN role may invoke this.
 
     Args:
         user_session: The active session (injected by ``require_session``).
@@ -998,6 +999,9 @@ def trigger_source_sync(
         raise HTTPException(status_code=500, detail=f"Import failed: {e}") from e
 
     sync_status.record_result("manual", result)
+    from smart_locker.sync.einsatzort_writeback import write_einsatzort_with_engine
+
+    write_einsatzort_with_engine(get_engine(), SOURCE_EXCEL_PATH)
     return {
         "success": True,
         "imported": result.imported,

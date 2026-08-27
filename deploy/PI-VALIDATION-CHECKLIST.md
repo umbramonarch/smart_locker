@@ -56,8 +56,14 @@ table at the end.
 
 - [ ] `mount | grep /mnt/locker` shows the CIFS mount; the workbook is readable.
 - [ ] Admin panel → **Sync Source** → preview shows add/update/skip counts → confirm → counts applied.
-- [ ] Edit the workbook on the share from another PC → **Sync Source** (or wait for the
-      6-hour interval) imports the catalog change (check `journalctl` for source import).
+- [ ] Edit a catalog field (name / manufacturer / model) in the workbook on the share from
+      another PC → **Sync Source** (or wait for the 6-hour interval) imports the catalog
+      change (check `journalctl` for source import). **Aktueller Einsatzort** on locker PMs
+      is not taken from Excel; the Pi writes it back instead.
+- [ ] Borrow or return on the kiosk updates **Aktueller Einsatzort** in
+      `device-list.xlsx` for that PM (`Schrank` when in the locker, borrower name
+      when out). Other columns stay. If Excel has the file open, the kiosk still
+      works; the cell updates on the next sync or the next successful write.
 - [ ] Reboot with the share **unavailable** → boot still completes (nofail), service starts, kiosk loads.
       Admin last-sync line is not "never" if a previous import was recorded.
 - [ ] Auto-export of `smart_locker_data.xlsx` is off unless `SMART_LOCKER_EXCEL_AUTO_EXPORT=1`.
