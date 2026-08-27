@@ -781,9 +781,9 @@ it still asks for a work card first.
 
 1. **Tap your work card** → the reader reads the UID → the system authenticates you → the
    scan-first main menu appears.
-2. **Tap the NFC sticker on the device** (auto borrow/return) **or** use Borrow / Return
-   on screen. After a return, the same slot overlay appears. The session stays open so
-   several devices can be tagged in one login.
+2. **Tap the NFC sticker on the device** (auto borrow/return) **or** open **Locker**
+   (what's in / what's out) or **Return** on screen. After a return, the same slot
+   overlay appears. The session stays open so several devices can be tagged in one login.
 3. **The session ends** via the **End Session** button, a **work-card tap** (a device
    sticker does not log you out), or the **inactivity timeout** (120 seconds of no touch —
    a silent security backstop).
@@ -798,17 +798,19 @@ it still asks for a work card first.
 - **Authentication failed** — red "Card Not Recognized", auto-returns to idle. A bound
   **available** device sticker at idle is **not** this screen — it asks you to tap your
   work card first. A **borrowed** sticker at idle returns the device.
-- **Main menu** — welcome + name; **Tap the device** to borrow or return; **Borrow** /
-  **Return** stay as *or pick on screen*; **End Session**.
-- **Borrow** — a grid of devices by locker slot; available ones are tappable, borrowed ones
-  show who has them. A sticker tap still auto-intents and refreshes this grid.
-- **Return** — the same grid, with your own borrowed items highlighted. Confirming a
-  return shows the slot overlay.
-- **Device detail** (overlay) — photo, specs, and a confirm button.
+- **Main menu** — welcome + name; **Tap the device** to borrow or return; **Locker**
+  (what's in · what's out) and **Return** (*or pick on screen*); **End Session**.
+- **Locker** — availability overlay: every locker device by slot, tagged **IN** / **OUT**
+  / **YOURS** / **MAINT**, with **PM number** on the card. Screen-pick borrow still
+  works for units without a sticker. A sticker tap still auto-intents and refreshes
+  this grid.
+- **Return** — the same grid (PM on each card), with your own borrowed items highlighted.
+  Confirming a return shows the slot overlay.
+- **Device detail** (overlay) — photo, PM, type, serial, and a confirm button.
 - **Return slot** (overlay) — after any successful return: device name and **Put in slot N**.
 - **Inactivity warning** (overlay) — a countdown with a "Stay Active" button.
 - **Hidden admin panel** (overlay) — opened by tapping the idle clock 5 times. Shortcuts for
-  Borrow, Return, **Sync source**, Register user, **Register Device**, **Export to Excel**,
+  Locker, Return, **Sync source**, Register user, **Register Device**, **Export to Excel**,
   **Software Update**, End Session.
 
 ### The rules
@@ -833,7 +835,7 @@ Pi on the LAN can use them — the lock is **physical access**, not a password.
    in the database — no card tap. If no admin has been enrolled yet, the panel cannot
    open (`POST /api/admin/session` returns "no admin").
 4. What the buttons do:
-   - **Borrow Screen / Return Screen** — jump into those flows as that admin.
+   - **Locker / Return Screen** — jump into the availability overlay or return grid as that admin.
    - **Sync Source** — first tap *previews* Excel changes from the share; second tap *applies* them.
    - **Register User** — type any name, then tap a card (skips the approved-name list).
      After success, timeout, or cancel the kiosk returns to idle; the next
@@ -1159,8 +1161,8 @@ visible at a time, and JavaScript decides which:
 | `screen-idle` | "Tap your card" screen |
 | `screen-register` | Self-service registration |
 | `screen-auth-failed` | Red error screen |
-| `screen-main-menu` | Welcome + tap-the-device + Borrow / Return |
-| `screen-borrow` | Device grid for borrowing |
+| `screen-main-menu` | Welcome + tap-the-device + Locker / Return |
+| `screen-borrow` | Locker availability overlay (in / out) |
 | `screen-return` | Device grid for returning |
 | `overlay-device-detail` | Device detail popup |
 | `overlay-inactivity` | Countdown warning |
@@ -1205,10 +1207,10 @@ important decision reads or writes it.
 ### How they connect
 
 ```
-User taps "BORROW"
+User taps "LOCKER"
   → app.js listener → openBorrow()
       → navigate('borrow')   JS adds .active to #screen-borrow → CSS wipes it in
-      → apiGetDevices()      JS fetches /api/devices → builds the grid of cards
+      → apiGetDevices()      JS fetches /api/devices → builds the in/out card grid
 ```
 
 ### Where to look to change something
@@ -1218,7 +1220,7 @@ User taps "BORROW"
 | Change a colour | `style.css` | `:root {` at the top |
 | Change the font | `style.css` | `--font-display` / `--font-body` |
 | Change a button label | `index.html` | the button's text |
-| Change the borrow count display | `app.js` | `borrow-badge` |
+| Change the locker in/out badge | `app.js` | `borrow-badge` |
 | Change the inactivity timeout (UI) | `app.js` | `cdSeconds` in the `S` object |
 
 ---

@@ -13,7 +13,7 @@ Shipped as specified. Historical plan — do not treat this file as open work.
 A colleague taps their **work card** to log in, then either:
 
 - taps an **NFC sticker on the device** on the same reader, or
-- picks the device on the touch UI (existing Borrow / Return grids).
+- picks the device on the touch UI (Locker availability overlay / Return grid).
 
 The system records who has that exact unit. Auto-intent: a device tap borrows if the unit is available, and returns it if the logged-in user already has it.
 
@@ -26,7 +26,7 @@ Device rows still come from Excel (**schrank** rows only). **Register Device** i
 | Topic | Decision |
 |---|---|
 | Intent | **Auto-intent.** After login, a device-tag tap borrows or returns from device status. No extra “Borrow or Return?” step. |
-| Post-login UI | **Change the main menu** to scan-first. Keep Borrow / Return as “or pick on screen.” Do not skip the menu. Do not merge the two grids into one inventory on login. |
+| Post-login UI | **Change the main menu** to scan-first. **Locker** is an in/out availability overlay (screen-pick borrow remains). **Return** stays as “or pick on screen.” Do not skip the menu. |
 | Register Device | Admin bind only. Does **not** create a device. Excel/schrank import already created the row. |
 | List identity | Show **name + PM** (and slot if present). Same name, different PM → two rows. |
 | Tag storage | `devices.tag_hmac` (HMAC-SHA256 of UID, same key as `users.uid_hmac`). **Never** store or log the raw UID. No encrypted UID on devices. |
@@ -52,7 +52,7 @@ That extra HID device fights the Chromium kiosk (focus, “types into the wrong 
 
 ## 4. What is already true in the code
 
-- Idle → work-card HMAC lookup → session → main menu (`Borrow` / `Return` / `End Session`).
+- Idle → work-card HMAC lookup → session → main menu (`Locker` / `Return` / `End Session`).
 - NFC bridge (`smart_locker/api/app_context.py`): **any** insert while a session is active **logs out before lookup**. A device sticker would currently end the session. That is the main state-machine change.
 - `LockerService` already enforces `MAX_BORROWS`, available-only borrow, owner-or-admin return, and `touch()` on success.
 - Frontend `S.mode` (`borrow` / `return`) is **UI-only**. The backend has no current screen. Auto-intent must live in the backend from device status, not from a new “mode” API.
@@ -112,7 +112,7 @@ Pending intercepts run **before** classify (same pattern as `pending_registratio
 | Bound device tag, **available** | **Not** auth-failed. Short idle message: tap your work card first. No session. Does not borrow. |
 | Bound device tag, **borrowed** | Returns without a work card (`device_action`, `action: return`). Log keeps the original borrower; notes `returned at kiosk without card`. SSE includes `locker_slot`. Kiosk shows a large "Put in slot N" overlay. |
 
-### Logged in (main menu, borrow, return, detail)
+### Logged in (main menu, locker overlay, return, detail)
 
 | Tap | Result |
 |---|---|
@@ -143,13 +143,13 @@ Keep `#screen-main-menu`. Change the message so the reader is the primary path.
 
 - Welcome + name + role stay.
 - Smaller NFC ring / copy: **Tap the device** — to borrow or return.
-- **Borrow** and **Return** stay, demoted: *or pick on screen* (tag missing, metal chassis, browsing).
+- **Locker** (availability overlay: IN / OUT) and **Return** stay as screen pick (tag missing, metal chassis, browsing). Cards and detail show **PM number**.
 - **End Session** stays.
 - Optional one-liner: `N / 5 borrowed`.
 
 Happy path: tap work card → tap sticker → toast (“Borrowed Fluke 87V”) → stay on this screen for the next device.
 
-If the user opened Borrow or Return, a sticker tap still uses auto-intent. On `device_action`, refresh the open grid (or detail) and show the same toast.
+If the user opened Locker or Return, a sticker tap still uses auto-intent. On `device_action`, refresh the open grid (or detail) and show the same toast.
 
 Idle copy can mention that after login they can tap a device. Keep it one line. Self-service **Register your card** stays for **people**, not devices.
 

@@ -47,7 +47,8 @@ table at the end.
 - [ ] Chromium launches fullscreen on the Riverdi display; no cursor, no chrome.
 - [ ] `<html>` has class `lite` (the launcher forces `?lite`) — confirm via remote DevTools or by the flat UI.
 - [ ] Idle screen animation is smooth (no visible stutter) for ≥60 s.
-- [ ] Borrow grid scroll is smooth; screen transitions do not drop frames.
+- [ ] After login, main menu is scan-first. **Locker** opens the in/out availability overlay; cards and device detail show the **PM number**; screen-pick **Confirm Borrow** still works for untagged units.
+- [ ] Locker overlay scroll is smooth; screen transitions do not drop frames.
 - [ ] Touch targets respond on the first tap; no ghost/double taps.
 - [ ] If any jank is seen even in lite mode, note it — that is a real-hardware-only finding.
 

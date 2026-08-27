@@ -196,11 +196,11 @@ The system runs as a kiosk: FastAPI serves the frontend as static files in a ful
 1. **Idle** — animated NFC ring, "Tap your card to begin", marquee ticker, live clock, "Register your card" entry; borrowed stickers return here
 2. **Register** — self-service: search/select your approved name → tap card → success/error
 3. **Auth failed** — red flash, "Card not recognized", auto-dismisses
-4. **Main menu** — welcome + **Tap the device**; Borrow / Return as *or pick on screen*; End Session
-5. **Borrow** — device grid; available = tappable, borrowed/maintenance show borrower info
-6. **Return** — device grid; the user's borrowed items highlighted
+4. **Main menu** — welcome + **Tap the device**; **Locker** (what's in · what's out) and **Return** (*or pick on screen*); End Session
+5. **Locker** — availability overlay; IN / OUT / YOURS / MAINT; PM number on each card; screen-pick borrow still works
+6. **Return** — device grid with PM on each card; the user's borrowed items highlighted
 
-Overlays: **device detail** (photo, specs, confirm), **return slot** (put in slot N), **inactivity** countdown, and a **hidden admin panel** (5× tap on the clock) with Borrow/Return/Sync/Register User/**Register Device**/Export/End-Session shortcuts.
+Overlays: **device detail** (photo, PM, type, serial, confirm), **return slot** (put in slot N), **inactivity** countdown, and a **hidden admin panel** (5× tap on the clock) with Locker/Return/Sync/Register User/**Register Device**/Export/End-Session shortcuts.
 
 **Theme:** green (`#009641`) on dark charcoal (`#181d24`).
 

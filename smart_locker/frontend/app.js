@@ -1,8 +1,9 @@
 /**
  * @fileoverview Client-side state machine for the kiosk touch UI. Manages screen
  *               transitions, API communication, SSE event handling, and user
- *               interaction flow across idle, auth, menu, borrow, return, detail,
- *               registration, admin, return-slot, and software-update overlay.
+ *               interaction flow across idle, auth, menu, locker availability,
+ *               return, detail, registration, admin, return-slot, and
+ *               software-update overlay.
  * @project smart_locker/frontend
  * @description Demo mode (?demo), circle-reveal transitions, split text,
  *              inactivity countdown, and self-registration.
@@ -71,14 +72,14 @@ const DEMO_USERS = [
 let demoUserIdx = 0;
 
 const DEMO_DEVICES = [
-  { id:1, pm_number:'PM-001', name:'PM-001 Keysight DSOX3054T',  device_type:'Oscilloscope',   serial_number:'MY12345678',  manufacturer:'Keysight',       model:'DSOX3054T',   barcode:'490001', locker_slot:1,  description:null, image_path:null, calibration_due:'2026-09-15', status:'available',   borrower_name:null, has_tag:false },
-  { id:2, pm_number:'PM-002', name:'PM-002 Rohde & Schwarz HMC8043', device_type:'Power Supply', serial_number:'RS-HMC-042', manufacturer:'Rohde & Schwarz', model:'HMC8043',    barcode:'490002', locker_slot:2,  description:null, image_path:null, calibration_due:'2026-11-01', status:'borrowed',    borrower_name:'Sarah K.' },
-  { id:3, pm_number:'PM-003', name:'PM-003 Fluke 87V',           device_type:'Multimeter',     serial_number:'FL-87V-007',  manufacturer:'Fluke',          model:'87V',         barcode:'490003', locker_slot:3,  description:null, image_path:null, calibration_due:'2026-06-30', status:'available',   borrower_name:null       },
-  { id:4, pm_number:'PM-004', name:'PM-004 Keysight 34465A',     device_type:'Multimeter',     serial_number:'MY98765432',  manufacturer:'Keysight',       model:'34465A',      barcode:'490004', locker_slot:4,  description:null, image_path:null, calibration_due:null,         status:'available',   borrower_name:null       },
-  { id:5, pm_number:'PM-005', name:'PM-005 Fluke i400s',         device_type:'Current Probe',  serial_number:null,          manufacturer:'Fluke',          model:'i400s',       barcode:'490005', locker_slot:5,  description:null, image_path:null, calibration_due:'2027-01-15', status:'borrowed',    borrower_name:'You'      },
-  { id:6, pm_number:'PM-006', name:'PM-006 Tektronix TBS2104X',  device_type:'Oscilloscope',   serial_number:'TEK-TBS-099', manufacturer:'Tektronix',      model:'TBS2104X',    barcode:'490006', locker_slot:6,  description:null, image_path:null, calibration_due:'2026-08-20', status:'available',   borrower_name:null       },
-  { id:7, pm_number:'PM-007', name:'PM-007 Hioki DT4282',        device_type:'Multimeter',     serial_number:null,          manufacturer:'Hioki',          model:'DT4282',      barcode:'490007', locker_slot:7,  description:null, image_path:null, calibration_due:null,         status:'available',   borrower_name:null       },
-  { id:8, pm_number:'PM-008', name:'PM-008 Megger MIT485/2',     device_type:'Insulation Tester', serial_number:'MEG-485-002', manufacturer:'Megger',      model:'MIT485/2',    barcode:'490008', locker_slot:8,  description:null, image_path:null, calibration_due:'2026-12-01', status:'maintenance', borrower_name:null       },
+  { id:1, pm_number:'PM-001', name:'Keysight DSOX3054T',  device_type:'Oscilloscope',   serial_number:'MY12345678',  manufacturer:'Keysight',       model:'DSOX3054T',   barcode:'490001', locker_slot:1,  description:null, image_path:null, calibration_due:'2026-09-15', status:'available',   borrower_name:null, has_tag:false },
+  { id:2, pm_number:'PM-002', name:'Rohde & Schwarz HMC8043', device_type:'Power Supply', serial_number:'RS-HMC-042', manufacturer:'Rohde & Schwarz', model:'HMC8043',    barcode:'490002', locker_slot:2,  description:null, image_path:null, calibration_due:'2026-11-01', status:'borrowed',    borrower_name:'Sarah K.' },
+  { id:3, pm_number:'PM-003', name:'Fluke 87V',           device_type:'Multimeter',     serial_number:'FL-87V-007',  manufacturer:'Fluke',          model:'87V',         barcode:'490003', locker_slot:3,  description:null, image_path:null, calibration_due:'2026-06-30', status:'available',   borrower_name:null       },
+  { id:4, pm_number:'PM-004', name:'Keysight 34465A',     device_type:'Multimeter',     serial_number:'MY98765432',  manufacturer:'Keysight',       model:'34465A',      barcode:'490004', locker_slot:4,  description:null, image_path:null, calibration_due:null,         status:'available',   borrower_name:null       },
+  { id:5, pm_number:'PM-005', name:'Fluke i400s',         device_type:'Current Probe',  serial_number:null,          manufacturer:'Fluke',          model:'i400s',       barcode:'490005', locker_slot:5,  description:null, image_path:null, calibration_due:'2027-01-15', status:'borrowed',    borrower_name:'You'      },
+  { id:6, pm_number:'PM-006', name:'Tektronix TBS2104X',  device_type:'Oscilloscope',   serial_number:'TEK-TBS-099', manufacturer:'Tektronix',      model:'TBS2104X',    barcode:'490006', locker_slot:6,  description:null, image_path:null, calibration_due:'2026-08-20', status:'available',   borrower_name:null       },
+  { id:7, pm_number:'PM-007', name:'Hioki DT4282',        device_type:'Multimeter',     serial_number:null,          manufacturer:'Hioki',          model:'DT4282',      barcode:'490007', locker_slot:7,  description:null, image_path:null, calibration_due:null,         status:'available',   borrower_name:null       },
+  { id:8, pm_number:'PM-008', name:'Megger MIT485/2',     device_type:'Insulation Tester', serial_number:'MEG-485-002', manufacturer:'Megger',      model:'MIT485/2',    barcode:'490008', locker_slot:8,  description:null, image_path:null, calibration_due:'2026-12-01', status:'maintenance', borrower_name:null       },
 ];
 
 /** @type {string[]} Demo registrant names for testing the name list without backend */
@@ -603,9 +604,19 @@ async function updateMenuBorrowCount() {
   try {
     const devices = await apiGetDevices();
     S.devices = devices;
-    const n = devices.filter(d => d.borrower_name === 'You').length;
-    el.textContent = `${n} / 5 borrowed`;
+    setMenuBorrowCount(devices);
   } catch (_) { /* leave the last count */ }
+}
+
+/**
+ * Write the main-menu "N / 5 borrowed" line from an already-fetched list.
+ * @param {Array<Object>} devices - Device list from the API.
+ */
+function setMenuBorrowCount(devices) {
+  const el = document.getElementById('menu-borrow-count');
+  if (!el) return;
+  const n = devices.filter(d => d.borrower_name === 'You').length;
+  el.textContent = `${n} / 5 borrowed`;
 }
 
 /**
@@ -621,8 +632,7 @@ async function refreshAfterDeviceAction(data) {
   const detailOpen = S.screen === 'device-detail';
   const gridScreen = detailOpen ? S.prevScreen : S.screen;
   if (gridScreen === 'borrow') {
-    const myCount = devices.filter(d => d.borrower_name === 'You').length;
-    document.getElementById('borrow-badge').textContent = `${myCount} / 5 borrowed`;
+    setLockerBadge(devices);
     buildGrid('borrow-grid', devices, 'borrow');
   } else if (gridScreen === 'return') {
     const mine = devices.filter(d => d.borrower_name === 'You').length;
@@ -648,20 +658,45 @@ function keepSessionAliveFromTag() {
 }
 
 /* ============================================================
-   DEVICE GRID — borrow and return screens
+   DEVICE GRID — locker availability overlay and return screen
 ============================================================ */
 /**
- * Open the borrow screen, fetch the current device list from the API, update
- * the borrow count badge, and build the device card grid.
+ * Count locker devices that are in the cabinet vs borrowed out.
+ * Maintenance rows are neither.
+ * @param {Array<Object>} devices - Device list from the API.
+ * @returns {{inCount: number, outCount: number}}
+ */
+function lockerInOutCounts(devices) {
+  let inCount = 0;
+  let outCount = 0;
+  for (const d of devices) {
+    if (d.status === 'available') inCount += 1;
+    else if (d.status === 'borrowed') outCount += 1;
+  }
+  return { inCount, outCount };
+}
+
+/**
+ * Set the locker overlay badge to "N in · M out".
+ * @param {Array<Object>} devices - Device list from the API.
+ */
+function setLockerBadge(devices) {
+  const { inCount, outCount } = lockerInOutCounts(devices);
+  document.getElementById('borrow-badge').textContent =
+    `${inCount} in · ${outCount} out`;
+}
+
+/**
+ * Open the locker availability overlay, fetch devices, show in/out counts,
+ * and build the card grid. Screen-pick borrow remains available on a card.
  * @returns {Promise<void>}
  */
 async function openBorrow() {
   navigate('borrow');
   const devices = await apiGetDevices();
   S.devices = devices;
-  const myCount = devices.filter(d => d.borrower_name === 'You').length;
-  // 5 = MAX_BORROWS default from config.settings (must match server setting)
-  document.getElementById('borrow-badge').textContent = `${myCount} / 5 borrowed`;
+  setLockerBadge(devices);
+  setMenuBorrowCount(devices);
   buildGrid('borrow-grid', devices, 'borrow');
 }
 
@@ -677,6 +712,7 @@ async function openReturn() {
   const mine = devices.filter(d => d.borrower_name === 'You').length;
   document.getElementById('return-badge').textContent =
     `${mine} item${mine !== 1 ? 's' : ''} to return`;
+  setMenuBorrowCount(devices);
   buildGrid('return-grid', devices, 'return');
 }
 
@@ -759,10 +795,10 @@ function buildGrid(gridId, devices, mode) {
     else                   cls += mine  ? ' mine'      : ' unavailable';
 
     let statusCls, statusTxt;
-    if      (mine)  { statusCls = 'mine-tag';  statusTxt = 'YOURS';     }
-    else if (avail) { statusCls = 'available'; statusTxt = 'AVAILABLE'; }
-    else if (maint) { statusCls = 'maint';     statusTxt = 'MAINT';     }
-    else            { statusCls = 'in-use';    statusTxt = 'IN USE';    }
+    if      (mine)  { statusCls = 'mine-tag';  statusTxt = 'YOURS'; }
+    else if (avail) { statusCls = 'available'; statusTxt = 'IN';    }
+    else if (maint) { statusCls = 'maint';     statusTxt = 'MAINT'; }
+    else            { statusCls = 'in-use';    statusTxt = 'OUT';   }
 
     const slotLabel = `S${String(dev.locker_slot ?? 0).padStart(2, '0')}`;
 
@@ -788,6 +824,7 @@ function buildGrid(gridId, devices, mode) {
       </div>
       <div class="card-body">
         <div class="card-name">${dev.name}</div>
+        ${dev.pm_number ? `<div class="card-pm">${dev.pm_number}</div>` : ''}
         <div class="card-type">${dev.device_type}</div>
       </div>
     `;
@@ -826,7 +863,7 @@ function buildGrid(gridId, devices, mode) {
 ============================================================ */
 /**
  * Open the device detail overlay with full information about a device. Populates
- * all detail fields (name, type, serial, image, status, description) and configures
+ * all detail fields (name, PM, type, serial, image, status, description) and configures
  * the confirm button based on device availability and current mode.
  * @param {Object} dev - The device object to display details for.
  * @param {string} mode - Either 'borrow' or 'return', determines confirm button behavior.
@@ -849,6 +886,7 @@ function openDetail(dev, mode) {
   document.getElementById('detail-slot-tag').textContent =
     `SLOT ${String(dev.locker_slot ?? 0).padStart(2, '0')}`;
   document.getElementById('detail-name').textContent    = dev.name;
+  document.getElementById('detail-pm').textContent      = dev.pm_number || '—';
   document.getElementById('detail-type').textContent    = dev.device_type;
   document.getElementById('detail-serial').textContent  = dev.serial_number;
   document.getElementById('detail-img-slot').textContent = slot;
@@ -1538,7 +1576,7 @@ async function adminStartSession(overlay = true) {
 
 /**
  * Admin shortcut: close the admin panel, start a real backend admin session,
- * navigate to the main menu, and then open the borrow screen. If the backend
+ * navigate to the main menu, and then open the locker overlay. If the backend
  * session creation fails (e.g. no admin users enrolled), the panel closes but
  * navigation is aborted so the user stays on the current screen.
  * @returns {Promise<void>}

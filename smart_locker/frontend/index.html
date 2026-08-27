@@ -1,8 +1,8 @@
 <!--
   File: index.html
   Description: Kiosk touch-display UI with six screens (Idle, Auth Failed,
-    Main Menu, Borrow Grid, Return Grid, Device Detail) plus overlays for
-    inactivity warning, return slot, self-registration, admin panel,
+    Main Menu, Locker availability, Return Grid, Device Detail) plus overlays
+    for inactivity warning, return slot, self-registration, admin panel,
     Register Device, and software update.
   Project: smart_locker/frontend
   Notes: Served as a static file by FastAPI. Requires app.js and style.css.
@@ -283,8 +283,8 @@
           <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12l7-7 7 7"/></svg>
         </div>
         <div class="btn-texts">
-          <span class="btn-label">Borrow</span>
-          <span class="btn-desc">or pick on screen</span>
+          <span class="btn-label">Locker</span>
+          <span class="btn-desc">what's in · what's out</span>
         </div>
       </button>
       <button class="action-btn pick-btn" id="btn-return">
@@ -308,14 +308,14 @@
   </div>
 
   <!-- ================================================================
-       SCREEN 4 — BORROW
+       SCREEN 4 — LOCKER (availability overlay)
   ================================================================ -->
   <div id="screen-borrow" class="screen">
     <div class="screen-header">
       <button class="back-btn" data-target="main-menu">
         <svg viewBox="0 0 24 24"><path d="M19 12H5M12 5l-7 7 7 7"/></svg>
       </button>
-      <h2 class="screen-title">Borrow Equipment</h2>
+      <h2 class="screen-title">What's in the locker</h2>
       <span class="screen-badge" id="borrow-badge"></span>
     </div>
     <div class="grid-wrapper">
@@ -356,6 +356,10 @@
       <div class="detail-slot-tag" id="detail-slot-tag">SLOT —</div>
       <h1 class="detail-name" id="detail-name">—</h1>
       <div class="detail-meta-box">
+        <div class="detail-meta-row">
+          <span class="meta-label">PM</span>
+          <span class="meta-value" id="detail-pm">—</span>
+        </div>
         <div class="detail-meta-row">
           <span class="meta-label">Type</span>
           <span class="meta-value" id="detail-type">—</span>
@@ -416,8 +420,8 @@
             <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12l7-7 7 7"/></svg>
           </div>
           <div class="admin-btn-text">
-            <span class="admin-btn-label">Borrow Screen</span>
-            <span class="admin-btn-desc">Browse available equipment</span>
+            <span class="admin-btn-label">Locker</span>
+            <span class="admin-btn-desc">What's in · what's out</span>
           </div>
         </button>
 

@@ -30,7 +30,7 @@ python -m scripts.init_db
 python -m scripts.enroll_card --name "Name" --role admin
 python -m smart_locker.app           # kiosk API + UI on :8000
 
-python -m pytest tests/ -v           # ~240 items, 16 files, no NFC hardware
+python -m pytest tests/ -v           # ~247 items, 17 files, no NFC hardware
 
 # Pi (offline): copy tree + wheelhouse + .debs, then
 sudo bash deploy/install/install.sh
