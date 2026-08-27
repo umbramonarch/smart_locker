@@ -290,6 +290,46 @@ class DeviceRepository:
         return session.execute(stmt).scalar_one_or_none()
 
     @staticmethod
+    def find_by_slot(session: Session, locker_slot: int) -> Device | None:
+        """Look up the locker device occupying a physical slot.
+
+        Args:
+            session: Active database session.
+            locker_slot: Cabinet slot number.
+
+        Returns:
+            Device object or None if the slot is free.
+        """
+        stmt = select(Device).where(Device.locker_slot == locker_slot)
+        return session.execute(stmt).scalar_one_or_none()
+
+    @staticmethod
+    def find_by_serial(session: Session, serial_number: str) -> Device | None:
+        """Look up a device by manufacturer serial number.
+
+        Args:
+            session: Active database session.
+            serial_number: Serial string as stored on the device.
+
+        Returns:
+            Device object or None if not found.
+        """
+        stmt = select(Device).where(Device.serial_number == serial_number)
+        return session.execute(stmt).scalar_one_or_none()
+
+    @staticmethod
+    def set_locker_slot(session: Session, device: Device, locker_slot: int) -> None:
+        """Set the physical cabinet slot on a locker device.
+
+        Args:
+            session: Active database session.
+            device: Device row to update.
+            locker_slot: Cabinet slot number (>= 1).
+        """
+        device.locker_slot = locker_slot
+        session.flush()
+
+    @staticmethod
     def find_by_tag_hmac(session: Session, tag_hmac: str) -> Device | None:
         """Look up a device by the HMAC of its NFC sticker UID.
 

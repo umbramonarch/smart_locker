@@ -2,8 +2,8 @@
  * @fileoverview Client-side state machine for the kiosk touch UI. Manages screen
  *               transitions, API communication, SSE event handling, and user
  *               interaction flow across idle, auth, menu, locker availability,
- *               return, detail, registration, admin, return-slot,
- *               software-update, and appliance shutdown overlays.
+ *               return, detail, registration, admin, Register Device (PM + slot
+ *               + NFC), return-slot, software-update, and appliance shutdown overlays.
  * @project smart_locker/frontend
  * @description Demo mode (?demo), circle-reveal transitions, split text,
  *              inactivity countdown, and self-registration.
@@ -2070,7 +2070,7 @@ function closeRegisterDevice() {
 }
 
 /**
- * Open the admin Register Device list (bind only — does not create devices).
+ * Open the admin Register Device overlay (add from Excel, or bind an existing row).
  * @returns {Promise<void>}
  */
 async function adminRegisterDevice() {
@@ -2141,6 +2141,12 @@ async function populateBindList() {
     bindBtn.textContent = 'Bind';
     bindBtn.addEventListener('click', () => { clickSound(); startDeviceTagBind(dev); });
     actions.appendChild(bindBtn);
+    const slotBtn = document.createElement('button');
+    slotBtn.type = 'button';
+    slotBtn.className = 'bind-unbind';
+    slotBtn.textContent = 'Slot';
+    slotBtn.addEventListener('click', () => { clickSound(); openChangeSlot(dev); });
+    actions.appendChild(slotBtn);
     if (tagged) {
       const unbindBtn = document.createElement('button');
       unbindBtn.type = 'button';
@@ -2166,7 +2172,6 @@ async function startDeviceTagBind(dev) {
   document.getElementById('bind-confirm-name').textContent =
     `${dev.name} (${dev.pm_number})`;
   showBindStep('bind-step-tap');
-  clearInterval(bindCountdownTimer);
   try {
     const res = await fetch(`/api/admin/devices/${dev.id}/bind-tag`, { method: 'POST' });
     const data = await res.json().catch(() => ({}));
@@ -2191,6 +2196,70 @@ async function startDeviceTagBind(dev) {
     }, 2500);
     return;
   }
+  startBindCountdown();
+}
+
+/** Minimum slot buttons shown in the picker (grows with occupied max + 1). */
+const SLOT_GRID_MIN = 12;
+
+/** @type {number|null} Slot chosen on the Add from Excel step. */
+let selectedAddSlot = null;
+
+/** @type {Object|null} Device being moved in the change-slot step. */
+let slotChangeDevice = null;
+
+/** @type {number|null} Slot chosen on the change-slot step. */
+let selectedChangeSlot = null;
+
+/**
+ * Occupied locker slot numbers, optionally ignoring one device (the one being moved).
+ * @param {number|null} [exceptId]
+ * @returns {Set<number>}
+ */
+function occupiedSlots(exceptId) {
+  const used = new Set();
+  (S.devices || []).forEach(d => {
+    if (d.locker_slot == null) return;
+    if (exceptId != null && d.id === exceptId) return;
+    used.add(d.locker_slot);
+  });
+  return used;
+}
+
+/**
+ * Render a 1..N slot picker. Occupied slots are disabled.
+ * @param {string} containerId
+ * @param {Set<number>} occupied
+ * @param {number|null} selected
+ * @param {function(number): void} onPick
+ */
+function renderSlotGrid(containerId, occupied, selected, onPick) {
+  const el = document.getElementById(containerId);
+  if (!el) return;
+  el.innerHTML = '';
+  let maxUsed = 0;
+  occupied.forEach(n => { if (n > maxUsed) maxUsed = n; });
+  const max = Math.max(SLOT_GRID_MIN, maxUsed + 1);
+  for (let n = 1; n <= max; n++) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'bind-slot-btn';
+    btn.textContent = String(n);
+    if (occupied.has(n)) {
+      btn.classList.add('taken');
+      btn.disabled = true;
+    }
+    if (selected === n) btn.classList.add('selected');
+    btn.addEventListener('click', () => { clickSound(); onPick(n); });
+    el.appendChild(btn);
+  }
+}
+
+/**
+ * 60s countdown on the tap-sticker step. Shared by Bind and Add from Excel.
+ */
+function startBindCountdown() {
+  clearInterval(bindCountdownTimer);
   let secs = 60;
   const cdEl = document.getElementById('bind-countdown');
   cdEl.textContent = secs + 's';
@@ -2209,6 +2278,127 @@ async function startDeviceTagBind(dev) {
       }, 2500);
     }
   }, 1000);
+}
+
+/**
+ * Open the Add from Excel step (PM + free slot).
+ */
+function openAddFromExcel() {
+  if (USE_DEMO) {
+    showToast('Add from Excel is Pi only', 'error');
+    return;
+  }
+  document.getElementById('bind-pm-input').value = '';
+  document.getElementById('bind-add-error').textContent = '';
+  selectedAddSlot = null;
+  const paint = () => {
+    renderSlotGrid('bind-slot-grid', occupiedSlots(), selectedAddSlot, n => {
+      selectedAddSlot = n;
+      paint();
+    });
+  };
+  paint();
+  showBindStep('bind-step-add');
+}
+
+/**
+ * POST PM + slot, then wait for the sticker tap (bind window already armed).
+ * @returns {Promise<void>}
+ */
+async function submitRegisterDevice() {
+  if (USE_DEMO) {
+    showToast('Add from Excel is Pi only', 'error');
+    return;
+  }
+  const pm = (document.getElementById('bind-pm-input').value || '').trim();
+  const err = document.getElementById('bind-add-error');
+  err.textContent = '';
+  if (!pm) {
+    err.textContent = 'Enter a PM number.';
+    return;
+  }
+  if (!selectedAddSlot) {
+    err.textContent = 'Pick a free slot.';
+    return;
+  }
+  try {
+    const res = await fetch('/api/admin/devices/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pm_number: pm, locker_slot: selectedAddSlot }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const detail = data.detail;
+      err.textContent = typeof detail === 'string' ? detail : 'Could not register.';
+      return;
+    }
+    document.getElementById('bind-confirm-name').textContent =
+      `${data.name} (${data.pm_number})`;
+    showBindStep('bind-step-tap');
+    startBindCountdown();
+  } catch (_) {
+    err.textContent = 'Could not register.';
+  }
+}
+
+/**
+ * Open the change-slot step for an existing locker row.
+ * @param {Object} dev
+ */
+function openChangeSlot(dev) {
+  slotChangeDevice = dev;
+  selectedChangeSlot = dev.locker_slot != null ? dev.locker_slot : null;
+  document.getElementById('bind-slot-name').textContent =
+    `${dev.name} (${dev.pm_number})`;
+  document.getElementById('bind-slot-error').textContent = '';
+  const paint = () => {
+    renderSlotGrid(
+      'bind-change-slot-grid',
+      occupiedSlots(dev.id),
+      selectedChangeSlot,
+      n => { selectedChangeSlot = n; paint(); },
+    );
+  };
+  paint();
+  showBindStep('bind-step-slot');
+}
+
+/**
+ * POST a new slot for the device opened in openChangeSlot.
+ * @returns {Promise<void>}
+ */
+async function submitChangeSlot() {
+  const err = document.getElementById('bind-slot-error');
+  err.textContent = '';
+  if (!slotChangeDevice) return;
+  if (!selectedChangeSlot) {
+    err.textContent = 'Pick a slot.';
+    return;
+  }
+  if (USE_DEMO) {
+    slotChangeDevice.locker_slot = selectedChangeSlot;
+    showBindStep('bind-step-list');
+    populateBindList();
+    return;
+  }
+  try {
+    const res = await fetch(`/api/admin/devices/${slotChangeDevice.id}/slot`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ locker_slot: selectedChangeSlot }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const detail = data.detail;
+      err.textContent = typeof detail === 'string' ? detail : 'Could not change slot.';
+      return;
+    }
+    showBindStep('bind-step-list');
+    await populateBindList();
+  } catch (_) {
+    err.textContent = 'Could not change slot.';
+  }
 }
 
 /**
@@ -2458,6 +2648,11 @@ document.getElementById('admin-register-user').addEventListener('click', () => {
 document.getElementById('admin-register-device').addEventListener('click', () => { clickSound(); adminRegisterDevice(); });
 document.getElementById('bind-device-close').addEventListener('click', () => { clickSound(); closeRegisterDevice(); });
 document.getElementById('bind-search').addEventListener('input', () => { populateBindList(); });
+document.getElementById('bind-add-open').addEventListener('click', () => { clickSound(); openAddFromExcel(); });
+document.getElementById('bind-add-back').addEventListener('click', () => { clickSound(); showBindStep('bind-step-list'); populateBindList(); });
+document.getElementById('bind-add-submit').addEventListener('click', () => { clickSound(); submitRegisterDevice(); });
+document.getElementById('bind-slot-back').addEventListener('click', () => { clickSound(); showBindStep('bind-step-list'); });
+document.getElementById('bind-slot-submit').addEventListener('click', () => { clickSound(); submitChangeSlot(); });
 document.getElementById('admin-export-excel').addEventListener('click', () => { clickSound(); adminExportExcel(); });
 document.getElementById('admin-update').addEventListener('click', () => { clickSound(); adminUpdate(); });
 document.getElementById('admin-exit-kiosk').addEventListener('click', () => { clickSound(); adminExitKiosk(); });

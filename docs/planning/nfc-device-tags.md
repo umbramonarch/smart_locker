@@ -17,7 +17,7 @@ A colleague taps their **work card** to log in, then either:
 
 The system records who has that exact unit. Auto-intent: a device tap borrows if the unit is available, and returns it if the logged-in user already has it.
 
-Device rows still come from Excel (**schrank** rows only). **Register Device** in the hidden admin panel binds a sticker to an existing locker device. The list must show **name and PM number**, because several units can share a name and differ only by PM.
+Device rows live in SQLite only after admin **Register Device** (PM + slot + NFC). Excel is the catalog. **Register Device** in the hidden admin panel also binds the sticker. The list must show **name and PM number**, because several units can share a name and differ only by PM.
 
 ---
 
@@ -27,7 +27,7 @@ Device rows still come from Excel (**schrank** rows only). **Register Device** i
 |---|---|
 | Intent | **Auto-intent.** After login, a device-tag tap borrows or returns from device status. No extra “Borrow or Return?” step. |
 | Post-login UI | **Change the main menu** to scan-first. **Locker** is an in/out availability overlay (screen-pick borrow remains). **Return** stays as “or pick on screen.” Do not skip the menu. |
-| Register Device | Admin bind only. Does **not** create a device. Excel/schrank import already created the row. |
+| Register Device | Admin **PM + free slot + NFC**. Copies catalog from Excel. Sync never inserts. Bind/unbind/change slot on existing rows. |
 | List identity | Show **name + PM** (and slot if present). Same name, different PM → two rows. |
 | Tag storage | `devices.tag_hmac` (HMAC-SHA256 of UID, same key as `users.uid_hmac`). **Never** store or log the raw UID. No encrypted UID on devices. |
 | One sticker | One tag per device. Re-bind replaces the HMAC on that row. |
@@ -58,7 +58,7 @@ That extra HID device fights the Chromium kiosk (focus, “types into the wrong 
 - Frontend `S.mode` (`borrow` / `return`) is **UI-only**. The backend has no current screen. Auto-intent must live in the backend from device status, not from a new “mode” API.
 - Fake reader `simulate_tap(uid)` already injects any UID. No second fake-reader class.
 - Admin panel: idle clock 5× within 3 s. **Register User** already: pick/type name → 60 s tap window.
-- Import: schrank rows only; `DeviceRepository.update_metadata` ALLOWED set does not include slot/image/description. `tag_hmac` must stay off that set.
+- Import: catalog-only for PMs already in SQLite; never inserts. `DeviceRepository.update_metadata` ALLOWED set does not include slot/image/description. `tag_hmac` must stay off that set.
 
 ---
 
@@ -155,21 +155,20 @@ Idle copy can mention that after login they can tap a device. Keep it one line. 
 
 ---
 
-## 8. Admin: Register Device (bind, not create)
+## 8. Admin: Register Device (PM + slot + NFC)
 
-Excel is the master list. Import already inserted schrank devices into SQLite. Operators:
+Excel is the catalog. Sync never inserts locker rows. Operators:
 
-1. **Sync Source** if the workbook changed.
-2. **Register Device** (new admin button, next to Register User).
-3. See locker devices as **distinct rows**: display **name**, **PM**, slot if any, and whether a tag is already bound.
+1. **Register Device** (admin button, next to Register User).
+2. **Add from Excel**: type the **PM**, pick a **free slot**, Continue, then tap the sticker.
+3. Existing locker rows stay on the list as **name + PM + slot**, with Bind / Unbind / Slot.
 4. Search/filter by name or PM (same names must still all be visible).
-5. Pick **one row** (the PM identifies the unit).
-6. 60 s **Tap the sticker** step (reuse the user-registration waiting UI).
-7. Success / fail, then back to the list so the next unit can be bound.
+5. 60 s **Tap the sticker** step after add or Bind.
+6. Success / fail, then back to the list.
 
-Unbound rows first; already-tagged rows remain so an operator can **re-bind** (lost sticker). Unbind is allowed (clear `tag_hmac`).
+Unbound rows first; already-tagged rows remain so an operator can **re-bind** (lost sticker). Unbind is allowed (clear `tag_hmac`). Change slot is allowed when the new number is free.
 
-Do **not** add a “new device” form. If it is not a schrank row in the DB, it is not a locker device.
+Unknown PM or share down → error, no ghost row.
 
 ---
 
@@ -179,6 +178,8 @@ No public “borrow by tag” URL. The NFC bridge calls `LockerService` and push
 
 Admin (require admin session, same as Register User):
 
+- `POST /api/admin/devices/register` — PM + slot; insert from Excel catalog; arm bind.
+- `POST /api/admin/devices/{id}/slot` — move to a free slot.
 - `POST /api/admin/devices/{id}/bind-tag` — set `pending_tag_bind` (60 s).
 - `POST /api/admin/devices/{id}/unbind-tag` — clear `tag_hmac`.
 - `GET /api/devices` — add `has_tag: bool` (no digest). Admin list uses name, `pm_number`, `locker_slot`, `has_tag`.

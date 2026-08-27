@@ -169,6 +169,17 @@ class TestDeviceRepository:
         assert device.tag_hmac is None
         assert DeviceRepository.find_by_tag_hmac(db_session, digest) is None
 
+    def test_find_by_slot(self, db_session):
+        """Slot lookup finds the device occupying that locker number."""
+        DeviceRepository.create(
+            db_session, name="Fluke 87V", device_type="t",
+            pm_number="PM-SLOT", locker_slot=7,
+        )
+        found = DeviceRepository.find_by_slot(db_session, 7)
+        assert found is not None
+        assert found.pm_number == "PM-SLOT"
+        assert DeviceRepository.find_by_slot(db_session, 8) is None
+
     def test_tag_hmac_null_uniqueness(self, db_session):
         """SQLite UNIQUE on tag_hmac allows many unbound (NULL) devices."""
         DeviceRepository.create(

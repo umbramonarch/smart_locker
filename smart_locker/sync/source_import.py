@@ -1,14 +1,14 @@
 """
 File: source_import.py
-Description: Source Excel import — reads the company device master list and syncs
-             to the database. Inserts new devices and updates metadata on existing
-             ones. Only devices with a slot column starting with "schrank" are
-             imported. Supports both German and English column headers.
+Description: Source Excel import — reads the company device master list and
+             refreshes catalog metadata on locker devices already in SQLite.
+             Never inserts a locker row (Register Device does that). Supports
+             German and English column headers.
 Project: smart_locker/sync
-Notes: Can be called programmatically (by the scheduler), via CLI
-       ('python -m scripts.sync_source'), or via the admin API endpoint
-       (POST /api/admin/sync-source). Status, borrower, slot, image, and
-       description fields are never overwritten on existing devices.
+Notes: Called by the scheduler, ``python -m scripts.sync_source``, or
+       POST /api/admin/sync-source. Status, borrower, slot, image,
+       description, and tag_hmac are never overwritten. Platz/Schrank is
+       unused. lookup_catalog_by_pm is the Register Device Excel lookup.
 """
 
 import logging
@@ -19,9 +19,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 from openpyxl import load_workbook
-from sqlalchemy.orm import Session
 
-from smart_locker.database.models import Device, DeviceStatus
 from smart_locker.database.repositories import DeviceRepository
 
 logger = logging.getLogger(__name__)
@@ -81,11 +79,9 @@ LOCATION_CANDIDATES = [
 class ImportResult:
     """Summary of a source import run with per-category counts.
 
-    Tracks how many devices were newly imported, updated with changed
-    metadata, left unchanged, skipped (non-locker), or errored during
-    the import process. Also records how many new registrant names were
-    extracted from the "Aktueller Einsatzort" column and added to the
-    registrants table for self-service registration.
+    ``imported`` stays 0 — Sync never inserts locker rows. ``non_locker_skipped``
+    is Excel PMs that are not already in SQLite. Also records registrant names
+    extracted from Aktueller Einsatzort.
     """
     imported: int = 0
     updated: int = 0
@@ -94,6 +90,23 @@ class ImportResult:
     errors: int = 0
     error_details: list[str] = field(default_factory=list)
     registrants_added: int = 0
+
+
+@dataclass(frozen=True)
+class CatalogRow:
+    """Catalog fields copied from one Excel PM row into a locker device."""
+
+    pm_number: str
+    name: str
+    device_type: str
+    serial_number: str | None
+    manufacturer: str | None
+    model: str | None
+    calibration_due: date | None
+
+
+class CatalogReadError(Exception):
+    """Source Excel is missing, locked, or has no PM column."""
 
 
 # ---------------------------------------------------------------------------
@@ -201,6 +214,148 @@ def _cell_str(row, idx: int | None) -> str | None:
     return val if val else None
 
 
+def _load_rows(
+    path: Path,
+    sheet_name: str | None = None,
+) -> tuple[list | None, str | None]:
+    """Copy the workbook to a temp file and return ``(rows, error)``.
+
+    Copying first lets the read succeed when Excel has the share file open.
+
+    Args:
+        path: Path to the source ``.xlsx``.
+        sheet_name: Sheet to read, or None for the active sheet.
+
+    Returns:
+        ``(rows, None)`` on success, or ``(None, error_message)``.
+    """
+    if not path.exists():
+        return None, f"File not found: {path}"
+
+    tmp_fd, tmp_path_str = tempfile.mkstemp(suffix=".xlsx")
+    tmp_path = Path(tmp_path_str)
+    try:
+        shutil.copy2(path, tmp_path)
+    except PermissionError:
+        tmp_path.unlink(missing_ok=True)
+        return None, f"Source file locked: {path}"
+    finally:
+        import os
+        os.close(tmp_fd)
+
+    try:
+        wb = load_workbook(tmp_path, read_only=True, data_only=True)
+        if sheet_name:
+            if sheet_name not in wb.sheetnames:
+                wb.close()
+                return None, (
+                    f"Sheet '{sheet_name}' not found. Available: {wb.sheetnames}"
+                )
+            ws = wb[sheet_name]
+        else:
+            ws = wb.active
+        rows = list(ws.iter_rows(values_only=True))
+        wb.close()
+        return rows, None
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+def _catalog_from_row(
+    row,
+    cols: dict[str, int | None],
+    compose_name: bool,
+    default_type: str,
+) -> CatalogRow | None:
+    """Parse one Excel data row into catalog fields, or None if PM is empty.
+
+    Args:
+        row: Tuple of cell values.
+        cols: Column index map from ``_detect_columns``.
+        compose_name: True when the sheet has no name column (use manufacturer + model).
+        default_type: Fallback device_type.
+
+    Returns:
+        CatalogRow, or None when the PM cell is empty.
+    """
+    pm_number = _cell_str(row, cols["pm"])
+    if not pm_number:
+        return None
+
+    manufacturer = _cell_str(row, cols["manufacturer"])
+    model_val = _cell_str(row, cols["model"])
+    if compose_name:
+        name_parts = []
+        if manufacturer:
+            name_parts.append(manufacturer)
+        if model_val:
+            name_parts.append(model_val)
+        name = " ".join(name_parts) if name_parts else pm_number
+    else:
+        name = _cell_str(row, cols["name"]) or pm_number
+
+    device_type = default_type
+    if cols["type"] is not None and row[cols["type"]]:
+        device_type = str(row[cols["type"]]).strip()
+
+    calibration_due = None
+    if cols["calibration"] is not None:
+        calibration_due = parse_date(row[cols["calibration"]])
+
+    return CatalogRow(
+        pm_number=pm_number,
+        name=name,
+        device_type=device_type,
+        serial_number=_cell_str(row, cols["serial"]),
+        manufacturer=manufacturer,
+        model=model_val,
+        calibration_due=calibration_due,
+    )
+
+
+def lookup_catalog_by_pm(
+    source_path: str | Path,
+    pm_number: str,
+    sheet_name: str | None = None,
+    default_type: str = "general",
+    column_overrides: dict[str, str] | None = None,
+) -> CatalogRow | None:
+    """Return catalog fields for one PM from the company Excel, or None.
+
+    Args:
+        source_path: Path to ``device-list.xlsx``.
+        pm_number: Equipment number to match (stripped; compared as stored).
+        sheet_name: Sheet to read (default: active sheet).
+        default_type: Device type when the sheet has no category column.
+        column_overrides: Optional header-name overrides.
+
+    Returns:
+        CatalogRow if the PM is on the sheet, otherwise None.
+
+    Raises:
+        CatalogReadError: File missing, locked, empty, or no PM column.
+    """
+    path = Path(source_path)
+    rows, err = _load_rows(path, sheet_name)
+    if err:
+        raise CatalogReadError(err)
+    if not rows or len(rows) < 2:
+        raise CatalogReadError("Source Excel has no data rows.")
+
+    headers = [str(h).strip() if h else "" for h in rows[0]]
+    cols = _detect_columns(headers, column_overrides)
+    if cols["pm"] is None:
+        raise CatalogReadError(f"Could not find PM/equipment column. Headers: {headers}")
+
+    want = pm_number.strip()
+    compose_name = cols["name"] is None
+    for row in rows[1:]:
+        catalog = _catalog_from_row(row, cols, compose_name, default_type)
+        if catalog is not None and catalog.pm_number == want:
+            return catalog
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Main import function
 # ---------------------------------------------------------------------------
@@ -213,11 +368,11 @@ def import_from_source_excel(
     default_type: str = "general",
     column_overrides: dict[str, str] | None = None,
 ) -> ImportResult:
-    """Import new devices and update existing ones from the company source Excel.
+    """Refresh catalog metadata on locker devices that already exist in SQLite.
 
-    Only devices with a slot column value starting with "schrank" are imported.
-    Existing devices (matched by PM number) get catalog metadata updated; status,
-    borrower, locker_slot, image_path, description, and tag_hmac are never overwritten.
+    Excel PMs that are not already locker rows are counted as skipped and
+    never inserted. Platz/Schrank is ignored. Status, borrower, locker_slot,
+    image_path, description, and tag_hmac are never overwritten.
 
     Args:
         engine: SQLAlchemy engine.
@@ -233,61 +388,18 @@ def import_from_source_excel(
     result = ImportResult()
     path = Path(source_path)
 
-    if not path.exists():
-        logger.warning("Source Excel not found: %s", path)
-        result.errors = 1
-        result.error_details.append(f"File not found: {path}")
-        return result
-
     logger.info("Reading source Excel: %s", path)
-
-    # Copy to a temp file before reading so the import succeeds even when
-    # the source file is open in Excel (Windows holds a lock on open files).
-    tmp_fd, tmp_path_str = tempfile.mkstemp(suffix=".xlsx")
-    tmp_path = Path(tmp_path_str)
-    try:
-        shutil.copy2(path, tmp_path)
-    except PermissionError:
-        logger.warning(
-            "Source Excel at %s is locked — cannot copy for reading.", path
-        )
+    rows, err = _load_rows(path, sheet_name)
+    if err:
+        logger.warning("%s", err)
         result.errors = 1
-        result.error_details.append(f"Source file locked: {path}")
-        tmp_path.unlink(missing_ok=True)
+        result.error_details.append(err)
         return result
-    finally:
-        # Close the file descriptor opened by mkstemp; the file itself
-        # persists on disk for openpyxl to read.
-        import os
-        os.close(tmp_fd)
 
-    try:
-        wb = load_workbook(tmp_path, read_only=True, data_only=True)
-
-        if sheet_name:
-            if sheet_name not in wb.sheetnames:
-                result.errors = 1
-                result.error_details.append(
-                    f"Sheet '{sheet_name}' not found. Available: {wb.sheetnames}"
-                )
-                wb.close()
-                return result
-            ws = wb[sheet_name]
-        else:
-            ws = wb.active
-
-        # Read all rows
-        rows = list(ws.iter_rows(values_only=True))
-        wb.close()
-    finally:
-        # Always clean up the temporary copy
-        tmp_path.unlink(missing_ok=True)
-
-    if len(rows) < 2:
+    if not rows or len(rows) < 2:
         logger.warning("Source Excel has no data rows.")
         return result
 
-    # Parse headers
     headers = [str(h).strip() if h else "" for h in rows[0]]
     cols = _detect_columns(headers, column_overrides)
 
@@ -296,15 +408,9 @@ def import_from_source_excel(
         result.error_details.append(f"Could not find PM/equipment column. Headers: {headers}")
         return result
 
-    slot_idx = cols["slot"]
-    pm_idx = cols["pm"]
     compose_name = cols["name"] is None
 
     # --- Registrant extraction: collect unique person names from ALL rows ---
-    # The "Aktueller Einsatzort" column lists where each device is deployed.
-    # Values containing "schrank" are locker locations; everything else is a
-    # person's name. We read ALL rows (not just schrank-filtered ones) so that
-    # the registrant list covers employees who have non-locker devices too.
     registrant_names: set[str] = set()
     if cols["location"] is not None:
         for row in rows[1:]:
@@ -318,162 +424,50 @@ def import_from_source_excel(
             len(registrant_names),
         )
 
-    # --- First pass: build schrank auto-numbering ---
-    schrank_row_indices: list[int] = []
-    if slot_idx is not None:
-        for data_idx, row in enumerate(rows[1:]):
-            if row[slot_idx]:
-                val = str(row[slot_idx]).strip().lower()
-                if val.startswith("schrank"):
-                    schrank_row_indices.append(data_idx)
-
-    schrank_slot_map = {idx: slot_num for slot_num, idx in enumerate(schrank_row_indices, start=1)}
-
-    # --- Second pass: parse rows, filter to schrank only ---
-    parsed_devices: list[dict] = []
-    for data_idx, row in enumerate(rows[1:]):
-        pm_number = _cell_str(row, pm_idx)
-        if not pm_number:
+    parsed: list[CatalogRow] = []
+    for row in rows[1:]:
+        catalog = _catalog_from_row(row, cols, compose_name, default_type)
+        if catalog is None:
             continue
+        parsed.append(catalog)
 
-        # Only import devices assigned to a locker
-        if slot_idx is None:
-            result.non_locker_skipped += 1
-            continue
-        raw_slot = str(row[slot_idx]).strip().lower() if row[slot_idx] else ""
-        if not raw_slot.startswith("schrank"):
-            result.non_locker_skipped += 1
-            continue
+    logger.info("Parsed %d Excel PM row(s).", len(parsed))
 
-        manufacturer = _cell_str(row, cols["manufacturer"])
-        model_val = _cell_str(row, cols["model"])
-
-        if compose_name:
-            # Compose name from manufacturer and model only — PM number is a
-            # separate identifier and should not appear in the display name.
-            name_parts = []
-            if manufacturer:
-                name_parts.append(manufacturer)
-            if model_val:
-                name_parts.append(model_val)
-            # Fall back to PM number only if neither manufacturer nor model exists
-            name = " ".join(name_parts) if name_parts else pm_number
-        else:
-            name = _cell_str(row, cols["name"]) or pm_number
-
-        serial = _cell_str(row, cols["serial"])
-
-        device_type = default_type
-        if cols["type"] is not None and row[cols["type"]]:
-            device_type = str(row[cols["type"]]).strip()
-
-        locker_slot = schrank_slot_map.get(data_idx)
-
-        description = _cell_str(row, cols["desc"])
-        image_path = _cell_str(row, cols["image"])
-
-        calibration_due = None
-        if cols["calibration"] is not None:
-            calibration_due = parse_date(row[cols["calibration"]])
-
-        # Determine device location from "Aktueller Einsatzort" column.
-        # If the value contains "schrank" the device is physically in the
-        # locker (AVAILABLE); any other non-empty value is a person's name,
-        # meaning that person currently has the device (BORROWED).
-        location_raw = _cell_str(row, cols["location"])
-        if location_raw and "schrank" not in location_raw.lower():
-            borrower_name = location_raw
-            device_status = DeviceStatus.BORROWED.value
-        else:
-            borrower_name = None
-            device_status = DeviceStatus.AVAILABLE.value
-
-        parsed_devices.append({
-            "pm_number": pm_number,
-            "name": name,
-            "serial_number": serial,
-            "device_type": device_type,
-            "locker_slot": locker_slot,
-            "description": description,
-            "image_path": image_path,
-            "manufacturer": manufacturer,
-            "model": model_val,
-            "calibration_due": calibration_due,
-            "borrower_name": borrower_name,
-            "device_status": device_status,
-        })
-
-    logger.info(
-        "Parsed %d locker devices (%d non-locker skipped).",
-        len(parsed_devices), result.non_locker_skipped,
-    )
-
-    if not parsed_devices:
-        return result
-
-    # --- Import to database (or compute the diff only, when dry_run) ---
     from smart_locker.database.engine import get_session, get_session_factory
-    from smart_locker.database.repositories import UserRepository
     from smart_locker.sync.excel_sync import export_to_excel
 
-    # Run the real create/update logic so the per-category counts are exact, then
-    # either commit (a real import) or — for a dry run (preview) — roll the whole
-    # transaction back, so add/update/unchanged are reported without persisting.
     factory = get_session_factory()
     session = factory()
     try:
-        for d in parsed_devices:
+        for catalog in parsed:
             try:
-                existing = DeviceRepository.find_by_pm(session, d["pm_number"])
+                existing = DeviceRepository.find_by_pm(session, catalog.pm_number)
                 if existing is None:
-                    # New device — insert. Einsatzort applies only on first insert.
-                    borrower_id = None
-                    if d["borrower_name"]:
-                        user = UserRepository.find_by_display_name(
-                            session, d["borrower_name"]
-                        )
-                        if user is not None:
-                            borrower_id = user.id
-                        else:
-                            logger.warning(
-                                "Borrower '%s' for PM %s not found in user database.",
-                                d["borrower_name"], d["pm_number"],
-                            )
-                    DeviceRepository.create(
-                        session,
-                        name=d["name"],
-                        device_type=d["device_type"],
-                        pm_number=d["pm_number"],
-                        serial_number=d["serial_number"],
-                        locker_slot=d["locker_slot"],
-                        description=d["description"],
-                        image_path=d["image_path"],
-                        manufacturer=d["manufacturer"],
-                        model=d["model"],
-                        calibration_due=d["calibration_due"],
-                        status=d["device_status"],
-                        current_borrower_id=borrower_id,
-                    )
-                    result.imported += 1
+                    result.non_locker_skipped += 1
+                    continue
+                serial = catalog.serial_number
+                if serial:
+                    holder = DeviceRepository.find_by_serial(session, serial)
+                    if holder is not None and holder.id != existing.id:
+                        serial = existing.serial_number
+                changed = DeviceRepository.update_metadata(
+                    session,
+                    existing,
+                    name=catalog.name,
+                    device_type=catalog.device_type,
+                    serial_number=serial,
+                    manufacturer=catalog.manufacturer,
+                    model=catalog.model,
+                    calibration_due=catalog.calibration_due,
+                )
+                if changed:
+                    result.updated += 1
                 else:
-                    changed = DeviceRepository.update_metadata(
-                        session,
-                        existing,
-                        name=d["name"],
-                        device_type=d["device_type"],
-                        serial_number=d["serial_number"],
-                        manufacturer=d["manufacturer"],
-                        model=d["model"],
-                        calibration_due=d["calibration_due"],
-                    )
-                    if changed:
-                        result.updated += 1
-                    else:
-                        result.unchanged += 1
+                    result.unchanged += 1
             except Exception as e:
                 result.errors += 1
-                result.error_details.append(f"PM {d['pm_number']}: {e}")
-                logger.error("Import error for PM %s: %s", d["pm_number"], e)
+                result.error_details.append(f"PM {catalog.pm_number}: {e}")
+                logger.error("Import error for PM %s: %s", catalog.pm_number, e)
 
         if dry_run:
             session.rollback()
@@ -485,20 +479,14 @@ def import_from_source_excel(
     finally:
         session.close()
 
-    # A dry run reports the diff and stops here — no registrant sync, no photo
-    # re-scan, no Excel export (all of which would mutate state).
     if dry_run:
         logger.info(
-            "Source import DRY RUN: %d would import, %d would update, %d unchanged, "
-            "%d errors (nothing written).",
-            result.imported, result.updated, result.unchanged, result.errors,
+            "Source import DRY RUN: %d would update, %d unchanged, "
+            "%d not in locker, %d errors (nothing written).",
+            result.updated, result.unchanged, result.non_locker_skipped, result.errors,
         )
         return result
 
-    # --- Sync registrant names to the registrants table ---
-    # This is done after the device import so both operations share the
-    # same get_session factory. Names are additive — existing registrants
-    # are never removed, only new ones are inserted.
     if registrant_names:
         from smart_locker.database.repositories import RegistrantRepository
 
@@ -509,35 +497,7 @@ def import_from_source_excel(
         except Exception as e:
             logger.warning("Registrant name sync failed: %s", e)
 
-    # --- Re-scan existing photos for newly imported devices ---
-    # The photo watcher and source import are independent pipelines that
-    # converge at DeviceRepository. If a photo for a model (e.g. "87V.jpg")
-    # was placed in the input folder *before* the device with that model was
-    # imported, the photo watcher would never have matched it — it only fires
-    # on filesystem events, not on database changes. Re-scanning after import
-    # closes this gap without coupling the two pipelines together.
-    if result.imported > 0:
-        from config.settings import PHOTO_INPUT_PATH, PHOTO_SERVE_DIR
-
-        if PHOTO_INPUT_PATH:
-            try:
-                from smart_locker.sync.photo_watcher import scan_existing_photos
-
-                photo_count = scan_existing_photos(
-                    Path(PHOTO_INPUT_PATH), PHOTO_SERVE_DIR, engine,
-                )
-                if photo_count:
-                    logger.info(
-                        "Photo re-scan after import: %d device(s) updated.",
-                        photo_count,
-                    )
-            except Exception as e:
-                logger.warning("Photo re-scan after import failed: %s", e)
-
-    # Trigger output Excel sync to the configured export path (the locker share on the
-    # Pi). Only when EXCEL_AUTO_EXPORT is set; otherwise the export stays on-demand
-    # (and the test suite, which never sets SMART_LOCKER_EXCEL_PATH, is unaffected).
-    if result.imported > 0 or result.updated > 0:
+    if result.updated > 0:
         from config.settings import EXCEL_AUTO_EXPORT, EXCEL_SYNC_PATH
         if EXCEL_AUTO_EXPORT:
             try:
@@ -546,9 +506,10 @@ def import_from_source_excel(
                 logger.warning("Excel sync after import failed: %s", e)
 
     logger.info(
-        "Source import done: %d imported, %d updated, %d unchanged, %d errors, "
+        "Source import done: %d updated, %d unchanged, %d not in locker, %d errors, "
         "%d registrants added.",
-        result.imported, result.updated, result.unchanged, result.errors,
+        result.updated, result.unchanged, result.non_locker_skipped, result.errors,
         result.registrants_added,
     )
     return result
+

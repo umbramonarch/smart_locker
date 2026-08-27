@@ -74,7 +74,7 @@ smart_locker/
 │   │   └── user_service.py      # User enrollment, public/admin views
 │   └── sync/
 │       ├── excel_sync.py        # On-demand / auto Excel export (Devices / Transactions / Users)
-│       ├── source_import.py     # Import company device master list (schrank only, DE/EN headers)
+│       ├── source_import.py     # Catalog refresh for locker PMs (no insert, DE/EN headers)
 │       ├── scheduler.py         # Source import: startup + 6h interval (+ file-watch on local FS)
 │       ├── photo_watcher.py     # Auto-assign device photos by model number
 │       └── fs_utils.py          # Detect network (CIFS/NFS) paths so watchers skip unreliable inotify
@@ -115,12 +115,12 @@ smart_locker/
 | FastAPI REST API | ✅ Done | Session, device, registration, admin, dashboard endpoints + SSE |
 | Self-registration | ✅ Done | Approved-name list + NFC tap; admin manual registration |
 | Excel export | ✅ Done | On-demand `.xlsx` (Devices + Transactions + Users) — replaces old auto-sync |
-| Source import | ✅ Done | Startup + 6h interval + file-watch on local FS; schrank filter, DE/EN headers |
-| Device import | ✅ Done | German + English Excel headers, PM-based dedup, schrank auto-numbering |
+| Source import | ✅ Done | Startup + 6h interval + file-watch on local FS; catalog-only, no insert |
+| Device import | ✅ Done | German + English Excel headers, PM-based catalog update, no auto locker insert |
 | Photo import | ✅ Done | By PM number (`update_device`) or by model (photo watcher) |
 | Web dashboard | ✅ Done | Read-only `/dashboard` — devices, transactions, users; 30s auto-refresh |
 | Frontend UI | ✅ Done | 6-screen kiosk UI + overlays |
-| Unit tests | ✅ Done | ~234 tests across 16 modules, all hardware-free |
+| Unit tests | ✅ Done | ~298 tests, hardware-free |
 | NFC device tags | ✅ Done | Same ACR1252U; `devices.tag_hmac`; auto borrow/return after login |
 | Calibration alerts | 🔲 Future | Calibration dates stored; notification system not yet built |
 | Kiosk deployment | ✅ Done | Raspberry Pi appliance: systemd service, CIFS mount, Chromium kiosk, offline install (`deploy/`) |
@@ -247,7 +247,7 @@ Cheap NFC stickers on locker devices use the same ACR1252U as work cards (no USB
 
 - **Storage:** `devices.tag_hmac` (HMAC-SHA256 of the sticker UID, same key as work cards). The raw UID is never stored or logged.
 - **Flow:** tap work card → tap sticker (or pick on screen). Auto-intent from device status: borrow if available, return if you hold it. Session stays open for several devices. A work-card tap still logs out.
-- **Register Device** (hidden admin panel) binds a sticker to an existing Excel/schrank row. The list shows **name + PM** because duplicate names exist. CLI: `python -m scripts.enroll_device_tag --pm PM-001` (or `--uid HEX`).
+- **Register Device** (hidden admin panel): **PM + free slot + NFC**. Catalog comes from Excel. Sync never inserts locker rows. The list shows **name + PM**. CLI bind: `python -m scripts.enroll_device_tag --pm PM-001` (or `--uid HEX`).
 - Excel barcode is unused leftover; re-import does **not** overwrite `tag_hmac`, locker status, or the current borrower.
 
 ## Running Tests

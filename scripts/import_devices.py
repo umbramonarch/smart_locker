@@ -1,13 +1,12 @@
 """
 File: import_devices.py
-Description: Bulk device import from Excel (.xlsx) files. Reads devices from
-             an Excel sheet and inserts/updates them in the database, skipping
-             non-locker devices (only "schrank" slot values are imported).
-             Supports German and English column headers with auto-detection.
+Description: Refresh locker-device catalog fields from Excel. Does not insert
+             new locker rows (Register Device does that). Supports German and
+             English column headers with auto-detection.
 Project: smart_locker/scripts
 Notes: Usage: python -m scripts.import_devices --file devices.xlsx [--dry-run]
        Column headers can be overridden via CLI flags (--pm-col, --serial-col,
-       --manufacturer-col, etc.). Duplicates are skipped by PM number.
+       --manufacturer-col, etc.). PMs not already in SQLite are skipped.
 """
 
 import argparse
@@ -30,8 +29,8 @@ def main() -> None:
     """Parse CLI arguments and run a bulk device import from an Excel file.
 
     Reads an Excel file, auto-detects column headers (German or English),
-    filters to locker-assigned ("schrank") devices, and inserts or updates
-    them in the database. Supports dry-run mode and column override flags.
+    and updates catalog fields on locker devices that already exist. New PMs
+    are skipped. Supports dry-run mode and column override flags.
 
     Returns:
         None. Import summary is printed to stdout.
@@ -96,7 +95,7 @@ def main() -> None:
 
     print(
         f"\nDone: {result.imported} imported, {result.updated} updated, "
-        f"{result.unchanged} unchanged, {result.non_locker_skipped} non-locker skipped, "
+        f"{result.unchanged} unchanged, {result.non_locker_skipped} not in locker, "
         f"{result.errors} errors."
     )
     for detail in result.error_details:

@@ -1,7 +1,7 @@
 """
 File: test_source_import.py
 Description: Tests for the source Excel import module. Validates column
-             auto-detection, schrank filtering, device insert/update logic,
+             auto-detection, catalog-only updates (never insert locker rows),
              metadata-only updates, date parsing from German Excel formats,
              and registrant name extraction from the "Aktueller Einsatzort"
              column for the self-service registration name list.
@@ -81,44 +81,90 @@ class TestParseDate:
 
 
 class TestImportFromSourceExcel:
-    """Tests for the full source Excel import pipeline — insert, update, skip, dry-run."""
-    def test_import_new_devices(self, db_session):
-        """New schrank devices are inserted into the database."""
+    """Tests for the source Excel import pipeline — catalog update only, never insert."""
+
+    def test_new_pm_is_not_inserted(self, db_session):
+        """Excel PMs that are not already locker devices are skipped, not inserted."""
         path = _create_test_excel([
             ["Equipment", "Hersteller", "Typbezeichnung", "Platz Messmittelschrank"],
             ["PM-001", "Fluke", "87V", "Schrank 1"],
-            ["PM-002", "Keysight", "34465A", "Schrank 2"],
+            ["PM-002", "Keysight", "34465A", "Labor 3"],
         ])
         try:
             from smart_locker.database.engine import get_engine
             result = import_from_source_excel(get_engine(), path)
-            assert result.imported == 2
+            assert result.imported == 0
+            assert result.non_locker_skipped == 2
             assert result.errors == 0
-
-            d1 = DeviceRepository.find_by_pm(db_session, "PM-001")
-            assert d1 is not None
-            assert d1.manufacturer == "Fluke"
-            assert d1.locker_slot == 1
-
-            d2 = DeviceRepository.find_by_pm(db_session, "PM-002")
-            assert d2 is not None
-            assert d2.locker_slot == 2
+            assert DeviceRepository.find_by_pm(db_session, "PM-001") is None
+            assert DeviceRepository.find_by_pm(db_session, "PM-002") is None
         finally:
             path.unlink(missing_ok=True)
 
-    def test_skip_non_schrank(self, db_session):
-        """Rows without 'schrank' in slot column are skipped."""
+    def test_catalog_updates_without_schrank_column(self, db_session):
+        """Platz/Schrank is unused; an existing locker PM still gets catalog updates."""
+        DeviceRepository.create(
+            db_session,
+            name="Fluke 87V",
+            device_type="general",
+            pm_number="PM-001",
+            manufacturer="Fluke",
+            model="87V",
+            locker_slot=4,
+        )
+        db_session.commit()
+
         path = _create_test_excel([
-            ["Equipment", "Platz Messmittelschrank"],
-            ["PM-001", "Schrank 1"],
-            ["PM-002", "Labor 3"],
-            ["PM-003", ""],
+            ["Equipment", "Hersteller", "Typbezeichnung"],
+            ["PM-001", "Fluke", "87-V MAX"],
+            ["PM-NEW", "Keysight", "34465A"],
         ])
         try:
             from smart_locker.database.engine import get_engine
             result = import_from_source_excel(get_engine(), path)
-            assert result.imported == 1
-            assert result.non_locker_skipped == 2
+            assert result.imported == 0
+            assert result.updated == 1
+            assert result.non_locker_skipped == 1
+
+            device = DeviceRepository.find_by_pm(db_session, "PM-001")
+            assert device.model == "87-V MAX"
+            assert device.locker_slot == 4
+            assert DeviceRepository.find_by_pm(db_session, "PM-NEW") is None
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_reimport_skips_serial_already_used_by_another_device(self, db_session):
+        """A catalog serial that belongs to a different locker PM must not abort sync."""
+        DeviceRepository.create(
+            db_session,
+            name="Fluke 87V",
+            device_type="general",
+            pm_number="PM-001",
+            locker_slot=1,
+        )
+        DeviceRepository.create(
+            db_session,
+            name="Other",
+            device_type="general",
+            pm_number="PM-002",
+            serial_number="SN-SHARED",
+            locker_slot=2,
+        )
+        db_session.commit()
+
+        path = _create_test_excel([
+            ["Equipment", "Hersteller", "Typbezeichnung", "Hersteller-Serialnummer"],
+            ["PM-001", "Fluke", "87-V MAX", "SN-SHARED"],
+        ])
+        try:
+            from smart_locker.database.engine import get_engine
+            result = import_from_source_excel(get_engine(), path)
+            assert result.errors == 0
+            assert result.updated == 1
+            db_session.expire_all()
+            assert DeviceRepository.find_by_pm(db_session, "PM-001").serial_number is None
+            assert DeviceRepository.find_by_pm(db_session, "PM-001").model == "87-V MAX"
+            assert DeviceRepository.find_by_pm(db_session, "PM-002").serial_number == "SN-SHARED"
         finally:
             path.unlink(missing_ok=True)
 
@@ -179,7 +225,7 @@ class TestImportFromSourceExcel:
         assert "not found" in result.error_details[0].lower()
 
     def test_dry_run_no_writes(self, db_session):
-        """Dry run reports the diff (would-import count) but writes nothing."""
+        """Dry run reports skipped new PMs and writes nothing."""
         path = _create_test_excel([
             ["Equipment", "Platz Messmittelschrank"],
             ["PM-001", "Schrank 1"],
@@ -187,11 +233,9 @@ class TestImportFromSourceExcel:
         try:
             from smart_locker.database.engine import get_engine
             result = import_from_source_excel(get_engine(), path, dry_run=True)
-            # The diff is computed (1 device WOULD be imported)...
-            assert result.imported == 1
-            # ...but nothing is persisted (the transaction is rolled back).
-            device = DeviceRepository.find_by_pm(db_session, "PM-001")
-            assert device is None
+            assert result.imported == 0
+            assert result.non_locker_skipped == 1
+            assert DeviceRepository.find_by_pm(db_session, "PM-001") is None
         finally:
             path.unlink(missing_ok=True)
 
@@ -210,21 +254,32 @@ class TestImportFromSourceExcel:
         path = _create_test_excel([
             ["Equipment", "Hersteller", "Typbezeichnung", "Platz Messmittelschrank"],
             ["PM-001", "Fluke", "87-V MAX", "Schrank 1"],   # model changed -> would update
-            ["PM-002", "Keysight", "34465A", "Schrank 2"],  # new -> would import
+            ["PM-002", "Keysight", "34465A", "Schrank 2"],  # not in locker -> skipped
         ])
         try:
             from smart_locker.database.engine import get_engine
             result = import_from_source_excel(get_engine(), path, dry_run=True)
-            assert (result.imported, result.updated, result.unchanged) == (1, 1, 0)
+            assert (result.imported, result.updated, result.unchanged) == (0, 1, 0)
+            assert result.non_locker_skipped == 1
 
-            # No mutation: PM-001 still has the original model, PM-002 absent.
             assert DeviceRepository.find_by_pm(db_session, "PM-001").model == "87V"
             assert DeviceRepository.find_by_pm(db_session, "PM-002") is None
         finally:
             path.unlink(missing_ok=True)
 
     def test_german_column_headers(self, db_session):
-        """German column headers are auto-detected."""
+        """German column headers are auto-detected on an existing locker PM."""
+        DeviceRepository.create(
+            db_session,
+            name="Old",
+            device_type="general",
+            pm_number="PM-001",
+            manufacturer="Old",
+            model="Old",
+            locker_slot=1,
+        )
+        db_session.commit()
+
         path = _create_test_excel([
             ["Equipment", "Hersteller", "Typbezeichnung", "Hersteller-Serialnummer",
              "Barcodenummer", "Platz Messmittelschrank", "Kategorie"],
@@ -233,40 +288,24 @@ class TestImportFromSourceExcel:
         try:
             from smart_locker.database.engine import get_engine
             result = import_from_source_excel(get_engine(), path)
-            assert result.imported == 1
+            assert result.updated == 1
+            assert result.imported == 0
 
             device = DeviceRepository.find_by_pm(db_session, "PM-001")
             assert device.manufacturer == "Rohde & Schwarz"
             assert device.serial_number == "SN-12345"
             assert device.device_type == "Oscilloscope"
             assert device.barcode is None
+            assert device.locker_slot == 1
         finally:
             path.unlink(missing_ok=True)
 
 
 class TestLocationColumn:
-    """Tests for the 'Aktueller Einsatzort' column — device location and borrower detection."""
+    """Einsatzort is not locker membership. Sync never inserts; status stays locker-local."""
 
-    def test_schrank_location_sets_available(self, db_session):
-        """Device with 'Schrank' in location column is imported as AVAILABLE."""
-        path = _create_test_excel([
-            ["Equipment", "Hersteller", "Typbezeichnung",
-             "Platz Messmittelschrank", "Aktueller Einsatzort"],
-            ["PM-001", "Fluke", "87V", "Schrank 1", "Messmittelschrank"],
-        ])
-        try:
-            from smart_locker.database.engine import get_engine
-            result = import_from_source_excel(get_engine(), path)
-            assert result.imported == 1
-
-            device = DeviceRepository.find_by_pm(db_session, "PM-001")
-            assert device.status == DeviceStatus.AVAILABLE
-            assert device.current_borrower_id is None
-        finally:
-            path.unlink(missing_ok=True)
-
-    def test_name_in_location_sets_borrowed(self, db_session):
-        """Device with a person's name in location column is imported as BORROWED."""
+    def test_new_pm_not_inserted_even_with_einsatzort(self, db_session):
+        """A person name in Aktueller Einsatzort does not create a locker row."""
         path = _create_test_excel([
             ["Equipment", "Hersteller", "Typbezeichnung",
              "Platz Messmittelschrank", "Aktueller Einsatzort"],
@@ -275,58 +314,8 @@ class TestLocationColumn:
         try:
             from smart_locker.database.engine import get_engine
             result = import_from_source_excel(get_engine(), path)
-            assert result.imported == 1
-
-            device = DeviceRepository.find_by_pm(db_session, "PM-001")
-            assert device.status == DeviceStatus.BORROWED
-            # Borrower not in our system — no linked user
-            assert device.current_borrower_id is None
-        finally:
-            path.unlink(missing_ok=True)
-
-    def test_known_borrower_linked(self, db_session):
-        """When the borrower name matches a registered user, the device is linked."""
-        UserRepository.create(
-            db_session,
-            encrypted_card_uid="dummy_enc_aabb",
-            uid_hmac="aabb" * 16,
-            display_name="Max Müller",
-            role="user",
-        )
-        db_session.commit()
-
-        path = _create_test_excel([
-            ["Equipment", "Hersteller", "Typbezeichnung",
-             "Platz Messmittelschrank", "Aktueller Einsatzort"],
-            ["PM-001", "Fluke", "87V", "Schrank 1", "Max Müller"],
-        ])
-        try:
-            from smart_locker.database.engine import get_engine
-            result = import_from_source_excel(get_engine(), path)
-            assert result.imported == 1
-
-            device = DeviceRepository.find_by_pm(db_session, "PM-001")
-            assert device.status == DeviceStatus.BORROWED
-            assert device.current_borrower_id is not None
-
-            user = UserRepository.find_by_display_name(db_session, "Max Müller")
-            assert device.current_borrower_id == user.id
-        finally:
-            path.unlink(missing_ok=True)
-
-    def test_no_location_column_defaults_available(self, db_session):
-        """Without a location column, devices default to AVAILABLE."""
-        path = _create_test_excel([
-            ["Equipment", "Hersteller", "Typbezeichnung", "Platz Messmittelschrank"],
-            ["PM-001", "Fluke", "87V", "Schrank 1"],
-        ])
-        try:
-            from smart_locker.database.engine import get_engine
-            result = import_from_source_excel(get_engine(), path)
-            assert result.imported == 1
-
-            device = DeviceRepository.find_by_pm(db_session, "PM-001")
-            assert device.status == DeviceStatus.AVAILABLE
+            assert result.imported == 0
+            assert DeviceRepository.find_by_pm(db_session, "PM-001") is None
         finally:
             path.unlink(missing_ok=True)
 
@@ -436,17 +425,8 @@ class TestLocationColumn:
         finally:
             path.unlink(missing_ok=True)
 
-    def test_borrower_lookup_case_insensitive(self, db_session):
-        """Borrower name matching is case-insensitive."""
-        UserRepository.create(
-            db_session,
-            encrypted_card_uid="dummy_enc_ccdd",
-            uid_hmac="ccdd" * 16,
-            display_name="Anna Schmidt",
-            role="user",
-        )
-        db_session.commit()
-
+    def test_borrower_name_still_extracted_as_registrant(self, db_session):
+        """Einsatzort person names still feed the self-register list when Sync skips the PM."""
         path = _create_test_excel([
             ["Equipment", "Hersteller", "Typbezeichnung",
              "Platz Messmittelschrank", "Aktueller Einsatzort"],
@@ -455,10 +435,9 @@ class TestLocationColumn:
         try:
             from smart_locker.database.engine import get_engine
             result = import_from_source_excel(get_engine(), path)
-            assert result.imported == 1
-
-            device = DeviceRepository.find_by_pm(db_session, "PM-001")
-            assert device.current_borrower_id is not None
+            assert result.imported == 0
+            assert result.registrants_added == 1
+            assert DeviceRepository.find_by_pm(db_session, "PM-001") is None
         finally:
             path.unlink(missing_ok=True)
 

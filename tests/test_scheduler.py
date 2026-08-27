@@ -54,9 +54,21 @@ class TestRunSourceImport:
             _create_test_excel(source)
 
             from smart_locker.database.engine import get_engine
+            from smart_locker.database.repositories import DeviceRepository
+
+            DeviceRepository.create(
+                db_session,
+                name="Old",
+                device_type="general",
+                pm_number="PM-SCHED-001",
+                manufacturer="OldMfr",
+                model="OldModel",
+                locker_slot=1,
+            )
+            db_session.commit()
+
             _run_source_import(get_engine(), source)
 
-            from smart_locker.database.repositories import DeviceRepository
             device = DeviceRepository.find_by_pm(db_session, "PM-SCHED-001")
             assert device is not None
             assert device.manufacturer == "TestMfr"
@@ -72,12 +84,24 @@ class TestStartupImport:
             _create_test_excel(source)
 
             from smart_locker.database.engine import get_engine
+            from smart_locker.database.repositories import DeviceRepository
+
+            DeviceRepository.create(
+                db_session,
+                name="Old",
+                device_type="general",
+                pm_number="PM-SCHED-001",
+                manufacturer="OldMfr",
+                model="OldModel",
+                locker_slot=1,
+            )
+            db_session.commit()
             try:
                 start_scheduler(get_engine(), source, interval_hours=6)
 
-                from smart_locker.database.repositories import DeviceRepository
                 device = DeviceRepository.find_by_pm(db_session, "PM-SCHED-001")
-                assert device is not None, "Startup import should have inserted the device"
+                assert device is not None
+                assert device.manufacturer == "TestMfr"
             finally:
                 stop_scheduler()
 

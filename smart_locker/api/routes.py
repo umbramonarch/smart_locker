@@ -3,9 +3,10 @@ File: routes.py
 Description: REST API endpoints and SSE event stream for the Smart Locker kiosk.
              Provides session management, device listing, borrow/return operations,
              user self-registration (with registrant name validation), admin-only
-             manual registration and device-tag bind/unbind, registrant list
-             retrieval, source sync, public dashboard data endpoints, an
-             admin-only Excel export download, and admin Exit kiosk / Shut down.
+             manual registration, Register Device (PM + slot + NFC), device-tag
+             bind/unbind, registrant list retrieval, source sync, public dashboard
+             data endpoints, an admin-only Excel export download, and admin Exit
+             kiosk / Shut down.
 Project: smart_locker/api
 Notes: All device/session endpoints require an active kiosk session enforced by
        the require_session dependency. SSE stream at /api/events pushes NFC and
@@ -514,6 +515,19 @@ class RegisterRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
 
 
+class RegisterDeviceRequest(BaseModel):
+    """Admin Register Device: PM from Excel plus a free locker slot."""
+
+    pm_number: str = Field(..., min_length=1, max_length=50)
+    locker_slot: int = Field(..., ge=1)
+
+
+class SetSlotRequest(BaseModel):
+    """Admin change of the physical locker slot on an existing device."""
+
+    locker_slot: int = Field(..., ge=1)
+
+
 @router.post("/api/register")
 def start_registration(body: RegisterRequest, db: Session = Depends(get_db)):
     """Begin self-registration: validate name against approved list, await NFC tap.
@@ -743,6 +757,131 @@ def start_admin_registration(
     return {"success": True, "message": "Tap the new user's NFC card to complete registration."}
 
 
+@router.post("/api/admin/devices/register")
+def register_locker_device(
+    body: RegisterDeviceRequest,
+    db: Session = Depends(get_db),
+    user_session: UserSession = Depends(require_session),
+):
+    """Create a locker row from Excel catalog (PM + free slot) and arm NFC bind.
+
+    Looks up the PM in ``device-list.xlsx``, copies catalog fields, assigns the
+    chosen slot, then waits for the sticker tap (same window as bind-tag).
+
+    Args:
+        body: PM number and locker slot.
+        db: Database session (injected by ``get_db``).
+        user_session: The active admin session (injected by ``require_session``).
+
+    Returns:
+        dict: ``success``, ``device_id``, ``name``, ``pm_number``, ``locker_slot``.
+
+    Raises:
+        HTTPException: 503 if not ready / share down, 403 if not admin,
+            400 if source path unset, 404 if PM unknown, 409 if PM or slot taken.
+    """
+    if ctx_module.context is None:
+        raise HTTPException(status_code=503, detail="System not ready.")
+
+    if user_session.user.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Admin access required.")
+
+    from config.settings import SOURCE_EXCEL_PATH
+    if not SOURCE_EXCEL_PATH:
+        raise HTTPException(status_code=400, detail="Source Excel path not configured.")
+
+    from smart_locker.services.device_registration import (
+        AlreadyRegistered,
+        CatalogUnavailable,
+        InvalidSlot,
+        SlotTaken,
+        UnknownPm,
+        register_locker_device as create_from_catalog,
+    )
+
+    try:
+        device = create_from_catalog(
+            db, SOURCE_EXCEL_PATH, body.pm_number, body.locker_slot,
+        )
+    except CatalogUnavailable as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+    except UnknownPm as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except (SlotTaken, AlreadyRegistered) as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    except InvalidSlot as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+
+    ctx_module.context.pending_registration = None
+    ctx_module.context.pending_tag_bind = PendingTagBind(device_id=device.id)
+    logger.info(
+        "Locker device registered %s (pm=%s, slot=%s) by admin %s. Awaiting sticker.",
+        device.name,
+        device.pm_number,
+        device.locker_slot,
+        user_session.user.display_name,
+    )
+    return {
+        "success": True,
+        "device_id": device.id,
+        "name": device.name,
+        "pm_number": device.pm_number,
+        "locker_slot": device.locker_slot,
+        "message": "Tap the sticker to bind it.",
+    }
+
+
+@router.post("/api/admin/devices/{device_id}/slot")
+def set_device_slot(
+    device_id: int,
+    body: SetSlotRequest,
+    db: Session = Depends(get_db),
+    user_session: UserSession = Depends(require_session),
+):
+    """Move an existing locker device to a different free slot (admin).
+
+    Args:
+        device_id: Primary key of the locker device.
+        body: New slot number.
+        db: Database session (injected by ``get_db``).
+        user_session: The active admin session (injected by ``require_session``).
+
+    Returns:
+        dict: ``{"success": True, "locker_slot": int}``.
+
+    Raises:
+        HTTPException: 403 if not admin, 404 if missing, 409 if slot taken.
+    """
+    if user_session.user.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Admin access required.")
+
+    device = DeviceRepository.find_by_id(db, device_id)
+    if device is None:
+        raise HTTPException(status_code=404, detail="Device not found.")
+
+    from smart_locker.services.device_registration import (
+        InvalidSlot,
+        SlotTaken,
+        set_locker_slot,
+    )
+
+    try:
+        set_locker_slot(db, device, body.locker_slot)
+    except SlotTaken as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    except InvalidSlot as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+
+    logger.info(
+        "Slot for %s (pm=%s) set to %s by admin %s.",
+        device.name,
+        device.pm_number,
+        device.locker_slot,
+        user_session.user.display_name,
+    )
+    return {"success": True, "locker_slot": device.locker_slot}
+
+
 @router.post("/api/admin/devices/{device_id}/bind-tag")
 def start_device_tag_bind(
     device_id: int,
@@ -874,9 +1013,9 @@ def preview_source_sync(
 ):
     """Preview the source import diff without writing anything (admin only).
 
-    Runs the import in dry-run mode (the real create/update logic inside a
-    rolled-back transaction) so the admin sees exactly how many devices would
-    be added, updated, left unchanged, or skipped before committing.
+    Runs the import in dry-run mode so the admin sees how many locker PMs
+    would be updated, left unchanged, or skipped (not in the locker) before
+    committing. Sync never inserts locker rows.
 
     Args:
         user_session: The active session (injected by ``require_session``).

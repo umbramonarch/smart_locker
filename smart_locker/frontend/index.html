@@ -461,7 +461,7 @@
           </div>
           <div class="admin-btn-text">
             <span class="admin-btn-label">Register Device</span>
-            <span class="admin-btn-desc">Bind an NFC sticker</span>
+            <span class="admin-btn-desc">PM, slot, then tap NFC</span>
           </div>
         </button>
 
@@ -540,7 +540,7 @@
   </div>
 
   <!-- ================================================================
-       OVERLAY — REGISTER DEVICE (admin bind, not create)
+       OVERLAY — REGISTER DEVICE (PM + slot + NFC)
   ================================================================ -->
   <div id="overlay-register-device" class="overlay" style="display:none">
     <div class="bind-panel">
@@ -555,13 +555,38 @@
       </div>
 
       <div class="bind-step" id="bind-step-list">
-        <p class="bind-hint">Pick a locker device, then tap its sticker. Rows with the same name are different units — use the PM number.</p>
+        <p class="bind-hint">Add a unit from the Excel list (PM + free slot), then tap its sticker. Existing rows can bind, unbind, or change slot.</p>
+        <button type="button" class="bind-add-open" id="bind-add-open">Add from Excel</button>
         <div class="register-search-group bind-search-group">
           <svg class="register-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
           <input type="text" id="bind-search" class="register-input register-search-input" placeholder="Search name or PM…" autocomplete="off" spellcheck="false">
           <div class="register-input-glow"></div>
         </div>
         <div class="bind-device-list" id="bind-device-list"></div>
+      </div>
+
+      <div class="bind-step hidden" id="bind-step-add">
+        <p class="bind-hint">Enter the PM number from the company sheet, pick a free slot, then continue to tap the sticker.</p>
+        <div class="register-input-group bind-pm-group">
+          <input type="text" id="bind-pm-input" class="register-input" placeholder="PM number" maxlength="50" autocomplete="off" spellcheck="false">
+          <div class="register-input-glow"></div>
+        </div>
+        <div class="bind-slot-grid" id="bind-slot-grid"></div>
+        <div class="bind-add-actions">
+          <button type="button" class="bind-unbind" id="bind-add-back">Back</button>
+          <button type="button" class="bind-go" id="bind-add-submit">Continue</button>
+        </div>
+        <p class="bind-error-inline" id="bind-add-error"></p>
+      </div>
+
+      <div class="bind-step hidden" id="bind-step-slot">
+        <p class="bind-hint">Pick a free slot for <strong id="bind-slot-name">—</strong>.</p>
+        <div class="bind-slot-grid" id="bind-change-slot-grid"></div>
+        <div class="bind-add-actions">
+          <button type="button" class="bind-unbind" id="bind-slot-back">Back</button>
+          <button type="button" class="bind-go" id="bind-slot-submit">Save slot</button>
+        </div>
+        <p class="bind-error-inline" id="bind-slot-error"></p>
       </div>
 
       <div class="bind-step hidden" id="bind-step-tap">

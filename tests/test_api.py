@@ -2,9 +2,10 @@
 File: test_api.py
 Description: Tests for the REST API layer — session management, device listing,
              borrow/return endpoints, user self-registration (with registrant
-             validation), admin manual registration, registrant list retrieval,
-             admin source sync, software update, Exit kiosk / Shut down, and
-             SSE event stream. Uses FastAPI's TestClient with mocked NFC context.
+             validation), admin manual registration, Register Device (PM + slot
+             + NFC), registrant list retrieval, admin source sync, software
+             update, Exit kiosk / Shut down, and SSE event stream. Uses
+             FastAPI's TestClient with mocked NFC context.
 Project: smart_locker/tests
 Notes: Run with: python -m pytest tests/test_api.py -v
 """
@@ -556,6 +557,121 @@ class TestDeviceTagBindApi:
         mock_context.session_mgr.start_session(admin_user)
         resp = client.post("/api/admin/devices/99999/unbind-tag")
         assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Admin Register Device (PM + slot + NFC)
+# ---------------------------------------------------------------------------
+
+def _catalog_workbook(tmp_path, rows):
+    """Write a temporary device-list.xlsx and return its path."""
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    for row in rows:
+        ws.append(row)
+    path = tmp_path / "device-list.xlsx"
+    wb.save(path)
+    return path
+
+
+class TestRegisterDeviceApi:
+    """Admin POST /api/admin/devices/register creates a locker row from Excel."""
+
+    def test_register_requires_session(self, client, mock_context):
+        resp = client.post(
+            "/api/admin/devices/register",
+            json={"pm_number": "PM-001", "locker_slot": 1},
+        )
+        assert resp.status_code == 401
+
+    def test_register_rejects_non_admin(self, client, mock_context, test_user):
+        mock_context.session_mgr.start_session(test_user)
+        resp = client.post(
+            "/api/admin/devices/register",
+            json={"pm_number": "PM-001", "locker_slot": 1},
+        )
+        assert resp.status_code == 403
+
+    def test_register_accepts_admin(
+        self, client, mock_context, admin_user, db_session, tmp_path, monkeypatch
+    ):
+        """Known PM + free slot inserts the locker row and arms the sticker bind."""
+        path = _catalog_workbook(tmp_path, [
+            ["Equipment", "Hersteller", "Typbezeichnung"],
+            ["PM-XL", "Fluke", "87V"],
+        ])
+        monkeypatch.setattr("config.settings.SOURCE_EXCEL_PATH", str(path))
+        mock_context.session_mgr.start_session(admin_user)
+        mock_context.pending_tag_bind = None
+        resp = client.post(
+            "/api/admin/devices/register",
+            json={"pm_number": "PM-XL", "locker_slot": 7},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["success"] is True
+        assert body["pm_number"] == "PM-XL"
+        assert body["locker_slot"] == 7
+        device = DeviceRepository.find_by_pm(db_session, "PM-XL")
+        assert device is not None
+        assert device.locker_slot == 7
+        assert mock_context.pending_tag_bind.device_id == device.id
+
+    def test_register_unknown_pm(
+        self, client, mock_context, admin_user, db_session, tmp_path, monkeypatch
+    ):
+        path = _catalog_workbook(tmp_path, [
+            ["Equipment", "Hersteller"],
+            ["PM-001", "Fluke"],
+        ])
+        monkeypatch.setattr("config.settings.SOURCE_EXCEL_PATH", str(path))
+        mock_context.session_mgr.start_session(admin_user)
+        resp = client.post(
+            "/api/admin/devices/register",
+            json={"pm_number": "PM-MISSING", "locker_slot": 1},
+        )
+        assert resp.status_code == 404
+        assert DeviceRepository.find_by_pm(db_session, "PM-MISSING") is None
+
+    def test_register_duplicate_slot(
+        self, client, mock_context, admin_user, test_devices, tmp_path, monkeypatch
+    ):
+        path = _catalog_workbook(tmp_path, [
+            ["Equipment", "Hersteller"],
+            ["PM-NEW", "Keysight"],
+        ])
+        monkeypatch.setattr("config.settings.SOURCE_EXCEL_PATH", str(path))
+        mock_context.session_mgr.start_session(admin_user)
+        resp = client.post(
+            "/api/admin/devices/register",
+            json={"pm_number": "PM-NEW", "locker_slot": test_devices[0].locker_slot},
+        )
+        assert resp.status_code == 409
+
+    def test_set_slot_accepts_admin(
+        self, client, mock_context, admin_user, test_devices, db_session
+    ):
+        mock_context.session_mgr.start_session(admin_user)
+        resp = client.post(
+            f"/api/admin/devices/{test_devices[0].id}/slot",
+            json={"locker_slot": 9},
+        )
+        assert resp.status_code == 200
+        db_session.expire_all()
+        assert test_devices[0].locker_slot == 9
+
+    def test_set_slot_requires_session(self, client, mock_context, test_devices):
+        resp = client.post(
+            f"/api/admin/devices/{test_devices[0].id}/slot",
+            json={"locker_slot": 9},
+        )
+        assert resp.status_code == 401
+
+
+class TestAdminOverlaySession:
+    """Admin overlay session flag and device-list payload used by Register Device."""
 
     def test_admin_session_defaults_overlay_true(
         self, client, mock_context, admin_user

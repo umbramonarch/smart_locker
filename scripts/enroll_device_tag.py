@@ -8,7 +8,7 @@ Notes: Usage:
          python -m scripts.enroll_device_tag --pm PM-001
          python -m scripts.enroll_device_tag --pm PM-001 --uid AABBCCDD
          python -m scripts.enroll_device_tag --pm PM-001 --force
-       Does not create a device row — Excel/schrank import already did.
+       Does not create a device row — Register Device (PM + slot + NFC) does.
        The raw UID is masked in console output and never logged.
 """
 

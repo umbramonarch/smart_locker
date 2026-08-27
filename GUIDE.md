@@ -601,7 +601,7 @@ When you see `Place card on reader...`, tap your card and hold it steady for 1�
 The card UID is masked in the output (e.g. `A1****D4`) and stored encrypted — only admins
 can ever decrypt it. Enroll regular users the same way with `--role user`.
 
-To bind a sticker to a locker device after Excel import (optional CLI; the admin panel
+To bind a sticker to a locker device after Register Device (optional CLI; the admin panel
 **Register Device** is the usual path):
 
 ```bash
@@ -716,14 +716,20 @@ share comes back.
 
 ### 6.2 Load devices from the Excel list
 
-The company device master list lives on the share. Import it (it filters to the locker/"schrank"
-rows and auto-numbers slots 1…N). German and English column headers are auto-detected.
+The company device master list lives on the share. **Sync does not put devices in the
+locker.** It only refreshes catalog fields (name, type, serial, manufacturer, model,
+calibration) for PMs that are **already** locker rows. Platz/Schrank is unused.
+
+A device enters the locker when an admin uses **Register Device**: enter the **PM**
+number, pick a **free slot**, tap the NFC sticker. The Pi looks up that PM in
+`device-list.xlsx` and copies name / type / manufacturer / model / serial / cal.
+Unknown PM or share down → error, no ghost row.
 
 ```bash
-# Preview without writing anything:
+# Preview catalog updates without writing:
 python -m scripts.import_devices --file "/mnt/locker/device-list.xlsx" --dry-run
 
-# Import for real:
+# Apply catalog updates for PMs already in the locker:
 python -m scripts.import_devices --file "/mnt/locker/device-list.xlsx"
 ```
 
@@ -735,19 +741,17 @@ python -m scripts.import_devices --file "/mnt/locker/device-list.xlsx"
 | Manufacturer | Hersteller | `manufacturer` | No |
 | Type designation | Typbezeichnung | `model` | No |
 | Serial number | Hersteller-serialnummer | `serial_number` | No |
-| Locker placement | Platz Messmittelschrank | `locker_slot` | No |
 | Calibration date | Datum der nächsten Kalibrierung | `calibration_due` | No |
 
 If auto-detection picks the wrong column, override it, e.g.
 `--pm-col "Equipment" --type-col "Kategorie"`. Re-importing is safe — devices are matched by
-PM number. A re-import **never** overwrites `locker_slot`, `image_path`, `description`,
-`status`, or the current borrower. Catalog fields (name, type, serial, manufacturer, model,
-calibration) still update. Barcode is not imported. New PMs still take "Aktueller Einsatzort"
-on first insert (a person name → borrowed; empty / contains "schrank" → available).
+PM number. A re-import **never** inserts a locker row and **never** overwrites `locker_slot`,
+`image_path`, `description`, `status`, or the current borrower. Catalog fields (name, type,
+serial, manufacturer, model, calibration) still update. Barcode is not imported.
 
-Once running as a service, this same import also happens **automatically**: once on startup,
-every 6 hours (configurable), and on demand from the hidden admin panel. (See Section 8 for
-why the live "watch the file" mode is off for network shares.)
+Once running as a service, this same catalog refresh also happens **automatically**: once on
+startup, every 6 hours (configurable), and on demand from the hidden admin panel. (See
+Section 8 for why the live "watch the file" mode is off for network shares.)
 
 ### 6.3 Add device photos
 
@@ -843,8 +847,9 @@ Pi on the LAN can use them — the lock is **physical access**, not a password.
      After success, timeout, or cancel the kiosk returns to idle; the next
      work-card tap logs that user in (a leftover admin session must not
      treat the tap as logout).
-   - **Register Device** — bind (or re-bind) an NFC sticker to an existing locker
-     device. The list shows **name + PM** (and slot). Does not create devices.
+   - **Register Device** — add a locker unit: **PM + free slot + NFC tap** (catalog
+     comes from Excel). Existing rows can bind / unbind / change slot. The list shows
+     **name + PM** (and slot).
    - **Export to Excel** — download a snapshot of devices / transactions / users.
    - **Software Update** — apply the newest signed tarball from `locker-updates` on the
      share. Full-screen updating overlay, then the kiosk reloads.
@@ -889,8 +894,9 @@ usually succeeds.
    and when you use **Sync Source** in the admin panel. Linux cannot see "file changed"
    events for a file another computer wrote on a CIFS share, so there is no 30-second poll.
 
-3. Only rows whose slot cell starts with `schrank` become locker devices. They are numbered
-   1…N in sheet order (the number in "Schrank 7" is ignored).
+3. Sync **never inserts** locker devices. It updates catalog fields for PMs already
+   in SQLite. A device enters the locker only via admin **Register Device**
+   (PM + free slot + NFC). Platz/Schrank is unused.
 
 4. Values in **Aktueller Einsatzort** that are not schrank locations are treated as person
    names and added to the self-register list.
@@ -901,7 +907,7 @@ usually succeeds.
 
 Re-import matches devices by PM number. It leaves `locker_slot`, `image_path`,
 `description`, `status`, and the current borrower alone. Catalog fields still update.
-New PMs still take Aktueller Einsatzort on first insert.
+Excel never inserts a locker row.
 
 **Web dashboard** — open `http://<pi-address>:8000/dashboard` from any browser on the
 network (no login). It shows three tables, auto-refreshing every 30 seconds: **Devices**
@@ -1126,7 +1132,7 @@ All settings live in `.env` (loaded by `config/settings.py`). The Pi template
 **Built:** NFC enrollment & authentication (AES-256-GCM + HMAC), single-user sessions with
 timeout, device tracking with the full schema, NFC **device tags** (same ACR1252U; auto
 borrow/return after login), borrow/return with admin overrides and per-user limits,
-self-service registration, Excel import (schrank filter, DE/EN headers) and on-demand/auto
+self-service registration, Excel catalog refresh (no locker insert) and on-demand/auto
 export, photo assignment, the read-only `/dashboard`, the FastAPI REST API + SSE bridge, the
 6-screen kiosk UI, **Raspberry Pi appliance deployment** (systemd service, CIFS mount,
 Chromium kiosk, fully offline install including the no-PyPI-wheel `pyscard` case), and a
@@ -1291,10 +1297,12 @@ borrow; borrowed by you → return; borrowed by someone else → fail for a norm
 admin return-on-behalf; maintenance → fail. The session stays open. A **work-card** tap
 still logs out; a device tag does not. An unknown UID while logged in stays logged in.
 
-**Register Device** (hidden admin panel) binds a sticker to an existing schrank row. The
-list shows **name + PM** so duplicate names stay distinct. CLI: `python -m
-scripts.enroll_device_tag --pm PM-001` (or `--uid HEX`, `--force` to replace). There is no
-USB barcode scanner and no `GET /api/devices/barcode/{barcode}`.
+**Register Device** (hidden admin panel): enter **PM**, pick a **free slot**, tap the
+sticker. Catalog (name, type, manufacturer, model, serial, cal) is copied from Excel.
+Unknown PM or share down fails with no ghost row. Existing rows can bind / unbind /
+change slot. The list shows **name + PM**. CLI bind-only:
+`python -m scripts.enroll_device_tag --pm PM-001` (or `--uid HEX`, `--force` to replace).
+There is no USB barcode scanner and no `GET /api/devices/barcode/{barcode}`.
 
 ---
 

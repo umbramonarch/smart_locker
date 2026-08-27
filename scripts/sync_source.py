@@ -1,8 +1,8 @@
 """
 File: sync_source.py
 Description: Manually trigger source Excel import from the company device
-             master list. Inserts new devices and updates metadata on existing
-             ones, filtering to locker-assigned ("schrank") devices only.
+             master list. Updates catalog metadata on existing locker devices;
+             never inserts new locker rows.
 Project: smart_locker/scripts
 Notes: Usage: python -m scripts.sync_source [--file path] [--dry-run]
        Defaults to SMART_LOCKER_SOURCE_EXCEL_PATH from .env if --file is omitted.
@@ -24,13 +24,13 @@ def main() -> None:
     """Parse CLI arguments and trigger a source Excel import.
 
     Reads the company device master list (from ``--file`` or the
-    ``SMART_LOCKER_SOURCE_EXCEL_PATH`` env var), inserts new locker devices,
-    and updates metadata on existing ones. Supports dry-run preview.
+    ``SMART_LOCKER_SOURCE_EXCEL_PATH`` env var) and updates catalog
+    metadata on locker devices already in SQLite. Supports dry-run preview.
 
     Returns:
         None. Import summary is printed to stdout.
     """
-    parser = argparse.ArgumentParser(description="Import new devices from source Excel.")
+    parser = argparse.ArgumentParser(description="Update locker catalog from source Excel.")
     parser.add_argument("--file", default=None, help="Path to source Excel (default: from env)")
     parser.add_argument("--sheet", default=None, help="Sheet name (default: first sheet)")
     parser.add_argument("--dry-run", action="store_true", help="Preview without writing")
@@ -58,7 +58,7 @@ def main() -> None:
 
     print(
         f"\nDone: {result.imported} imported, {result.updated} updated, "
-        f"{result.unchanged} unchanged, {result.non_locker_skipped} non-locker skipped, "
+        f"{result.unchanged} unchanged, {result.non_locker_skipped} not in locker, "
         f"{result.errors} errors."
     )
     for detail in result.error_details:
