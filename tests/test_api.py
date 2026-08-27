@@ -5,7 +5,7 @@ Description: Tests for the REST API layer — session management, device listing
              validation), admin manual registration, Register Device (PM + slot
              + NFC), registrant list retrieval, admin source sync, software
              update, Exit kiosk / Shut down, dashboard Inventory/Display,
-             public owner edit, and SSE event stream. Uses
+             public owner edit, dashboard NFC bind/unbind, and SSE event stream. Uses
              FastAPI's TestClient with mocked NFC context.
 Project: smart_locker/tests
 Notes: Run with: python -m pytest tests/test_api.py -v
@@ -773,8 +773,11 @@ class TestAdminOverlaySession:
         for row in rows:
             assert "tag_hmac" not in row
             assert "barcode" not in row
+            assert "has_tag" in row
             dumped = str(row)
             assert digest not in dumped
+        cam = next(r for r in rows if r["name"] == "Camera")
+        assert cam["has_tag"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -1216,3 +1219,58 @@ class TestDashboardOwnerEditApi:
             json={"pm_number": "PM-001", "owner": "Alex"},
         )
         assert resp.status_code == 503
+
+
+class TestDashboardTagApi:
+    """Dashboard 5-tap overlay can unbind or arm bind without a kiosk session."""
+
+    def test_bind_tag_needs_no_session(self, client, mock_context, test_devices):
+        """POST /api/dashboard/bind-tag arms pending_tag_bind with no session."""
+        mock_context.pending_tag_bind = None
+        resp = client.post(
+            "/api/dashboard/bind-tag",
+            json={"pm_number": "PM-001"},
+        )
+        assert resp.status_code == 200
+        assert resp.json().get("ok") is True
+        assert mock_context.pending_tag_bind is not None
+        assert mock_context.pending_tag_bind.device_id == test_devices[0].id
+        assert mock_context.pending_tag_bind.is_expired is False
+
+    def test_unbind_tag_needs_no_session(
+        self, client, test_devices, db_session, hmac_key
+    ):
+        """POST /api/dashboard/unbind-tag clears tag_hmac; has_tag becomes False."""
+        DeviceRepository.bind_tag(
+            db_session,
+            test_devices[0],
+            compute_uid_hmac("AABBCCDD", hmac_key),
+        )
+        db_session.commit()
+        resp = client.post(
+            "/api/dashboard/unbind-tag",
+            json={"pm_number": "PM-001"},
+        )
+        assert resp.status_code == 200
+        assert resp.json().get("ok") is True
+        db_session.expire_all()
+        assert test_devices[0].tag_hmac is None
+        listed = client.get("/api/dashboard/devices").json()
+        cam = next(d for d in listed if d["name"] == "Camera")
+        assert cam["has_tag"] is False
+        assert "tag_hmac" not in cam
+
+    def test_unknown_pm_is_404(self, client, mock_context):
+        """Bind/unbind of a PM that is not a locker device is 404."""
+        resp = client.post(
+            "/api/dashboard/bind-tag",
+            json={"pm_number": "PM-MISSING"},
+        )
+        assert resp.status_code == 404
+        resp = client.post(
+            "/api/dashboard/unbind-tag",
+            json={"pm_number": "PM-MISSING"},
+        )
+        assert resp.status_code == 404
+        assert mock_context.pending_tag_bind is None
+

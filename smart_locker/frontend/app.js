@@ -2200,7 +2200,7 @@ async function populateBindList() {
     const bindBtn = document.createElement('button');
     bindBtn.type = 'button';
     bindBtn.className = 'bind-go';
-    bindBtn.textContent = 'Bind';
+    bindBtn.textContent = tagged ? 'Replace tag' : 'Bind';
     bindBtn.addEventListener('click', () => { clickSound(); startDeviceTagBind(dev); });
     actions.appendChild(bindBtn);
     const slotBtn = document.createElement('button');

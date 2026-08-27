@@ -47,9 +47,9 @@ smart_locker/
 │   │   ├── index.html           # Kiosk UI — 6 screens + overlays
 │   │   ├── style.css            # kiosk theme (#009641 on #181d24)
 │   │   ├── app.js               # Kiosk state machine, API calls, NFC-driven navigation
-│   │   ├── dashboard.html       # Network dashboard: Inventory / Locker / Display tabs
+│   │   ├── dashboard.html       # Network dashboard: tabs + 5-tap admin overlay
 │   │   ├── dashboard.css        # Dashboard styling (kiosk colours, desktop cursor)
-│   │   ├── dashboard.js         # Tabs, Excel/SQLite fetch, Display poll, owner edit
+│   │   ├── dashboard.js         # Tabs, Excel/SQLite fetch, Display poll, owner edit, 5-tap admin
 │   │   └── images/              # Device photos + hero background
 │   ├── nfc/                     # NFC reader interface (pyscard + APDU)
 │   │   ├── apdu.py              # APDU command definitions + response parsing
@@ -78,6 +78,7 @@ smart_locker/
 │       ├── source_import.py     # Catalog refresh for locker PMs (no insert, English headers)
 │       ├── location_writeback.py    # Pi → Excel: Location by PM only
 │       ├── inventory_reader.py  # Dashboard Inventory tab: live Excel, not SQLite
+│       ├── dashboard_launcher.py # Share HTML + .url redirect to live /dashboard
 │       ├── scheduler.py         # Source import + write-back: startup + 6h interval (+ local FS watch)
 │       ├── photo_watcher.py     # Auto-assign device photos by model number
 │       └── fs_utils.py          # Detect network (CIFS/NFS) paths so watchers skip unreliable inotify
@@ -122,9 +123,9 @@ smart_locker/
 | Location write-back | ✅ Done | Pi writes Location by PM (`Locker` / borrower); locked file skipped |
 | Device import | ✅ Done | English Excel headers and aliases, PM-based catalog update, no auto locker insert |
 | Photo import | ✅ Done | By PM number (`update_device`) or by model (photo watcher) |
-| Web dashboard | ✅ Done | `/dashboard` — Inventory (Excel), Locker (SQLite), Display (kiosk view); public owner edit |
+| Web dashboard | ✅ Done | `/dashboard` — Inventory / Locker / Display; owner edit; 5-tap admin; share launcher |
 | Frontend UI | ✅ Done | 6-screen kiosk UI + overlays |
-| Unit tests | ✅ Done | ~356 tests, hardware-free |
+| Unit tests | ✅ Done | ~371 tests, hardware-free |
 | NFC device tags | ✅ Done | Same ACR1252U; `devices.tag_hmac`; auto borrow/return after login |
 | Calibration alerts | 🔲 Future | Calibration dates stored; notification system not yet built |
 | Kiosk deployment | ✅ Done | Raspberry Pi appliance: systemd service, CIFS mount, Chromium kiosk, offline install (`deploy/`) |
@@ -171,8 +172,8 @@ See **GUIDE.md** for detailed step-by-step instructions.
 │  Touch Display (Chromium kiosk)          Any browser on the network    │
 │  ┌────────────────────────────┐         ┌───────────────────────────┐ │
 │  │ Kiosk UI  (frontend/)      │         │ Dashboard  (/dashboard)   │ │
-│  │ index.html · app.js        │         │ read-only · no auth       │ │
-│  │ 6 screens · green theme    │         │ devices/transactions/users│ │
+│  │ index.html · app.js        │         │ tabs · 5-tap admin        │ │
+│  │ 6 screens · green theme    │         │ no login                  │ │
 │  └─────────────┬──────────────┘         └─────────────┬─────────────┘ │
 │   REST (fetch) │  SSE (NFC/session events)            │ REST          │
 │  ┌─────────────▼──────────────────────────────────────▼─────────────┐ │
@@ -204,7 +205,7 @@ The system runs as a kiosk: FastAPI serves the frontend as static files in a ful
 5. **Locker** — availability overlay; IN / OUT / YOURS / MAINT; PM number on each card; screen-pick borrow still works
 6. **Return** — device grid with PM on each card; the user's borrowed items highlighted
 
-Overlays: **device detail** (photo, PM, type, serial, confirm), **return slot** (put in slot N), **inactivity** countdown, and a **hidden admin panel** (5× tap on the clock) with Locker/Return/Sync/Register User/**Register Device**/Export/**Exit kiosk**/**Shut down**/End-Session shortcuts.
+Overlays: **device detail** (photo, PM, type, serial, confirm), **return slot** (put in slot N), **inactivity** countdown, and a **hidden admin panel** (5× tap on the clock) with Locker/Return/Sync/Register User/**Register Device**/Export/**Exit kiosk**/**Shut down**/End-Session shortcuts. Register Device uses **Replace tag** when a sticker is already bound.
 
 **Theme:** green (`#009641`) on dark charcoal (`#181d24`).
 
@@ -214,10 +215,14 @@ A dashboard is served at **`/dashboard`** for anyone on the local network — no
 Three tabs:
 
 - **Inventory** — live `device-list.xlsx` (full catalog). Search and sort. Click owner to change it (confirm) for PMs that are **not** in the locker. Share down shows an error here only.
-- **Locker** — SQLite devices registered into a slot (status, borrower, slot). Owner is set at the kiosk (borrow/return), not here.
+- **Locker** — SQLite devices registered into a slot (status, borrower, slot, Tagged / No tag). Owner is set at the kiosk (borrow/return), not here.
 - **Display** — what the kiosk is showing right now, plus the signed-in user. View only.
 
-Colours match the kiosk (`#181d24` / `#009641`); this is a normal desktop page (cursor, select, scroll). Users and transaction logs are not on the public page. Use **Export to Excel** from the kiosk admin panel for a downloadable snapshot.
+Tap the header clock **5× within 3 s** (same gesture as the kiosk) for registered users, the last 500 transactions, and NFC **Unbind** / **Bind** / **Replace tag**. Arm-bind waits for the sticker on the ACR1252U; the dashboard does not start a kiosk admin session.
+
+Colleagues can double-click `dashboard.html` or `dashboard.url` on the locker share if the Pi is configured with `SMART_LOCKER_PUBLIC_URL` and `SMART_LOCKER_DASHBOARD_SHARE_PATH` (startup writes those files). The live page is still `GET /dashboard`.
+
+Colours match the kiosk (`#181d24` / `#009641`); this is a normal desktop page (cursor, select, scroll). Use **Export to Excel** from the kiosk admin panel for a downloadable snapshot (Devices sheet has Tagged Yes/No, never the HMAC).
 
 ## Self-Registration
 

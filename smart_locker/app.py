@@ -18,8 +18,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from config.logging_config import setup_logging
 from config.settings import (
+    DASHBOARD_SHARE_PATH,
     PHOTO_INPUT_PATH,
     PHOTO_SERVE_DIR,
+    PUBLIC_URL,
     SESSION_TIMEOUT_SECONDS,
     SOURCE_EXCEL_PATH,
     SOURCE_SYNC_INTERVAL_HOURS,
@@ -47,7 +49,7 @@ def _start_background_sync() -> None:
     and NFC flow from coming up. Each missed sync is retried by the interval
     import or the admin "Sync source" action once the share is back. The two
     subsystems are guarded independently so one failing does not disable the
-    other.
+    other. The dashboard launcher write is guarded the same way.
     """
     if SOURCE_EXCEL_PATH:
         try:
@@ -70,6 +72,16 @@ def _start_background_sync() -> None:
                 "Photo watcher failed to start — continuing without it. "
                 "Photos can be applied later via 'python -m scripts.update_device --auto'."
             )
+
+    try:
+        from smart_locker.sync.dashboard_launcher import write_dashboard_launcher
+        write_dashboard_launcher(DASHBOARD_SHARE_PATH, PUBLIC_URL)
+    except Exception:
+        logger.exception(
+            "Dashboard launcher failed to write — continuing without it. "
+            "Set SMART_LOCKER_PUBLIC_URL and SMART_LOCKER_DASHBOARD_SHARE_PATH "
+            "once the share is back."
+        )
 
 
 class SmartLockerApp:

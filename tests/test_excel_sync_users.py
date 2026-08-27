@@ -115,9 +115,34 @@ class TestUsersSheet:
             headers_lower = [str(h).lower() for h in rows[0]]
             assert not any("tag_hmac" in h or h == "hmac" for h in headers_lower)
             assert "barcode" not in headers_lower
+            assert "Tagged" in rows[0]
+            tagged_i = list(rows[0]).index("Tagged")
+            assert rows[1][tagged_i] == "Yes"
             for row in rows:
                 for cell in row:
                     assert digest not in str(cell or "")
+            wb.close()
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_devices_sheet_tagged_no_when_unbound(self, db_session):
+        """Unbound locker rows export Tagged as No."""
+        DeviceRepository.create(
+            db_session,
+            name="Scope",
+            device_type="Oscilloscope",
+            pm_number="PM-002",
+        )
+        db_session.commit()
+
+        path = Path(tempfile.mktemp(suffix=".xlsx"))
+        try:
+            export_to_excel(get_engine(), path)
+            wb = load_workbook(path, read_only=True)
+            ws = wb["Devices"]
+            rows = list(ws.iter_rows(values_only=True))
+            tagged_i = list(rows[0]).index("Tagged")
+            assert rows[1][tagged_i] == "No"
             wb.close()
         finally:
             path.unlink(missing_ok=True)

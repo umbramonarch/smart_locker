@@ -6,7 +6,7 @@ Description: REST API endpoints and SSE event stream for the Smart Locker kiosk.
              manual registration, Register Device (PM + slot + NFC), device-tag
              bind/unbind, registrant list retrieval, source sync, public dashboard
              (Inventory from Excel, Locker from SQLite, Display snapshot,
-             public owner edit), an admin-only Excel export download, admin
+             public owner edit, 5-tap admin unbind / arm-bind), an admin-only Excel export download, admin
              Exit kiosk / Shut down, and source sync that writes Location back.
 Project: smart_locker/api
 Notes: All device/session endpoints require an active kiosk session enforced by
@@ -564,6 +564,12 @@ class OwnerEditBody(BaseModel):
 
     pm_number: str = Field(..., min_length=1, max_length=50)
     owner: str = Field("", max_length=100)
+
+
+class TagActionBody(BaseModel):
+    """Dashboard 5-tap overlay: unbind or arm-bind one locker PM."""
+
+    pm_number: str = Field(..., min_length=1, max_length=50)
 
 
 # Labels for GET /api/dashboard/display. Unknown ids are title-cased.
@@ -1449,8 +1455,9 @@ def dashboard_devices(db: Session = Depends(get_db)):
         db: Active database session (injected by ``get_db``).
 
     Returns:
-        list[dict]: One dict per locker device with status fields.
-                    Sensitive fields (internal IDs, image paths) are excluded.
+        list[dict]: One dict per locker device with status fields and
+                    ``has_tag`` (bool). Sensitive fields (internal IDs,
+                    image paths, ``tag_hmac``) are excluded.
     """
     devices = db.execute(
         select(Device).order_by(Device.locker_slot, Device.name)
@@ -1475,6 +1482,7 @@ def dashboard_devices(db: Session = Depends(get_db)):
             "borrower_name": borrower_name,
             "calibration_due": d.calibration_due.isoformat() if d.calibration_due else None,
             "description": d.description,
+            "has_tag": d.tag_hmac is not None,
         })
 
     return result
@@ -1537,6 +1545,75 @@ def dashboard_set_owner(body: OwnerEditBody, db: Session = Depends(get_db)):
         "owner": result.owner,
         "locker": result.locker,
     }
+
+
+@router.post("/api/dashboard/bind-tag")
+def dashboard_bind_tag(body: TagActionBody, db: Session = Depends(get_db)):
+    """Arm a 60s NFC bind window for one locker PM. No kiosk session.
+
+    The next sticker tap on the ACR1252U binds that device (same window as
+    kiosk Register Device). Does not create a kiosk admin session. Physical
+    tap still happens at the locker.
+
+    Args:
+        body: PM number of an existing locker device.
+        db: Active database session (injected by ``get_db``).
+
+    Returns:
+        dict: ``ok``, ``pm_number``, ``name``.
+
+    Raises:
+        HTTPException: 503 if not ready; 404 if the PM is not a locker device.
+    """
+    if ctx_module.context is None:
+        raise HTTPException(status_code=503, detail="System not ready.")
+
+    pm = body.pm_number.strip()
+    device = DeviceRepository.find_by_pm(db, pm)
+    if device is None:
+        raise HTTPException(status_code=404, detail="Device not found.")
+
+    ctx_module.context.pending_registration = None
+    ctx_module.context.pending_tag_bind = PendingTagBind(device_id=device.id)
+    logger.info(
+        "Dashboard tag bind armed for %s (pm=%s). Awaiting sticker at kiosk.",
+        device.name,
+        device.pm_number,
+    )
+    return {
+        "ok": True,
+        "pm_number": device.pm_number,
+        "name": device.name,
+        "message": "Tap the sticker on the kiosk.",
+    }
+
+
+@router.post("/api/dashboard/unbind-tag")
+def dashboard_unbind_tag(body: TagActionBody, db: Session = Depends(get_db)):
+    """Clear the NFC sticker HMAC on one locker PM. No kiosk session.
+
+    Args:
+        body: PM number of an existing locker device.
+        db: Active database session (injected by ``get_db``).
+
+    Returns:
+        dict: ``ok``, ``pm_number``.
+
+    Raises:
+        HTTPException: 404 if the PM is not a locker device.
+    """
+    pm = body.pm_number.strip()
+    device = DeviceRepository.find_by_pm(db, pm)
+    if device is None:
+        raise HTTPException(status_code=404, detail="Device not found.")
+
+    DeviceRepository.unbind_tag(db, device)
+    logger.info(
+        "Dashboard unbound device tag for %s (pm=%s).",
+        device.name,
+        device.pm_number,
+    )
+    return {"ok": True, "pm_number": device.pm_number}
 
 
 @router.get("/api/dashboard/transactions")

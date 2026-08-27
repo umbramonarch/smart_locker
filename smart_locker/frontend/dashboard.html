@@ -3,11 +3,13 @@
   Description: Public network dashboard. Three tabs: Inventory (live Excel),
                Locker (SQLite), Display (what the kiosk is showing). No login.
                Anyone can change owner on Inventory (confirm), not for locker
-               PMs. Users and transaction logs are not on this page.
+               PMs. 5-tap the header clock for users, logs, and NFC unbind /
+               arm-bind. Locker shows Tagged / No tag.
   Project: smart_locker/frontend
   Notes: Kiosk colours (#181d24 / #009641) with a normal desktop cursor,
          text selection, and scroll. dashboard.js polls Inventory/Locker
-         every 30s and Display more often.
+         every 30s and Display more often. Dashboard 5-tap does not start
+         a kiosk admin session.
 -->
 <!DOCTYPE html>
 <html lang="en">
@@ -30,6 +32,7 @@
         Live
       </span>
       <span class="last-updated" id="last-updated"></span>
+      <span class="clock" id="dash-clock"></span>
     </div>
   </header>
 
@@ -98,6 +101,7 @@
                   <th data-sort="device_type">Type</th>
                   <th data-sort="status">Status</th>
                   <th data-sort="borrower_name">Borrower</th>
+                  <th data-sort="has_tag">Tag</th>
                   <th data-sort="calibration_due">Calibration Due</th>
                 </tr>
               </thead>
@@ -134,6 +138,71 @@
         <button type="button" class="owner-cancel" id="owner-cancel">Cancel</button>
         <button type="button" class="owner-confirm" id="owner-confirm">Confirm</button>
       </div>
+    </div>
+  </div>
+
+  <div class="admin-overlay" id="admin-overlay" hidden>
+    <div class="admin-overlay-card" role="dialog" aria-labelledby="admin-overlay-title">
+      <div class="admin-overlay-header">
+        <h2 class="admin-overlay-title" id="admin-overlay-title">Admin</h2>
+        <button type="button" class="admin-overlay-close" id="admin-overlay-close">Close</button>
+      </div>
+
+      <section class="admin-section">
+        <h3 class="admin-section-title">NFC tags</h3>
+        <p class="admin-hint">Unbind here. Bind / Replace tag arms the kiosk — tap the sticker on the locker reader within 60 seconds.</p>
+        <p class="admin-tag-status" id="admin-tag-status"></p>
+        <div class="table-wrap">
+          <table class="data-table" id="admin-tags-table">
+            <thead>
+              <tr>
+                <th>Slot</th>
+                <th>PM Number</th>
+                <th>Name</th>
+                <th>Tag</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="admin-tags-tbody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="admin-section">
+        <h3 class="admin-section-title">Registered Users</h3>
+        <div class="table-wrap">
+          <table class="data-table" id="admin-users-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Role</th>
+                <th>Active</th>
+                <th>Registered</th>
+              </tr>
+            </thead>
+            <tbody id="admin-users-tbody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="admin-section">
+        <h3 class="admin-section-title">Transaction History</h3>
+        <div class="table-wrap">
+          <table class="data-table" id="admin-tx-table">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>User</th>
+                <th>Device</th>
+                <th>Type</th>
+                <th>Performed by</th>
+                <th>Notes</th>
+              </tr>
+            </thead>
+            <tbody id="admin-tx-tbody"></tbody>
+          </table>
+        </div>
+      </section>
     </div>
   </div>
 

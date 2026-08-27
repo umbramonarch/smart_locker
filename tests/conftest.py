@@ -42,6 +42,8 @@ def _default_site_overlay(monkeypatch):
     monkeypatch.delenv("SMART_LOCKER_ID_HEADERS", raising=False)
     monkeypatch.delenv("SMART_LOCKER_LOCATION_HEADERS", raising=False)
     monkeypatch.delenv("SMART_LOCKER_IN_LOCKER_TOKEN", raising=False)
+    monkeypatch.delenv("SMART_LOCKER_PUBLIC_URL", raising=False)
+    monkeypatch.delenv("SMART_LOCKER_DASHBOARD_SHARE_PATH", raising=False)
 
 
 @pytest.fixture(autouse=True)

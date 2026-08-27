@@ -2,8 +2,10 @@
 File: test_dashboard_tabs.py
 Description: Contract tests for the public dashboard tabs: Inventory (Excel),
              Locker (SQLite), Display (kiosk view-only). Kiosk colors, desktop
-             cursor and scroll. Users and transaction logs stay off the public
-             page. Owner change is Inventory only, and not for locker PMs.
+             cursor and scroll. Users and transaction logs stay behind the
+             5-tap clock overlay. Owner change is Inventory only, and not for
+             locker PMs. Locker shows Tagged / No tag. Kiosk Register Device
+             uses Replace tag for an already-bound sticker.
 Project: smart_locker/tests
 Notes: Run with: python -m pytest tests/test_dashboard_tabs.py -v
        Frontend is vanilla HTML/JS/CSS; asserted as text.
@@ -43,14 +45,15 @@ class TestDashboardPublicTabs:
         assert "Locker" in html
         assert "Display" in html
 
-    def test_users_and_logs_not_on_public_page(self):
+    def test_users_and_logs_not_on_public_tabs(self):
         """Registered users and transaction history are not public tab content."""
         html = _html()
-        assert "Transaction History" not in html
-        assert "Registered Users" not in html
-        js = _js()
-        assert "/api/dashboard/transactions" not in js
-        assert "/api/dashboard/users" not in js
+        assert 'id="tab-inventory"' in html
+        assert 'id="tab-users"' not in html
+        assert 'id="tab-transactions"' not in html
+        public = html.split('id="admin-overlay"', 1)[0]
+        assert "Transaction History" not in public
+        assert "Registered Users" not in public
 
     def test_inventory_fetches_excel_endpoint(self):
         """Inventory tab reads the live Excel API, not SQLite devices."""
@@ -75,6 +78,60 @@ class TestDashboardPublicTabs:
         html = _html()
         assert 'id="display-screen"' in html
         assert 'id="display-user"' in html
+
+
+class TestDashboardFiveTapAdmin:
+    """Same 5-tap clock as the kiosk; overlay has users, logs, unbind / arm-bind."""
+
+    def test_clock_and_overlay_present(self):
+        """Header clock is the 5-tap target; overlay is hidden until then."""
+        html = _html()
+        js = _js()
+        assert 'id="dash-clock"' in html
+        assert 'id="admin-overlay"' in html
+        assert "ADMIN_TAP_COUNT" in js or "adminTaps" in js
+        assert "3000" in js
+        assert "openAdminOverlay" in js or "checkAdminTapSequence" in js
+
+    def test_overlay_has_users_logs_and_tag_actions(self):
+        """5-tap overlay lists users, last transactions, and NFC unbind / arm-bind."""
+        html = _html()
+        js = _js()
+        assert 'id="admin-users-tbody"' in html
+        assert 'id="admin-tx-tbody"' in html
+        assert 'id="admin-tags-tbody"' in html
+        assert "Registered Users" in html
+        assert "Transaction History" in html
+        assert "/api/dashboard/users" in js
+        assert "/api/dashboard/transactions" in js
+        assert "/api/dashboard/bind-tag" in js
+        assert "/api/dashboard/unbind-tag" in js
+        assert "Replace tag" in js
+        assert "/api/admin/session" not in js
+
+    def test_users_and_logs_not_fetched_on_public_load(self):
+        """Public DOMContentLoaded must not pull users/logs; overlay open does."""
+        js = _js()
+        # The overlay fetchers exist; the public init block must not call them
+        # until the 5-tap overlay opens.
+        assert "fetchAdminTables" in js or "fetchUsers" in js
+        init = js.split("DOMContentLoaded", 1)[-1]
+        assert "/api/dashboard/users" not in init
+        assert "/api/dashboard/transactions" not in init
+
+
+class TestDashboardHasTag:
+    """Locker tab shows Tagged / No tag; never the HMAC digest."""
+
+    def test_locker_has_tag_column(self):
+        """Public Locker table has a Tag column driven by has_tag."""
+        html = _html()
+        js = _js()
+        assert "data-sort=\"has_tag\"" in html or "data-sort='has_tag'" in html
+        assert "has_tag" in js
+        assert "Tagged" in js
+        assert "No tag" in js
+        assert "tag_hmac" not in js
 
 
 class TestDashboardOwnerEdit:

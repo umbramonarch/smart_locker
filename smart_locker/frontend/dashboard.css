@@ -6,7 +6,8 @@
  * Project: smart_locker/frontend
  * Notes: Tabs for Inventory / Locker / Display. Status badges stay
  *        colour-coded. Inventory owner edit (non-locker PMs) uses a
- *        confirm dialog. Responsive down to ~600px.
+ *        confirm dialog. 5-tap header clock opens users / logs / NFC
+ *        unbind and arm-bind. Responsive down to ~600px.
  */
 
 /* --- Reset & base -------------------------------------------------------- */
@@ -113,6 +114,15 @@ body {
 .last-updated {
   font-size: 0.8rem;
   color: var(--text-muted);
+}
+
+.clock {
+  font-family: var(--font-heading);
+  font-size: 1.05rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  user-select: none;
+  cursor: default;
 }
 
 /* --- Tabs ---------------------------------------------------------------- */
@@ -473,6 +483,96 @@ body {
   cursor: not-allowed;
 }
 
+/* --- 5-tap admin overlay ------------------------------------------------- */
+.admin-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 2rem 1rem;
+  overflow: auto;
+}
+
+.admin-overlay[hidden] {
+  display: none;
+}
+
+.admin-overlay-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  width: min(960px, 100%);
+  padding: 1.25rem 1.5rem 1.5rem;
+  margin-bottom: 2rem;
+}
+
+.admin-overlay-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.admin-overlay-title {
+  font-family: var(--font-heading);
+  font-size: 1.2rem;
+}
+
+.admin-overlay-close {
+  font-family: var(--font-body);
+  font-size: 0.85rem;
+  font-weight: 600;
+  padding: 0.4rem 0.85rem;
+  border-radius: 4px;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text-muted);
+}
+
+.admin-section {
+  margin-top: 1.25rem;
+}
+
+.admin-section-title {
+  font-size: 0.95rem;
+  margin-bottom: 0.4rem;
+}
+
+.admin-hint,
+.admin-tag-status {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  margin-bottom: 0.6rem;
+}
+
+.admin-tag-status:not(:empty) {
+  color: var(--accent);
+}
+
+.admin-tag-btn {
+  font-family: var(--font-body);
+  font-size: 0.8rem;
+  font-weight: 600;
+  padding: 0.3rem 0.6rem;
+  margin-right: 0.35rem;
+  border-radius: 4px;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.admin-tag-bind {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
 /* --- Responsive ---------------------------------------------------------- */
 @media (max-width: 768px) {
   .header {
@@ -503,7 +603,9 @@ body {
 
   .refresh-indicator,
   .filter-group,
-  .tabs {
+  .tabs,
+  .clock,
+  .admin-overlay {
     display: none !important;
   }
 

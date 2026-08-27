@@ -566,6 +566,11 @@ is Section 11 — this is the same information, walked through in the order it a
 - `SMART_LOCKER_LAST_SYNC_PATH` — JSON snapshot for the admin "Last sync" line. Empty
   stores `last_sync.json` next to the SQLite database (local disk, not the share).
   `update.sh` keeps that file across code swaps.
+- `SMART_LOCKER_PUBLIC_URL` — this Pi as other PCs see it, e.g. `http://192.168.1.10:8000`.
+  Together with the next line, startup writes a double-click launcher on the share.
+- `SMART_LOCKER_DASHBOARD_SHARE_PATH` — folder on the share (or a `.html` path) for
+  `dashboard.html` and `dashboard.url`. Empty skips the launcher. After `update.sh`,
+  set these in the live `.env` (the tarball does not overwrite `.env`).
 - `SMART_LOCKER_PHOTO_INPUT_PATH` — a folder (can be on the share or local) the app scans for
   device photos, matched by filename to the device model. Empty disables photo import
   entirely.
@@ -866,7 +871,7 @@ Pi on the LAN can use them — the lock is **physical access**, not a password.
 
 | What | URL |
 |---|---|
-| Inventory (Excel), Locker (SQLite), Display (kiosk view); public owner edit | `http://<pi-address>:8000/dashboard` |
+| Inventory / Locker / Display; owner edit; 5-tap admin | `http://<pi-address>:8000/dashboard` |
 | Is the appliance alive? | `http://<pi-address>:8000/api/health` |
 | Kiosk UI (only needed if Chromium is not already fullscreen) | `http://localhost:8000/?lite` on the Pi |
 
@@ -923,9 +928,13 @@ back into the sheet.
 network (no login). Three tabs: **Inventory** (live `device-list.xlsx`, search/sort;
 click owner to change it for PMs that are **not** in the locker — confirm writes Excel;
 locker PMs are not editable here; share down errors that tab only), **Locker** (SQLite
-slot/status/borrower; owner is set at the kiosk), **Display** (what the Riverdi is
-showing, plus the signed-in user — view only). Kiosk colours, desktop cursor and scroll.
-Users and transaction logs are not on this page.
+slot/status/borrower plus Tagged / No tag; owner is set at the kiosk), **Display** (what
+the Riverdi is showing, plus the signed-in user — view only). Kiosk colours, desktop
+cursor and scroll. Tap the dashboard clock **5× within 3 s** for registered users, the
+last 500 transactions, and NFC unbind / arm-bind (tap the sticker on the locker reader).
+If `SMART_LOCKER_PUBLIC_URL` and `SMART_LOCKER_DASHBOARD_SHARE_PATH` are set, startup
+writes `dashboard.html` and `dashboard.url` on the share so a double-click opens the
+live page.
 
 **Status workbook on the share:** the Pi can write `smart_locker_data.xlsx`
 at `SMART_LOCKER_EXCEL_PATH` (Devices + Transactions + Users) when
@@ -1020,7 +1029,7 @@ The Pi lives in the locker, far from you, so it is built to heal itself:
 
 - **Health:** open `http://<pi-address>:8000/api/health`. It returns a small JSON you can bookmark:
   `status` (`ok`/`degraded`), `uptime_seconds`, `database`, `nfc_reader`, and the last sync result.
-- **Dashboard:** open `http://<pi-address>:8000/dashboard` for Inventory / Locker / Display (owner edit on Inventory for non-locker PMs).
+- **Dashboard:** open `http://<pi-address>:8000/dashboard` for Inventory / Locker / Display (owner edit on Inventory for non-locker PMs; 5-tap clock for users/logs/NFC).
 - If `/api/health` doesn't load at all, the Pi is off or off the network (power / cable / Wi-Fi) —
   the one situation that needs someone physically there.
 
@@ -1134,6 +1143,8 @@ All settings live in `.env` (loaded by `config/settings.py`). The Pi template
 | `SMART_LOCKER_EXCEL_AUTO_EXPORT` | (off) | `1` = auto-refresh the exported workbook after each import/photo change |
 | `SMART_LOCKER_SOURCE_SYNC_INTERVAL_HOURS` | `6` | Hours between automatic source imports (startup + admin Sync still run) |
 | `SMART_LOCKER_LAST_SYNC_PATH` | `last_sync.json` next to the DB | Admin last-sync snapshot; keep on the Pi's local disk |
+| `SMART_LOCKER_PUBLIC_URL` | (empty) | Origin of this Pi as other PCs see it (e.g. `http://192.168.1.10:8000`); with the share path, startup writes a dashboard launcher |
+| `SMART_LOCKER_DASHBOARD_SHARE_PATH` | (empty) | Folder (or `.html` path) on the locker share for `dashboard.html` + `dashboard.url`; empty skips the launcher |
 | `SMART_LOCKER_PHOTO_INPUT_PATH` | (empty) | Folder watched for device photos; empty disables |
 | `SMART_LOCKER_UPDATE_DIR` | `/mnt/locker/locker-updates` | share folder for the signed pair from `pack_release` (`.tar.gz` + `.hmac`); `update.sh` picks it up — see "Updating the software" in Section 9 |
 | `SMART_LOCKER_KEEP_BACKUPS` | `5` | How many old code+DB backup pairs `update.sh` keeps under `./backups` before pruning |
@@ -1147,7 +1158,7 @@ timeout, device tracking with the full schema, NFC **device tags** (same ACR1252
 borrow/return after login), borrow/return with admin overrides and per-user limits,
 self-service registration, Excel catalog refresh (no locker insert), Location
 write-back into `device-list.xlsx`, on-demand/auto export, photo assignment, the
-`/dashboard` (Inventory / Locker / Display; public owner edit), the FastAPI REST API + SSE bridge, the
+`/dashboard` (Inventory / Locker / Display; owner edit; 5-tap admin; share launcher), the FastAPI REST API + SSE bridge, the
 6-screen kiosk UI, **Raspberry Pi appliance deployment** (systemd service, CIFS mount,
 Chromium kiosk, fully offline install including the no-PyPI-wheel `pyscard` case), and a
 hardware-free pytest suite.
@@ -1287,15 +1298,18 @@ that bridges card taps to the browser.
 | `GET` | `/api/dashboard/display` | Public kiosk screen snapshot (no auth) |
 | `GET` | `/api/dashboard/owners` | Owner dropdown names (users + registrants + in-locker token) |
 | `POST` | `/api/dashboard/owner` | Change owner of a non-locker PM (Excel only; 409 if in locker) |
+| `POST` | `/api/dashboard/bind-tag` | Arm 60s NFC bind for a locker PM (no kiosk session; tap at the reader) |
+| `POST` | `/api/dashboard/unbind-tag` | Clear sticker HMAC on a locker PM (no kiosk session) |
 | `POST` | `/api/kiosk/display` | Kiosk heartbeat of the current screen |
-| `GET` | `/api/dashboard/transactions` | Transaction history, last 500 (API still public; not on the dashboard page) |
-| `GET` | `/api/dashboard/users` | Registered-users list (API still public; not on the dashboard page) |
+| `GET` | `/api/dashboard/transactions` | Transaction history, last 500 (5-tap overlay on the dashboard) |
+| `GET` | `/api/dashboard/users` | Registered-users list (5-tap overlay on the dashboard) |
 | `GET` | `/api/events` | SSE stream — card-tap, auth, and session events |
 
 `GET /api/devices` returns per device: `id`, `pm_number`, `name`, `device_type`,
 `serial_number`, `manufacturer`, `model`, `locker_slot`, `description`,
 `image_path`, `calibration_due`, `status`, `borrower_name`, `has_tag` (bool — no HMAC
-digest). Device-tag HMAC is never on this payload, the public dashboard, or Excel export.
+digest). Device-tag HMAC is never on this payload, the public dashboard, or Excel export
+(export uses Tagged Yes/No). `GET /api/dashboard/devices` also includes `has_tag`.
 
 **The NFC → browser bridge:** the background NFC listener detects a tap and puts an event on
 a queue; `GET /api/events` streams it to the browser, which then runs the auth/registration
@@ -1328,8 +1342,8 @@ There is no USB barcode scanner and no `GET /api/devices/barcode/{barcode}`.
 ## 16. Future improvements
 
 - **Calibration-due notifications** — calibration dates are stored; a reminder system is not.
-- **Full admin web panel** — edit users/devices from the browser (today: public dashboard owner edit
-  + the kiosk's hidden admin panel).
+- **Full admin web panel** — edit users/devices from the browser (today: public dashboard
+  owner edit, 5-tap users/logs/NFC, + the kiosk's hidden admin panel).
 - **MIFARE sector reading** — APDU commands exist in `nfc/apdu.py` but aren't wired in.
 - **Multi-reader support** — currently the first matching reader is used.
 - **Email / webhook alerts** — overdue devices, borrow-limit hits.

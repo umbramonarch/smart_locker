@@ -12,7 +12,8 @@ Notes: Both public functions delegate to ``_build_workbook()`` which queries
        the database and assembles the openpyxl Workbook in memory. The disk-
        writing path uses a temp file + atomic replace for crash safety, with
        retry logic to handle Windows file locking when the target is open in
-       Excel. Three sheets are produced: Devices, Transactions, and Users.
+       Excel. Three sheets are produced: Devices (including Tagged Yes/No,
+       never tag_hmac), Transactions, and Users.
 """
 
 import io
@@ -76,7 +77,7 @@ def _build_workbook(engine) -> Workbook:
         ws.title = "Devices"
         headers = [
             "PM Number", "Name", "Type", "Manufacturer", "Model",
-            "Serial Number", "Locker Slot", "Status",
+            "Serial Number", "Locker Slot", "Status", "Tagged",
             "Current Borrower", "Description", "Calibration Due",
         ]
         ws.append(headers)
@@ -97,6 +98,7 @@ def _build_workbook(engine) -> Workbook:
                 d.serial_number,
                 d.locker_slot,
                 d.status.value,
+                "Yes" if d.tag_hmac else "No",
                 borrower,
                 d.description,
                 d.calibration_due,

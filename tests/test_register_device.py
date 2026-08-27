@@ -2,7 +2,7 @@
 File: test_register_device.py
 Description: Contract tests for admin Register Device: add by PM from Excel,
              pick a free slot, then tap NFC. Existing locker rows keep Bind
-             / Unbind / change-slot.
+             / Replace tag / Unbind / change-slot.
 Project: smart_locker/tests
 Notes: Run with: python -m pytest tests/test_register_device.py -v
        Frontend is vanilla HTML/JS; asserted as text.
@@ -81,3 +81,13 @@ class TestRegisterDeviceAddFromExcel:
         html = (FRONTEND / "dashboard.html").read_text(encoding="utf-8")
         assert "/api/config" in js
         assert 'id="col-asset-label"' in html
+
+
+class TestReplaceTagCopy:
+    """Same device, new sticker: the bind button is labelled Replace tag."""
+
+    def test_tagged_row_says_replace_tag(self):
+        """Register Device uses Replace tag when the row already has a sticker."""
+        js = _js()
+        assert "Replace tag" in js
+        assert "bindBtn.textContent" in js

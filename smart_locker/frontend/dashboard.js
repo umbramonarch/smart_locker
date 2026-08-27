@@ -2,10 +2,12 @@
  * @fileoverview Public dashboard: Inventory (Excel), Locker (SQLite), and
  *               Display (kiosk snapshot). Sort, search, status filter, and
  *               polling. Owner change is Inventory only (not locker PMs).
- *               No login. No remote control of the kiosk.
+ *               5-tap the header clock for users, logs, and NFC unbind /
+ *               arm-bind. No login. No remote control of the kiosk.
  * @project smart_locker/frontend
  * @description Tabs switch locally. Inventory errors (share down) leave
  *              the Locker tab usable. Asset-label text comes from /api/config.
+ *              Dashboard 5-tap does not start a kiosk admin session.
  */
 
 /* ── State ────────────────────────────────────────────────────────────────── */
@@ -38,6 +40,15 @@ const DISPLAY_MS = 2_000;
 let ownerNames = [];
 /** PM currently open in the owner dialog, or ''. */
 let ownerEditPm = '';
+
+/** Cached registered users for the 5-tap overlay. */
+let usersData = [];
+/** Cached transaction rows for the 5-tap overlay. */
+let txData = [];
+
+const adminTaps = [];
+const ADMIN_TAP_COUNT = 5;
+const ADMIN_TAP_WINDOW = 3000;
 
 
 /**
@@ -326,6 +337,7 @@ function renderDevices() {
       <td>${esc(d.device_type ?? '')}</td>
       <td><span class="status-badge ${d.status}">${d.status}</span></td>
       <td>${esc(d.borrower_name ?? '')}</td>
+      <td>${d.has_tag ? 'Tagged' : 'No tag'}</td>
       <td>${esc(d.calibration_due ?? '')}</td>
     </tr>
   `).join('');
@@ -442,6 +454,195 @@ async function confirmOwnerEdit() {
 }
 
 
+/**
+ * Format the header clock as local HH:MM:SS.
+ */
+function tickClock() {
+  const el = document.getElementById('dash-clock');
+  if (!el) return;
+  const now = new Date();
+  const hh = String(now.getHours()).padStart(2, '0');
+  const mm = String(now.getMinutes()).padStart(2, '0');
+  const ss = String(now.getSeconds()).padStart(2, '0');
+  el.textContent = `${hh}:${mm}:${ss}`;
+}
+
+
+/**
+ * Record a tap on the header clock. Five taps within 3s opens admin.
+ */
+function checkAdminTapSequence() {
+  const now = Date.now();
+  adminTaps.push(now);
+  while (adminTaps.length > 0 && (now - adminTaps[0]) > ADMIN_TAP_WINDOW) {
+    adminTaps.shift();
+  }
+  if (adminTaps.length >= ADMIN_TAP_COUNT) {
+    adminTaps.length = 0;
+    const overlay = document.getElementById('admin-overlay');
+    if (overlay && !overlay.hidden) closeAdminOverlay();
+    else openAdminOverlay();
+  }
+}
+
+
+/**
+ * Show the 5-tap overlay and load users, logs, and locker tags.
+ */
+function openAdminOverlay() {
+  const overlay = document.getElementById('admin-overlay');
+  if (overlay) overlay.hidden = false;
+  const status = document.getElementById('admin-tag-status');
+  if (status) status.textContent = '';
+  fetchAdminTables();
+}
+
+
+/**
+ * Hide the 5-tap overlay.
+ */
+function closeAdminOverlay() {
+  const overlay = document.getElementById('admin-overlay');
+  if (overlay) overlay.hidden = true;
+}
+
+
+/**
+ * Load users, transactions, and refresh locker rows for the overlay.
+ * Called only when the 5-tap overlay opens — not on public page load.
+ */
+async function fetchAdminTables() {
+  try {
+    const res = await fetch('/api/dashboard/users');
+    usersData = res.ok ? await res.json() : [];
+  } catch (_) {
+    usersData = [];
+  }
+  try {
+    const res = await fetch('/api/dashboard/transactions');
+    txData = res.ok ? await res.json() : [];
+  } catch (_) {
+    txData = [];
+  }
+  await fetchTables();
+  renderAdminOverlay();
+}
+
+
+/**
+ * Render users, transactions, and NFC actions in the 5-tap overlay.
+ */
+function renderAdminOverlay() {
+  const usersBody = document.getElementById('admin-users-tbody');
+  if (usersBody) {
+    usersBody.innerHTML = usersData.map(u => `
+      <tr>
+        <td>${esc(u.display_name)}</td>
+        <td>${esc(u.role)}</td>
+        <td>${u.is_active ? 'Yes' : 'No'}</td>
+        <td>${esc(u.registered_at)}</td>
+      </tr>
+    `).join('');
+  }
+
+  const txBody = document.getElementById('admin-tx-tbody');
+  if (txBody) {
+    txBody.innerHTML = txData.map(t => `
+      <tr>
+        <td>${esc(t.timestamp)}</td>
+        <td>${esc(t.user_name)}</td>
+        <td>${esc(t.device_name)}</td>
+        <td>${esc(t.transaction_type)}</td>
+        <td>${esc(t.performed_by)}</td>
+        <td>${esc(t.notes)}</td>
+      </tr>
+    `).join('');
+  }
+
+  const tagsBody = document.getElementById('admin-tags-tbody');
+  if (!tagsBody) return;
+  tagsBody.innerHTML = devicesData.map(d => {
+    const tagged = !!d.has_tag;
+    const bindLabel = tagged ? 'Replace tag' : 'Bind';
+    const unbind = tagged
+      ? `<button type="button" class="admin-tag-btn" data-unbind-pm="${esc(d.pm_number)}">Unbind</button>`
+      : '';
+    return `
+      <tr>
+        <td>${d.locker_slot ?? '—'}</td>
+        <td>${esc(d.pm_number)}</td>
+        <td>${esc(d.name)}</td>
+        <td>${tagged ? 'Tagged' : 'No tag'}</td>
+        <td>
+          <button type="button" class="admin-tag-btn admin-tag-bind" data-bind-pm="${esc(d.pm_number)}">${bindLabel}</button>
+          ${unbind}
+        </td>
+      </tr>
+    `;
+  }).join('');
+}
+
+
+/**
+ * Arm a 60s bind window on the Pi; the sticker must be tapped at the kiosk.
+ *
+ * @param {string} pm - Locker PM number.
+ */
+async function armBind(pm) {
+  const status = document.getElementById('admin-tag-status');
+  if (status) status.textContent = '';
+  try {
+    const res = await fetch('/api/dashboard/bind-tag', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pm_number: pm }),
+    });
+    let detail = 'Could not arm bind.';
+    try {
+      const body = await res.json();
+      if (body && body.message) detail = String(body.message);
+      else if (body && body.detail) detail = String(body.detail);
+    } catch (_) { /* keep default */ }
+    if (status) status.textContent = res.ok
+      ? `${detail} (${pm})`
+      : detail;
+  } catch (_) {
+    if (status) status.textContent = 'Could not arm bind.';
+  }
+}
+
+
+/**
+ * Clear the sticker HMAC for one locker PM.
+ *
+ * @param {string} pm - Locker PM number.
+ */
+async function unbindTag(pm) {
+  const status = document.getElementById('admin-tag-status');
+  if (status) status.textContent = '';
+  try {
+    const res = await fetch('/api/dashboard/unbind-tag', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pm_number: pm }),
+    });
+    if (!res.ok) {
+      let detail = 'Could not unbind.';
+      try {
+        const body = await res.json();
+        if (body && body.detail) detail = String(body.detail);
+      } catch (_) { /* keep default */ }
+      if (status) status.textContent = detail;
+      return;
+    }
+    if (status) status.textContent = `Unbound ${pm}.`;
+    await fetchAdminTables();
+  } catch (_) {
+    if (status) status.textContent = 'Could not unbind.';
+  }
+}
+
+
 /* ── Event wiring ─────────────────────────────────────────────────────────── */
 
 /**
@@ -483,6 +684,10 @@ function initEvents() {
     if (btn) {
       openOwnerDialog(btn.dataset.pm || '', btn.dataset.owner || '');
     }
+    const bindBtn = e.target.closest('[data-bind-pm]');
+    if (bindBtn) armBind(bindBtn.dataset.bindPm || '');
+    const unbindBtn = e.target.closest('[data-unbind-pm]');
+    if (unbindBtn) unbindTag(unbindBtn.dataset.unbindPm || '');
   });
 
   const cancel = document.getElementById('owner-cancel');
@@ -497,6 +702,24 @@ function initEvents() {
       if (e.target === dialog) closeOwnerDialog();
     });
   }
+
+  const clock = document.getElementById('dash-clock');
+  if (clock) {
+    clock.addEventListener('click', (e) => {
+      e.stopPropagation();
+      checkAdminTapSequence();
+    });
+  }
+
+  const adminClose = document.getElementById('admin-overlay-close');
+  if (adminClose) adminClose.addEventListener('click', closeAdminOverlay);
+
+  const adminOverlay = document.getElementById('admin-overlay');
+  if (adminOverlay) {
+    adminOverlay.addEventListener('click', (e) => {
+      if (e.target === adminOverlay) closeAdminOverlay();
+    });
+  }
 }
 
 
@@ -508,6 +731,8 @@ document.addEventListener('DOMContentLoaded', () => {
   fetchOwners();
   fetchTables();
   fetchDisplay();
+  tickClock();
+  setInterval(tickClock, 1000);
   setInterval(fetchTables, REFRESH_MS);
   setInterval(fetchDisplay, DISPLAY_MS);
 });
