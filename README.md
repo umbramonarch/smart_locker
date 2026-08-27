@@ -47,9 +47,9 @@ smart_locker/
 │   │   ├── index.html           # Kiosk UI — 6 screens + overlays
 │   │   ├── style.css            # kiosk theme (#009641 on #181d24)
 │   │   ├── app.js               # Kiosk state machine, API calls, NFC-driven navigation
-│   │   ├── dashboard.html       # Read-only network dashboard (served at /dashboard)
-│   │   ├── dashboard.css        # Dashboard styling
-│   │   ├── dashboard.js         # Dashboard data fetch + sort/filter, 30s auto-refresh
+│   │   ├── dashboard.html       # Network dashboard: Inventory / Locker / Display tabs
+│   │   ├── dashboard.css        # Dashboard styling (kiosk colours, desktop cursor)
+│   │   ├── dashboard.js         # Tabs, Excel/SQLite fetch, Display poll
 │   │   └── images/              # Device photos + hero background
 │   ├── nfc/                     # NFC reader interface (pyscard + APDU)
 │   │   ├── apdu.py              # APDU command definitions + response parsing
@@ -76,6 +76,7 @@ smart_locker/
 │       ├── excel_sync.py        # On-demand / auto Excel export (Devices / Transactions / Users)
 │       ├── source_import.py     # Catalog refresh for locker PMs (no insert, English headers)
 │       ├── location_writeback.py    # Pi → Excel: Location by PM only
+│       ├── inventory_reader.py  # Dashboard Inventory tab: live Excel, not SQLite
 │       ├── scheduler.py         # Source import + write-back: startup + 6h interval (+ local FS watch)
 │       ├── photo_watcher.py     # Auto-assign device photos by model number
 │       └── fs_utils.py          # Detect network (CIFS/NFS) paths so watchers skip unreliable inotify
@@ -120,9 +121,9 @@ smart_locker/
 | Location write-back | ✅ Done | Pi writes Location by PM (`Locker` / borrower); locked file skipped |
 | Device import | ✅ Done | English Excel headers and aliases, PM-based catalog update, no auto locker insert |
 | Photo import | ✅ Done | By PM number (`update_device`) or by model (photo watcher) |
-| Web dashboard | ✅ Done | Read-only `/dashboard` — devices, transactions, users; 30s auto-refresh |
+| Web dashboard | ✅ Done | `/dashboard` — Inventory (Excel), Locker (SQLite), Display (kiosk view) |
 | Frontend UI | ✅ Done | 6-screen kiosk UI + overlays |
-| Unit tests | ✅ Done | ~314 tests, hardware-free |
+| Unit tests | ✅ Done | ~346 tests, hardware-free |
 | NFC device tags | ✅ Done | Same ACR1252U; `devices.tag_hmac`; auto borrow/return after login |
 | Calibration alerts | 🔲 Future | Calibration dates stored; notification system not yet built |
 | Kiosk deployment | ✅ Done | Raspberry Pi appliance: systemd service, CIFS mount, Chromium kiosk, offline install (`deploy/`) |
@@ -208,7 +209,14 @@ Overlays: **device detail** (photo, PM, type, serial, confirm), **return slot** 
 
 ## Web Dashboard
 
-A read-only dashboard is served at **`/dashboard`** for anyone on the local network — no authentication required. It shows the device inventory (slot, PM number, type, status, borrower, calibration due — filterable/sortable), transaction history (last 500), and registered users, auto-refreshing every 30 seconds. This replaced the old auto-synced Excel file (which suffered Windows file-locking issues); use **Export to Excel** from the admin panel for a downloadable snapshot.
+A dashboard is served at **`/dashboard`** for anyone on the local network — no login.
+Three tabs:
+
+- **Inventory** — live `device-list.xlsx` (full catalog). Search and sort. Share down shows an error here only.
+- **Locker** — SQLite devices registered into a slot (status, borrower, slot).
+- **Display** — what the kiosk is showing right now, plus the signed-in user. View only.
+
+Colours match the kiosk (`#181d24` / `#009641`); this is a normal desktop page (cursor, select, scroll). Users and transaction logs are not on the public page. Use **Export to Excel** from the kiosk admin panel for a downloadable snapshot.
 
 ## Self-Registration
 

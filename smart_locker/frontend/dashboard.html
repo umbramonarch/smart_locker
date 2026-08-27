@@ -1,14 +1,12 @@
 <!--
   File: dashboard.html
-  Description: Read-only network dashboard for the Smart Locker system. Displays
-               device availability, transaction history, and registered users in
-               a clean desktop-friendly layout. Accessible to anyone on the local
-               network at /dashboard — no authentication required. Replaces the
-               old auto-synced Excel file that had Windows file-locking issues.
+  Description: Public network dashboard. Three tabs: Inventory (live Excel),
+               Locker (SQLite), Display (what the kiosk is showing). No login.
+               Users and transaction logs are not on this page.
   Project: smart_locker/frontend
-  Notes: Loads dashboard.css for light-theme styling and dashboard.js for data
-         fetching, rendering, 30-second auto-refresh, column sorting, and status
-         filtering. Uses the same brand accent (#00d4ff) as the kiosk UI.
+  Notes: Kiosk colours (#181d24 / #009641) with a normal desktop cursor,
+         text selection, and scroll. dashboard.js polls Inventory/Locker
+         every 30s and Display more often.
 -->
 <!DOCTYPE html>
 <html lang="en">
@@ -20,118 +18,104 @@
 </head>
 <body>
 
-  <!-- Header bar with title and refresh indicator -->
   <header class="header">
     <div class="header-left">
       <h1 class="header-title">Smart Locker</h1>
-      <span class="header-subtitle">Equipment Dashboard</span>
+      <span class="header-subtitle">Dashboard</span>
     </div>
     <div class="header-right">
       <span class="refresh-indicator" id="refresh-indicator">
         <span class="refresh-dot"></span>
-        Live &mdash; refreshes every 30s
+        Live
       </span>
       <span class="last-updated" id="last-updated"></span>
     </div>
   </header>
 
+  <nav class="tabs" role="tablist">
+    <button class="tab-btn active" id="tab-inventory" role="tab" aria-selected="true" data-tab="inventory">Inventory</button>
+    <button class="tab-btn" id="tab-locker" role="tab" aria-selected="false" data-tab="locker">Locker</button>
+    <button class="tab-btn" id="tab-display" role="tab" aria-selected="false" data-tab="display">Display</button>
+  </nav>
+
   <main class="main">
 
-    <!-- Device Availability Section -->
-    <section class="section" id="section-devices">
-      <div class="section-header" data-toggle="devices">
-        <h2 class="section-title">Device Availability</h2>
-        <div class="section-controls">
-          <div class="filter-group" id="status-filters">
-            <button class="filter-btn active" data-filter="all">All</button>
-            <button class="filter-btn" data-filter="available">Available</button>
-            <button class="filter-btn" data-filter="borrowed">Borrowed</button>
-            <button class="filter-btn" data-filter="maintenance">Maintenance</button>
+    <section class="tab-panel" id="panel-inventory" role="tabpanel">
+      <div class="section">
+        <div class="section-header">
+          <h2 class="section-title">Inventory</h2>
+          <div class="section-controls">
+            <input type="search" class="search-input" id="inventory-search" placeholder="Search…" autocomplete="off">
+            <span class="section-count" id="inventory-count"></span>
           </div>
-          <span class="section-count" id="device-count"></span>
-          <button class="collapse-btn" aria-label="Toggle section">
-            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
-          </button>
         </div>
-      </div>
-      <div class="section-body" id="devices-body">
-        <div class="table-wrap">
-          <table class="data-table" id="devices-table">
-            <thead>
-              <tr>
-                <th data-sort="locker_slot">Slot</th>
-                <th data-sort="pm_number" id="col-asset-label">PM Number</th>
-                <th data-sort="name">Name</th>
-                <th data-sort="device_type">Type</th>
-                <th data-sort="status">Status</th>
-                <th data-sort="borrower_name">Borrower</th>
-                <th data-sort="calibration_due">Calibration Due</th>
-              </tr>
-            </thead>
-            <tbody id="devices-tbody"></tbody>
-          </table>
+        <div class="section-body">
+          <p class="error-msg" id="inventory-error" style="display:none"></p>
+          <div class="table-wrap">
+            <table class="data-table" id="inventory-table">
+              <thead>
+                <tr>
+                  <th data-sort="pm_number" id="col-inventory-asset-label">PM Number</th>
+                  <th data-sort="name">Name</th>
+                  <th data-sort="manufacturer">Manufacturer</th>
+                  <th data-sort="model">Model</th>
+                  <th data-sort="serial_number">Serial</th>
+                  <th data-sort="location">Location</th>
+                  <th data-sort="calibration_due">Calibration Due</th>
+                </tr>
+              </thead>
+              <tbody id="inventory-tbody"></tbody>
+            </table>
+          </div>
+          <p class="empty-msg" id="inventory-empty" style="display:none">No catalog rows.</p>
         </div>
-        <p class="empty-msg" id="devices-empty" style="display:none">No devices found.</p>
       </div>
     </section>
 
-    <!-- Transactions Section -->
-    <section class="section collapsed" id="section-transactions">
-      <div class="section-header" data-toggle="transactions">
-        <h2 class="section-title">Transaction History</h2>
-        <div class="section-controls">
-          <span class="section-count" id="txn-count"></span>
-          <button class="collapse-btn" aria-label="Toggle section">
-            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
-          </button>
+    <section class="tab-panel" id="panel-locker" role="tabpanel" hidden>
+      <div class="section">
+        <div class="section-header">
+          <h2 class="section-title">Locker</h2>
+          <div class="section-controls">
+            <div class="filter-group" id="status-filters">
+              <button class="filter-btn active" data-filter="all">All</button>
+              <button class="filter-btn" data-filter="available">Available</button>
+              <button class="filter-btn" data-filter="borrowed">Borrowed</button>
+              <button class="filter-btn" data-filter="maintenance">Maintenance</button>
+            </div>
+            <span class="section-count" id="device-count"></span>
+          </div>
         </div>
-      </div>
-      <div class="section-body" id="transactions-body">
-        <div class="table-wrap">
-          <table class="data-table" id="transactions-table">
-            <thead>
-              <tr>
-                <th data-sort="timestamp">Date</th>
-                <th data-sort="user_name">User</th>
-                <th data-sort="device_name">Device</th>
-                <th data-sort="transaction_type">Type</th>
-                <th data-sort="performed_by">Performed By</th>
-                <th data-sort="notes">Notes</th>
-              </tr>
-            </thead>
-            <tbody id="transactions-tbody"></tbody>
-          </table>
+        <div class="section-body" id="devices-body">
+          <div class="table-wrap">
+            <table class="data-table" id="devices-table">
+              <thead>
+                <tr>
+                  <th data-sort="locker_slot">Slot</th>
+                  <th data-sort="pm_number" id="col-asset-label">PM Number</th>
+                  <th data-sort="name">Name</th>
+                  <th data-sort="device_type">Type</th>
+                  <th data-sort="status">Status</th>
+                  <th data-sort="borrower_name">Borrower</th>
+                  <th data-sort="calibration_due">Calibration Due</th>
+                </tr>
+              </thead>
+              <tbody id="devices-tbody"></tbody>
+            </table>
+          </div>
+          <p class="empty-msg" id="devices-empty" style="display:none">No locker devices.</p>
         </div>
-        <p class="empty-msg" id="txn-empty" style="display:none">No transactions recorded.</p>
       </div>
     </section>
 
-    <!-- Users Section -->
-    <section class="section collapsed" id="section-users">
-      <div class="section-header" data-toggle="users">
-        <h2 class="section-title">Registered Users</h2>
-        <div class="section-controls">
-          <span class="section-count" id="user-count"></span>
-          <button class="collapse-btn" aria-label="Toggle section">
-            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
-          </button>
-        </div>
-      </div>
-      <div class="section-body" id="users-body">
-        <div class="table-wrap">
-          <table class="data-table" id="users-table">
-            <thead>
-              <tr>
-                <th data-sort="display_name">Name</th>
-                <th data-sort="role">Role</th>
-                <th data-sort="is_active">Active</th>
-                <th data-sort="registered_at">Registered At</th>
-              </tr>
-            </thead>
-            <tbody id="users-tbody"></tbody>
-          </table>
-        </div>
-        <p class="empty-msg" id="users-empty" style="display:none">No users registered.</p>
+    <section class="tab-panel" id="panel-display" role="tabpanel" hidden>
+      <div class="section display-card">
+        <h2 class="section-title">Kiosk display</h2>
+        <p class="display-hint">View only — this does not control the kiosk.</p>
+        <p class="display-label">Screen</p>
+        <p class="display-value" id="display-screen">—</p>
+        <p class="display-label">Current user</p>
+        <p class="display-value" id="display-user">—</p>
       </div>
     </section>
 

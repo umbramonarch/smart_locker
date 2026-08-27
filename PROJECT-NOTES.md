@@ -24,7 +24,7 @@ python -m scripts.init_db
 python -m scripts.enroll_card --name "Name" --role admin
 python -m smart_locker.app           # kiosk API + UI on :8000
 
-python -m pytest tests/ -v           # ~325 items, no NFC hardware
+python -m pytest tests/ -v           # ~346 items, no NFC hardware
 
 # Pi (offline): copy tree + wheelhouse + .debs, then
 sudo bash deploy/install/install.sh
@@ -71,7 +71,7 @@ sudo bash deploy/install/install.sh
 - **Excel auto-export** only if `SMART_LOCKER_EXCEL_AUTO_EXPORT=1` (off in the Pi template; admin Export Excel stays).
 - **Photos:** filename stem = device **model**. `scripts/update_device.py --auto` matches **PM number** — different scheme.
 - **Pi updates:** signed tarball from `python -m scripts.pack_release` only (copy `.tar.gz` + `.hmac` to `/mnt/locker/locker-updates`). `update.sh` still does stop / backup / pip / migrate / health / rollback, then refreshes sudoers. Git reset is not a full update.
-- **Hidden admin:** idle screen, tap the **clock 5× within 3 s**. **Register User** returns to idle after enroll (next work-card tap logs in). **Register Device** is PM + free slot + NFC (catalog from Excel; Sync never inserts). List shows **name + PM**. CLI bind: `python -m scripts.enroll_device_tag --pm PM-001`. **Exit kiosk** closes Chromium (service stays); **Shut down** is `systemctl poweroff` (needs `/etc/sudoers.d/smart-locker` via `apply-sudoers.sh`). Dashboard: `http://<pi>:8000/dashboard` (no login). Health: `/api/health`.
+- **Hidden admin:** idle screen, tap the **clock 5× within 3 s**. **Register User** returns to idle after enroll (next work-card tap logs in). **Register Device** is PM + free slot + NFC (catalog from Excel; Sync never inserts). List shows **name + PM**. CLI bind: `python -m scripts.enroll_device_tag --pm PM-001`. **Exit kiosk** closes Chromium (service stays); **Shut down** is `systemctl poweroff` (needs `/etc/sudoers.d/smart-locker` via `apply-sudoers.sh`). Dashboard (`http://<pi>:8000/dashboard`, no login): **Inventory** (live Excel), **Locker** (SQLite), **Display** (kiosk screen, view-only). Health: `/api/health`.
 - **Entry / layout:** `smart_locker/app.py`, `config/`, `scripts/`, `deploy/`, `tests/`, `GUIDE.md`. Frontend: `smart_locker/frontend/`.
 - **Logging:** `config/logging_config.py` → `logs/smart_locker.log` (5 MB × 5) + stdout INFO.
 - **Style:** every Python/JS/CSS/HTML file has a `File:` / `Description:` / `Project:` / `Notes:` header. Python: Google docstrings. JS: JSDoc.

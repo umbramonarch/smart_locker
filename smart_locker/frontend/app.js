@@ -369,6 +369,22 @@ function navigate(toId) {
   }
 
   S.screen = toId;
+  reportKioskDisplay(toId);
+}
+
+/**
+ * Tell the Pi which screen the Riverdi is showing so /dashboard Display can poll.
+ * Demo mode does not POST. Failures are ignored so navigation never waits.
+ * @param {string} [screenId] - Logical screen id; defaults to S.screen.
+ */
+function reportKioskDisplay(screenId) {
+  if (USE_DEMO) return;
+  const screen = screenId || S.screen || 'idle';
+  fetch('/api/kiosk/display', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ screen }),
+  }).catch(() => {});
 }
 
 /* ============================================================
@@ -1554,6 +1570,7 @@ async function openAdminPanel() {
   // shortcuts (which were previously the only callers of adminStartSession).
   await adminStartSession();
   refreshSyncStatus();
+  reportKioskDisplay('admin');
 }
 
 /**
@@ -1567,6 +1584,7 @@ function closeAdminPanel() {
   setTimeout(() => {
     overlay.classList.remove('visible', 'hidden-left');
     overlay.style.display = 'none';
+    reportKioskDisplay(S.screen);
   }, 710);
 }
 
@@ -2913,6 +2931,7 @@ if (USE_DEMO) {
   loadSiteConfig();
   connectSSE();
   checkExistingSession();
+  reportKioskDisplay('idle');
 }
 
 /* ============================================================

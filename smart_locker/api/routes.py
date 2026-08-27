@@ -5,8 +5,9 @@ Description: REST API endpoints and SSE event stream for the Smart Locker kiosk.
              user self-registration (with registrant name validation), admin-only
              manual registration, Register Device (PM + slot + NFC), device-tag
              bind/unbind, registrant list retrieval, source sync, public dashboard
-             data endpoints, an admin-only Excel export download, admin Exit
-             kiosk / Shut down, and source sync that writes Location back.
+             (Inventory from Excel, Locker from SQLite, Display snapshot), an
+             admin-only Excel export download, admin Exit kiosk / Shut down,
+             and source sync that writes Location back.
 Project: smart_locker/api
 Notes: All device/session endpoints require an active kiosk session enforced by
        the require_session dependency. SSE stream at /api/events pushes NFC and
@@ -51,6 +52,7 @@ from smart_locker.services.appliance import (
 )
 from smart_locker.services.locker_service import LockerService
 from smart_locker.sync import sync_status
+from smart_locker.sync.inventory_reader import InventoryReadError, read_inventory
 
 logger = logging.getLogger(__name__)
 
@@ -541,6 +543,63 @@ class SetSlotRequest(BaseModel):
     """Admin change of the physical locker slot on an existing device."""
 
     locker_slot: int = Field(..., ge=1)
+
+
+class KioskDisplayBody(BaseModel):
+    """Kiosk heartbeat of the screen currently shown on the Riverdi."""
+
+    screen: str = Field(..., min_length=1, max_length=64)
+
+
+# Labels for GET /api/dashboard/display. Unknown ids are title-cased.
+_KIOSK_SCREEN_LABELS = {
+    "idle": "Idle",
+    "main-menu": "Main menu",
+    "borrow": "Locker",
+    "return": "Return",
+    "admin": "Admin",
+    "register": "Register",
+    "device-detail": "Device detail",
+    "auth-failed": "Sign-in failed",
+}
+
+
+def _normalize_kiosk_screen(raw: str) -> str:
+    """Keep a short lowercase screen id (letters, digits, hyphen, underscore).
+
+    Args:
+        raw: Value from the kiosk heartbeat.
+
+    Returns:
+        Sanitized id, or ``idle`` if nothing usable remains.
+    """
+    cleaned = "".join(
+        ch for ch in (raw or "").strip().lower() if ch.isalnum() or ch in "-_"
+    )
+    return cleaned[:64] or "idle"
+
+
+def _kiosk_display_snapshot() -> dict:
+    """Build the public Display-tab payload from AppContext.
+
+    Returns:
+        ``screen``, human ``label``, and ``user_name`` (or None when idle).
+    """
+    ctx = ctx_module.context
+    screen = "idle"
+    raw = getattr(ctx, "kiosk_screen", "idle")
+    if isinstance(raw, str) and raw.strip():
+        screen = _normalize_kiosk_screen(raw)
+    if bool(getattr(ctx, "admin_overlay_open", False)):
+        screen = "admin"
+    user_name = None
+    session_mgr = getattr(ctx, "session_mgr", None)
+    if session_mgr is not None:
+        session = session_mgr.current_session
+        if session is not None:
+            user_name = session.user.display_name
+    label = _KIOSK_SCREEN_LABELS.get(screen, screen.replace("-", " ").title())
+    return {"screen": screen, "label": label, "user_name": user_name}
 
 
 @router.post("/api/register")
@@ -1288,20 +1347,83 @@ def admin_shutdown(user_session: UserSession = Depends(require_session)):
 
 # --- Dashboard Endpoints (public, no auth) ----------------------------------
 
+@router.post("/api/kiosk/display")
+def kiosk_display_heartbeat(body: KioskDisplayBody) -> dict:
+    """Record the screen the kiosk is showing (no auth; local appliance).
+
+    The dashboard Display tab polls this snapshot. This endpoint does not
+    change kiosk navigation.
+
+    Args:
+        body: Screen id from the kiosk (``idle``, ``main-menu``, ``borrow``, …).
+
+    Returns:
+        dict: ``ok`` true after the id is stored.
+    """
+    ctx_module.context.kiosk_screen = _normalize_kiosk_screen(body.screen)
+    return {"ok": True}
+
+
+@router.get("/api/dashboard/display")
+def dashboard_display() -> dict:
+    """Public snapshot of what the kiosk is showing.
+
+    Returns:
+        dict: ``screen`` id, human ``label``, and ``user_name`` or null.
+    """
+    return _kiosk_display_snapshot()
+
+
+@router.get("/api/dashboard/inventory")
+def dashboard_inventory():
+    """Public company catalog from the live Excel file (not SQLite).
+
+    Share down or an unreadable workbook is HTTP 503 so the Inventory tab
+    can error while the Locker tab still uses ``/api/dashboard/devices``.
+
+    Returns:
+        list[dict]: One dict per Excel PM row.
+
+    Raises:
+        HTTPException: 503 when the catalog path is empty or unreadable.
+    """
+    from config.settings import SOURCE_EXCEL_PATH
+
+    if not SOURCE_EXCEL_PATH:
+        raise HTTPException(
+            status_code=503, detail="Catalog Excel is not configured."
+        )
+    try:
+        rows = read_inventory(SOURCE_EXCEL_PATH)
+    except InventoryReadError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+    return [
+        {
+            "pm_number": r.pm_number,
+            "name": r.name,
+            "manufacturer": r.manufacturer,
+            "model": r.model,
+            "serial_number": r.serial_number,
+            "location": r.location,
+            "calibration_due": r.calibration_due,
+        }
+        for r in rows
+    ]
+
+
 @router.get("/api/dashboard/devices")
 def dashboard_devices(db: Session = Depends(get_db)):
-    """Public device inventory for the network dashboard.
+    """Public locker inventory for the dashboard Locker tab.
 
-    Returns all devices with their current status and borrower name. Unlike
-    the kiosk ``GET /api/devices`` endpoint, this requires no active session
-    — it replaces the old shared Excel file that anyone on the network could
-    open. Devices are sorted by locker slot then name.
+    SQLite devices only (admin-registered locker rows). Unlike
+    the kiosk ``GET /api/devices`` endpoint, this requires no active session.
+    Devices are sorted by locker slot then name.
 
     Args:
         db: Active database session (injected by ``get_db``).
 
     Returns:
-        list[dict]: One dict per device with inventory and status fields.
+        list[dict]: One dict per locker device with status fields.
                     Sensitive fields (internal IDs, image paths) are excluded.
     """
     devices = db.execute(

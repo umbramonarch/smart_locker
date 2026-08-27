@@ -4,7 +4,8 @@ Description: Tests for the REST API layer — session management, device listing
              borrow/return endpoints, user self-registration (with registrant
              validation), admin manual registration, Register Device (PM + slot
              + NFC), registrant list retrieval, admin source sync, software
-             update, Exit kiosk / Shut down, and SSE event stream. Uses
+             update, Exit kiosk / Shut down, dashboard Inventory/Display, and
+             SSE event stream. Uses
              FastAPI's TestClient with mocked NFC context.
 Project: smart_locker/tests
 Notes: Run with: python -m pytest tests/test_api.py -v
@@ -149,6 +150,7 @@ def mock_context(session_mgr):
     mock_ctx.session_mgr = session_mgr
     mock_ctx.sse_queue = asyncio.Queue()
     mock_ctx.admin_overlay_open = False
+    mock_ctx.kiosk_screen = "idle"
     mock_ctx.pending_tag_bind = None
     mock_ctx.pending_registration = None
     ctx_module.context = mock_ctx
@@ -1019,3 +1021,109 @@ class TestPublicConfig:
         resp = client.get("/api/config")
         assert resp.status_code == 200
         assert resp.json()["asset_label"] == "Asset ID"
+
+
+class TestDashboardInventoryAndDisplay:
+    """Inventory is Excel; Locker is SQLite; Display is a kiosk snapshot."""
+
+    def test_inventory_is_excel_not_sqlite(
+        self, client, test_devices, tmp_path, monkeypatch
+    ):
+        """Inventory includes Excel-only PMs that are not locker rows."""
+        path = _catalog_workbook(tmp_path, [
+            ["PM", "Name", "Manufacturer", "Model", "Serial", "Location", "Calibration due"],
+            ["PM-001", "Scope", "Keysight", "DSOX", "SN-1", "Locker", "2026-01-01"],
+            ["PM-999", "Van kit", "Fluke", "87V", "SN-9", "Workshop", None],
+        ])
+        monkeypatch.setattr("config.settings.SOURCE_EXCEL_PATH", str(path))
+        resp = client.get("/api/dashboard/inventory")
+        assert resp.status_code == 200
+        rows = resp.json()
+        pms = {r["pm_number"] for r in rows}
+        assert "PM-001" in pms
+        assert "PM-999" in pms
+        van = next(r for r in rows if r["pm_number"] == "PM-999")
+        assert van["name"] == "Van kit"
+        assert van["location"] == "Workshop"
+        assert "status" not in van
+        assert "locker_slot" not in van
+        assert "tag_hmac" not in van
+
+    def test_locker_stays_sqlite_only(
+        self, client, test_devices, tmp_path, monkeypatch
+    ):
+        """Locker tab JSON is SQLite devices; Excel-only PMs are absent."""
+        path = _catalog_workbook(tmp_path, [
+            ["PM", "Name", "Location"],
+            ["PM-001", "Scope", "Locker"],
+            ["PM-999", "Van kit", "Workshop"],
+        ])
+        monkeypatch.setattr("config.settings.SOURCE_EXCEL_PATH", str(path))
+        resp = client.get("/api/dashboard/devices")
+        assert resp.status_code == 200
+        pms = {r["pm_number"] for r in resp.json()}
+        assert "PM-001" in pms
+        assert "PM-999" not in pms
+        row = next(r for r in resp.json() if r["pm_number"] == "PM-001")
+        assert "locker_slot" in row
+        assert "status" in row
+
+    def test_inventory_share_down_does_not_break_locker(
+        self, client, test_devices, tmp_path, monkeypatch
+    ):
+        """Missing catalog → Inventory errors; Locker still answers."""
+        monkeypatch.setattr(
+            "config.settings.SOURCE_EXCEL_PATH", str(tmp_path / "missing.xlsx")
+        )
+        inv = client.get("/api/dashboard/inventory")
+        assert inv.status_code == 503
+        locker = client.get("/api/dashboard/devices")
+        assert locker.status_code == 200
+        assert locker.json()
+
+    def test_inventory_unconfigured_is_error(self, client, monkeypatch):
+        """Empty SOURCE_EXCEL_PATH is an Inventory error, not an empty catalog."""
+        monkeypatch.setattr("config.settings.SOURCE_EXCEL_PATH", "")
+        resp = client.get("/api/dashboard/inventory")
+        assert resp.status_code == 503
+
+    def test_display_idle_has_no_user(self, client, mock_context):
+        """Idle kiosk reports Idle and no current user."""
+        mock_context.kiosk_screen = "idle"
+        mock_context.admin_overlay_open = False
+        resp = client.get("/api/dashboard/display")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["screen"] == "idle"
+        assert data["label"] == "Idle"
+        assert data["user_name"] is None
+
+    def test_display_shows_session_user(
+        self, client, mock_context, test_user
+    ):
+        """Logged-in kiosk reports the current user on Display."""
+        mock_context.session_mgr.start_session(test_user)
+        mock_context.kiosk_screen = "main-menu"
+        resp = client.get("/api/dashboard/display")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["screen"] == "main-menu"
+        assert data["label"] == "Main menu"
+        assert data["user_name"] == "Test User"
+
+    def test_heartbeat_updates_display(self, client, mock_context):
+        """Kiosk POST of a screen id is what Display polls."""
+        resp = client.post("/api/kiosk/display", json={"screen": "borrow"})
+        assert resp.status_code == 200
+        assert mock_context.kiosk_screen == "borrow"
+        shown = client.get("/api/dashboard/display").json()
+        assert shown["screen"] == "borrow"
+        assert shown["label"] == "Locker"
+
+    def test_display_admin_overlay_overrides_heartbeat(self, client, mock_context):
+        """Open admin overlay is Admin even if the last heartbeat was idle."""
+        mock_context.kiosk_screen = "idle"
+        mock_context.admin_overlay_open = True
+        data = client.get("/api/dashboard/display").json()
+        assert data["screen"] == "admin"
+        assert data["label"] == "Admin"

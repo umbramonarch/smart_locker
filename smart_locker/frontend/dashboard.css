@@ -1,15 +1,11 @@
 /**
  * File: dashboard.css
- * Description: Light-theme styles for the Smart Locker network dashboard.
- *              Designed for desktop/laptop viewing (not the kiosk touch
- *              display). Uses the same brand accent colour (#00d4ff) as
- *              the kiosk UI for visual consistency, with a clean white
- *              background optimised for readability on standard monitors.
+ * Description: Desktop dashboard using kiosk charcoal (#181d24) and green
+ *              (#009641). Normal cursor, text selection, and page scroll —
+ *              not the kiosk hidden-cursor fullscreen.
  * Project: smart_locker/frontend
- * Notes: Responsive down to ~600px for tablet/phone viewers. Includes
- *        @media print rules for clean paper output. Table rows alternate
- *        shading for scanability. Status badges are colour-coded:
- *        green (available), amber (borrowed), gray (maintenance).
+ * Notes: Tabs for Inventory / Locker / Display. Status badges stay
+ *        colour-coded. Responsive down to ~600px.
  */
 
 /* --- Reset & base -------------------------------------------------------- */
@@ -22,26 +18,22 @@
 }
 
 :root {
-  /* Brand accent — matches kiosk UI */
-  --accent: #00b8d9;
-  --accent-light: #e0f7fa;
+  --bg: #181d24;
+  --surface: #1f2630;
+  --surface-2: #28303c;
+  --accent: #009641;
+  --accent-dim: rgba(0, 150, 65, 0.14);
+  --border: rgba(255, 255, 255, 0.08);
+  --text: #f0f4f8;
+  --text-muted: #9ba8b8;
 
-  /* Surface palette — light theme for desktop readability */
-  --bg: #f4f6f8;
-  --surface: #ffffff;
-  --border: #e2e8f0;
-  --text: #1e293b;
-  --text-muted: #64748b;
+  --status-available: #22c55e;
+  --status-available-bg: rgba(34, 197, 94, 0.16);
+  --status-borrowed: #f59e0b;
+  --status-borrowed-bg: rgba(245, 158, 11, 0.16);
+  --status-maintenance: #9ba8b8;
+  --status-maintenance-bg: rgba(155, 168, 184, 0.16);
 
-  /* Status badge colours */
-  --status-available: #16a34a;
-  --status-available-bg: #dcfce7;
-  --status-borrowed: #d97706;
-  --status-borrowed-bg: #fef3c7;
-  --status-maintenance: #6b7280;
-  --status-maintenance-bg: #f3f4f6;
-
-  /* Typography */
   --font-heading: 'Space Grotesk', system-ui, sans-serif;
   --font-body: 'Inter', system-ui, sans-serif;
 }
@@ -108,7 +100,7 @@ body {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: var(--status-available);
+  background: var(--accent);
   animation: pulse 2s ease-in-out infinite;
 }
 
@@ -122,14 +114,47 @@ body {
   color: var(--text-muted);
 }
 
+/* --- Tabs ---------------------------------------------------------------- */
+.tabs {
+  display: flex;
+  gap: 0.25rem;
+  padding: 0.75rem 2rem 0;
+  max-width: 1400px;
+  margin: 0 auto;
+  border-bottom: 1px solid var(--border);
+}
+
+.tab-btn {
+  font-family: var(--font-heading);
+  font-size: 0.95rem;
+  font-weight: 600;
+  padding: 0.65rem 1.1rem;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+
+.tab-btn:hover {
+  color: var(--text);
+}
+
+.tab-btn.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
 /* --- Main content -------------------------------------------------------- */
 .main {
   max-width: 1400px;
   margin: 0 auto;
   padding: 1.5rem 2rem 3rem;
-  display: flex;
-  flex-direction: column;
-  gap: 1.25rem;
+}
+
+.tab-panel[hidden] {
+  display: none;
 }
 
 /* --- Section cards ------------------------------------------------------- */
@@ -145,13 +170,8 @@ body {
   justify-content: space-between;
   align-items: center;
   padding: 0.85rem 1.25rem;
-  cursor: pointer;
-  user-select: none;
-  transition: background 0.15s;
-}
-
-.section-header:hover {
-  background: var(--bg);
+  gap: 1rem;
+  flex-wrap: wrap;
 }
 
 .section-title {
@@ -164,6 +184,7 @@ body {
   display: flex;
   align-items: center;
   gap: 1rem;
+  flex-wrap: wrap;
 }
 
 .section-count {
@@ -172,24 +193,20 @@ body {
   font-weight: 500;
 }
 
-/* Collapse toggle arrow rotation */
-.collapse-btn {
-  background: none;
-  border: none;
-  cursor: pointer;
-  color: var(--text-muted);
-  padding: 0.2rem;
-  display: flex;
-  transition: transform 0.25s ease;
+.search-input {
+  font-family: var(--font-body);
+  font-size: 0.85rem;
+  padding: 0.4rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface-2);
+  color: var(--text);
+  min-width: 16rem;
 }
 
-.section.collapsed .collapse-btn {
-  transform: rotate(-90deg);
-}
-
-/* Hide section body when collapsed */
-.section.collapsed .section-body {
-  display: none;
+.search-input:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 /* --- Filter buttons (device status) -------------------------------------- */
@@ -205,10 +222,9 @@ body {
   padding: 0.3rem 0.7rem;
   border: 1px solid var(--border);
   border-radius: 4px;
-  background: var(--surface);
+  background: var(--surface-2);
   color: var(--text-muted);
   cursor: pointer;
-  transition: all 0.15s;
 }
 
 .filter-btn:hover {
@@ -241,15 +257,12 @@ body {
   text-transform: uppercase;
   letter-spacing: 0.03em;
   color: var(--text-muted);
-  background: var(--bg);
+  background: var(--surface-2);
   border-bottom: 2px solid var(--border);
   cursor: pointer;
-  user-select: none;
   white-space: nowrap;
-  position: relative;
 }
 
-/* Sort arrow indicator */
 .data-table th::after {
   content: '';
   display: inline-block;
@@ -277,13 +290,12 @@ body {
   vertical-align: middle;
 }
 
-/* Alternating row shading for scanability */
 .data-table tbody tr:nth-child(even) {
-  background: #f8fafc;
+  background: rgba(255, 255, 255, 0.02);
 }
 
 .data-table tbody tr:hover {
-  background: var(--accent-light);
+  background: var(--accent-dim);
 }
 
 /* --- Status badges ------------------------------------------------------- */
@@ -312,70 +324,46 @@ body {
   color: var(--status-maintenance);
 }
 
-/* Transaction type badges */
-.type-badge {
-  display: inline-block;
-  padding: 0.2rem 0.55rem;
-  border-radius: 4px;
+/* --- Display tab --------------------------------------------------------- */
+.display-card {
+  padding: 2rem 1.5rem 2.25rem;
+  max-width: 32rem;
+}
+
+.display-hint {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  margin: 0.35rem 0 1.5rem;
+}
+
+.display-label {
   font-size: 0.75rem;
-  font-weight: 600;
   text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  margin-top: 1rem;
 }
 
-.type-badge.borrow {
-  background: var(--status-borrowed-bg);
-  color: var(--status-borrowed);
-}
-
-.type-badge.return {
-  background: var(--status-available-bg);
-  color: var(--status-available);
-}
-
-/* Role badges */
-.role-badge {
-  display: inline-block;
-  padding: 0.2rem 0.55rem;
-  border-radius: 4px;
-  font-size: 0.75rem;
+.display-value {
+  font-family: var(--font-heading);
+  font-size: 1.6rem;
   font-weight: 600;
-  text-transform: uppercase;
-}
-
-.role-badge.admin {
-  background: #ede9fe;
-  color: #7c3aed;
-}
-
-.role-badge.user {
-  background: var(--accent-light);
   color: var(--accent);
+  margin-top: 0.2rem;
 }
 
-/* Active/inactive indicator */
-.active-dot {
-  display: inline-block;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  margin-right: 0.35rem;
-  vertical-align: middle;
-}
-
-.active-dot.yes {
-  background: var(--status-available);
-}
-
-.active-dot.no {
-  background: var(--status-maintenance);
-}
-
-/* --- Empty state --------------------------------------------------------- */
-.empty-msg {
+/* --- Empty / error ------------------------------------------------------- */
+.empty-msg,
+.error-msg {
   text-align: center;
   padding: 2rem;
   color: var(--text-muted);
   font-style: italic;
+}
+
+.error-msg {
+  color: #f87171;
+  font-style: normal;
 }
 
 /* --- Responsive ---------------------------------------------------------- */
@@ -387,17 +375,14 @@ body {
     padding: 1rem;
   }
 
+  .tabs,
   .main {
-    padding: 1rem;
+    padding-left: 1rem;
+    padding-right: 1rem;
   }
 
-  .section-header {
-    flex-wrap: wrap;
-    gap: 0.5rem;
-  }
-
-  .filter-group {
-    order: 3;
+  .search-input {
+    min-width: 0;
     width: 100%;
   }
 }
@@ -411,19 +396,11 @@ body {
 
   .refresh-indicator,
   .filter-group,
-  .collapse-btn {
+  .tabs {
     display: none !important;
   }
 
-  .section.collapsed .section-body {
+  .tab-panel[hidden] {
     display: block !important;
-  }
-
-  .data-table tbody tr:hover {
-    background: transparent;
-  }
-
-  .section {
-    break-inside: avoid;
   }
 }

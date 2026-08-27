@@ -87,6 +87,8 @@ class AppContext:
         self.pending_tag_bind: PendingTagBind | None = None
         # True only while the admin / Register Device overlay is on screen.
         self.admin_overlay_open: bool = False
+        # Last kiosk screen id heartbeated from the Riverdi UI (Display tab).
+        self.kiosk_screen: str = "idle"
 
     async def start(self) -> None:
         """Start NFC reader and launch the bridge task.

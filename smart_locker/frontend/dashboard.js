@@ -1,52 +1,50 @@
 /**
- * @fileoverview Client-side logic for the Smart Locker network dashboard.
- *               Fetches device, transaction, and user data from the public
- *               dashboard API, renders sortable/filterable tables, and
- *               auto-refreshes every 30 seconds.
+ * @fileoverview Public dashboard: Inventory (Excel), Locker (SQLite), and
+ *               Display (kiosk snapshot). Sort, search, status filter, and
+ *               polling. No login. No remote control of the kiosk.
  * @project smart_locker/frontend
- * @description Manages three data tables (Devices, Transactions, Users) with
- *              column sorting, status filtering for devices, section collapse
- *              toggling, and a polling-based auto-refresh cycle. All data
- *              comes from the /api/dashboard/* endpoints which require no
- *              authentication.
+ * @description Tabs switch locally. Inventory errors (share down) leave
+ *              the Locker tab usable. Asset-label text comes from /api/config.
  */
 
 /* ── State ────────────────────────────────────────────────────────────────── */
 
-/** Cached data arrays from the most recent fetch — used for re-rendering
- *  when sort/filter changes without hitting the server again. */
+/** Cached Inventory rows from the last successful Excel fetch. */
+let inventoryData = [];
+/** Cached Locker rows from SQLite. */
 let devicesData = [];
-let transactionsData = [];
-let usersData = [];
+/** True when Inventory last failed (share down / unreadable Excel). */
+let inventoryError = '';
 
-/** Current sort configuration per table. Key is a column name, direction is
- *  'asc' or 'desc'. Null key means no active sort (use server order). */
+/** Current sort configuration per table. */
 const sortState = {
-  devices:      { key: null, dir: 'asc' },
-  transactions: { key: null, dir: 'asc' },
-  users:        { key: null, dir: 'asc' },
+  inventory: { key: null, dir: 'asc' },
+  devices:   { key: null, dir: 'asc' },
 };
 
-/** Active status filter for the devices table ('all', 'available',
- *  'borrowed', or 'maintenance'). */
+/** Active status filter for the Locker table. */
 let activeFilter = 'all';
 
-/** Auto-refresh interval ID — stored so it can be cleared if needed. */
-let refreshInterval = null;
+/** Inventory search string (case-insensitive substring). */
+let inventoryQuery = '';
 
-/** How often to poll the server for fresh data (milliseconds). */
+/** How often to poll Inventory and Locker (milliseconds). */
 const REFRESH_MS = 30_000;
+/** How often to poll the kiosk Display snapshot. */
+const DISPLAY_MS = 2_000;
 
 
 /**
- * Apply the site join-key label to the devices table header.
+ * Apply the site join-key label to Inventory and Locker column headers.
  * @param {string} label - Display noun from GET /api/config.
  */
 function applyAssetLabel(label) {
   const text = (label || '').trim();
   if (!text) return;
-  const th = document.getElementById('col-asset-label');
-  if (th) th.textContent = text;
+  ['col-asset-label', 'col-inventory-asset-label'].forEach(id => {
+    const th = document.getElementById(id);
+    if (th) th.textContent = text;
+  });
 }
 
 /**
@@ -63,40 +61,76 @@ async function loadSiteConfig() {
 }
 
 
+/* ── Tabs ─────────────────────────────────────────────────────────────────── */
+
+/**
+ * Show one tab panel and mark its button selected.
+ * @param {string} name - 'inventory' | 'locker' | 'display'.
+ */
+function showTab(name) {
+  document.querySelectorAll('.tab-btn').forEach(btn => {
+    const on = btn.dataset.tab === name;
+    btn.classList.toggle('active', on);
+    btn.setAttribute('aria-selected', on ? 'true' : 'false');
+  });
+  document.querySelectorAll('.tab-panel').forEach(panel => {
+    panel.hidden = panel.id !== `panel-${name}`;
+  });
+}
+
+
 /* ── Data fetching ────────────────────────────────────────────────────────── */
 
 /**
- * Fetch all three dashboard endpoints in parallel and re-render tables.
- *
- * Catches network errors silently — the dashboard simply shows stale data
- * until the next successful refresh. Updates the "last updated" timestamp
- * on success.
+ * Fetch Locker (SQLite) and Inventory (Excel) independently so a down share
+ * only fails Inventory.
  */
-async function fetchAll() {
+async function fetchTables() {
   try {
-    const [devRes, txnRes, usrRes] = await Promise.all([
-      fetch('/api/dashboard/devices'),
-      fetch('/api/dashboard/transactions'),
-      fetch('/api/dashboard/users'),
-    ]);
-
-    if (devRes.ok) {
-      devicesData = await devRes.json();
+    const res = await fetch('/api/dashboard/devices');
+    if (res.ok) {
+      devicesData = await res.json();
       renderDevices();
     }
-    if (txnRes.ok) {
-      transactionsData = await txnRes.json();
-      renderTransactions();
-    }
-    if (usrRes.ok) {
-      usersData = await usrRes.json();
-      renderUsers();
-    }
+  } catch (_) { /* keep stale locker rows */ }
 
-    updateTimestamp();
+  try {
+    const res = await fetch('/api/dashboard/inventory');
+    if (res.ok) {
+      inventoryData = await res.json();
+      inventoryError = '';
+    } else {
+      inventoryData = [];
+      let detail = 'Catalog Excel is not available.';
+      try {
+        const body = await res.json();
+        if (body && body.detail) detail = String(body.detail);
+      } catch (_) { /* keep default */ }
+      inventoryError = detail;
+    }
+    renderInventory();
   } catch (_) {
-    /* Network error — keep showing stale data, retry on next cycle */
+    inventoryError = 'Catalog Excel is not available.';
+    renderInventory();
   }
+
+  updateTimestamp();
+}
+
+
+/**
+ * Poll what the Riverdi is showing. View only — never POSTs to the kiosk.
+ */
+async function fetchDisplay() {
+  try {
+    const res = await fetch('/api/dashboard/display');
+    if (!res.ok) return;
+    const data = await res.json();
+    const screenEl = document.getElementById('display-screen');
+    const userEl = document.getElementById('display-user');
+    if (screenEl) screenEl.textContent = data.label || data.screen || '—';
+    if (userEl) userEl.textContent = data.user_name || 'None';
+  } catch (_) { /* keep last snapshot */ }
 }
 
 
@@ -118,10 +152,6 @@ function updateTimestamp() {
 /**
  * Sort an array of objects by a given key in the specified direction.
  *
- * Handles nulls (sorted to the end), numbers (numeric comparison), and
- * strings (locale-aware, case-insensitive). The original array is not
- * mutated — a sorted copy is returned.
- *
  * @param {Object[]} data  - Array of row objects to sort.
  * @param {string}   key   - Object property name to sort by.
  * @param {string}   dir   - 'asc' or 'desc'.
@@ -132,16 +162,13 @@ function sortData(data, key, dir) {
     let va = a[key];
     let vb = b[key];
 
-    /* Nulls and empty strings sort to the end regardless of direction */
     if (va == null || va === '') return 1;
     if (vb == null || vb === '') return -1;
 
-    /* Numeric comparison when both values look like numbers */
     if (typeof va === 'number' && typeof vb === 'number') {
       return dir === 'asc' ? va - vb : vb - va;
     }
 
-    /* String comparison — locale-aware, case-insensitive */
     va = String(va).toLowerCase();
     vb = String(vb).toLowerCase();
     const cmp = va.localeCompare(vb);
@@ -153,11 +180,7 @@ function sortData(data, key, dir) {
 /**
  * Handle a click on a sortable column header.
  *
- * Toggles the sort direction if the column is already active, otherwise
- * sets it as the new sort column in ascending order. Updates the visual
- * sort indicator and re-renders the affected table.
- *
- * @param {string} table - Table identifier ('devices', 'transactions', 'users').
+ * @param {string} table - Table identifier ('inventory' or 'devices').
  * @param {string} key   - Column key that was clicked.
  */
 function handleSort(table, key) {
@@ -169,7 +192,6 @@ function handleSort(table, key) {
     state.dir = 'asc';
   }
 
-  /* Update visual indicators on all <th> in this table */
   const tableEl = document.getElementById(`${table}-table`);
   tableEl.querySelectorAll('th').forEach(th => {
     th.classList.remove('sort-asc', 'sort-desc');
@@ -178,28 +200,76 @@ function handleSort(table, key) {
     }
   });
 
-  /* Re-render the table with the new sort applied */
-  if (table === 'devices') renderDevices();
-  else if (table === 'transactions') renderTransactions();
-  else if (table === 'users') renderUsers();
+  if (table === 'inventory') renderInventory();
+  else renderDevices();
 }
 
 
 /* ── Rendering ────────────────────────────────────────────────────────────── */
 
 /**
- * Render the devices table from cached data, applying the active status
- * filter and sort order. Updates the device count badge.
+ * Render Inventory from cached Excel rows, applying search and sort.
+ */
+function renderInventory() {
+  const errorEl = document.getElementById('inventory-error');
+  const tbody = document.getElementById('inventory-tbody');
+  const empty = document.getElementById('inventory-empty');
+  const count = document.getElementById('inventory-count');
+
+  if (inventoryError) {
+    errorEl.textContent = inventoryError;
+    errorEl.style.display = '';
+    tbody.innerHTML = '';
+    empty.style.display = 'none';
+    count.textContent = '';
+    return;
+  }
+  errorEl.style.display = 'none';
+
+  let data = inventoryData;
+  const q = inventoryQuery.trim().toLowerCase();
+  if (q) {
+    data = data.filter(d =>
+      Object.values(d).some(v => v != null && String(v).toLowerCase().includes(q))
+    );
+  }
+
+  const s = sortState.inventory;
+  if (s.key) data = sortData(data, s.key, s.dir);
+
+  count.textContent = `${data.length} / ${inventoryData.length}`;
+
+  if (data.length === 0) {
+    tbody.innerHTML = '';
+    empty.style.display = '';
+    return;
+  }
+  empty.style.display = 'none';
+
+  tbody.innerHTML = data.map(d => `
+    <tr>
+      <td>${esc(d.pm_number)}</td>
+      <td>${esc(d.name)}</td>
+      <td>${esc(d.manufacturer)}</td>
+      <td>${esc(d.model)}</td>
+      <td>${esc(d.serial_number)}</td>
+      <td>${esc(d.location)}</td>
+      <td>${esc(d.calibration_due)}</td>
+    </tr>
+  `).join('');
+}
+
+
+/**
+ * Render the Locker table from cached SQLite data.
  */
 function renderDevices() {
   let data = devicesData;
 
-  /* Apply status filter */
   if (activeFilter !== 'all') {
     data = data.filter(d => d.status === activeFilter);
   }
 
-  /* Apply sort */
   const s = sortState.devices;
   if (s.key) data = sortData(data, s.key, s.dir);
 
@@ -207,7 +277,6 @@ function renderDevices() {
   const empty = document.getElementById('devices-empty');
   const count = document.getElementById('device-count');
 
-  /* Summary counts for the badge (always computed from full data) */
   const avail = devicesData.filter(d => d.status === 'available').length;
   count.textContent = `${avail} available / ${devicesData.length} total`;
 
@@ -232,84 +301,6 @@ function renderDevices() {
 }
 
 
-/**
- * Render the transactions table from cached data with the current sort.
- * Updates the transaction count badge.
- */
-function renderTransactions() {
-  let data = transactionsData;
-
-  const s = sortState.transactions;
-  if (s.key) data = sortData(data, s.key, s.dir);
-
-  const tbody = document.getElementById('transactions-tbody');
-  const empty = document.getElementById('txn-empty');
-  const count = document.getElementById('txn-count');
-
-  count.textContent = `${transactionsData.length} records`;
-
-  if (data.length === 0) {
-    tbody.innerHTML = '';
-    empty.style.display = '';
-    return;
-  }
-  empty.style.display = 'none';
-
-  tbody.innerHTML = data.map(t => {
-    const typeCls = t.transaction_type === 'borrow' ? 'borrow' : 'return';
-    return `
-    <tr>
-      <td>${esc(t.timestamp ?? '')}</td>
-      <td>${esc(t.user_name)}</td>
-      <td>${esc(t.device_name)}</td>
-      <td><span class="type-badge ${typeCls}">${t.transaction_type}</span></td>
-      <td>${esc(t.performed_by)}</td>
-      <td>${esc(t.notes ?? '')}</td>
-    </tr>
-  `;
-  }).join('');
-}
-
-
-/**
- * Render the users table from cached data with the current sort.
- * Updates the user count badge.
- */
-function renderUsers() {
-  let data = usersData;
-
-  const s = sortState.users;
-  if (s.key) data = sortData(data, s.key, s.dir);
-
-  const tbody = document.getElementById('users-tbody');
-  const empty = document.getElementById('users-empty');
-  const count = document.getElementById('user-count');
-
-  count.textContent = `${usersData.length} users`;
-
-  if (data.length === 0) {
-    tbody.innerHTML = '';
-    empty.style.display = '';
-    return;
-  }
-  empty.style.display = 'none';
-
-  tbody.innerHTML = data.map(u => {
-    const roleCls = u.role === 'admin' ? 'admin' : 'user';
-    const activeCls = u.is_active ? 'yes' : 'no';
-    const activeLabel = u.is_active ? 'Yes' : 'No';
-    return `
-    <tr>
-      <td>${esc(u.display_name)}</td>
-      <td><span class="role-badge ${roleCls}">${u.role}</span></td>
-      <td><span class="active-dot ${activeCls}"></span>${activeLabel}</td>
-      <td>${esc(u.registered_at ?? '')}</td>
-    </tr>
-  `;
-  }).join('');
-}
-
-
 /* ── Utility ──────────────────────────────────────────────────────────────── */
 
 /**
@@ -329,34 +320,22 @@ function esc(str) {
 /* ── Event wiring ─────────────────────────────────────────────────────────── */
 
 /**
- * Wire up section collapse toggles, sort headers, and filter buttons.
- * Called once on DOMContentLoaded.
+ * Wire tabs, sort headers, Locker filters, and Inventory search.
  */
 function initEvents() {
-  /* Section collapse toggles — click header to expand/collapse */
-  document.querySelectorAll('.section-header[data-toggle]').forEach(header => {
-    header.addEventListener('click', (e) => {
-      /* Don't toggle when clicking filter buttons inside the header */
-      if (e.target.closest('.filter-btn')) return;
-      header.closest('.section').classList.toggle('collapsed');
-    });
+  document.querySelectorAll('.tab-btn').forEach(btn => {
+    btn.addEventListener('click', () => showTab(btn.dataset.tab));
   });
 
-  /* Column sort — click any <th> with a data-sort attribute */
+  document.querySelectorAll('#inventory-table th[data-sort]').forEach(th => {
+    th.addEventListener('click', () => handleSort('inventory', th.dataset.sort));
+  });
   document.querySelectorAll('#devices-table th[data-sort]').forEach(th => {
     th.addEventListener('click', () => handleSort('devices', th.dataset.sort));
   });
-  document.querySelectorAll('#transactions-table th[data-sort]').forEach(th => {
-    th.addEventListener('click', () => handleSort('transactions', th.dataset.sort));
-  });
-  document.querySelectorAll('#users-table th[data-sort]').forEach(th => {
-    th.addEventListener('click', () => handleSort('users', th.dataset.sort));
-  });
 
-  /* Status filter buttons for the devices table */
   document.querySelectorAll('#status-filters .filter-btn').forEach(btn => {
-    btn.addEventListener('click', (e) => {
-      e.stopPropagation();
+    btn.addEventListener('click', () => {
       document.querySelectorAll('#status-filters .filter-btn').forEach(b =>
         b.classList.remove('active')
       );
@@ -365,6 +344,14 @@ function initEvents() {
       renderDevices();
     });
   });
+
+  const search = document.getElementById('inventory-search');
+  if (search) {
+    search.addEventListener('input', () => {
+      inventoryQuery = search.value;
+      renderInventory();
+    });
+  }
 }
 
 
@@ -373,6 +360,8 @@ function initEvents() {
 document.addEventListener('DOMContentLoaded', () => {
   initEvents();
   loadSiteConfig();
-  fetchAll();
-  refreshInterval = setInterval(fetchAll, REFRESH_MS);
+  fetchTables();
+  fetchDisplay();
+  setInterval(fetchTables, REFRESH_MS);
+  setInterval(fetchDisplay, DISPLAY_MS);
 });

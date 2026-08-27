@@ -72,6 +72,7 @@ table at the end.
 - [ ] Admin **Register Device**: Add from Excel (PM in the sheet + free slot) creates the locker row and waits for the sticker; unknown PM / share down does not create a row. Existing rows Bind / Unbind / Slot still work. **Sync Source** updates catalog only (does not add locker devices).
 - [ ] Admin **Exit kiosk** (confirm) closes Chromium; `smart-locker` stays `active`; dashboard on `:8000` still answers. Chromium does not return until login/reboot.
 - [ ] Admin **Shut down** (confirm) powers the Pi off. After the first update of this feature, if the button errors, SSH `sudo bash deploy/install/apply-sudoers.sh` once.
+- [ ] From another PC, open `http://<pi>:8000/dashboard`. **Inventory** lists the full Excel catalog (share down → error on that tab only). **Locker** lists SQLite locker devices. **Display** follows the kiosk screen (idle / main menu / locker / return / admin) and shows the signed-in user. Cursor and scroll work; the page is kiosk colours, not a second kiosk.
 
 ## 6. Sign-off
 
