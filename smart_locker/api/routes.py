@@ -5,9 +5,9 @@ Description: REST API endpoints and SSE event stream for the Smart Locker kiosk.
              user self-registration (with registrant name validation), admin-only
              manual registration, Register Device (PM + slot + NFC), device-tag
              bind/unbind, registrant list retrieval, source sync, public dashboard
-             (Inventory from Excel, Locker from SQLite, Display snapshot), an
-             admin-only Excel export download, admin Exit kiosk / Shut down,
-             and source sync that writes Location back.
+             (Inventory from Excel, Locker from SQLite, Display snapshot,
+             public owner edit), an admin-only Excel export download, admin
+             Exit kiosk / Shut down, and source sync that writes Location back.
 Project: smart_locker/api
 Notes: All device/session endpoints require an active kiosk session enforced by
        the require_session dependency. SSE stream at /api/events pushes NFC and
@@ -51,6 +51,13 @@ from smart_locker.services.appliance import (
     shutdown as appliance_shutdown,
 )
 from smart_locker.services.locker_service import LockerService
+from smart_locker.services.owner_edit import (
+    CatalogUnavailable,
+    InvalidOwnerRequest,
+    UnknownPm,
+    owner_choices,
+    set_owner,
+)
 from smart_locker.sync import sync_status
 from smart_locker.sync.inventory_reader import InventoryReadError, read_inventory
 
@@ -92,7 +99,7 @@ _SYSTEMD_RUN = shutil.which("systemd-run")
 
 @router.get("/dashboard")
 def serve_dashboard() -> FileResponse:
-    """Serve the read-only dashboard at the documented ``/dashboard`` URL.
+    """Serve the public dashboard at the documented ``/dashboard`` URL.
 
     The frontend is mounted via ``StaticFiles(html=True)``, which maps a
     directory to its ``index.html`` but does NOT map a bare name to
@@ -549,6 +556,13 @@ class KioskDisplayBody(BaseModel):
     """Kiosk heartbeat of the screen currently shown on the Riverdi."""
 
     screen: str = Field(..., min_length=1, max_length=64)
+
+
+class OwnerEditBody(BaseModel):
+    """Public dashboard owner change for one catalog PM."""
+
+    pm_number: str = Field(..., min_length=1, max_length=50)
+    owner: str = Field("", max_length=100)
 
 
 # Labels for GET /api/dashboard/display. Unknown ids are title-cased.
@@ -1452,6 +1466,63 @@ def dashboard_devices(db: Session = Depends(get_db)):
         })
 
     return result
+
+
+@router.get("/api/dashboard/owners")
+def dashboard_owners(db: Session = Depends(get_db)):
+    """Names for the public owner-edit dropdown. No session required.
+
+    Combines the in-locker token, registered users, and registrant names
+    so Inventory and Locker can offer the same list plus free text.
+
+    Args:
+        db: Active database session (injected by ``get_db``).
+
+    Returns:
+        dict: ``names`` (list of strings) and ``in_locker_token``.
+    """
+    from config.settings import in_locker_token
+
+    return {
+        "names": owner_choices(db),
+        "in_locker_token": in_locker_token(),
+    }
+
+
+@router.post("/api/dashboard/owner")
+def dashboard_set_owner(body: OwnerEditBody, db: Session = Depends(get_db)):
+    """Change owner for one PM. Public — no kiosk session.
+
+    Writes the catalog Excel Location cell. SQLite is updated only when
+    that PM is already a locker device. A transaction is logged in that
+    locker case. Does not insert locker rows.
+
+    Args:
+        body: PM number and new owner text.
+        db: Active database session (injected by ``get_db``).
+
+    Returns:
+        dict: ``ok``, ``pm_number``, ``owner``, ``locker``.
+
+    Raises:
+        HTTPException: 400 empty PM; 404 PM not in Excel; 503 share down.
+    """
+    from config.settings import SOURCE_EXCEL_PATH
+
+    try:
+        result = set_owner(db, SOURCE_EXCEL_PATH, body.pm_number, body.owner)
+    except InvalidOwnerRequest as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except UnknownPm as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except CatalogUnavailable as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+    return {
+        "ok": True,
+        "pm_number": result.pm_number,
+        "owner": result.owner,
+        "locker": result.locker,
+    }
 
 
 @router.get("/api/dashboard/transactions")

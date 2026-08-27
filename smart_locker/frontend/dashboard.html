@@ -2,6 +2,7 @@
   File: dashboard.html
   Description: Public network dashboard. Three tabs: Inventory (live Excel),
                Locker (SQLite), Display (what the kiosk is showing). No login.
+               Anyone can change owner on Inventory and Locker (confirm).
                Users and transaction logs are not on this page.
   Project: smart_locker/frontend
   Notes: Kiosk colours (#181d24 / #009641) with a normal desktop cursor,
@@ -120,6 +121,21 @@
     </section>
 
   </main>
+
+  <div class="owner-dialog" id="owner-dialog" hidden>
+    <div class="owner-dialog-card" role="dialog" aria-labelledby="owner-dialog-title">
+      <h3 class="owner-dialog-title" id="owner-dialog-title">Change owner</h3>
+      <p class="owner-dialog-pm" id="owner-dialog-pm"></p>
+      <label class="owner-dialog-label" for="owner-input">Owner</label>
+      <input type="text" class="search-input" id="owner-input" list="owner-names" autocomplete="off">
+      <datalist id="owner-names"></datalist>
+      <p class="error-msg" id="owner-dialog-error" style="display:none"></p>
+      <div class="owner-dialog-actions">
+        <button type="button" class="owner-cancel" id="owner-cancel">Cancel</button>
+        <button type="button" class="owner-confirm" id="owner-confirm">Confirm</button>
+      </div>
+    </div>
+  </div>
 
   <script src="dashboard.js"></script>
 </body>

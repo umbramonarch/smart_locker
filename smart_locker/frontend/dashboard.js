@@ -1,7 +1,8 @@
 /**
  * @fileoverview Public dashboard: Inventory (Excel), Locker (SQLite), and
  *               Display (kiosk snapshot). Sort, search, status filter, and
- *               polling. No login. No remote control of the kiosk.
+ *               polling. Anyone can change owner on Inventory and Locker
+ *               after confirm. No login. No remote control of the kiosk.
  * @project smart_locker/frontend
  * @description Tabs switch locally. Inventory errors (share down) leave
  *              the Locker tab usable. Asset-label text comes from /api/config.
@@ -32,6 +33,13 @@ let inventoryQuery = '';
 const REFRESH_MS = 30_000;
 /** How often to poll the kiosk Display snapshot. */
 const DISPLAY_MS = 2_000;
+
+/** Names for the owner datalist (users + registrants + in-locker token). */
+let ownerNames = [];
+/** In-locker Location token from GET /api/dashboard/owners. */
+let inLockerToken = 'Locker';
+/** PM currently open in the owner dialog, or ''. */
+let ownerEditPm = '';
 
 
 /**
@@ -115,6 +123,34 @@ async function fetchTables() {
   }
 
   updateTimestamp();
+  fetchOwners();
+}
+
+
+/**
+ * Load dropdown names (registered users + registrants + in-locker token).
+ */
+async function fetchOwners() {
+  try {
+    const res = await fetch('/api/dashboard/owners');
+    if (!res.ok) return;
+    const data = await res.json();
+    ownerNames = Array.isArray(data.names) ? data.names : [];
+    if (typeof data.in_locker_token === 'string' && data.in_locker_token.trim()) {
+      inLockerToken = data.in_locker_token.trim();
+    }
+    fillOwnerDatalist();
+  } catch (_) { /* keep last names */ }
+}
+
+
+/**
+ * Rebuild the owner <datalist> from cached names.
+ */
+function fillOwnerDatalist() {
+  const list = document.getElementById('owner-names');
+  if (!list) return;
+  list.innerHTML = ownerNames.map(n => `<option value="${esc(n)}"></option>`).join('');
 }
 
 
@@ -253,7 +289,7 @@ function renderInventory() {
       <td>${esc(d.manufacturer)}</td>
       <td>${esc(d.model)}</td>
       <td>${esc(d.serial_number)}</td>
-      <td>${esc(d.location)}</td>
+      <td>${ownerCell(d.pm_number, d.location)}</td>
       <td>${esc(d.calibration_due)}</td>
     </tr>
   `).join('');
@@ -294,7 +330,7 @@ function renderDevices() {
       <td>${esc(d.name)}</td>
       <td>${esc(d.device_type ?? '')}</td>
       <td><span class="status-badge ${d.status}">${d.status}</span></td>
-      <td>${esc(d.borrower_name ?? '')}</td>
+      <td>${ownerCell(d.pm_number, d.borrower_name || (d.status === 'available' ? inLockerToken : ''))}</td>
       <td>${esc(d.calibration_due ?? '')}</td>
     </tr>
   `).join('');
@@ -317,10 +353,104 @@ function esc(str) {
 }
 
 
+/**
+ * Clickable owner / location cell for Inventory and Locker.
+ *
+ * @param {string} pm - Equipment number.
+ * @param {string} owner - Current owner text (may be empty).
+ * @returns {string} Button HTML.
+ */
+function ownerCell(pm, owner) {
+  const text = owner || '—';
+  return `<button type="button" class="owner-btn" data-pm="${esc(pm)}" data-owner="${esc(owner || '')}">${esc(text)}</button>`;
+}
+
+
+/**
+ * Open the owner dialog for one PM.
+ *
+ * @param {string} pm - Equipment number.
+ * @param {string} current - Current owner text to prefill.
+ */
+function openOwnerDialog(pm, current) {
+  ownerEditPm = pm;
+  const dialog = document.getElementById('owner-dialog');
+  const pmEl = document.getElementById('owner-dialog-pm');
+  const input = document.getElementById('owner-input');
+  const err = document.getElementById('owner-dialog-error');
+  if (pmEl) pmEl.textContent = pm;
+  if (input) {
+    input.value = current || '';
+  }
+  if (err) {
+    err.textContent = '';
+    err.style.display = 'none';
+  }
+  if (dialog) dialog.hidden = false;
+  if (input) input.focus();
+}
+
+
+/**
+ * Hide the owner dialog without writing.
+ */
+function closeOwnerDialog() {
+  ownerEditPm = '';
+  const dialog = document.getElementById('owner-dialog');
+  if (dialog) dialog.hidden = true;
+}
+
+
+/**
+ * Confirm the owner change and POST it.
+ */
+async function confirmOwnerEdit() {
+  const pm = ownerEditPm;
+  const input = document.getElementById('owner-input');
+  const err = document.getElementById('owner-dialog-error');
+  const btn = document.getElementById('owner-confirm');
+  if (!pm || !input) return;
+  const owner = input.value.trim();
+  if (btn) btn.disabled = true;
+  if (err) {
+    err.textContent = '';
+    err.style.display = 'none';
+  }
+  try {
+    const res = await fetch('/api/dashboard/owner', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pm_number: pm, owner }),
+    });
+    if (!res.ok) {
+      let detail = 'Could not change owner.';
+      try {
+        const body = await res.json();
+        if (body && body.detail) detail = String(body.detail);
+      } catch (_) { /* keep default */ }
+      if (err) {
+        err.textContent = detail;
+        err.style.display = '';
+      }
+      return;
+    }
+    closeOwnerDialog();
+    await fetchTables();
+  } catch (_) {
+    if (err) {
+      err.textContent = 'Could not change owner.';
+      err.style.display = '';
+    }
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+
 /* ── Event wiring ─────────────────────────────────────────────────────────── */
 
 /**
- * Wire tabs, sort headers, Locker filters, and Inventory search.
+ * Wire tabs, sort headers, Locker filters, Inventory search, and owner edit.
  */
 function initEvents() {
   document.querySelectorAll('.tab-btn').forEach(btn => {
@@ -352,6 +482,26 @@ function initEvents() {
       renderInventory();
     });
   }
+
+  document.addEventListener('click', (e) => {
+    const btn = e.target.closest('.owner-btn');
+    if (btn) {
+      openOwnerDialog(btn.dataset.pm || '', btn.dataset.owner || '');
+    }
+  });
+
+  const cancel = document.getElementById('owner-cancel');
+  if (cancel) cancel.addEventListener('click', closeOwnerDialog);
+
+  const confirmBtn = document.getElementById('owner-confirm');
+  if (confirmBtn) confirmBtn.addEventListener('click', () => confirmOwnerEdit());
+
+  const dialog = document.getElementById('owner-dialog');
+  if (dialog) {
+    dialog.addEventListener('click', (e) => {
+      if (e.target === dialog) closeOwnerDialog();
+    });
+  }
 }
 
 
@@ -360,6 +510,7 @@ function initEvents() {
 document.addEventListener('DOMContentLoaded', () => {
   initEvents();
   loadSiteConfig();
+  fetchOwners();
   fetchTables();
   fetchDisplay();
   setInterval(fetchTables, REFRESH_MS);

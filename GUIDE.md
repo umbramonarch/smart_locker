@@ -866,7 +866,7 @@ Pi on the LAN can use them — the lock is **physical access**, not a password.
 
 | What | URL |
 |---|---|
-| Inventory (Excel), Locker (SQLite), Display (kiosk view) | `http://<pi-address>:8000/dashboard` |
+| Inventory (Excel), Locker (SQLite), Display (kiosk view); public owner edit | `http://<pi-address>:8000/dashboard` |
 | Is the appliance alive? | `http://<pi-address>:8000/api/health` |
 | Kiosk UI (only needed if Chromium is not already fullscreen) | `http://localhost:8000/?lite` on the Pi |
 
@@ -921,9 +921,11 @@ back into the sheet.
 
 **Web dashboard** — open `http://<pi-address>:8000/dashboard` from any browser on the
 network (no login). Three tabs: **Inventory** (live `device-list.xlsx`, search/sort;
-share down errors that tab only), **Locker** (SQLite slot/status/borrower), **Display**
-(what the Riverdi is showing, plus the signed-in user — view only). Kiosk colours,
-desktop cursor and scroll. Users and transaction logs are not on this page.
+click owner to change it — confirm writes Excel; locker PMs also update SQLite and
+log a transaction; share down errors that tab only), **Locker** (SQLite slot/status/borrower;
+same owner edit), **Display** (what the Riverdi is showing, plus the signed-in user —
+view only). Kiosk colours, desktop cursor and scroll. Users and transaction logs are
+not on this page.
 
 **Status workbook on the share:** the Pi can write `smart_locker_data.xlsx`
 at `SMART_LOCKER_EXCEL_PATH` (Devices + Transactions + Users) when
@@ -1018,7 +1020,7 @@ The Pi lives in the locker, far from you, so it is built to heal itself:
 
 - **Health:** open `http://<pi-address>:8000/api/health`. It returns a small JSON you can bookmark:
   `status` (`ok`/`degraded`), `uptime_seconds`, `database`, `nfc_reader`, and the last sync result.
-- **Dashboard:** open `http://<pi-address>:8000/dashboard` for Inventory / Locker / Display.
+- **Dashboard:** open `http://<pi-address>:8000/dashboard` for Inventory / Locker / Display (owner edit on Inventory and Locker).
 - If `/api/health` doesn't load at all, the Pi is off or off the network (power / cable / Wi-Fi) —
   the one situation that needs someone physically there.
 
@@ -1145,7 +1147,7 @@ timeout, device tracking with the full schema, NFC **device tags** (same ACR1252
 borrow/return after login), borrow/return with admin overrides and per-user limits,
 self-service registration, Excel catalog refresh (no locker insert), Location
 write-back into `device-list.xlsx`, on-demand/auto export, photo assignment, the
-read-only `/dashboard` (Inventory / Locker / Display), the FastAPI REST API + SSE bridge, the
+`/dashboard` (Inventory / Locker / Display; public owner edit), the FastAPI REST API + SSE bridge, the
 6-screen kiosk UI, **Raspberry Pi appliance deployment** (systemd service, CIFS mount,
 Chromium kiosk, fully offline install including the no-PyPI-wheel `pyscard` case), and a
 hardware-free pytest suite.
@@ -1283,6 +1285,8 @@ that bridges card taps to the browser.
 | `GET` | `/api/dashboard/devices` | Public locker inventory (SQLite, no auth) |
 | `GET` | `/api/dashboard/inventory` | Public company catalog (live Excel, no auth) |
 | `GET` | `/api/dashboard/display` | Public kiosk screen snapshot (no auth) |
+| `GET` | `/api/dashboard/owners` | Owner dropdown names (users + registrants + in-locker token) |
+| `POST` | `/api/dashboard/owner` | Change owner (Excel; SQLite + log if locker PM) |
 | `POST` | `/api/kiosk/display` | Kiosk heartbeat of the current screen |
 | `GET` | `/api/dashboard/transactions` | Transaction history, last 500 (API still public; not on the dashboard page) |
 | `GET` | `/api/dashboard/users` | Registered-users list (API still public; not on the dashboard page) |
@@ -1324,7 +1328,7 @@ There is no USB barcode scanner and no `GET /api/devices/barcode/{barcode}`.
 ## 16. Future improvements
 
 - **Calibration-due notifications** — calibration dates are stored; a reminder system is not.
-- **Full admin web panel** — edit users/devices from the browser (today: read-only dashboard
+- **Full admin web panel** — edit users/devices from the browser (today: public dashboard owner edit
   + the kiosk's hidden admin panel).
 - **MIFARE sector reading** — APDU commands exist in `nfc/apdu.py` but aren't wired in.
 - **Multi-reader support** — currently the first matching reader is used.

@@ -7,7 +7,8 @@ Description: Pi → Excel write-back of the Location column only, matched by PM.
 Project: smart_locker/sync
 Notes: Called after borrow/return, Register Device, and source import.
        A locked or missing workbook is logged and skipped — the kiosk and
-       SQLite stay correct; the next sync retries. Unchanged cells skip
+       SQLite stay correct; the next sync retries. Dashboard owner edit
+       uses write_location_value for one PM. Unchanged cells skip
        the save so a local file-watcher cannot loop. If the sheet changes
        between copy and replace, the write is retried from the latest file
        so catalog edits are not reverted.
@@ -53,6 +54,7 @@ class WritebackResult:
     unchanged: int = 0
     skipped: int = 0
     saved: bool = False
+    error: str | None = None
 
 
 def _location_value(device: Device) -> str:
@@ -130,12 +132,12 @@ def _replace_into(tmp_path: Path, dest: Path) -> None:
                 raise
 
 
-def _write_once(session: Session, path: Path) -> WritebackResult:
+def _write_once(path: Path, wanted: dict[str, str]) -> WritebackResult:
     """Copy, edit Location, and replace if anything changed.
 
     Args:
-        session: Database session used to read locker devices.
         path: Source ``device-list.xlsx``.
+        wanted: PM number → Location text to write.
 
     Returns:
         Counts of written / unchanged / skipped PMs and whether a save ran.
@@ -144,7 +146,6 @@ def _write_once(session: Session, path: Path) -> WritebackResult:
         OSError: Copy, load, save, or replace failed (caller retries/logs).
     """
     result = WritebackResult()
-    wanted = _wanted_by_pm(session)
     if not wanted:
         return result
 
@@ -169,6 +170,7 @@ def _write_once(session: Session, path: Path) -> WritebackResult:
                 "Location write-back skipped — no PM column in %s (headers: %s).",
                 path, headers,
             )
+            result.error = "no_pm_column"
             return result
         if loc_idx is None:
             logger.warning(
@@ -176,6 +178,7 @@ def _write_once(session: Session, path: Path) -> WritebackResult:
                 "in %s (headers: %s).",
                 path, headers,
             )
+            result.error = "no_location_column"
             return result
 
         pm_col = pm_idx + 1
@@ -230,29 +233,34 @@ def _write_once(session: Session, path: Path) -> WritebackResult:
             dest_path.unlink(missing_ok=True)
 
 
-def write_location(session: Session, source_path: str | Path) -> WritebackResult:
-    """Write locker location into the Location column. Never raises.
+def write_location_values(
+    source_path: str | Path, wanted: dict[str, str]
+) -> WritebackResult:
+    """Write PM → Location cells. Never raises.
 
     Args:
-        session: Active database session (reads devices; does not commit).
-        source_path: Path to the source ``device-list.xlsx``.
+        source_path: Path to ``device-list.xlsx``.
+        wanted: Mapping of stripped PM number to Location text.
 
     Returns:
-        WritebackResult. ``saved`` is False when nothing changed or the
-        file could not be written.
+        WritebackResult. ``error`` is set when the workbook could not be
+        written (missing, locked, no columns). ``saved`` is False when
+        nothing changed or the file could not be written.
     """
     result = WritebackResult()
     path = Path(source_path) if source_path else None
     if path is None or not str(source_path).strip():
+        result.error = "unconfigured"
         return result
     if not path.exists():
         logger.warning("Location write-back skipped — file not found: %s", path)
+        result.error = "missing"
         return result
 
     try:
         for attempt in range(1, _MAX_RETRIES + 1):
             try:
-                return _write_once(session, path)
+                return _write_once(path, wanted)
             except _StaleWorkbook:
                 if attempt < _MAX_RETRIES:
                     logger.info(
@@ -265,25 +273,62 @@ def write_location(session: Session, source_path: str | Path) -> WritebackResult
                     "Location write-back skipped — %s kept changing during edit.",
                     path,
                 )
+                result.error = "stale"
                 return result
     except PermissionError:
         logger.warning(
             "Location write-back skipped — %s is locked (open in Excel).",
             path,
         )
+        result.error = "locked"
         return result
     except OSError as e:
         logger.warning(
             "Location write-back skipped — %s unavailable or unwritable (%s).",
             path, e,
         )
+        result.error = "unavailable"
         return result
     except Exception:
         logger.exception(
             "Location write-back failed for %s — locker database is unchanged.",
             path,
         )
+        result.error = "failed"
         return result
+
+
+def write_location_value(
+    source_path: str | Path, pm_number: str, value: str
+) -> WritebackResult:
+    """Write one PM's Location cell. Never raises.
+
+    Args:
+        source_path: Path to ``device-list.xlsx``.
+        pm_number: Equipment number to match.
+        value: Text to put in the Location cell.
+
+    Returns:
+        WritebackResult for that single PM.
+    """
+    pm = (pm_number or "").strip()
+    if not pm:
+        return WritebackResult(error="no_pm")
+    return write_location_values(source_path, {pm: (value or "").strip()})
+
+
+def write_location(session: Session, source_path: str | Path) -> WritebackResult:
+    """Write locker location into the Location column. Never raises.
+
+    Args:
+        session: Active database session (reads devices; does not commit).
+        source_path: Path to the source ``device-list.xlsx``.
+
+    Returns:
+        WritebackResult. ``saved`` is False when nothing changed or the
+        file could not be written.
+    """
+    return write_location_values(source_path, _wanted_by_pm(session))
 
 
 def write_location_with_engine(engine, source_path: str | Path) -> WritebackResult:

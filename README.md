@@ -49,7 +49,7 @@ smart_locker/
 │   │   ├── app.js               # Kiosk state machine, API calls, NFC-driven navigation
 │   │   ├── dashboard.html       # Network dashboard: Inventory / Locker / Display tabs
 │   │   ├── dashboard.css        # Dashboard styling (kiosk colours, desktop cursor)
-│   │   ├── dashboard.js         # Tabs, Excel/SQLite fetch, Display poll
+│   │   ├── dashboard.js         # Tabs, Excel/SQLite fetch, Display poll, owner edit
 │   │   └── images/              # Device photos + hero background
 │   ├── nfc/                     # NFC reader interface (pyscard + APDU)
 │   │   ├── apdu.py              # APDU command definitions + response parsing
@@ -71,6 +71,7 @@ smart_locker/
 │   │   └── repositories.py      # CRUD: User / Registrant / Device / Transaction repositories
 │   ├── services/
 │   │   ├── locker_service.py    # Borrow/return rules (per-user limit, admin overrides)
+│   │   ├── owner_edit.py        # Dashboard owner change (Excel; SQLite if locker PM)
 │   │   └── user_service.py      # User enrollment, public/admin views
 │   └── sync/
 │       ├── excel_sync.py        # On-demand / auto Excel export (Devices / Transactions / Users)
@@ -121,9 +122,9 @@ smart_locker/
 | Location write-back | ✅ Done | Pi writes Location by PM (`Locker` / borrower); locked file skipped |
 | Device import | ✅ Done | English Excel headers and aliases, PM-based catalog update, no auto locker insert |
 | Photo import | ✅ Done | By PM number (`update_device`) or by model (photo watcher) |
-| Web dashboard | ✅ Done | `/dashboard` — Inventory (Excel), Locker (SQLite), Display (kiosk view) |
+| Web dashboard | ✅ Done | `/dashboard` — Inventory (Excel), Locker (SQLite), Display (kiosk view); public owner edit |
 | Frontend UI | ✅ Done | 6-screen kiosk UI + overlays |
-| Unit tests | ✅ Done | ~346 tests, hardware-free |
+| Unit tests | ✅ Done | ~357 tests, hardware-free |
 | NFC device tags | ✅ Done | Same ACR1252U; `devices.tag_hmac`; auto borrow/return after login |
 | Calibration alerts | 🔲 Future | Calibration dates stored; notification system not yet built |
 | Kiosk deployment | ✅ Done | Raspberry Pi appliance: systemd service, CIFS mount, Chromium kiosk, offline install (`deploy/`) |
@@ -212,8 +213,8 @@ Overlays: **device detail** (photo, PM, type, serial, confirm), **return slot** 
 A dashboard is served at **`/dashboard`** for anyone on the local network — no login.
 Three tabs:
 
-- **Inventory** — live `device-list.xlsx` (full catalog). Search and sort. Share down shows an error here only.
-- **Locker** — SQLite devices registered into a slot (status, borrower, slot).
+- **Inventory** — live `device-list.xlsx` (full catalog). Search and sort. Click owner to change it (confirm). Share down shows an error here only.
+- **Locker** — SQLite devices registered into a slot (status, borrower, slot). Same owner edit; locker PMs also update SQLite and log a transaction.
 - **Display** — what the kiosk is showing right now, plus the signed-in user. View only.
 
 Colours match the kiosk (`#181d24` / `#009641`); this is a normal desktop page (cursor, select, scroll). Users and transaction logs are not on the public page. Use **Export to Excel** from the kiosk admin panel for a downloadable snapshot.

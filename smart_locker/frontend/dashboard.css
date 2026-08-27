@@ -5,7 +5,8 @@
  *              not the kiosk hidden-cursor fullscreen.
  * Project: smart_locker/frontend
  * Notes: Tabs for Inventory / Locker / Display. Status badges stay
- *        colour-coded. Responsive down to ~600px.
+ *        colour-coded. Owner edit uses a confirm dialog. Responsive
+ *        down to ~600px.
  */
 
 /* --- Reset & base -------------------------------------------------------- */
@@ -364,6 +365,112 @@ body {
 .error-msg {
   color: #f87171;
   font-style: normal;
+}
+
+/* --- Owner edit ---------------------------------------------------------- */
+.owner-btn {
+  font-family: var(--font-body);
+  font-size: inherit;
+  color: var(--accent);
+  background: transparent;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+.owner-btn:hover {
+  color: #fff;
+}
+
+.owner-dialog {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+  padding: 1.5rem;
+}
+
+.owner-dialog[hidden] {
+  display: none;
+}
+
+.owner-dialog-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1.25rem 1.4rem 1.1rem;
+  width: min(24rem, 100%);
+}
+
+.owner-dialog-title {
+  font-family: var(--font-heading);
+  font-size: 1.15rem;
+  font-weight: 700;
+}
+
+.owner-dialog-pm {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  margin: 0.25rem 0 1rem;
+}
+
+.owner-dialog-label {
+  display: block;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  margin-bottom: 0.35rem;
+}
+
+.owner-dialog-card .search-input {
+  width: 100%;
+  min-width: 0;
+}
+
+.owner-dialog-card .error-msg {
+  text-align: left;
+  padding: 0.6rem 0 0;
+}
+
+.owner-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+
+.owner-cancel,
+.owner-confirm {
+  font-family: var(--font-body);
+  font-size: 0.85rem;
+  font-weight: 600;
+  padding: 0.45rem 0.9rem;
+  border-radius: 4px;
+  cursor: pointer;
+  border: 1px solid var(--border);
+}
+
+.owner-cancel {
+  background: var(--surface-2);
+  color: var(--text-muted);
+}
+
+.owner-confirm {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.owner-confirm:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 /* --- Responsive ---------------------------------------------------------- */

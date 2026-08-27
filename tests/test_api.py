@@ -4,8 +4,8 @@ Description: Tests for the REST API layer — session management, device listing
              borrow/return endpoints, user self-registration (with registrant
              validation), admin manual registration, Register Device (PM + slot
              + NFC), registrant list retrieval, admin source sync, software
-             update, Exit kiosk / Shut down, dashboard Inventory/Display, and
-             SSE event stream. Uses
+             update, Exit kiosk / Shut down, dashboard Inventory/Display,
+             public owner edit, and SSE event stream. Uses
              FastAPI's TestClient with mocked NFC context.
 Project: smart_locker/tests
 Notes: Run with: python -m pytest tests/test_api.py -v
@@ -1127,3 +1127,90 @@ class TestDashboardInventoryAndDisplay:
         data = client.get("/api/dashboard/display").json()
         assert data["screen"] == "admin"
         assert data["label"] == "Admin"
+
+
+class TestDashboardOwnerEditApi:
+    """Public POST /api/dashboard/owner — no kiosk session."""
+
+    def test_owner_change_needs_no_session(
+        self, client, tmp_path, monkeypatch
+    ):
+        """Anyone on the network can change owner without a work-card login."""
+        path = _catalog_workbook(tmp_path, [
+            ["Equipment", "Name", "Location"],
+            ["PM-VAN", "Van kit", "Workshop"],
+        ])
+        monkeypatch.setattr("config.settings.SOURCE_EXCEL_PATH", str(path))
+        resp = client.post(
+            "/api/dashboard/owner",
+            json={"pm_number": "PM-VAN", "owner": "Alex"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["ok"] is True
+        assert body["locker"] is False
+
+    def test_non_locker_does_not_create_sqlite_row(
+        self, client, db_session, tmp_path, monkeypatch
+    ):
+        """Excel-only PMs stay off the Pi after an Inventory owner edit."""
+        path = _catalog_workbook(tmp_path, [
+            ["Equipment", "Name", "Location"],
+            ["PM-VAN", "Van kit", "Workshop"],
+        ])
+        monkeypatch.setattr("config.settings.SOURCE_EXCEL_PATH", str(path))
+        client.post(
+            "/api/dashboard/owner",
+            json={"pm_number": "PM-VAN", "owner": "Alex"},
+        )
+        assert DeviceRepository.find_by_pm(db_session, "PM-VAN") is None
+
+    def test_locker_updates_sqlite_and_logs(
+        self, client, test_user, test_devices, tmp_path, monkeypatch, db_session
+    ):
+        """Locker PM writes Excel + SQLite and logs a borrow."""
+        from smart_locker.database.models import TransactionLog, TransactionType
+        from sqlalchemy import select
+
+        path = _catalog_workbook(tmp_path, [
+            ["Equipment", "Name", "Location"],
+            ["PM-001", "Camera", "Locker"],
+        ])
+        monkeypatch.setattr("config.settings.SOURCE_EXCEL_PATH", str(path))
+        db_session.commit()
+        resp = client.post(
+            "/api/dashboard/owner",
+            json={"pm_number": "PM-001", "owner": "Test User"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["locker"] is True
+        db_session.expire_all()
+        device = DeviceRepository.find_by_pm(db_session, "PM-001")
+        assert device.status == DeviceStatus.BORROWED
+        assert device.current_borrower_id == test_user.id
+        logs = db_session.execute(select(TransactionLog)).scalars().all()
+        assert any(t.transaction_type == TransactionType.BORROW for t in logs)
+
+    def test_owners_list_is_public(
+        self, client, test_user, db_session
+    ):
+        """Dropdown names: registered users + registrants. No session."""
+        RegistrantRepository.add_names(db_session, {"Bob Field"})
+        db_session.commit()
+        resp = client.get("/api/dashboard/owners")
+        assert resp.status_code == 200
+        names = resp.json()["names"]
+        assert "Test User" in names
+        assert "Bob Field" in names
+        assert "in_locker_token" in resp.json()
+
+    def test_share_down_is_error(self, client, monkeypatch, tmp_path):
+        """Missing catalog Excel is 503; does not invent a locker row."""
+        monkeypatch.setattr(
+            "config.settings.SOURCE_EXCEL_PATH", str(tmp_path / "missing.xlsx")
+        )
+        resp = client.post(
+            "/api/dashboard/owner",
+            json={"pm_number": "PM-001", "owner": "Alex"},
+        )
+        assert resp.status_code == 503

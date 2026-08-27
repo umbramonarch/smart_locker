@@ -3,7 +3,7 @@ File: test_dashboard_tabs.py
 Description: Contract tests for the public dashboard tabs: Inventory (Excel),
              Locker (SQLite), Display (kiosk view-only). Kiosk colors, desktop
              cursor and scroll. Users and transaction logs stay off the public
-             page.
+             page. Anyone can change owner on Inventory and Locker after confirm.
 Project: smart_locker/tests
 Notes: Run with: python -m pytest tests/test_dashboard_tabs.py -v
        Frontend is vanilla HTML/JS/CSS; asserted as text.
@@ -75,6 +75,27 @@ class TestDashboardPublicTabs:
         html = _html()
         assert 'id="display-screen"' in html
         assert 'id="display-user"' in html
+
+
+class TestDashboardOwnerEdit:
+    """Anyone can change owner on Inventory and Locker after confirm."""
+
+    def test_inventory_and_locker_have_owner_controls(self):
+        """Both public catalog tabs expose an owner editor, not Display."""
+        html = _html()
+        js = _js()
+        assert 'id="owner-dialog"' in html
+        assert 'id="owner-confirm"' in html
+        assert 'id="owner-input"' in html
+        assert 'id="owner-names"' in html
+        assert "/api/dashboard/owner" in js
+        assert "/api/dashboard/owners" in js
+
+    def test_confirm_before_write(self):
+        """Owner change requires an explicit Confirm control."""
+        html = _html()
+        assert 'id="owner-confirm"' in html
+        assert "Confirm" in html
 
 
 class TestDashboardDesktopTheme:
