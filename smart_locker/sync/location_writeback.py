@@ -23,6 +23,7 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 from openpyxl import load_workbook
@@ -65,6 +66,37 @@ class WritebackResult:
     skipped: int = 0
     saved: bool = False
     error: str | None = None
+
+
+_last_writeback_lock = threading.Lock()
+_last_writeback: dict | None = None
+
+
+def _remember_writeback(result: WritebackResult) -> None:
+    """Store the latest write-back outcome for ``/api/health``.
+
+    Args:
+        result: Outcome of this attempt (success, skip, or error).
+    """
+    global _last_writeback
+    snapshot = {
+        "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "error": result.error,
+        "saved": result.saved,
+        "written": result.written,
+    }
+    with _last_writeback_lock:
+        _last_writeback = snapshot
+
+
+def last_writeback() -> dict | None:
+    """Return the last Location write-back snapshot, or None if none yet.
+
+    Returns:
+        Dict with ``at``, ``error``, ``saved``, ``written``, or None.
+    """
+    with _last_writeback_lock:
+        return dict(_last_writeback) if _last_writeback else None
 
 
 def _location_value(device: Device) -> str | None:
@@ -310,74 +342,79 @@ def write_location_values(
         nothing changed or the file could not be written.
     """
     result = WritebackResult()
-    path = Path(source_path) if source_path else None
-    if path is None or not str(source_path).strip():
-        result.error = "unconfigured"
-        return result
-    if not path.exists():
-        logger.warning("Location write-back skipped — file not found: %s", path)
-        result.error = "missing"
-        return result
-
-    keyed = {pm_match_key(k): v for k, v in (wanted or {}).items() if pm_match_key(k)}
-
-    def _attempt(current: dict[str, str]) -> WritebackResult:
-        return _write_once(path, current)
-
     try:
-        with _excel_writer_lock:
-            for attempt in range(1, _MAX_RETRIES + 1):
-                current = keyed
-                if engine is not None:
-                    with Session(engine) as session:
-                        current = _wanted_by_pm(session)
-                try:
-                    return _call_with_timeout(
-                        _attempt, _IO_TIMEOUT_SECONDS, current
-                    )
-                except TimeoutError:
-                    logger.warning(
-                        "Location write-back timed out after %ss (%s).",
-                        _IO_TIMEOUT_SECONDS, path,
-                    )
-                    result.error = "timeout"
-                    return result
-                except _StaleWorkbook:
-                    if attempt < _MAX_RETRIES:
-                        logger.info(
-                            "Location write-back: %s changed during edit, "
-                            "retrying (%d/%d).",
-                            path, attempt, _MAX_RETRIES,
+        path = Path(source_path) if source_path else None
+        if path is None or not str(source_path).strip():
+            result.error = "unconfigured"
+            return result
+        if not path.exists():
+            logger.warning("Location write-back skipped — file not found: %s", path)
+            result.error = "missing"
+            return result
+
+        keyed = {pm_match_key(k): v for k, v in (wanted or {}).items() if pm_match_key(k)}
+
+        def _attempt(current: dict[str, str]) -> WritebackResult:
+            return _write_once(path, current)
+
+        try:
+            with _excel_writer_lock:
+                for attempt in range(1, _MAX_RETRIES + 1):
+                    current = keyed
+                    if engine is not None:
+                        with Session(engine) as session:
+                            current = _wanted_by_pm(session)
+                    try:
+                        result = _call_with_timeout(
+                            _attempt, _IO_TIMEOUT_SECONDS, current
                         )
-                        continue
-                    logger.warning(
-                        "Location write-back skipped — %s kept changing during edit.",
-                        path,
-                    )
-                    result.error = "stale"
-                    return result
-    except PermissionError:
-        logger.warning(
-            "Location write-back skipped — %s is locked (open in Excel).",
-            path,
-        )
-        result.error = "locked"
+                        return result
+                    except TimeoutError:
+                        logger.warning(
+                            "Location write-back timed out after %ss (%s).",
+                            _IO_TIMEOUT_SECONDS, path,
+                        )
+                        result.error = "timeout"
+                        return result
+                    except _StaleWorkbook:
+                        if attempt < _MAX_RETRIES:
+                            logger.info(
+                                "Location write-back: %s changed during edit, "
+                                "retrying (%d/%d).",
+                                path, attempt, _MAX_RETRIES,
+                            )
+                            continue
+                        logger.warning(
+                            "Location write-back skipped — %s kept changing during edit.",
+                            path,
+                        )
+                        result.error = "stale"
+                        return result
+        except PermissionError:
+            logger.warning(
+                "Location write-back skipped — %s is locked (open in Excel).",
+                path,
+            )
+            result.error = "locked"
+            return result
+        except OSError as e:
+            logger.warning(
+                "Location write-back skipped — %s unavailable or unwritable (%s).",
+                path, e,
+            )
+            result.error = "unavailable"
+            return result
+        except Exception:
+            logger.exception(
+                "Location write-back failed for %s — locker database is unchanged.",
+                path,
+            )
+            result.error = "failed"
+            return result
         return result
-    except OSError as e:
-        logger.warning(
-            "Location write-back skipped — %s unavailable or unwritable (%s).",
-            path, e,
-        )
-        result.error = "unavailable"
-        return result
-    except Exception:
-        logger.exception(
-            "Location write-back failed for %s — locker database is unchanged.",
-            path,
-        )
-        result.error = "failed"
-        return result
-    return result
+    finally:
+        if result is not None:
+            _remember_writeback(result)
 
 
 def _call_with_timeout(fn, timeout: float, *args):
@@ -468,7 +505,9 @@ def write_location_with_engine(engine, source_path: str | Path) -> WritebackResu
             "Location write-back failed for %s — locker database is unchanged.",
             source_path,
         )
-        return WritebackResult(error="failed")
+        failed = WritebackResult(error="failed")
+        _remember_writeback(failed)
+        return failed
 
 
 def maybe_write_location(session: Session) -> None:

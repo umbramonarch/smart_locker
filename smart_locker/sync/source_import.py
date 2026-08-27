@@ -550,11 +550,16 @@ def import_from_source_excel(
 
     logger.info("Parsed %d Excel PM row(s).", len(parsed))
 
-    from smart_locker.database.engine import get_session, get_session_factory
+    from sqlalchemy.orm import Session as EngineSession
+
     from smart_locker.sync.excel_sync import export_to_excel
 
-    factory = get_session_factory()
-    session = factory()
+    if engine is None:
+        result.errors += 1
+        result.error_details.append("No database engine.")
+        return result
+
+    session = EngineSession(engine)
     try:
         for catalog in parsed:
             try:
@@ -581,18 +586,15 @@ def import_from_source_excel(
                     result.updated += 1
                 else:
                     result.unchanged += 1
+                if dry_run:
+                    session.rollback()
+                else:
+                    session.commit()
             except Exception as e:
+                session.rollback()
                 result.errors += 1
                 result.error_details.append(f"PM {catalog.pm_number}: {e}")
                 logger.error("Import error for PM %s: %s", catalog.pm_number, e)
-
-        if dry_run:
-            session.rollback()
-        else:
-            session.commit()
-    except Exception:
-        session.rollback()
-        raise
     finally:
         session.close()
 
@@ -608,9 +610,10 @@ def import_from_source_excel(
         from smart_locker.database.repositories import RegistrantRepository
 
         try:
-            with get_session() as reg_session:
+            with EngineSession(engine) as reg_session:
                 added = RegistrantRepository.add_names(reg_session, registrant_names)
                 result.registrants_added = added
+                reg_session.commit()
         except Exception as e:
             logger.warning("Registrant name sync failed: %s", e)
 

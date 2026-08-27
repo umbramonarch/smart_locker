@@ -84,3 +84,26 @@ class TestPmNumberOnCardsAndDetail:
         assert "<div class=\"card-name\">${dev.name}</div>" not in js
         assert "SLOT_GRID_MAX" in js
         assert "reportKioskDisplay(S.screen)" in js
+
+    def test_session_touch_is_debounced(self):
+        """Pointer/key activity must not POST /api/session/touch on every event (I15)."""
+        js = _js()
+        assert "sessionTouchInFlight" in js
+        assert "onUserActivity" in js
+        assert "pointerdown" in js
+        assert "['click', 'touchstart', 'keydown'].forEach" not in js
+
+    def test_bind_search_filters_cache(self):
+        """Bind-search keystrokes filter S.devices; they do not GET per character (I3)."""
+        js = _js()
+        assert "populateBindList(false)" in js
+        assert "bindSearchTimer" in js
+
+    def test_lite_navigation_skips_forced_reflow(self):
+        """Lite mode must not wait 1.3s or force offsetHeight (I3)."""
+        js = _js()
+        assert "PERF.lite ? 250 : 1200" in js
+        assert "if (!PERF.lite)" in js
+        assert "1300" not in js.split("function navigate", 1)[1].split(
+            "function reportKioskDisplay", 1
+        )[0]

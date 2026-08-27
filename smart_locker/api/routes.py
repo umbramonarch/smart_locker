@@ -31,7 +31,7 @@ import time
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 import smart_locker.api.app_context as ctx_module
 from smart_locker.api.app_context import PendingRegistration, PendingTagBind
@@ -145,13 +145,15 @@ def health() -> dict:
 
     Returns a small JSON snapshot a remote operator can open in any browser —
     no SSH, no Linux — to confirm the appliance is alive and see at a glance
-    whether the database answers, the NFC reader is running, and when the last
-    source sync ran. Every probe is individually guarded so this endpoint can
-    NEVER raise and take the server down; it always returns HTTP 200, and the
-    ``status`` field is ``"ok"`` or ``"degraded"``.
+    whether the database answers, the NFC reader is running, when the last
+    source sync ran, and whether Location write-back last succeeded. Every
+    probe is individually guarded so this endpoint can NEVER raise and take
+    the server down; it always returns HTTP 200, and the ``status`` field is
+    ``"ok"`` or ``"degraded"``.
 
     Returns:
-        dict: status, uptime, database/reader liveness, and the last-sync snapshot.
+        dict: status, uptime, database/reader liveness, last-sync, and
+        last-writeback snapshots.
     """
     ctx = ctx_module.context
 
@@ -183,6 +185,13 @@ def health() -> dict:
     except Exception:
         last_sync = None
 
+    try:
+        from smart_locker.sync.location_writeback import last_writeback as _last_wb
+
+        last_writeback = _last_wb()
+    except Exception:
+        last_writeback = None
+
     return {
         "status": "ok" if db_ok else "degraded",
         "uptime_seconds": round(time.time() - _START_TIME, 1),
@@ -191,6 +200,7 @@ def health() -> dict:
         "fake_reader": fake_reader_enabled(),
         "session_active": session_active,
         "last_sync": last_sync,
+        "last_writeback": last_writeback,
         "update": _last_update_status(),
     }
 
@@ -1822,6 +1832,11 @@ def dashboard_transactions(
     """
     transactions = db.execute(
         select(TransactionLog)
+        .options(
+            selectinload(TransactionLog.user),
+            selectinload(TransactionLog.device),
+            selectinload(TransactionLog.performed_by),
+        )
         .order_by(TransactionLog.timestamp.desc())
         .limit(500)
     ).scalars().all()

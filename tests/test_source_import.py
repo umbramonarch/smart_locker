@@ -691,3 +691,110 @@ class TestSiteHeaderAliases:
             assert "At base" not in names
         finally:
             path.unlink(missing_ok=True)
+
+
+class TestImportEngineAndSavepoints:
+    """I14: use the passed engine; a row flush error must not poison later rows."""
+
+    def test_import_uses_passed_engine(self, db_session, tmp_path):
+        """Catalog updates go to the engine argument, not the global factory."""
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import Session
+
+        from smart_locker.database.models import Base
+
+        other = create_engine(
+            f"sqlite:///{tmp_path / 'other.db'}",
+            connect_args={"check_same_thread": False},
+        )
+        Base.metadata.create_all(other)
+        with Session(other) as session:
+            DeviceRepository.create(
+                session,
+                name="Isolated",
+                device_type="general",
+                pm_number="PM-ISO",
+                manufacturer="OldMfr",
+                model="X",
+                locker_slot=1,
+            )
+            session.commit()
+
+        DeviceRepository.create(
+            db_session,
+            name="Decoy",
+            device_type="general",
+            pm_number="PM-ISO",
+            manufacturer="Decoy",
+            model="Y",
+            locker_slot=1,
+        )
+        db_session.commit()
+
+        path = _create_test_excel([
+            ["Equipment", "Manufacturer", "Model"],
+            ["PM-ISO", "NewMfr", "Z"],
+        ])
+        try:
+            result = import_from_source_excel(other, path)
+            assert result.updated == 1
+            assert result.errors == 0
+        finally:
+            path.unlink(missing_ok=True)
+
+        with Session(other) as session:
+            isolated = DeviceRepository.find_by_pm(session, "PM-ISO")
+            assert isolated is not None
+            assert isolated.manufacturer == "NewMfr"
+        decoy = DeviceRepository.find_by_pm(db_session, "PM-ISO")
+        assert decoy.manufacturer == "Decoy"
+
+    def test_row_integrity_error_does_not_block_later_rows(
+        self, db_session, monkeypatch
+    ):
+        """A unique-serial flush failure on one PM still commits the next row."""
+        DeviceRepository.create(
+            db_session,
+            name="First",
+            device_type="general",
+            pm_number="PM-001",
+            serial_number="SN-A",
+            manufacturer="Old",
+            locker_slot=1,
+        )
+        DeviceRepository.create(
+            db_session,
+            name="Second",
+            device_type="general",
+            pm_number="PM-002",
+            serial_number="SN-B",
+            manufacturer="Old",
+            locker_slot=2,
+        )
+        db_session.commit()
+
+        monkeypatch.setattr(
+            DeviceRepository,
+            "find_by_serial",
+            staticmethod(lambda session, serial: None),
+        )
+
+        path = _create_test_excel([
+            ["Equipment", "Manufacturer", "Serial"],
+            ["PM-001", "Keep", "SN-B"],
+            ["PM-002", "NewMfr", "SN-B-ok"],
+        ])
+        try:
+            from smart_locker.database.engine import get_engine
+
+            result = import_from_source_excel(get_engine(), path)
+            assert result.errors == 1
+            assert result.updated == 1
+        finally:
+            path.unlink(missing_ok=True)
+
+        db_session.expire_all()
+        first = DeviceRepository.find_by_pm(db_session, "PM-001")
+        second = DeviceRepository.find_by_pm(db_session, "PM-002")
+        assert first.serial_number == "SN-A"
+        assert second.manufacturer == "NewMfr"

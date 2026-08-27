@@ -120,7 +120,11 @@ def _run_source_import(engine, source_path: str | Path, trigger: str = "interval
         sync_status.record_result(trigger, result)
         from smart_locker.sync.location_writeback import write_location_with_engine
 
-        write_location_with_engine(engine, path)
+        wb = write_location_with_engine(engine, path)
+        if wb.error:
+            logger.warning(
+                "Location write-back after source import failed (%s).", wb.error
+            )
         return result
     except Exception as e:
         logger.error("Source Excel import failed: %s", e)

@@ -1076,6 +1076,7 @@ class TestAdminSyncAndUpdateEndpoints:
         body = resp.json()
         assert "status" in body
         assert "update" in body
+        assert "last_writeback" in body
 
     def test_trigger_update_requires_session(self, client, mock_context):
         resp = client.post("/api/admin/update")
@@ -1453,6 +1454,20 @@ class TestDashboardOwnerEditApi:
         )
         assert tx.status_code == 200
         assert isinstance(tx.json(), list)
+
+    def test_transactions_eager_load_relationships(self):
+        """Last-500 transactions must not lazy-load user/device/performed_by (I16)."""
+        from pathlib import Path
+
+        src = (
+            Path(__file__).resolve().parents[1]
+            / "smart_locker"
+            / "api"
+            / "routes.py"
+        ).read_text(encoding="utf-8")
+        assert "selectinload(TransactionLog.user)" in src
+        assert "selectinload(TransactionLog.device)" in src
+        assert "selectinload(TransactionLog.performed_by)" in src
 
     def test_share_down_is_error(self, client, monkeypatch, tmp_path, dashboard_secret):
         """Missing catalog Excel is 503; does not invent a locker row."""

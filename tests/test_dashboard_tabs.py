@@ -183,3 +183,27 @@ class TestKioskDisplayHeartbeat:
         js = _kiosk_js()
         assert "/api/kiosk/display" in js
         assert "reportKioskDisplay" in js or "kiosk/display" in js
+
+
+class TestDashboardPollAndAdminFetch:
+    """I3 / I16: skip hidden polls, debounce search, do not reread Inventory on 5-tap."""
+
+    def test_poll_skips_when_document_hidden(self):
+        """30s Inventory poll must not run while the tab is in the background."""
+        js = _js()
+        assert "document.hidden" in js
+        assert "tablesInFlight" in js
+        assert "Promise.all" in js
+        assert "SEARCH_DEBOUNCE_MS" in js
+
+    def test_fetch_admin_does_not_copy_inventory_excel(self):
+        """Opening 5-tap must not await fetchTables / GET inventory."""
+        js = _js()
+        fn = js.split("async function fetchAdminTables", 1)[1].split(
+            "async function ", 1
+        )[0]
+        assert "fetchTables()" not in fn
+        assert "/api/dashboard/inventory" not in fn
+        assert "/api/dashboard/users" in fn
+        assert "/api/dashboard/transactions" in fn
+        assert "_escEl" in js

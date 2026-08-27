@@ -22,6 +22,7 @@ from smart_locker.services.device_registration import register_locker_device
 from smart_locker.services.locker_service import LockerService
 from smart_locker.sync.location_writeback import (
     IN_LOCKER_TOKEN,
+    last_writeback,
     write_location,
     write_location_with_engine,
 )
@@ -265,6 +266,10 @@ class TestWritebackResilience:
         """Share down / wrong path is skipped, not fatal."""
         result = write_location(db_session, tmp_path / "no-such.xlsx")
         assert result.saved is False
+        snap = last_writeback()
+        assert snap is not None
+        assert snap["error"] == "missing"
+        assert snap["saved"] is False
 
     def test_missing_location_column_does_not_raise(self, db_session, tmp_path):
         """A sheet without Location is skipped, not rewritten."""

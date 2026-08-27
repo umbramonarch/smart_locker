@@ -351,9 +351,12 @@ function navigate(toId) {
     // Without it, both the position and radius animate simultaneously.
     if (fromEl && !fromIsOverlay) {
       setRevealOrigin(fromEl);
-      void fromEl.offsetHeight;          // force reflow — lock in new origin
+      const exitMs = PERF.lite ? 250 : 1200;
+      if (!PERF.lite) {
+        void fromEl.offsetHeight;          // force reflow — lock in new origin
+      }
       fromEl.classList.add('exit');
-      setTimeout(() => fromEl.classList.remove('active', 'exit'), 1300); // matches CSS --t-reveal (1.3s) transition
+      setTimeout(() => fromEl.classList.remove('active', 'exit'), exitMs);
     }
   }
 
@@ -560,14 +563,31 @@ function dismissInactivity() {
   armIdle();
 }
 
-['click', 'touchstart', 'keydown'].forEach(evt =>
-  document.addEventListener(evt, () => {
-    if (S.screen === 'idle') return;
-    armIdle();
-    // Ping backend to reset server-side inactivity timer
-    if (!USE_DEMO && S.user) fetch('/api/session/touch', { method: 'POST' }).catch(() => {});
-  })
-);
+/** True while a session-touch POST is in flight. */
+let sessionTouchInFlight = false;
+/** Debounce timer for session-touch (coalesces click+touchstart). */
+let sessionTouchTimer = 0;
+
+/**
+ * Arm idle locally; ping the server at most once per second.
+ */
+function onUserActivity() {
+  if (S.screen === 'idle') return;
+  armIdle();
+  if (USE_DEMO || !S.user || sessionTouchInFlight) return;
+  if (sessionTouchTimer) return;
+  sessionTouchTimer = setTimeout(() => {
+    sessionTouchTimer = 0;
+    if (!S.user || S.screen === 'idle' || sessionTouchInFlight) return;
+    sessionTouchInFlight = true;
+    fetch('/api/session/touch', { method: 'POST' })
+      .catch(() => {})
+      .finally(() => { sessionTouchInFlight = false; });
+  }, 1000);
+}
+
+document.addEventListener('pointerdown', onUserActivity);
+document.addEventListener('keydown', onUserActivity);
 
 /* ============================================================
    AUTH
@@ -889,29 +909,32 @@ function buildGrid(gridId, devices, mode) {
   // Sort by locker slot number; 99 is a fallback for devices without a slot assignment
   const sorted = [...devices].sort((a, b) => (a.locker_slot || 99) - (b.locker_slot || 99));
 
-  // IntersectionObserver: cards animate in/out as they scroll into view
   const scrollRoot = grid.closest('.grid-wrapper');
-  const cardObserver = new IntersectionObserver((entries) => {
-    entries.forEach(entry => {
-      if (entry.isIntersecting) {
-        entry.target.classList.add('in');
-        entry.target.classList.remove('out-up');
-      } else {
-        // Card scrolled out of view — determine direction
-        if (entry.boundingClientRect.top < entry.rootBounds.top) {
-          entry.target.classList.add('out-up');
-          entry.target.classList.remove('in');
+  let cardObserver = null;
+  if (!PERF.lite) {
+    cardObserver = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting) {
+          entry.target.classList.add('in');
+          entry.target.classList.remove('out-up');
         } else {
-          entry.target.classList.remove('in', 'out-up');
+          // Card scrolled out of view — determine direction
+          if (entry.boundingClientRect.top < entry.rootBounds.top) {
+            entry.target.classList.add('out-up');
+            entry.target.classList.remove('in');
+          } else {
+            entry.target.classList.remove('in', 'out-up');
+          }
         }
-      }
-    });
-  }, { root: scrollRoot, threshold: 0.15, rootMargin: '40px 0px' }); // 15% visible triggers animation; 40px buffer for smooth entry
+      });
+    }, { root: scrollRoot, threshold: 0.15, rootMargin: '40px 0px' });
+    grid._scrollObs = cardObserver;
+  }
 
   // Scroll/mouse parallax on card images is pointer-driven eye-candy that
   // forces a getBoundingClientRect() per card per frame. Skip it entirely on
   // the touch kiosk (no pointer) and in lite mode (too costly) — the cards
-  // still get their IntersectionObserver entrance and click handling below.
+  // still get click handling below. Lite skips the observer too.
   const fancy = canHover && !PERF.lite;
 
   // Scroll parallax: shift card images based on scroll position
@@ -938,7 +961,6 @@ function buildGrid(gridId, devices, mode) {
       if (!grid._rafId) grid._rafId = requestAnimationFrame(onGridScroll);
     }, { passive: true });
   }
-  grid._scrollObs = cardObserver;
 
   sorted.forEach((dev, i) => {
     const avail = dev.status === 'available';
@@ -958,8 +980,8 @@ function buildGrid(gridId, devices, mode) {
     const slotLabel = `S${String(dev.locker_slot ?? 0).padStart(2, '0')}`;
     const card = buildDeviceCardEl(dev, cls, statusCls, statusTxt, slotLabel);
 
-    // Observe card for scroll-triggered entrance
-    cardObserver.observe(card);
+    if (cardObserver) cardObserver.observe(card);
+    else card.classList.add('in');
 
     // Track for scroll parallax + mouse parallax on hover (pointer-only eye-candy)
     const cardImg = card.querySelector('.card-image img');
@@ -2219,16 +2241,25 @@ async function adminRegisterDevice() {
   await populateBindList();
 }
 
+/** Debounce timer for Register Device bind-search (filters cached rows). */
+let bindSearchTimer = 0;
+
 /**
  * Fetch devices and render the bind list: name + PM (+ slot), unbound first.
  * Duplicate names stay as distinct rows (PM identifies the unit).
+ * Search filters the cached list; pass refresh=true after a bind/register.
+ *
+ * @param {boolean} [refresh=true] - When false, filter ``S.devices`` without a GET.
  * @returns {Promise<void>}
  */
-async function populateBindList() {
+async function populateBindList(refresh) {
   const list = document.getElementById('bind-device-list');
   if (!list) return;
-  const devices = await apiGetDevices();
-  S.devices = devices;
+  if (refresh !== false || !Array.isArray(S.devices)) {
+    const devices = await apiGetDevices();
+    S.devices = devices;
+  }
+  const devices = S.devices || [];
   const query = (document.getElementById('bind-search').value || '').toLowerCase().trim();
   const filtered = devices.filter(d => {
     if (!query) return true;
@@ -2782,7 +2813,10 @@ document.getElementById('admin-sync-source').addEventListener('click', () => { c
 document.getElementById('admin-register-user').addEventListener('click', () => { clickSound(); adminRegisterUser(); });
 document.getElementById('admin-register-device').addEventListener('click', () => { clickSound(); adminRegisterDevice(); });
 document.getElementById('bind-device-close').addEventListener('click', () => { clickSound(); closeRegisterDevice(); });
-document.getElementById('bind-search').addEventListener('input', () => { populateBindList(); });
+document.getElementById('bind-search').addEventListener('input', () => {
+  clearTimeout(bindSearchTimer);
+  bindSearchTimer = setTimeout(() => { populateBindList(false); }, 200);
+});
 document.getElementById('bind-add-open').addEventListener('click', () => { clickSound(); openAddFromExcel(); });
 document.getElementById('bind-add-back').addEventListener('click', () => { clickSound(); showBindStep('bind-step-list'); populateBindList(); });
 document.getElementById('bind-add-submit').addEventListener('click', () => { clickSound(); submitRegisterDevice(); });

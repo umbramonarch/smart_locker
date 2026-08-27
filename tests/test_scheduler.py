@@ -74,6 +74,24 @@ class TestRunSourceImport:
             assert device is not None
             assert device.manufacturer == "TestMfr"
 
+    def test_writeback_error_is_logged(self, db_session, tmp_path):
+        """Scheduler inspects Location write-back and logs a failure (I17)."""
+        source = tmp_path / "source.xlsx"
+        _create_test_excel(source)
+        from smart_locker.sync.location_writeback import WritebackResult
+
+        with patch(
+            "smart_locker.sync.location_writeback.write_location_with_engine",
+            return_value=WritebackResult(error="locked"),
+        ), patch("smart_locker.sync.scheduler.logger") as mock_logger:
+            from smart_locker.database.engine import get_engine
+
+            _run_source_import(get_engine(), source)
+            logged = " ".join(
+                str(c) for c in mock_logger.warning.call_args_list
+            )
+            assert "locked" in logged
+
 
 class TestStartupImport:
     """Tests for the immediate import on scheduler startup."""

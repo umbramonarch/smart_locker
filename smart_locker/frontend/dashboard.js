@@ -36,6 +36,19 @@ let inventoryQuery = '';
 const REFRESH_MS = 30_000;
 /** How often to poll the kiosk Display snapshot. */
 const DISPLAY_MS = 2_000;
+/** Debounce for Inventory search so each keystroke is not a full tbody rebuild. */
+const SEARCH_DEBOUNCE_MS = 200;
+
+/** In-flight ``fetchTables`` promise, or null. */
+let tablesInFlight = null;
+/** Inventory search debounce timer. */
+let inventorySearchTimer = 0;
+/** Last Inventory render fingerprint (skip identical tbody rebuilds). */
+let lastInventoryStamp = '';
+/** Last Locker render fingerprint. */
+let lastDevicesStamp = '';
+/** Reused node for ``esc()`` so each cell does not allocate a DIV. */
+const _escEl = document.createElement('div');
 
 /** Names for the owner datalist (users + registrants + in-locker token). */
 let ownerNames = [];
@@ -127,6 +140,19 @@ function showTab(name) {
   document.querySelectorAll('.tab-panel').forEach(panel => {
     panel.hidden = panel.id !== `panel-${name}`;
   });
+  if (name === 'display') fetchDisplay();
+  else fetchTables();
+}
+
+
+/**
+ * Currently selected public tab id.
+ *
+ * @returns {string} 'inventory' | 'locker' | 'display'.
+ */
+function activeTabName() {
+  const on = document.querySelector('.tab-btn.active');
+  return (on && on.dataset.tab) || 'inventory';
 }
 
 
@@ -134,37 +160,54 @@ function showTab(name) {
 
 /**
  * Fetch Locker (SQLite) and Inventory (Excel) independently so a down share
- * only fails Inventory.
+ * only fails Inventory. Skips overlapping polls and hidden-tab Excel copies.
+ *
+ * @returns {Promise<void>}
  */
 async function fetchTables() {
-  try {
-    const res = await fetch('/api/dashboard/devices');
-    if (res.ok) {
-      devicesData = await res.json();
-      renderDevices();
-    }
-  } catch (_) { /* keep stale locker rows */ }
+  if (document.hidden) return;
+  if (tablesInFlight) return tablesInFlight;
+  tablesInFlight = _fetchTablesWork().finally(() => { tablesInFlight = null; });
+  return tablesInFlight;
+}
 
-  try {
-    const res = await fetch('/api/dashboard/inventory');
-    if (res.ok) {
-      inventoryData = await res.json();
-      inventoryError = '';
-    } else {
-      inventoryData = [];
-      let detail = 'Catalog Excel is not available.';
-      try {
-        const body = await res.json();
-        if (body && body.detail) detail = String(body.detail);
-      } catch (_) { /* keep default */ }
-      inventoryError = detail;
-    }
-    renderInventory();
-  } catch (_) {
-    inventoryError = 'Catalog Excel is not available.';
-    renderInventory();
-  }
 
+/**
+ * Parallel Locker + optional Inventory GETs for the visible tab.
+ *
+ * @returns {Promise<void>}
+ */
+async function _fetchTablesWork() {
+  const tab = activeTabName();
+  const wantInventory = tab === 'inventory';
+  const devicesP = fetch('/api/dashboard/devices')
+    .then(async (res) => {
+      if (res.ok) devicesData = await res.json();
+    })
+    .catch(() => { /* keep stale locker rows */ });
+  const inventoryP = wantInventory
+    ? fetch('/api/dashboard/inventory')
+      .then(async (res) => {
+        if (res.ok) {
+          inventoryData = await res.json();
+          inventoryError = '';
+        } else {
+          inventoryData = [];
+          let detail = 'Catalog Excel is not available.';
+          try {
+            const body = await res.json();
+            if (body && body.detail) detail = String(body.detail);
+          } catch (_) { /* keep default */ }
+          inventoryError = detail;
+        }
+      })
+      .catch(() => {
+        inventoryError = 'Catalog Excel is not available.';
+      })
+    : Promise.resolve();
+  await Promise.all([devicesP, inventoryP]);
+  renderDevices();
+  if (wantInventory) renderInventory();
   updateTimestamp();
 }
 
@@ -200,6 +243,8 @@ function fillOwnerDatalist() {
  * Poll what the Riverdi is showing. View only — never POSTs to the kiosk.
  */
 async function fetchDisplay() {
+  if (document.hidden) return;
+  if (activeTabName() !== 'display') return;
   try {
     const res = await fetch('/api/dashboard/display');
     if (!res.ok) return;
@@ -300,6 +345,7 @@ function renderInventory() {
     tbody.innerHTML = '';
     empty.style.display = 'none';
     count.textContent = '';
+    lastInventoryStamp = '';
     return;
   }
   errorEl.style.display = 'none';
@@ -316,6 +362,10 @@ function renderInventory() {
   if (s.key) data = sortData(data, s.key, s.dir);
 
   count.textContent = `${data.length} / ${inventoryData.length}`;
+
+  const stamp = `${inventoryError}|${q}|${s.key}|${s.dir}|${data.length}|${JSON.stringify(data)}`;
+  if (stamp === lastInventoryStamp) return;
+  lastInventoryStamp = stamp;
 
   if (data.length === 0) {
     tbody.innerHTML = '';
@@ -358,6 +408,10 @@ function renderDevices() {
   const avail = devicesData.filter(d => d.status === 'available').length;
   count.textContent = `${avail} available / ${devicesData.length} total`;
 
+  const stamp = `${activeFilter}|${s.key}|${s.dir}|${data.length}|${JSON.stringify(data)}`;
+  if (stamp === lastDevicesStamp) return;
+  lastDevicesStamp = stamp;
+
   if (data.length === 0) {
     tbody.innerHTML = '';
     empty.style.display = '';
@@ -390,9 +444,8 @@ function renderDevices() {
  */
 function esc(str) {
   if (str == null) return '';
-  const div = document.createElement('div');
-  div.textContent = String(str);
-  return div.innerHTML;
+  _escEl.textContent = String(str);
+  return _escEl.innerHTML;
 }
 
 
@@ -547,24 +600,29 @@ function closeAdminOverlay() {
 
 
 /**
- * Load users, transactions, and refresh locker rows for the overlay.
- * Called only when the 5-tap overlay opens — not on public page load.
+ * Load users, transactions, and locker rows for the overlay.
+ * Does not re-copy Inventory Excel (the overlay does not show that table).
  */
 async function fetchAdminTables() {
   const headers = dashboardAdminHeaders();
+  const [usersRes, txRes, devicesRes] = await Promise.all([
+    fetch('/api/dashboard/users', { headers }).catch(() => null),
+    fetch('/api/dashboard/transactions', { headers }).catch(() => null),
+    fetch('/api/dashboard/devices').catch(() => null),
+  ]);
   try {
-    const res = await fetch('/api/dashboard/users', { headers });
-    usersData = res.ok ? await res.json() : [];
+    usersData = usersRes && usersRes.ok ? await usersRes.json() : [];
   } catch (_) {
     usersData = [];
   }
   try {
-    const res = await fetch('/api/dashboard/transactions', { headers });
-    txData = res.ok ? await res.json() : [];
+    txData = txRes && txRes.ok ? await txRes.json() : [];
   } catch (_) {
     txData = [];
   }
-  await fetchTables();
+  try {
+    if (devicesRes && devicesRes.ok) devicesData = await devicesRes.json();
+  } catch (_) { /* keep cached locker rows */ }
   renderAdminOverlay();
 }
 
@@ -715,7 +773,8 @@ function initEvents() {
   if (search) {
     search.addEventListener('input', () => {
       inventoryQuery = search.value;
-      renderInventory();
+      clearTimeout(inventorySearchTimer);
+      inventorySearchTimer = setTimeout(renderInventory, SEARCH_DEBOUNCE_MS);
     });
   }
 
