@@ -106,6 +106,7 @@ class TestDashboardFiveTapAdmin:
         assert "/api/dashboard/transactions" in js
         assert "/api/dashboard/bind-tag" in js
         assert "/api/dashboard/unbind-tag" in js
+        assert "X-Smart-Locker-Admin" in js
         assert "Replace tag" in js
         assert "/api/admin/session" not in js
 

@@ -318,10 +318,31 @@ sed "s#^Exec=.*#Exec=$APP_DIR/deploy/kiosk/start-kiosk.sh#" \
   "$APP_DIR/deploy/kiosk/smart-locker-kiosk.desktop" > "$AUTOSTART_DIR/smart-locker-kiosk.desktop"
 chown "$APP_USER:$APP_GROUP" "$AUTOSTART_DIR/smart-locker-kiosk.desktop"
 
-# --- 7. Ensure the app user owns its writable dirs (logs, db, served images) ---
-echo "==> Fixing ownership of $APP_DIR"
-mkdir -p "$APP_DIR/logs" "$APP_DIR/smart_locker/frontend/images"
-chown -R "$APP_USER:$APP_GROUP" "$APP_DIR"
+# --- 7. Root-own the application tree; only runtime dirs are service-writable ---
+# The sudoers rule lets the service account run deploy/install/update.sh as root.
+# Exact argv is not a privilege boundary if that script is user-writable.
+echo "==> Setting ownership of $APP_DIR (root tree, service-writable runtime dirs)"
+mkdir -p "$APP_DIR/logs" "$APP_DIR/smart_locker/frontend/images" "$APP_DIR/backups"
+chown -R root:root "$APP_DIR"
+chmod -R u=rwX,go=rX "$APP_DIR"
+chmod +x "$APP_DIR/deploy/install/"*.sh "$APP_DIR/deploy/kiosk/start-kiosk.sh" 2>/dev/null || true
+# SQLite WAL files are created next to the DB (default: APP_DIR). Sticky
+# group-write on APP_DIR lets the service create .db-wal without unlinking
+# root-owned files. deploy/install/ stays 755 root, so update.sh cannot be replaced.
+chown root:"$APP_GROUP" "$APP_DIR"
+chmod 1775 "$APP_DIR"
+chown -R "$APP_USER:$APP_GROUP" "$APP_DIR/logs"
+chown -R "$APP_USER:$APP_GROUP" "$APP_DIR/smart_locker/frontend/images"
+chown -R "$APP_USER:$APP_GROUP" "$APP_DIR/backups"
+if [ -f "$APP_DIR/.env" ]; then
+  chown root:"$APP_GROUP" "$APP_DIR/.env"
+  chmod 640 "$APP_DIR/.env"
+fi
+for f in "$APP_DIR/smart_locker.db" "$APP_DIR/smart_locker.db-wal" "$APP_DIR/smart_locker.db-shm" "$APP_DIR/last_sync.json"; do
+  if [ -e "$f" ]; then
+    chown "$APP_USER:$APP_GROUP" "$f"
+  fi
+done
 
 cat <<EOF
 

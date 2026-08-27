@@ -13,9 +13,10 @@ from __future__ import annotations
 
 import logging
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from config.settings import asset_label
+from config.settings import MAX_LOCKER_SLOT, asset_label
 from smart_locker.database.models import Device, DeviceStatus
 from smart_locker.database.repositories import DeviceRepository
 from smart_locker.sync.source_import import CatalogReadError, lookup_catalog_by_pm
@@ -52,11 +53,11 @@ def _require_free_slot(session: Session, locker_slot: int, ignore_id: int | None
         ignore_id: Device id allowed to keep this slot (reassign to same slot).
 
     Raises:
-        InvalidSlot: locker_slot is not >= 1.
+        InvalidSlot: locker_slot is not in 1..MAX_LOCKER_SLOT.
         SlotTaken: another device occupies the slot.
     """
-    if not isinstance(locker_slot, int) or locker_slot < 1:
-        raise InvalidSlot("Slot must be 1 or higher.")
+    if not isinstance(locker_slot, int) or locker_slot < 1 or locker_slot > MAX_LOCKER_SLOT:
+        raise InvalidSlot(f"Slot must be between 1 and {MAX_LOCKER_SLOT}.")
     occupant = DeviceRepository.find_by_slot(session, locker_slot)
     if occupant is not None and occupant.id != ignore_id:
         raise SlotTaken(f"Slot {locker_slot} is already used by {occupant.pm_number}.")
@@ -109,18 +110,22 @@ def register_locker_device(
         logger.warning("Serial %s already in locker — omitting it for %s.", serial, pm)
         serial = None
 
-    device = DeviceRepository.create(
-        session,
-        name=catalog.name,
-        device_type=catalog.device_type,
-        pm_number=catalog.pm_number,
-        serial_number=serial,
-        locker_slot=locker_slot,
-        manufacturer=catalog.manufacturer,
-        model=catalog.model,
-        calibration_due=catalog.calibration_due,
-        status=DeviceStatus.AVAILABLE.value,
-    )
+    try:
+        device = DeviceRepository.create(
+            session,
+            name=catalog.name,
+            device_type=catalog.device_type,
+            pm_number=catalog.pm_number,
+            serial_number=serial,
+            locker_slot=locker_slot,
+            manufacturer=catalog.manufacturer,
+            model=catalog.model,
+            calibration_due=catalog.calibration_due,
+            status=DeviceStatus.AVAILABLE.value,
+        )
+    except IntegrityError as e:
+        session.rollback()
+        raise SlotTaken(f"Slot {locker_slot} is already used.") from e
 
     if catalog.model:
         for sib in DeviceRepository.find_by_model(session, catalog.model):
@@ -154,6 +159,11 @@ def set_locker_slot(session: Session, device: Device, locker_slot: int) -> Devic
         SlotTaken: Slot occupied by another device.
     """
     _require_free_slot(session, locker_slot, ignore_id=device.id)
-    DeviceRepository.set_locker_slot(session, device, locker_slot)
+    try:
+        DeviceRepository.set_locker_slot(session, device, locker_slot)
+        session.flush()
+    except IntegrityError as e:
+        session.rollback()
+        raise SlotTaken(f"Slot {locker_slot} is already used.") from e
     logger.info("Moved %s (pm=%s) to slot %s.", device.name, device.pm_number, locker_slot)
     return device

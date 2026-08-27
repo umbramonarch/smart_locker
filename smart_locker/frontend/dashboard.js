@@ -7,7 +7,8 @@
  * @project smart_locker/frontend
  * @description Tabs switch locally. Inventory errors (share down) leave
  *              the Locker tab usable. Asset-label text comes from /api/config.
- *              Dashboard 5-tap does not start a kiosk admin session.
+ *              Dashboard 5-tap is not authorization; bind/unbind send
+ *              X-Smart-Locker-Admin from a prompted secret.
  */
 
 /* ── State ────────────────────────────────────────────────────────────────── */
@@ -49,6 +50,39 @@ let txData = [];
 const adminTaps = [];
 const ADMIN_TAP_COUNT = 5;
 const ADMIN_TAP_WINDOW = 3000;
+
+/** sessionStorage key for the dashboard admin secret (header value). */
+const ADMIN_SECRET_KEY = 'smartLockerAdminSecret';
+/** Header name matching config.settings.DASHBOARD_ADMIN_HEADER. */
+const ADMIN_HEADER = 'X-Smart-Locker-Admin';
+
+
+/**
+ * Headers for dashboard admin POSTs. Secret comes from sessionStorage.
+ *
+ * @returns {Object<string, string>} Fetch headers including Content-Type.
+ */
+function dashboardAdminHeaders() {
+  const headers = { 'Content-Type': 'application/json' };
+  const secret = sessionStorage.getItem(ADMIN_SECRET_KEY) || '';
+  if (secret) headers[ADMIN_HEADER] = secret;
+  return headers;
+}
+
+
+/**
+ * Prompt once per tab for the dashboard admin secret if it is not stored.
+ *
+ * @returns {string} Secret string, possibly empty if the prompt was cancelled.
+ */
+function ensureDashboardAdminSecret() {
+  let secret = sessionStorage.getItem(ADMIN_SECRET_KEY) || '';
+  if (!secret) {
+    secret = window.prompt('Dashboard admin secret') || '';
+    if (secret) sessionStorage.setItem(ADMIN_SECRET_KEY, secret);
+  }
+  return secret;
+}
 
 
 /**
@@ -132,16 +166,18 @@ async function fetchTables() {
   }
 
   updateTimestamp();
-  fetchOwners();
 }
 
 
 /**
  * Load dropdown names (registered users + registrants + in-locker token).
+ * Requires the dashboard admin secret header.
  */
 async function fetchOwners() {
   try {
-    const res = await fetch('/api/dashboard/owners');
+    const res = await fetch('/api/dashboard/owners', {
+      headers: dashboardAdminHeaders(),
+    });
     if (!res.ok) return;
     const data = await res.json();
     ownerNames = Array.isArray(data.names) ? data.names : [];
@@ -393,6 +429,8 @@ function openOwnerDialog(pm, current) {
     err.textContent = '';
     err.style.display = 'none';
   }
+  ensureDashboardAdminSecret();
+  fetchOwners();
   if (dialog) dialog.hidden = false;
   if (input) input.focus();
 }
@@ -426,7 +464,7 @@ async function confirmOwnerEdit() {
   try {
     const res = await fetch('/api/dashboard/owner', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: dashboardAdminHeaders(),
       body: JSON.stringify({ pm_number: pm, owner }),
     });
     if (!res.ok) {
@@ -494,6 +532,7 @@ function openAdminOverlay() {
   if (overlay) overlay.hidden = false;
   const status = document.getElementById('admin-tag-status');
   if (status) status.textContent = '';
+  ensureDashboardAdminSecret();
   fetchAdminTables();
 }
 
@@ -512,14 +551,15 @@ function closeAdminOverlay() {
  * Called only when the 5-tap overlay opens — not on public page load.
  */
 async function fetchAdminTables() {
+  const headers = dashboardAdminHeaders();
   try {
-    const res = await fetch('/api/dashboard/users');
+    const res = await fetch('/api/dashboard/users', { headers });
     usersData = res.ok ? await res.json() : [];
   } catch (_) {
     usersData = [];
   }
   try {
-    const res = await fetch('/api/dashboard/transactions');
+    const res = await fetch('/api/dashboard/transactions', { headers });
     txData = res.ok ? await res.json() : [];
   } catch (_) {
     txData = [];
@@ -594,7 +634,7 @@ async function armBind(pm) {
   try {
     const res = await fetch('/api/dashboard/bind-tag', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: dashboardAdminHeaders(),
       body: JSON.stringify({ pm_number: pm }),
     });
     let detail = 'Could not arm bind.';
@@ -623,7 +663,7 @@ async function unbindTag(pm) {
   try {
     const res = await fetch('/api/dashboard/unbind-tag', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: dashboardAdminHeaders(),
       body: JSON.stringify({ pm_number: pm }),
     });
     if (!res.ok) {
@@ -728,7 +768,6 @@ function initEvents() {
 document.addEventListener('DOMContentLoaded', () => {
   initEvents();
   loadSiteConfig();
-  fetchOwners();
   fetchTables();
   fetchDisplay();
   tickClock();

@@ -126,6 +126,28 @@ class TestWriteLocation:
         assert result.written == 1
         assert _location_by_pm(path)["PM-002"] == "Alice"
 
+    def test_formula_like_location_stored_as_text(self, tmp_path):
+        """Location starting with =+@- is stored as text, not an Excel formula."""
+        from smart_locker.sync.location_writeback import write_location_value
+
+        path = _workbook(tmp_path / "device-list.xlsx", [
+            ["Equipment", "Name", "Location"],
+            ["PM-VAN", "Van kit", "Workshop"],
+        ])
+        evil = '=HYPERLINK("http://evil.example/x","x")'
+        result = write_location_value(path, "PM-VAN", evil)
+        assert result.error is None
+        assert result.saved is True
+        wb = load_workbook(path, data_only=False)
+        try:
+            cell = wb.active["C2"]
+            assert cell.data_type == "s"
+            stored = "" if cell.value is None else str(cell.value)
+            assert stored.lstrip("'") == evil
+            assert cell.data_type != "f"
+        finally:
+            wb.close()
+
     def test_preserves_other_columns_and_sheets(self, db_session, tmp_path):
         """Only Location changes; catalog cells and extra sheets stay."""
         path = _workbook(
@@ -390,6 +412,9 @@ class TestWritebackWiring:
         session = SessionManager(timeout_seconds=60).start_session(user)
 
         assert LockerService.borrow_device(db_session, session, device.id) is True
+        from smart_locker.sync.location_writeback import flush_scheduled_writeback
+
+        flush_scheduled_writeback()
         assert _location_by_pm(path)["PM-001"] == "Alice"
 
     def test_return_writes_in_locker_token(
@@ -417,6 +442,9 @@ class TestWritebackWiring:
         session = SessionManager(timeout_seconds=60).start_session(user)
 
         assert LockerService.return_device(db_session, session, device.id) is True
+        from smart_locker.sync.location_writeback import flush_scheduled_writeback
+
+        flush_scheduled_writeback()
         assert _location_by_pm(path)["PM-001"] == IN_LOCKER_TOKEN
 
     def test_register_device_writes_in_locker_token(self, db_session, tmp_path):
@@ -547,3 +575,153 @@ class TestSiteWritebackAliases:
         result = write_location(db_session, path)
         assert result.saved is True
         assert _location_by_pm(path)["PM-001"] == "At base"
+
+
+class TestWritebackColumnAndStatus:
+    """I2 location-over-owner, I20/I21 join keys, I23 MAINTENANCE skip."""
+
+    def test_owner_and_location_updates_location_only(self, db_session, tmp_path):
+        """A sheet with Owner left of Location writes Location, not Owner."""
+        path = _workbook(tmp_path / "device-list.xlsx", [
+            ["Equipment", "Owner", "Location"],
+            ["PM-001", "Alice", "Stale"],
+        ])
+        DeviceRepository.create(
+            db_session,
+            name="Meter",
+            device_type="general",
+            pm_number="PM-001",
+            locker_slot=1,
+        )
+        db_session.flush()
+        write_location(db_session, path)
+        wb = load_workbook(path)
+        try:
+            assert wb.active["B2"].value == "Alice"
+            assert wb.active["C2"].value == IN_LOCKER_TOKEN
+        finally:
+            wb.close()
+
+    def test_maintenance_does_not_write_in_locker_token(self, db_session, tmp_path):
+        """MAINTENANCE Location is left as-is, not rewritten as Locker."""
+        path = _workbook(tmp_path / "device-list.xlsx", [
+            ["Equipment", "Location"],
+            ["PM-001", "Workshop"],
+        ])
+        DeviceRepository.create(
+            db_session,
+            name="Meter",
+            device_type="general",
+            pm_number="PM-001",
+            locker_slot=1,
+            status=DeviceStatus.MAINTENANCE.value,
+        )
+        db_session.flush()
+        write_location(db_session, path)
+        assert _location_by_pm(path)["PM-001"] == "Workshop"
+
+    def test_pm_case_and_excel_float_join(self, db_session, tmp_path):
+        """Write-back matches PM-001 vs pm-001 and Excel 1001.0 vs SQLite 1001."""
+        path = _workbook(tmp_path / "device-list.xlsx", [
+            ["Equipment", "Location"],
+            ["pm-001", "Old"],
+            [1001.0, "Old2"],
+        ])
+        DeviceRepository.create(
+            db_session,
+            name="A",
+            device_type="general",
+            pm_number="PM-001",
+            locker_slot=1,
+        )
+        DeviceRepository.create(
+            db_session,
+            name="B",
+            device_type="general",
+            pm_number="1001",
+            locker_slot=2,
+        )
+        db_session.flush()
+        write_location(db_session, path)
+        cells = _location_by_pm(path)
+        assert cells["pm-001"] == IN_LOCKER_TOKEN
+        assert IN_LOCKER_TOKEN in cells.values()
+
+
+class TestWritebackOffRequestPath:
+    """I10: HTTP/NFC borrow-return return before Excel I/O."""
+
+    def test_borrow_returns_before_excel_io(
+        self, db_session, tmp_path, enc_key, hmac_key, monkeypatch
+    ):
+        """LockerService.borrow returns while write-back is still in a worker."""
+        import time
+
+        from smart_locker.auth.session_manager import SessionManager
+        from smart_locker.sync import location_writeback as wb
+        from smart_locker.sync.location_writeback import (
+            WritebackResult,
+            flush_scheduled_writeback,
+        )
+
+        path = _workbook(tmp_path / "device-list.xlsx", [
+            ["Equipment", "Location"],
+            ["PM-001", IN_LOCKER_TOKEN],
+        ])
+        monkeypatch.setattr("config.settings.SOURCE_EXCEL_PATH", str(path))
+        user = _add_user(db_session, enc_key, hmac_key, "Alice")
+        device = DeviceRepository.create(
+            db_session,
+            name="Meter",
+            device_type="general",
+            pm_number="PM-001",
+            locker_slot=1,
+        )
+        db_session.flush()
+        session = SessionManager(timeout_seconds=60).start_session(user)
+
+        def slow_write(engine, source_path):
+            time.sleep(0.4)
+            return WritebackResult(written=1, saved=True)
+
+        monkeypatch.setattr(wb, "write_location_with_engine", slow_write)
+        t0 = time.monotonic()
+        assert LockerService.borrow_device(db_session, session, device.id) is True
+        elapsed = time.monotonic() - t0
+        assert elapsed < 0.25
+        flush_scheduled_writeback()
+
+    def test_writers_serialize(self, tmp_path, monkeypatch):
+        """Application writers take one lock; calls do not overlap."""
+        import time
+        from threading import Thread
+
+        from smart_locker.sync import location_writeback as wb
+        from smart_locker.sync.location_writeback import write_location_values
+
+        path = _workbook(tmp_path / "device-list.xlsx", [
+            ["Equipment", "Location"],
+            ["PM-001", "A"],
+            ["PM-002", "B"],
+        ])
+        order: list[str] = []
+        orig = wb._write_once
+
+        def slow(p, wanted):
+            order.append("start")
+            time.sleep(0.12)
+            result = orig(p, wanted)
+            order.append("end")
+            return result
+
+        monkeypatch.setattr(wb, "_write_once", slow)
+        threads = [
+            Thread(target=write_location_values, args=(path, {"PM-001": "Alice"})),
+            Thread(target=write_location_values, args=(path, {"PM-002": "Bob"})),
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert order == ["start", "end", "start", "end"]
+

@@ -12,13 +12,17 @@ Notes: Called by the scheduler, ``python -m scripts.sync_source``, or
 """
 
 import logging
+import os
+import re
 import shutil
 import tempfile
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
+from zipfile import BadZipFile
 
 from openpyxl import load_workbook
+from openpyxl.utils.exceptions import InvalidFileException
 
 from config.settings import id_header_extras, in_locker_token, location_header_extras
 from smart_locker.database.repositories import DeviceRepository
@@ -67,8 +71,7 @@ LOCATION_CANDIDATES = [
     "assigned to", "held by",
 ]
 
-# Location cell is "in the locker" (not a person) when it contains any of these,
-# or when it equals SMART_LOCKER_IN_LOCKER_TOKEN.
+# Whole-word in-locker markers (not substrings — "locker" is not in "blocker").
 _IN_LOCKER_MARKERS = ("locker", "cabinet")
 
 
@@ -152,14 +155,56 @@ class CatalogReadError(Exception):
 # Helpers
 # ---------------------------------------------------------------------------
 
+def normalize_pm(value) -> str:
+    """Canonical PM text: strip, drop Excel ``1001.0`` float tails.
+
+    Args:
+        value: Raw Excel or SQLite PM cell.
+
+    Returns:
+        Stripped PM string, integer-valued floats without ``.0``.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return str(value).strip()
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        if value == int(value):
+            return str(int(value))
+        return str(value).strip()
+    text = str(value).strip()
+    if text.endswith(".0"):
+        head = text[:-2]
+        if head.isdigit() or (head.startswith("-") and head[1:].isdigit()):
+            return head
+    return text
+
+
+def pm_match_key(value) -> str:
+    """Case-folded join key for Inventory / write-back / import.
+
+    Args:
+        value: Raw PM cell or SQLite ``pm_number``.
+
+    Returns:
+        ``normalize_pm`` then ``casefold``.
+    """
+    return normalize_pm(value).casefold()
+
+
 def is_in_locker_location(value: str) -> bool:
     """Return True when a Location cell means the device is in the locker.
+
+    Exact ``in_locker_token()`` match, or a whole-word locker/cabinet marker.
+    ``"Blocker"`` is not in-locker.
 
     Args:
         value: Location cell text.
 
     Returns:
-        True if the text looks like a locker/cabinet location, not a person.
+        True if the text is a locker location, not a person name.
     """
     text = (value or "").strip().lower()
     if not text:
@@ -167,26 +212,35 @@ def is_in_locker_location(value: str) -> bool:
     token = (in_locker_token() or "").strip().lower()
     if token and text == token:
         return True
-    return any(marker in text for marker in _IN_LOCKER_MARKERS)
+    return any(
+        re.search(rf"(?<![a-z]){re.escape(marker)}(?![a-z])", text)
+        for marker in _IN_LOCKER_MARKERS
+    )
 
 
 def find_column(headers: list[str], candidates: list[str]) -> int | None:
-    """Find a column index by trying multiple possible header names (case-insensitive).
+    """Find a column by candidate priority, then header order.
 
-    Iterates over the header row and returns the index of the first header
-    whose stripped, lowercased text matches any of the candidate names.
+    ``location`` is preferred over ``owner`` when both headers exist.
 
     Args:
         headers: List of column header strings from the Excel file.
-        candidates: Possible header names to match against.
+        candidates: Possible header names, highest priority first.
 
     Returns:
         Zero-based column index if found, or None if no match.
     """
-    lower_candidates = [c.lower() for c in candidates]
-    for i, header in enumerate(headers):
-        if header and header.strip().lower() in lower_candidates:
-            return i
+    lower_headers = [
+        (i, (header or "").strip().lower())
+        for i, header in enumerate(headers)
+    ]
+    for cand in candidates:
+        key = (cand or "").strip().lower()
+        if not key:
+            continue
+        for i, header in lower_headers:
+            if header == key:
+                return i
     return None
 
 
@@ -291,13 +345,18 @@ def _load_rows(
     tmp_fd, tmp_path_str = tempfile.mkstemp(suffix=".xlsx")
     tmp_path = Path(tmp_path_str)
     try:
+        os.close(tmp_fd)
+        tmp_fd = -1
         shutil.copy2(path, tmp_path)
     except PermissionError:
         tmp_path.unlink(missing_ok=True)
         return None, f"Source file locked: {path}"
+    except OSError as e:
+        tmp_path.unlink(missing_ok=True)
+        return None, f"Source file unavailable: {path} ({e})"
     finally:
-        import os
-        os.close(tmp_fd)
+        if tmp_fd >= 0:
+            os.close(tmp_fd)
 
     try:
         wb = load_workbook(tmp_path, read_only=True, data_only=True)
@@ -313,6 +372,8 @@ def _load_rows(
         rows = list(ws.iter_rows(values_only=True))
         wb.close()
         return rows, None
+    except (OSError, BadZipFile, InvalidFileException) as e:
+        return None, f"Source workbook unreadable: {e}"
     finally:
         tmp_path.unlink(missing_ok=True)
 
@@ -334,7 +395,7 @@ def _catalog_from_row(
     Returns:
         CatalogRow, or None when the PM cell is empty.
     """
-    pm_number = _cell_str(row, cols["pm"])
+    pm_number = normalize_pm(_cell_str(row, cols["pm"]) or "")
     if not pm_number:
         return None
 
@@ -403,11 +464,11 @@ def lookup_catalog_by_pm(
     if cols["pm"] is None:
         raise CatalogReadError(f"Could not find PM/equipment column. Headers: {headers}")
 
-    want = pm_number.strip()
+    want = pm_match_key(pm_number)
     compose_name = cols["name"] is None
     for row in rows[1:]:
         catalog = _catalog_from_row(row, cols, compose_name, default_type)
-        if catalog is not None and catalog.pm_number == want:
+        if catalog is not None and pm_match_key(catalog.pm_number) == want:
             return catalog
     return None
 

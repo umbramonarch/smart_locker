@@ -207,6 +207,18 @@ class TestRegisterLockerDevice:
         finally:
             path.unlink(missing_ok=True)
 
+    def test_slot_over_cap_is_invalid(self, db_session):
+        """locker_slot=999999 is InvalidSlot (I22)."""
+        path = _create_excel([
+            ["Equipment", "Manufacturer"],
+            ["PM-001", "Fluke"],
+        ])
+        try:
+            with pytest.raises(InvalidSlot):
+                register_locker_device(db_session, path, "PM-001", locker_slot=999999)
+        finally:
+            path.unlink(missing_ok=True)
+
     def test_location_does_not_mark_new_row_borrowed(self, db_session):
         """Registering into the locker always starts AVAILABLE, even if Excel names a person."""
         path = _create_excel([

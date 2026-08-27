@@ -9,7 +9,9 @@
 #        to /etc/sudoers.d/smart-locker with __APP_USER__ and __APP_DIR__
 #        substituted, mode 0440, owned by root, and validates it with
 #        `visudo -cf`. Every command is fully specified (no trailing
-#        wildcard) so this cannot be used to run arbitrary commands as root.
+#        wildcard). The update.sh path must stay root-owned and not writable
+#        by __APP_USER__ (install.sh / update.sh keep the tree root-owned;
+#        only logs, photos, backups, and the SQLite files are service-writable).
 #        Keep LF line endings.
 __APP_USER__ ALL=(root) NOPASSWD: /usr/bin/systemctl start smart-locker.service, /usr/bin/systemctl stop smart-locker.service, /usr/bin/systemctl restart smart-locker.service, /usr/bin/systemctl start smart-locker, /usr/bin/systemctl stop smart-locker, /usr/bin/systemctl restart smart-locker, /usr/bin/systemd-run --collect --unit=smart-locker-update /bin/bash __APP_DIR__/deploy/install/update.sh
 __APP_USER__ ALL=(root) NOPASSWD: /usr/bin/systemctl poweroff

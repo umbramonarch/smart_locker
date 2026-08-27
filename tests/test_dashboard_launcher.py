@@ -63,6 +63,16 @@ class TestWriteDashboardLauncher:
         assert "[InternetShortcut]" in shortcut
         assert f"URL={target}" in shortcut.replace("\r\n", "\n")
 
+    def test_quotes_in_url_are_html_escaped(self, tmp_path):
+        """Attribute interpolation cannot break on quotes in PUBLIC_URL (M5)."""
+        share = tmp_path / "locker"
+        share.mkdir()
+        origin = 'http://192.168.1.10:8000/"onclick=alert(1)'
+        write_dashboard_launcher(share, origin)
+        html = (share / "dashboard.html").read_text(encoding="utf-8")
+        assert 'href="http://192.168.1.10:8000/"onclick' not in html
+        assert "&quot;" in html
+
     def test_unconfigured_is_noop(self, tmp_path):
         """Empty path or URL does not create files and does not raise."""
         share = tmp_path / "locker"

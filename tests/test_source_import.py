@@ -56,6 +56,44 @@ class TestFindColumn:
         """Verify the first matching candidate from the list is returned."""
         assert find_column(["Make", "Model"], ["manufacturer", "make"]) == 0
 
+    def test_location_preferred_over_owner(self):
+        """Location wins when both Owner and Location headers exist."""
+        from smart_locker.sync.source_import import location_candidates
+
+        headers = ["Equipment", "Owner", "Location"]
+        idx = find_column(headers, location_candidates())
+        assert idx == 2
+
+
+class TestPmNormalizeAndInLocker:
+    """I20 whole-word locker match; I21 casefold and Excel 1001.0."""
+
+    def test_blocker_is_not_in_locker(self):
+        """is_in_locker_location('Blocker') is False."""
+        from smart_locker.sync.source_import import is_in_locker_location
+
+        assert is_in_locker_location("Blocker") is False
+        assert is_in_locker_location("Locker") is True
+
+    def test_normalize_pm_float_and_case(self):
+        """PM-001 vs pm-001 share a key; 1001.0 becomes 1001."""
+        from smart_locker.sync.source_import import normalize_pm, pm_match_key
+
+        assert normalize_pm(1001.0) == "1001"
+        assert normalize_pm("1001.0") == "1001"
+        assert pm_match_key("PM-001") == pm_match_key("pm-001")
+
+
+class TestEnvIntFallback:
+    """I18: non-numeric interval env falls back to 6."""
+
+    def test_non_numeric_falls_back_to_default(self, monkeypatch):
+        from config.settings import _env_int
+
+        monkeypatch.setenv("SMART_LOCKER_SOURCE_SYNC_INTERVAL_HOURS", "6h")
+        assert _env_int("SMART_LOCKER_SOURCE_SYNC_INTERVAL_HOURS", 6, minimum=1) == 6
+
+
 
 class TestParseDate:
     """Tests for date parsing from day-month-year and ISO Excel formats."""

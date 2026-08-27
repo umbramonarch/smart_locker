@@ -13,6 +13,7 @@ from datetime import timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
 from openpyxl import Workbook
 
 import smart_locker.sync.scheduler as sched
@@ -234,3 +235,35 @@ class TestStopScheduler:
     def test_stop_without_start(self):
         """Stopping when nothing is running should not raise."""
         stop_scheduler()
+
+
+class TestImportMutex:
+    """I24: startup / watcher / interval / manual Sync share one mutex."""
+
+    def test_overlapping_exclusive_raises(self):
+        """A second exclusive import is ImportInProgress while the first holds."""
+        import threading
+
+        from smart_locker.sync.scheduler import ImportInProgress, run_source_import_exclusive
+
+        entered = threading.Event()
+        release = threading.Event()
+
+        def slow_run(*_args, **_kwargs):
+            entered.set()
+            release.wait(5)
+
+        with patch(
+            "smart_locker.sync.scheduler._run_source_import", side_effect=slow_run
+        ):
+            t = threading.Thread(
+                target=run_source_import_exclusive,
+                args=(MagicMock(), "/tmp/x.xlsx"),
+            )
+            t.start()
+            assert entered.wait(2)
+            with pytest.raises(ImportInProgress):
+                run_source_import_exclusive(MagicMock(), "/tmp/x.xlsx")
+            release.set()
+            t.join(2)
+

@@ -25,10 +25,17 @@ logger = logging.getLogger(__name__)
 
 
 def _write_location(db_session: Session) -> None:
-    """Best-effort Location write-back. Never raises."""
-    from smart_locker.sync.location_writeback import maybe_write_location
+    """Commit SQLite, then enqueue Location write-back. Never blocks on Excel."""
+    db_session.flush()
+    try:
+        db_session.commit()
+    except Exception:
+        logger.exception("Commit before Location write-back failed.")
+        db_session.rollback()
+        raise
+    from smart_locker.sync.location_writeback import schedule_write_location
 
-    maybe_write_location(db_session)
+    schedule_write_location()
 
 
 class LockerService:

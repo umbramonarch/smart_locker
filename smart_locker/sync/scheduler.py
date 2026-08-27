@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 # Module-level singletons — set by start_scheduler(), cleared by stop_scheduler()
 _scheduler: BackgroundScheduler | None = None
 _observer: Observer | None = None
+_import_lock = threading.Lock()
 
 # Debounce window in seconds — Excel save operations can produce multiple
 # filesystem events in rapid succession (write temp, rename, update metadata).
@@ -42,7 +43,48 @@ _observer: Observer | None = None
 _DEBOUNCE_SECONDS = 3.0
 
 
-def _run_source_import(engine, source_path: str | Path, trigger: str = "interval") -> None:
+class ImportInProgress(Exception):
+    """A catalog import is already running in this process."""
+
+
+def run_source_import_exclusive(
+    engine,
+    source_path: str | Path,
+    trigger: str = "interval",
+):
+    """Run import+write-back, or raise if another import holds the mutex.
+
+    Args:
+        engine: SQLAlchemy Engine.
+        source_path: Path to the source Excel file.
+        trigger: startup / interval / watch / manual.
+
+    Returns:
+        ImportResult, or None when the file is missing.
+
+    Raises:
+        ImportInProgress: Watcher, interval, startup, or admin Sync is already
+            inside ``_run_source_import``.
+    """
+    if not _import_lock.acquire(blocking=False):
+        raise ImportInProgress()
+    try:
+        return _run_source_import(engine, source_path, trigger=trigger)
+    finally:
+        _import_lock.release()
+
+
+def _interval_import(engine, source_path: str | Path, trigger: str = "interval") -> None:
+    """Interval job entry: skip if import/sync already holds the mutex."""
+    try:
+        run_source_import_exclusive(engine, source_path, trigger=trigger)
+    except ImportInProgress:
+        logger.info("Source import already running — interval skipped.")
+    except Exception:
+        pass
+
+
+def _run_source_import(engine, source_path: str | Path, trigger: str = "interval"):
     """Execute the source Excel import, then Location write-back.
 
     Validates that the source file exists, then delegates to
@@ -59,14 +101,14 @@ def _run_source_import(engine, source_path: str | Path, trigger: str = "interval
             recorded in the sync-status snapshot.
 
     Returns:
-        None. Results are logged.
+        ImportResult on success, or None when the file is missing.
     """
     from smart_locker.sync.source_import import import_from_source_excel
 
     path = Path(source_path)
     if not path.exists():
         logger.warning("Source Excel not found at %s — skipping import.", path)
-        return
+        return None
 
     logger.info("Starting source Excel import from %s", path)
     try:
@@ -79,9 +121,11 @@ def _run_source_import(engine, source_path: str | Path, trigger: str = "interval
         from smart_locker.sync.location_writeback import write_location_with_engine
 
         write_location_with_engine(engine, path)
+        return result
     except Exception as e:
         logger.error("Source Excel import failed: %s", e)
         sync_status.record_error(trigger, str(e))
+        raise
 
 
 class _SourceFileHandler(FileSystemEventHandler):
@@ -187,7 +231,14 @@ class _SourceFileHandler(FileSystemEventHandler):
             None.
         """
         logger.info("Source Excel changed — triggering import.")
-        _run_source_import(self._engine, self._source_path, trigger="watch")
+        try:
+            run_source_import_exclusive(
+                self._engine, self._source_path, trigger="watch"
+            )
+        except ImportInProgress:
+            logger.info("Source import already running — watch event skipped.")
+        except Exception:
+            pass
 
 
 def start_scheduler(
@@ -218,11 +269,22 @@ def start_scheduler(
         logger.info("Source Excel path not configured — scheduler disabled.")
         return
 
-    hours = max(1, int(interval_hours))
+    try:
+        hours = max(1, int(interval_hours))
+    except (TypeError, ValueError):
+        logger.warning(
+            "Invalid source-sync interval %r — using 6 hours.", interval_hours
+        )
+        hours = 6
     source = Path(source_path).resolve()
 
     # --- 1. Immediate import on startup ---
-    _run_source_import(engine, source, trigger="startup")
+    try:
+        run_source_import_exclusive(engine, source, trigger="startup")
+    except ImportInProgress:
+        logger.info("Source import already running — startup import skipped.")
+    except Exception:
+        pass
 
     # --- 2. File watcher for live changes (local filesystems only) ---
     # inotify does not deliver events for writes made by other hosts on a network
@@ -253,7 +315,7 @@ def start_scheduler(
     # --- 3. Interval job (safety net) ---
     _scheduler = BackgroundScheduler()
     _scheduler.add_job(
-        _run_source_import,
+        _interval_import,
         trigger=IntervalTrigger(hours=hours),
         args=[engine, source, "interval"],
         id="source_excel_import",

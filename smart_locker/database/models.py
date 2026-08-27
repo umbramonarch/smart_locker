@@ -195,7 +195,10 @@ class Device(Base):
         back_populates="device"
     )
 
-    __table_args__ = (Index("ix_devices_tag_hmac", "tag_hmac", unique=True),)
+    __table_args__ = (
+        Index("ix_devices_tag_hmac", "tag_hmac", unique=True),
+        Index("ix_devices_locker_slot", "locker_slot", unique=True),
+    )
 
 
 class TransactionLog(Base):

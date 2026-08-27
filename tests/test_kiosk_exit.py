@@ -112,6 +112,23 @@ class TestSudoersPoweroff:
         text = (DEPLOY_INSTALL / "update.sh").read_text(encoding="utf-8")
         assert "apply-sudoers.sh" in text
 
+    def test_install_does_not_chown_tree_to_service_account(self):
+        """C3: the passwordless updater must stay root-owned, not service-writable."""
+        text = (DEPLOY_INSTALL / "install.sh").read_text(encoding="utf-8")
+        assert 'chown -R "$APP_USER:$APP_GROUP" "$APP_DIR"' not in text
+        assert 'chown -R root:root "$APP_DIR"' in text
+        assert "$APP_DIR/logs" in text
+        assert "smart_locker/frontend/images" in text
+        assert "chmod 1775" in text
+
+    def test_update_does_not_chown_tree_to_service_account(self):
+        """C3: update.sh must not hand the launcher back to the service account."""
+        text = (DEPLOY_INSTALL / "update.sh").read_text(encoding="utf-8")
+        assert 'chown -R "$APP_USER":"$APP_USER" "$APP_DIR"' not in text
+        assert 'chown -R root:root "$APP_DIR"' in text
+        assert "$APP_DIR/logs" in text
+        assert "smart_locker/frontend/images" in text
+
     def test_install_sh_uses_apply_sudoers(self):
         """Fresh install still writes sudoers (via the shared apply script)."""
         text = (DEPLOY_INSTALL / "install.sh").read_text(encoding="utf-8")

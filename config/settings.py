@@ -8,10 +8,13 @@ Notes: Requires a .env file with SMART_LOCKER_ENC_KEY and SMART_LOCKER_HMAC_KEY
        at minimum. See .env.example for the full list of variables.
 """
 
+import logging
 import os
 from pathlib import Path
 
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
 
 # Load .env file so all os.getenv() calls below pick up user-defined overrides
 load_dotenv()
@@ -31,17 +34,48 @@ READER_NAME_FILTER = os.getenv("SMART_LOCKER_READER_NAME", "ACR1252")
 # pyscard CardMonitor polling interval in milliseconds (500 ms balances responsiveness and CPU)
 CARD_POLL_INTERVAL_MS = 500
 
+
+def _env_int(name: str, default: int, *, minimum: int | None = None) -> int:
+    """Parse an integer env var; fall back to ``default`` on a bad value.
+
+    Args:
+        name: Environment variable name.
+        default: Used when unset, empty, or not an integer.
+        minimum: If set, clamp the parsed value up to this floor.
+
+    Returns:
+        Parsed integer, or ``default`` (then clamped).
+    """
+    raw = os.getenv(name)
+    if raw is None or not str(raw).strip():
+        value = default
+    else:
+        try:
+            value = int(str(raw).strip())
+        except ValueError:
+            logger.warning(
+                "Invalid %s=%r — using %s.", name, raw, default
+            )
+            value = default
+    if minimum is not None:
+        value = max(minimum, value)
+    return value
+
+
 # --- Session ---
 # Idle timeout in seconds — session is silently ended after this period of inactivity
-SESSION_TIMEOUT_SECONDS = int(os.getenv("SMART_LOCKER_SESSION_TIMEOUT", "120"))
+SESSION_TIMEOUT_SECONDS = _env_int("SMART_LOCKER_SESSION_TIMEOUT", 120)
 
 # --- Borrow limit ---
 # Maximum number of devices a single user may borrow concurrently
-MAX_BORROWS = int(os.getenv("SMART_LOCKER_MAX_BORROWS", "5"))
+MAX_BORROWS = _env_int("SMART_LOCKER_MAX_BORROWS", 5)
+
+# Cabinet slot picker and Register Device / change-slot API upper bound.
+MAX_LOCKER_SLOT = 48
 
 # --- Web server ---
 API_HOST = os.getenv("SMART_LOCKER_API_HOST", "0.0.0.0")
-API_PORT = int(os.getenv("SMART_LOCKER_API_PORT", "8000"))
+API_PORT = _env_int("SMART_LOCKER_API_PORT", 8000)
 
 # --- Excel export ---
 # Path for the exported workbook (Devices / Transactions / Users sheets). On the
@@ -65,7 +99,9 @@ SOURCE_EXCEL_PATH = os.getenv("SMART_LOCKER_SOURCE_EXCEL_PATH", "")
 
 # Hours between automatic source imports (startup import + admin Sync still run).
 # Minimum 1. Values below 1 are raised to 1 so a zero env cannot spin the importer.
-SOURCE_SYNC_INTERVAL_HOURS = max(1, int(os.getenv("SMART_LOCKER_SOURCE_SYNC_INTERVAL_HOURS", "6")))
+SOURCE_SYNC_INTERVAL_HOURS = _env_int(
+    "SMART_LOCKER_SOURCE_SYNC_INTERVAL_HOURS", 6, minimum=1
+)
 
 # Site overlay: display name and extra Excel header aliases. Storage/API stay
 # pm_number. Extra headers are merged with the built-in English lists.
@@ -138,3 +174,18 @@ PHOTO_SERVE_DIR = BASE_DIR / "smart_locker" / "frontend" / "images"
 # Environment variable names for the two cryptographic keys (actual keys loaded by key_manager)
 ENC_KEY_ENV_VAR = "SMART_LOCKER_ENC_KEY"
 HMAC_KEY_ENV_VAR = "SMART_LOCKER_HMAC_KEY"
+
+# Header LAN browsers send for dashboard mutations (bind/unbind, later owner).
+DASHBOARD_ADMIN_HEADER = "X-Smart-Locker-Admin"
+
+
+def dashboard_admin_secret() -> str:
+    """Shared secret for dashboard admin mutations.
+
+    Read on each call so tests can setenv. Empty means fail closed: mutating
+    dashboard routes must 401 rather than treating an admin SQLite row as auth.
+
+    Returns:
+        Stripped ``SMART_LOCKER_DASHBOARD_ADMIN_SECRET``, or ``""``.
+    """
+    return (os.getenv("SMART_LOCKER_DASHBOARD_ADMIN_SECRET") or "").strip()

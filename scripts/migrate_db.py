@@ -117,6 +117,15 @@ def migrate() -> None:
         )
         print("  CREATE UNIQUE INDEX ix_devices_tag_hmac")
 
+    # Unique locker slots (SQLite UNIQUE still allows multiple NULLs).
+    if _index_exists(cur, "ix_devices_locker_slot"):
+        print("  SKIP  ix_devices_locker_slot (already exists)")
+    else:
+        cur.execute(
+            "CREATE UNIQUE INDEX ix_devices_locker_slot ON devices (locker_slot)"
+        )
+        print("  CREATE UNIQUE INDEX ix_devices_locker_slot")
+
     # --- Table creation: registrants (self-service registration name list) ---
     if _table_exists(cur, "registrants"):
         print("  SKIP  registrants table (already exists)")

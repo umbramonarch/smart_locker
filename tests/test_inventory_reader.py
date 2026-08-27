@@ -81,3 +81,24 @@ class TestReadInventoryFromExcel:
         ])
         rows = read_inventory(path)
         assert [r.pm_number for r in rows] == ["PM-001"]
+
+    def test_truncated_xlsx_raises(self, tmp_path):
+        """Corrupt zip/xlsx is InventoryReadError, not a raw 500."""
+        path = tmp_path / "bad.xlsx"
+        path.write_bytes(b"PK\x03\x04not-a-real-workbook")
+        with pytest.raises((InventoryReadError, CatalogReadError)):
+            read_inventory(path)
+
+    def test_copy_oserror_raises(self, tmp_path, monkeypatch):
+        """Non-PermissionError copy failure is a typed read error (I13)."""
+        path = _workbook(tmp_path / "device-list.xlsx", [
+            ["PM", "Name", "Location"],
+            ["PM-001", "Scope", "Locker"],
+        ])
+
+        def boom(*_a, **_k):
+            raise OSError(5, "I/O error")
+
+        monkeypatch.setattr("smart_locker.sync.source_import.shutil.copy2", boom)
+        with pytest.raises((InventoryReadError, CatalogReadError)):
+            read_inventory(path)

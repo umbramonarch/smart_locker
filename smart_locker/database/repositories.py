@@ -286,8 +286,21 @@ class DeviceRepository:
         Returns:
             Device object or None if not found.
         """
-        stmt = select(Device).where(Device.pm_number == pm_number)
-        return session.execute(stmt).scalar_one_or_none()
+        want = (pm_number or "").strip()
+        if not want:
+            return None
+        found = session.execute(
+            select(Device).where(Device.pm_number == want)
+        ).scalar_one_or_none()
+        if found is not None:
+            return found
+        from smart_locker.sync.source_import import pm_match_key
+
+        key = pm_match_key(want)
+        for device in session.execute(select(Device)).scalars():
+            if pm_match_key(device.pm_number) == key:
+                return device
+        return None
 
     @staticmethod
     def find_by_slot(session: Session, locker_slot: int) -> Device | None:

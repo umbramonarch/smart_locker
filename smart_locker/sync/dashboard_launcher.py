@@ -10,9 +10,11 @@ Notes: Both SMART_LOCKER_PUBLIC_URL and SMART_LOCKER_DASHBOARD_SHARE_PATH must
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import tempfile
+from html import escape
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -35,18 +37,24 @@ def dashboard_public_url(public_url: str) -> str:
 
 
 def _html_page(url: str) -> str:
-    """Return a tiny redirect page that opens ``url``."""
+    """Return a tiny redirect page that opens ``url``.
+
+    Attribute values are HTML-escaped so quotes and ``<`` cannot break
+    the meta refresh, href, or script element.
+    """
+    href = escape(url, quote=True)
+    js_url = json.dumps(url).replace("<", "\\u003c")
     return (
         "<!DOCTYPE html>\n"
         '<html lang="en">\n'
         "<head>\n"
         '  <meta charset="utf-8">\n'
-        f'  <meta http-equiv="refresh" content="0; url={url}">\n'
+        f'  <meta http-equiv="refresh" content="0; url={href}">\n'
         "  <title>Smart Locker Dashboard</title>\n"
-        f"  <script>location.replace({url!r});</script>\n"
+        f"  <script>location.replace({js_url});</script>\n"
         "</head>\n"
         "<body>\n"
-        f'  <p><a href="{url}">Open the Smart Locker dashboard</a></p>\n'
+        f'  <p><a href="{href}">Open the Smart Locker dashboard</a></p>\n'
         "</body>\n"
         "</html>\n"
     )

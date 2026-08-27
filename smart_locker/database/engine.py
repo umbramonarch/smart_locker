@@ -16,6 +16,7 @@ from typing import Generator
 
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from config.settings import DATABASE_URL
 from smart_locker.database.models import Base
@@ -32,7 +33,13 @@ def get_engine(url: str | None = None):
     global _engine
     if _engine is None:
         db_url = url or DATABASE_URL
-        _engine = create_engine(db_url, echo=False)
+        engine_kwargs: dict = {"echo": False}
+        if db_url.startswith("sqlite"):
+            # NFC dispatch and Location write-back run on worker threads.
+            engine_kwargs["connect_args"] = {"check_same_thread": False}
+            if ":memory:" in db_url:
+                engine_kwargs["poolclass"] = StaticPool
+        _engine = create_engine(db_url, **engine_kwargs)
 
         # Enable WAL mode for SQLite
         if db_url.startswith("sqlite"):

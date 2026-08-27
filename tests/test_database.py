@@ -180,6 +180,20 @@ class TestDeviceRepository:
         assert found.pm_number == "PM-SLOT"
         assert DeviceRepository.find_by_slot(db_session, 8) is None
 
+    def test_duplicate_slot_is_integrity_error(self, db_session):
+        """locker_slot unique index rejects two devices in the same slot."""
+        DeviceRepository.create(
+            db_session, name="A", device_type="t",
+            pm_number="PM-DUP-A", locker_slot=3,
+        )
+        db_session.flush()
+        with pytest.raises(IntegrityError):
+            DeviceRepository.create(
+                db_session, name="B", device_type="t",
+                pm_number="PM-DUP-B", locker_slot=3,
+            )
+            db_session.flush()
+
     def test_tag_hmac_null_uniqueness(self, db_session):
         """SQLite UNIQUE on tag_hmac allows many unbound (NULL) devices."""
         DeviceRepository.create(

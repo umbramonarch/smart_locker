@@ -13,18 +13,22 @@ Notes: All device/session endpoints require an active kiosk session enforced by
        the require_session dependency. SSE stream at /api/events pushes NFC and
        session events to the browser. Self-registration validates against the
        approved registrants list; admin registration bypasses this check.
-       Dashboard endpoints under /api/dashboard/ are public (no auth) — they
-       replace the old auto-synced Excel file for network-wide device visibility.
+       Catalog GETs under /api/dashboard/ stay public. Dashboard mutations
+       require SMART_LOCKER_DASHBOARD_ADMIN_SECRET (header
+       X-Smart-Locker-Admin). Appliance session/shutdown/exit/update are
+       kiosk-loopback only.
 """
 
 import asyncio
+import ipaddress
 import json
 import logging
+import secrets
 import shutil
 import subprocess
 import time
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -32,7 +36,12 @@ from sqlalchemy.orm import Session
 import smart_locker.api.app_context as ctx_module
 from smart_locker.api.app_context import PendingRegistration, PendingTagBind
 from smart_locker.auth.session_manager import UserSession
-from config.settings import BASE_DIR
+from config.settings import (
+    BASE_DIR,
+    DASHBOARD_ADMIN_HEADER,
+    MAX_LOCKER_SLOT,
+    dashboard_admin_secret,
+)
 from smart_locker.database.engine import get_session, get_session_factory
 from sqlalchemy import select
 from smart_locker.database.models import (
@@ -232,6 +241,110 @@ def require_session() -> UserSession:
         raise HTTPException(status_code=401, detail="No active session.")
     ctx_module.context.session_mgr.touch()
     return session
+
+
+def _is_loopback_request(request: Request) -> bool:
+    """Whether the HTTP client is on loopback (kiosk Chromium / local tests).
+
+    Does not trust ``X-Forwarded-For``. Binding ``API_HOST`` to ``0.0.0.0`` is
+    not enough: LAN browsers must not pass this check.
+
+    Args:
+        request: Incoming ASGI request.
+
+    Returns:
+        True for 127.0.0.0/8, ::1, IPv4-mapped loopback, and localhost.
+    """
+    if request.client is None or not request.client.host:
+        return False
+    host = request.client.host.strip()
+    if host.lower() in {"localhost", "ip6-localhost"}:
+        return True
+    raw = host.strip("[]")
+    try:
+        addr = ipaddress.ip_address(raw)
+    except ValueError:
+        return False
+    if addr.is_loopback:
+        return True
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+        return addr.ipv4_mapped.is_loopback
+    return False
+
+
+def require_loopback(request: Request) -> None:
+    """Refuse appliance and kiosk-session-start calls from the LAN.
+
+    FastAPI dependency. Session start, shutdown, exit-kiosk, and software
+    update are kiosk-local.
+
+    Args:
+        request: Incoming ASGI request.
+
+    Raises:
+        HTTPException: 403 if the client is not loopback.
+    """
+    if not _is_loopback_request(request):
+        raise HTTPException(
+            status_code=403,
+            detail="Kiosk-local access required.",
+        )
+
+
+def require_dashboard_admin(request: Request) -> None:
+    """Require the dashboard admin secret header. Fail closed if unset.
+
+    The 5-tap overlay is client-only and is not authorization. An admin
+    row in SQLite is also not authorization.
+
+    Args:
+        request: Incoming ASGI request.
+
+    Raises:
+        HTTPException: 401 if the secret is unset or the header does not match.
+    """
+    expected = dashboard_admin_secret()
+    if not expected:
+        raise HTTPException(
+            status_code=401,
+            detail="Dashboard admin is not configured.",
+        )
+    provided = request.headers.get(DASHBOARD_ADMIN_HEADER) or ""
+    if len(provided) != len(expected) or not secrets.compare_digest(provided, expected):
+        raise HTTPException(
+            status_code=401,
+            detail="Dashboard admin authorization required.",
+        )
+
+
+def _clear_expired_pending() -> None:
+    """Drop expired registration/bind windows so a new arm can proceed."""
+    ctx = ctx_module.context
+    if ctx is None:
+        return
+    pending_reg = ctx.pending_registration
+    if pending_reg is not None and pending_reg.is_expired:
+        ctx.pending_registration = None
+    pending_bind = ctx.pending_tag_bind
+    if pending_bind is not None and pending_bind.is_expired:
+        ctx.pending_tag_bind = None
+
+
+def _pending_nfc_conflict() -> str | None:
+    """Message if a non-expired bind or registration already owns the reader.
+
+    Returns:
+        Conflict detail, or None if the reader is free.
+    """
+    _clear_expired_pending()
+    ctx = ctx_module.context
+    if ctx is None:
+        return None
+    if ctx.pending_registration is not None:
+        return "A registration is already waiting for a card tap."
+    if ctx.pending_tag_bind is not None:
+        return "A device-tag bind is already waiting for a sticker tap."
+    return None
 
 
 # --- SSE Event Stream -------------------------------------------------------
@@ -544,13 +657,13 @@ class RegisterDeviceRequest(BaseModel):
     """Admin Register Device: PM from Excel plus a free locker slot."""
 
     pm_number: str = Field(..., min_length=1, max_length=50)
-    locker_slot: int = Field(..., ge=1)
+    locker_slot: int = Field(..., ge=1, le=MAX_LOCKER_SLOT)
 
 
 class SetSlotRequest(BaseModel):
     """Admin change of the physical locker slot on an existing device."""
 
-    locker_slot: int = Field(..., ge=1)
+    locker_slot: int = Field(..., ge=1, le=MAX_LOCKER_SLOT)
 
 
 class KioskDisplayBody(BaseModel):
@@ -650,6 +763,10 @@ def start_registration(body: RegisterRequest, db: Session = Depends(get_db)):
     if ctx_module.context.session_mgr.has_active_session:
         raise HTTPException(status_code=409, detail="A session is active. End it first.")
 
+    conflict = _pending_nfc_conflict()
+    if conflict:
+        raise HTTPException(status_code=409, detail=conflict)
+
     # Validate name against the approved registrants list
     registrant = RegistrantRepository.find_by_name(db, body.name.strip())
     if registrant is None:
@@ -735,19 +852,20 @@ def get_registrants(db: Session = Depends(get_db)):
 def start_admin_session(
     overlay: bool = True,
     db: Session = Depends(get_db),
+    _: None = Depends(require_loopback),
 ):
     """Start a backend session for the admin panel (triggered by 5x clock tap).
 
-    The hidden admin panel on the kiosk UI allows physical-access admin control
-    without an NFC card. This endpoint finds the first active admin user in the
-    database and creates a real backend session so that subsequent API calls
-    (borrow, return, sync, etc.) pass the ``require_session`` check.
+    Kiosk-local only (loopback). The hidden admin panel on the kiosk UI allows
+    physical-access admin control without an NFC card. This endpoint finds the
+    first active admin user in the database and creates a real backend session
+    so that subsequent API calls (borrow, return, sync, etc.) pass the
+    ``require_session`` check.
 
-    Unlike NFC-based authentication, this bypasses card tap — security relies on
-    physical kiosk access and the hidden 5-tap gesture. ``overlay=true`` (the
-    default) blocks auto-intent on device tags while the admin panel is open.
-    If a session is already active, only the overlay flag is updated (the
-    logged-in user is not replaced).
+    ``overlay=true`` (the default) blocks auto-intent on device tags while the
+    admin panel is open. If a session is already active, only the overlay flag
+    is updated (the logged-in user is not replaced). Overlay is not
+    authentication; LAN callers are refused even when an admin row exists.
 
     Args:
         overlay: When True, device-tag taps do not borrow/return. Pass False
@@ -759,8 +877,8 @@ def start_admin_session(
               admin user whose session was created.
 
     Raises:
-        HTTPException: 503 if system not ready, 404 if no active admin users
-                       exist in the database.
+        HTTPException: 403 if not loopback, 503 if system not ready, 404 if
+                       no active admin users exist in the database.
     """
     if ctx_module.context is None:
         raise HTTPException(status_code=503, detail="System not ready.")
@@ -774,11 +892,16 @@ def start_admin_session(
     )
     admin_user = db.execute(stmt).scalars().first()
     if ctx_module.context.session_mgr.has_active_session:
-        ctx_module.context.admin_overlay_open = overlay
         session = ctx_module.context.session_mgr.current_session
         user = session.user if session is not None else None
         if user is None:
             raise HTTPException(status_code=401, detail="No active session.")
+        if user.role != UserRole.ADMIN:
+            raise HTTPException(
+                status_code=403,
+                detail="An active kiosk session is in progress.",
+            )
+        ctx_module.context.admin_overlay_open = overlay
         return {
             "success": True,
             "user": {
@@ -841,6 +964,10 @@ def start_admin_registration(
     if user_session.user.role != UserRole.ADMIN:
         raise HTTPException(status_code=403, detail="Admin access required.")
 
+    conflict = _pending_nfc_conflict()
+    if conflict:
+        raise HTTPException(status_code=409, detail=conflict)
+
     ctx_module.context.pending_tag_bind = None
     ctx_module.context.pending_registration = PendingRegistration(
         display_name=body.name.strip(),
@@ -881,6 +1008,10 @@ def register_locker_device(
     if user_session.user.role != UserRole.ADMIN:
         raise HTTPException(status_code=403, detail="Admin access required.")
 
+    conflict = _pending_nfc_conflict()
+    if conflict:
+        raise HTTPException(status_code=409, detail=conflict)
+
     from config.settings import SOURCE_EXCEL_PATH
     if not SOURCE_EXCEL_PATH:
         raise HTTPException(status_code=400, detail="Source Excel path not configured.")
@@ -907,7 +1038,6 @@ def register_locker_device(
     except InvalidSlot as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
 
-    ctx_module.context.pending_registration = None
     ctx_module.context.pending_tag_bind = PendingTagBind(device_id=device.id)
     logger.info(
         "Locker device registered %s (pm=%s, slot=%s) by admin %s. Awaiting sticker.",
@@ -1010,7 +1140,10 @@ def start_device_tag_bind(
     if device is None:
         raise HTTPException(status_code=404, detail="Device not found.")
 
-    ctx_module.context.pending_registration = None
+    conflict = _pending_nfc_conflict()
+    if conflict:
+        raise HTTPException(status_code=409, detail=conflict)
+
     ctx_module.context.pending_tag_bind = PendingTagBind(device_id=device_id)
     logger.info(
         "Device tag bind started for %s (pm=%s) by admin %s. Awaiting sticker.",
@@ -1048,6 +1181,8 @@ def unbind_device_tag(
         raise HTTPException(status_code=404, detail="Device not found.")
 
     DeviceRepository.unbind_tag(db, device)
+    if ctx_module.context is not None:
+        ctx_module.context.pending_tag_bind = None
     logger.info(
         "Unbound device tag for %s (pm=%s) by admin %s.",
         device.name,
@@ -1085,18 +1220,21 @@ def trigger_source_sync(
         raise HTTPException(status_code=400, detail="Source Excel path not configured.")
 
     from smart_locker.database.engine import get_engine
-    from smart_locker.sync.source_import import import_from_source_excel
+    from smart_locker.sync.scheduler import ImportInProgress, run_source_import_exclusive
 
     try:
-        result = import_from_source_excel(get_engine(), SOURCE_EXCEL_PATH)
+        result = run_source_import_exclusive(
+            get_engine(), SOURCE_EXCEL_PATH, trigger="manual"
+        )
+    except ImportInProgress as e:
+        raise HTTPException(
+            status_code=409, detail="A catalog import is already running."
+        ) from e
     except Exception as e:
-        sync_status.record_error("manual", str(e))
         raise HTTPException(status_code=500, detail=f"Import failed: {e}") from e
 
-    sync_status.record_result("manual", result)
-    from smart_locker.sync.location_writeback import write_location_with_engine
-
-    write_location_with_engine(get_engine(), SOURCE_EXCEL_PATH)
+    if result is None:
+        raise HTTPException(status_code=400, detail="Source Excel file not found.")
     return {
         "success": True,
         "imported": result.imported,
@@ -1251,7 +1389,10 @@ def get_update_status(user_session: UserSession = Depends(require_session)):
 
 
 @router.post("/api/admin/update")
-def trigger_update(user_session: UserSession = Depends(require_session)):
+def trigger_update(
+    _: None = Depends(require_loopback),
+    user_session: UserSession = Depends(require_session),
+):
     """Launch the safe software-update script out-of-process (admin only).
 
     Backs the admin-panel "Update now" button. The update itself is applied by
@@ -1308,7 +1449,10 @@ def trigger_update(user_session: UserSession = Depends(require_session)):
 
 
 @router.post("/api/admin/exit-kiosk")
-def admin_exit_kiosk(user_session: UserSession = Depends(require_session)):
+def admin_exit_kiosk(
+    _: None = Depends(require_loopback),
+    user_session: UserSession = Depends(require_session),
+):
     """Stop the Chromium kiosk browser (admin only). The backend stays up.
 
     Chromium was started by graphical autostart; it does not come back until
@@ -1337,7 +1481,10 @@ def admin_exit_kiosk(user_session: UserSession = Depends(require_session)):
 
 
 @router.post("/api/admin/shutdown")
-def admin_shutdown(user_session: UserSession = Depends(require_session)):
+def admin_shutdown(
+    _: None = Depends(require_loopback),
+    user_session: UserSession = Depends(require_session),
+):
     """Power off the Raspberry Pi (admin only).
 
     Runs ``sudo -n /usr/bin/systemctl poweroff``. On a Windows/dev host this
@@ -1369,19 +1516,25 @@ def admin_shutdown(user_session: UserSession = Depends(require_session)):
 # --- Dashboard Endpoints (public, no auth) ----------------------------------
 
 @router.post("/api/kiosk/display")
-def kiosk_display_heartbeat(body: KioskDisplayBody) -> dict:
-    """Record the screen the kiosk is showing (no auth; local appliance).
+def kiosk_display_heartbeat(
+    body: KioskDisplayBody,
+    _: None = Depends(require_loopback),
+) -> dict:
+    """Record the screen the kiosk is showing (loopback / kiosk Chromium).
 
     The dashboard Display tab polls this snapshot. This endpoint does not
-    change kiosk navigation.
+    change kiosk navigation. A missing AppContext is a no-op, not a 500.
 
     Args:
         body: Screen id from the kiosk (``idle``, ``main-menu``, ``borrow``, …).
 
     Returns:
-        dict: ``ok`` true after the id is stored.
+        dict: ``ok`` true after the id is stored (or skipped).
     """
-    ctx_module.context.kiosk_screen = _normalize_kiosk_screen(body.screen)
+    ctx = ctx_module.context
+    if ctx is None:
+        return {"ok": True}
+    ctx.kiosk_screen = _normalize_kiosk_screen(body.screen)
     return {"ok": True}
 
 
@@ -1414,6 +1567,7 @@ def dashboard_inventory(db: Session = Depends(get_db)):
         HTTPException: 503 when the catalog path is empty or unreadable.
     """
     from config.settings import SOURCE_EXCEL_PATH
+    from smart_locker.sync.source_import import pm_match_key
 
     if not SOURCE_EXCEL_PATH:
         raise HTTPException(
@@ -1423,8 +1577,8 @@ def dashboard_inventory(db: Session = Depends(get_db)):
         rows = read_inventory(SOURCE_EXCEL_PATH)
     except InventoryReadError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
-    locker_pms = {
-        (d.pm_number or "").strip()
+    locker_keys = {
+        pm_match_key(d.pm_number)
         for d in DeviceRepository.list_all(db)
         if d.pm_number
     }
@@ -1437,7 +1591,7 @@ def dashboard_inventory(db: Session = Depends(get_db)):
             "serial_number": r.serial_number,
             "location": r.location,
             "calibration_due": r.calibration_due,
-            "in_locker": r.pm_number in locker_pms,
+            "in_locker": pm_match_key(r.pm_number) in locker_keys,
         }
         for r in rows
     ]
@@ -1489,8 +1643,11 @@ def dashboard_devices(db: Session = Depends(get_db)):
 
 
 @router.get("/api/dashboard/owners")
-def dashboard_owners(db: Session = Depends(get_db)):
-    """Names for the public owner-edit dropdown. No session required.
+def dashboard_owners(
+    db: Session = Depends(get_db),
+    _: None = Depends(require_dashboard_admin),
+):
+    """Names for the owner-edit dropdown (dashboard admin secret required).
 
     Combines the in-locker token, registered users, and registrant names
     so the Inventory owner dialog can offer the same list plus free text.
@@ -1510,8 +1667,12 @@ def dashboard_owners(db: Session = Depends(get_db)):
 
 
 @router.post("/api/dashboard/owner")
-def dashboard_set_owner(body: OwnerEditBody, db: Session = Depends(get_db)):
-    """Change owner for one non-locker PM. Public — no kiosk session.
+def dashboard_set_owner(
+    body: OwnerEditBody,
+    db: Session = Depends(get_db),
+    _: None = Depends(require_dashboard_admin),
+):
+    """Change owner for one non-locker PM (dashboard admin secret required).
 
     Writes the catalog Excel Location cell. Locker devices are refused
     (owner stays with kiosk borrow/return). Does not insert locker rows.
@@ -1524,8 +1685,8 @@ def dashboard_set_owner(body: OwnerEditBody, db: Session = Depends(get_db)):
         dict: ``ok``, ``pm_number``, ``owner``, ``locker``.
 
     Raises:
-        HTTPException: 400 empty PM; 404 PM not in Excel; 409 locker PM;
-                       503 share down.
+        HTTPException: 401 without secret; 400 empty PM; 404 PM not in Excel;
+                       409 locker PM; 503 share down.
     """
     from config.settings import SOURCE_EXCEL_PATH
 
@@ -1548,12 +1709,18 @@ def dashboard_set_owner(body: OwnerEditBody, db: Session = Depends(get_db)):
 
 
 @router.post("/api/dashboard/bind-tag")
-def dashboard_bind_tag(body: TagActionBody, db: Session = Depends(get_db)):
-    """Arm a 60s NFC bind window for one locker PM. No kiosk session.
+def dashboard_bind_tag(
+    body: TagActionBody,
+    db: Session = Depends(get_db),
+    _: None = Depends(require_dashboard_admin),
+):
+    """Arm a 60s NFC bind window for one locker PM.
 
-    The next sticker tap on the ACR1252U binds that device (same window as
-    kiosk Register Device). Does not create a kiosk admin session. Physical
-    tap still happens at the locker.
+    Requires ``X-Smart-Locker-Admin`` matching
+    ``SMART_LOCKER_DASHBOARD_ADMIN_SECRET`` (fail closed if unset). Does not
+    create a kiosk admin session. Refuses while a kiosk user is logged in or
+    a non-expired bind/registration already owns the reader. Does not drop
+    an in-progress kiosk enroll.
 
     Args:
         body: PM number of an existing locker device.
@@ -1563,17 +1730,27 @@ def dashboard_bind_tag(body: TagActionBody, db: Session = Depends(get_db)):
         dict: ``ok``, ``pm_number``, ``name``.
 
     Raises:
-        HTTPException: 503 if not ready; 404 if the PM is not a locker device.
+        HTTPException: 401 without secret; 503 if not ready; 409 if a session
+            or pending window is active; 404 if the PM is not a locker device.
     """
     if ctx_module.context is None:
         raise HTTPException(status_code=503, detail="System not ready.")
+
+    if ctx_module.context.session_mgr.has_active_session:
+        raise HTTPException(
+            status_code=409,
+            detail="A kiosk session is active. Bind from the kiosk or end the session.",
+        )
+
+    conflict = _pending_nfc_conflict()
+    if conflict:
+        raise HTTPException(status_code=409, detail=conflict)
 
     pm = body.pm_number.strip()
     device = DeviceRepository.find_by_pm(db, pm)
     if device is None:
         raise HTTPException(status_code=404, detail="Device not found.")
 
-    ctx_module.context.pending_registration = None
     ctx_module.context.pending_tag_bind = PendingTagBind(device_id=device.id)
     logger.info(
         "Dashboard tag bind armed for %s (pm=%s). Awaiting sticker at kiosk.",
@@ -1589,8 +1766,15 @@ def dashboard_bind_tag(body: TagActionBody, db: Session = Depends(get_db)):
 
 
 @router.post("/api/dashboard/unbind-tag")
-def dashboard_unbind_tag(body: TagActionBody, db: Session = Depends(get_db)):
-    """Clear the NFC sticker HMAC on one locker PM. No kiosk session.
+def dashboard_unbind_tag(
+    body: TagActionBody,
+    db: Session = Depends(get_db),
+    _: None = Depends(require_dashboard_admin),
+):
+    """Clear the NFC sticker HMAC on one locker PM.
+
+    Requires the dashboard admin secret. Also clears an armed bind window
+    so the next tap is not re-bound.
 
     Args:
         body: PM number of an existing locker device.
@@ -1600,7 +1784,7 @@ def dashboard_unbind_tag(body: TagActionBody, db: Session = Depends(get_db)):
         dict: ``ok``, ``pm_number``.
 
     Raises:
-        HTTPException: 404 if the PM is not a locker device.
+        HTTPException: 401 without secret; 404 if the PM is not a locker device.
     """
     pm = body.pm_number.strip()
     device = DeviceRepository.find_by_pm(db, pm)
@@ -1608,6 +1792,8 @@ def dashboard_unbind_tag(body: TagActionBody, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Device not found.")
 
     DeviceRepository.unbind_tag(db, device)
+    if ctx_module.context is not None:
+        ctx_module.context.pending_tag_bind = None
     logger.info(
         "Dashboard unbound device tag for %s (pm=%s).",
         device.name,
@@ -1617,7 +1803,10 @@ def dashboard_unbind_tag(body: TagActionBody, db: Session = Depends(get_db)):
 
 
 @router.get("/api/dashboard/transactions")
-def dashboard_transactions(db: Session = Depends(get_db)):
+def dashboard_transactions(
+    db: Session = Depends(get_db),
+    _: None = Depends(require_dashboard_admin),
+):
     """Public transaction history for the network dashboard.
 
     Returns the most recent 500 borrow/return transactions in reverse
@@ -1652,7 +1841,10 @@ def dashboard_transactions(db: Session = Depends(get_db)):
 
 
 @router.get("/api/dashboard/users")
-def dashboard_users(db: Session = Depends(get_db)):
+def dashboard_users(
+    db: Session = Depends(get_db),
+    _: None = Depends(require_dashboard_admin),
+):
     """Public registered-users list for the network dashboard.
 
     Returns all registered users with their role and registration date.

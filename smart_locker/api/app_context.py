@@ -224,6 +224,14 @@ class AppContext:
                     self.pending_tag_bind.device_id,
                 )
                 self.pending_tag_bind = None
+            elif self._uid_is_work_card(uid, get_session):
+                # Bind is for stickers. A work card must still log in (or stay
+                # logged in) rather than consuming the window as tag_bind_failed.
+                logger.info(
+                    "Work card tapped during device-tag bind; bind window kept."
+                )
+                if self.session_mgr.has_active_session:
+                    return
             else:
                 await self._handle_tag_bind_tap(uid, get_session)
                 return
@@ -231,15 +239,22 @@ class AppContext:
         from smart_locker.auth.tap_router import handle_insert
         from smart_locker.security.key_manager import key_manager
 
-        with get_session() as db_session:
-            result = handle_insert(
-                db_session,
-                uid,
-                key_manager.hmac_key,
-                self.session_mgr,
-                admin_overlay_open=self.admin_overlay_open,
-                reader_name=reader_name,
-            )
+        overlay = self.admin_overlay_open
+        session_mgr = self.session_mgr
+        hmac_key = key_manager.hmac_key
+
+        def _run_insert():
+            with get_session() as db_session:
+                return handle_insert(
+                    db_session,
+                    uid,
+                    hmac_key,
+                    session_mgr,
+                    admin_overlay_open=overlay,
+                    reader_name=reader_name,
+                )
+
+        result = await asyncio.to_thread(_run_insert)
 
         if result.event in ("session_ended", "auth_success"):
             self.admin_overlay_open = False
@@ -339,6 +354,32 @@ class AppContext:
                 })
         finally:
             self._end_leftover_session()
+
+    def _uid_is_work_card(self, uid: str, get_session) -> bool:
+        """Whether this UID is an enrolled work card (not a device sticker).
+
+        Used so an armed bind window does not steal login. Lookup failures
+        are treated as not-a-work-card so a sticker tap still binds.
+
+        Args:
+            uid: Hex-encoded UID from the NFC reader.
+            get_session: Callable returning a SQLAlchemy session context manager.
+
+        Returns:
+            True if the UID matches an active user row.
+        """
+        try:
+            from smart_locker.database.repositories import UserRepository
+            from smart_locker.security.hashing import compute_uid_hmac
+            from smart_locker.security.key_manager import key_manager
+
+            digest = compute_uid_hmac(uid, key_manager.hmac_key)
+            with get_session() as db_session:
+                user = UserRepository.find_by_uid_hmac(db_session, digest)
+            return user is not None and bool(user.is_active)
+        except Exception:
+            logger.exception("Work-card lookup failed during tag-bind intercept.")
+            return False
 
     def _end_leftover_session(self) -> None:
         """Drop a leftover overlay session with no session_ended SSE.

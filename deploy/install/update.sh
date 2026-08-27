@@ -44,7 +44,17 @@ if [ -f "$APP_DIR/.env" ]; then
   set +a
 fi
 
-APP_USER="$(stat -c '%U' "$APP_DIR" 2>/dev/null || echo root)"   # the update unit runs as root; restore this owner after applying
+# Do not stat APP_DIR for the service account: the application tree is
+# root-owned so the passwordless sudoers target is not user-writable.
+if [ -z "${SMART_LOCKER_USER:-}" ]; then
+  _svc_user="$(systemctl show -p User --value "${SERVICE:-smart-locker}.service" 2>/dev/null || true)"
+  if [ -n "$_svc_user" ] && [ "$_svc_user" != "-" ]; then
+    SMART_LOCKER_USER="$_svc_user"
+  elif [ -d "$APP_DIR/logs" ]; then
+    SMART_LOCKER_USER="$(stat -c '%U' "$APP_DIR/logs" 2>/dev/null || true)"
+  fi
+fi
+APP_USER="${SMART_LOCKER_USER:-locker}"
 VENV_DIR="$APP_DIR/venv"
 PY="$VENV_DIR/bin/python"
 WHEELHOUSE="$APP_DIR/deploy/wheelhouse"
@@ -288,16 +298,33 @@ sudo systemctl stop "$SERVICE"
 RSYNC_EXCLUDES=()
 for p in "${PRESERVE[@]}"; do RSYNC_EXCLUDES+=( --exclude="/$p" ); done
 rsync -a --delete "${RSYNC_EXCLUDES[@]}" "$STAGING_DIR"/ "$APP_DIR"/
-# The transient update unit runs as root, so newly written files are root-owned;
-# hand the tree back to the service account (runtime dirs were preserved anyway).
-chown -R "$APP_USER":"$APP_USER" "$APP_DIR" 2>/dev/null || true
+# Newly written files are root-owned (this unit runs as root). Keep it that
+# way: do NOT chown the tree to the service account. Only runtime dirs
+# (logs, photos, backups) and the SQLite files are service-writable.
+chown -R root:root "$APP_DIR" 2>/dev/null || true
+chmod -R u=rwX,go=rX "$APP_DIR" 2>/dev/null || true
+chmod +x "$APP_DIR/deploy/install/"*.sh "$APP_DIR/deploy/kiosk/start-kiosk.sh" 2>/dev/null || true
+chown root:"$(id -gn "$APP_USER" 2>/dev/null || echo root)" "$APP_DIR" 2>/dev/null || true
+chmod 1775 "$APP_DIR" 2>/dev/null || true
+mkdir -p "$APP_DIR/logs" "$APP_DIR/smart_locker/frontend/images" "$APP_DIR/backups"
+chown -R "$APP_USER":"$APP_USER" "$APP_DIR/logs" 2>/dev/null || true
+chown -R "$APP_USER":"$APP_USER" "$APP_DIR/backups" 2>/dev/null || true
+if [ -f "$APP_DIR/.env" ]; then
+  chown root:"$(id -gn "$APP_USER" 2>/dev/null || echo root)" "$APP_DIR/.env" 2>/dev/null || true
+  chmod 640 "$APP_DIR/.env" 2>/dev/null || true
+fi
+for f in "$APP_DIR/smart_locker.db" "$APP_DIR/smart_locker.db-wal" "$APP_DIR/smart_locker.db-shm" "$APP_DIR/last_sync.json"; do
+  if [ -e "$f" ]; then
+    chown "$APP_USER":"$APP_USER" "$f" 2>/dev/null || true
+  fi
+done
 # PRESERVE skipped this dir so gitignored device photos survive --delete.
 # Overlay committed UI assets from the staged release without removing photos.
 if [ -d "$STAGING_DIR/smart_locker/frontend/images" ]; then
   mkdir -p "$APP_DIR/smart_locker/frontend/images"
   rsync -a "$STAGING_DIR/smart_locker/frontend/images/" "$APP_DIR/smart_locker/frontend/images/"
-  chown -R "$APP_USER":"$APP_USER" "$APP_DIR/smart_locker/frontend/images" 2>/dev/null || true
 fi
+chown -R "$APP_USER":"$APP_USER" "$APP_DIR/smart_locker/frontend/images" 2>/dev/null || true
 log "New code in place."
 
 # ============================================================================

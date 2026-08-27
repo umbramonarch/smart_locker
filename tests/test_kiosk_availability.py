@@ -75,3 +75,12 @@ class TestPmNumberOnCardsAndDetail:
         js = _js()
         assert "detail-pm" in js
         assert "dev.pm_number" in js
+
+    def test_cards_do_not_interpolate_catalog_html(self):
+        """Kiosk cards use textContent, not innerHTML with catalog fields (I4)."""
+        js = _js()
+        assert "buildDeviceCardEl" in js
+        assert "safeKioskImagePath" in js
+        assert "<div class=\"card-name\">${dev.name}</div>" not in js
+        assert "SLOT_GRID_MAX" in js
+        assert "reportKioskDisplay(S.screen)" in js

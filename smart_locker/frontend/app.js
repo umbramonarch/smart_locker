@@ -777,6 +777,101 @@ async function openReturn() {
 }
 
 /**
+ * Allow only local photo paths under images/. Catalog names never become
+ * javascript: URLs or HTML.
+ * @param {string|null|undefined} raw
+ * @returns {string}
+ */
+function safeKioskImagePath(raw) {
+  if (!raw || typeof raw !== 'string') return '';
+  const path = raw.trim().replace(/\\/g, '/');
+  if (!path || path.includes('..') || path.includes(':') || path.startsWith('//')) {
+    return '';
+  }
+  const bare = path.replace(/^\/+/, '');
+  if (!bare.startsWith('images/')) return '';
+  return path;
+}
+
+/**
+ * Build one locker card with textContent / setAttribute (no catalog HTML).
+ * @param {Object} dev
+ * @param {string} cls
+ * @param {string} statusCls
+ * @param {string} statusTxt
+ * @param {string} slotLabel
+ * @returns {HTMLElement}
+ */
+function buildDeviceCardEl(dev, cls, statusCls, statusTxt, slotLabel) {
+  const card = document.createElement('div');
+  card.className = cls;
+
+  const cardImage = document.createElement('div');
+  cardImage.className = 'card-image';
+  const imgPath = safeKioskImagePath(dev.image_path);
+
+  if (imgPath) {
+    const img = document.createElement('img');
+    img.src = imgPath;
+    img.alt = dev.name || '';
+    img.loading = 'lazy';
+    cardImage.appendChild(img);
+
+    const reveal = document.createElement('div');
+    reveal.className = 'card-hover-reveal';
+    const revealImg = document.createElement('div');
+    revealImg.className = 'card-hover-reveal-img';
+    revealImg.style.backgroundImage = `url("${imgPath.replace(/"/g, '\\"')}")`;
+    const revealIcon = document.createElement('div');
+    revealIcon.className = 'card-hover-icon';
+    revealIcon.innerHTML =
+      '<svg viewBox="0 0 24 24"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>';
+    reveal.appendChild(revealImg);
+    reveal.appendChild(revealIcon);
+    cardImage.appendChild(reveal);
+  } else {
+    const ph = document.createElement('div');
+    ph.className = 'card-img-placeholder';
+    ph.innerHTML =
+      '<svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>';
+    const slotSpan = document.createElement('span');
+    slotSpan.textContent = slotLabel;
+    ph.appendChild(slotSpan);
+    cardImage.appendChild(ph);
+  }
+
+  const slotEl = document.createElement('div');
+  slotEl.className = 'card-slot';
+  slotEl.textContent = slotLabel;
+  const statusEl = document.createElement('div');
+  statusEl.className = `card-status ${statusCls}`;
+  statusEl.textContent = statusTxt;
+  cardImage.appendChild(slotEl);
+  cardImage.appendChild(statusEl);
+
+  const body = document.createElement('div');
+  body.className = 'card-body';
+  const nameEl = document.createElement('div');
+  nameEl.className = 'card-name';
+  nameEl.textContent = dev.name || '';
+  body.appendChild(nameEl);
+  if (dev.pm_number) {
+    const pmEl = document.createElement('div');
+    pmEl.className = 'card-pm';
+    pmEl.textContent = dev.pm_number;
+    body.appendChild(pmEl);
+  }
+  const typeEl = document.createElement('div');
+  typeEl.className = 'card-type';
+  typeEl.textContent = dev.device_type || '';
+  body.appendChild(typeEl);
+
+  card.appendChild(cardImage);
+  card.appendChild(body);
+  return card;
+}
+
+/**
  * Build the device card grid for either borrow or return mode. Creates card DOM
  * elements sorted by locker slot, sets up IntersectionObserver for scroll-triggered
  * entrance animations, scroll parallax on card images, and mouse hover parallax.
@@ -861,33 +956,7 @@ function buildGrid(gridId, devices, mode) {
     else            { statusCls = 'in-use';    statusTxt = 'OUT';   }
 
     const slotLabel = `S${String(dev.locker_slot ?? 0).padStart(2, '0')}`;
-
-    const card = document.createElement('div');
-    card.className = cls;
-    card.innerHTML = `
-      <div class="card-image">
-        ${dev.image_path
-          ? `<img src="${dev.image_path}" alt="${dev.name}" loading="lazy">`
-          : `<div class="card-img-placeholder">
-               <svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
-               <span>${slotLabel}</span>
-             </div>`}
-        ${dev.image_path ? `
-        <div class="card-hover-reveal">
-          <div class="card-hover-reveal-img" style="background-image:url('${dev.image_path}')"></div>
-          <div class="card-hover-icon">
-            <svg viewBox="0 0 24 24"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
-          </div>
-        </div>` : ''}
-        <div class="card-slot">${slotLabel}</div>
-        <div class="card-status ${statusCls}">${statusTxt}</div>
-      </div>
-      <div class="card-body">
-        <div class="card-name">${dev.name}</div>
-        ${dev.pm_number ? `<div class="card-pm">${dev.pm_number}</div>` : ''}
-        <div class="card-type">${dev.device_type}</div>
-      </div>
-    `;
+    const card = buildDeviceCardEl(dev, cls, statusCls, statusTxt, slotLabel);
 
     // Observe card for scroll-triggered entrance
     cardObserver.observe(card);
@@ -959,15 +1028,16 @@ function openDetail(dev, mode) {
   document.getElementById('detail-desc').textContent    =
     dev.description || 'No description available.';
 
+  const imgPath     = safeKioskImagePath(dev.image_path);
   const imgPane     = document.getElementById('detail-img-pane');
   const placeholder = document.getElementById('detail-img-placeholder');
   const existingImg = imgPane.querySelector('img');
   if (existingImg) existingImg.remove();
-  if (dev.image_path) {
+  if (imgPath) {
     placeholder.classList.add('hidden');
     const img = document.createElement('img');
-    img.src = dev.image_path;
-    img.alt = dev.name;
+    img.src = imgPath;
+    img.alt = dev.name || '';
     imgPane.appendChild(img);
   } else {
     placeholder.classList.remove('hidden');
@@ -1008,6 +1078,7 @@ function closeDetail() {
     overlay.style.display = 'none';
   }, 710);
   S.screen = S.prevScreen || (S.mode === 'return' ? 'return' : 'borrow');
+  reportKioskDisplay(S.screen);
 }
 
 /**
@@ -2263,6 +2334,8 @@ async function startDeviceTagBind(dev) {
 
 /** Minimum slot buttons shown in the picker (grows with occupied max + 1). */
 const SLOT_GRID_MIN = 12;
+/** Same cap as the Register Device / change-slot API (MAX_LOCKER_SLOT). */
+const SLOT_GRID_MAX = 48;
 
 /** @type {number|null} Slot chosen on the Add from Excel step. */
 let selectedAddSlot = null;
@@ -2301,7 +2374,7 @@ function renderSlotGrid(containerId, occupied, selected, onPick) {
   el.innerHTML = '';
   let maxUsed = 0;
   occupied.forEach(n => { if (n > maxUsed) maxUsed = n; });
-  const max = Math.max(SLOT_GRID_MIN, maxUsed + 1);
+  const max = Math.min(SLOT_GRID_MAX, Math.max(SLOT_GRID_MIN, maxUsed + 1));
   for (let n = 1; n <= max; n++) {
     const btn = document.createElement('button');
     btn.type = 'button';
