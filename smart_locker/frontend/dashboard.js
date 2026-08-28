@@ -620,6 +620,14 @@ async function fetchAdminTables() {
   } catch (_) {
     txData = [];
   }
+  if ((usersRes && usersRes.status === 401) || (txRes && txRes.status === 401)) {
+    sessionStorage.removeItem(ADMIN_SECRET_KEY);
+    const status = document.getElementById('admin-tag-status');
+    if (status) status.textContent =
+      'Dashboard admin authorization failed. Check the secret.';
+    usersData = [];
+    txData = [];
+  }
   try {
     if (devicesRes && devicesRes.ok) devicesData = await devicesRes.json();
   } catch (_) { /* keep cached locker rows */ }
@@ -735,6 +743,7 @@ async function unbindTag(pm) {
     }
     if (status) status.textContent = `Unbound ${pm}.`;
     await fetchAdminTables();
+    renderDevices();
   } catch (_) {
     if (status) status.textContent = 'Could not unbind.';
   }
@@ -833,4 +842,10 @@ document.addEventListener('DOMContentLoaded', () => {
   setInterval(tickClock, 1000);
   setInterval(fetchTables, REFRESH_MS);
   setInterval(fetchDisplay, DISPLAY_MS);
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) {
+      fetchTables();
+      fetchDisplay();
+    }
+  });
 });

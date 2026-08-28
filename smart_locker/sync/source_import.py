@@ -616,6 +616,8 @@ def import_from_source_excel(
                 reg_session.commit()
         except Exception as e:
             logger.warning("Registrant name sync failed: %s", e)
+            result.errors += 1
+            result.error_details.append(f"Registrant sync: {e}")
 
     if result.updated > 0:
         from config.settings import EXCEL_AUTO_EXPORT, EXCEL_SYNC_PATH

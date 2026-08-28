@@ -178,7 +178,7 @@ def main() -> None:
 
     uid = _read_uid_from_reader()
     if uid is None:
-        return
+        raise SystemExit(1)
     print(f"Tag detected (UID: {_mask_uid(uid)})")
     _bind(uid, args.pm, args.force)
 

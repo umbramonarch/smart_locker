@@ -195,6 +195,7 @@ class TestDashboardPollAndAdminFetch:
         assert "tablesInFlight" in js
         assert "Promise.all" in js
         assert "SEARCH_DEBOUNCE_MS" in js
+        assert "visibilitychange" in js
 
     def test_fetch_admin_does_not_copy_inventory_excel(self):
         """Opening 5-tap must not await fetchTables / GET inventory."""
@@ -207,3 +208,11 @@ class TestDashboardPollAndAdminFetch:
         assert "/api/dashboard/users" in fn
         assert "/api/dashboard/transactions" in fn
         assert "_escEl" in js
+        assert "visibilitychange" in js
+        assert "sessionStorage.removeItem" in js
+        assert "ADMIN_SECRET_KEY" in js
+        unbind = js.split("async function unbindTag", 1)[1].split(
+            "async function ", 1
+        )[0]
+        assert "fetchAdminTables" in unbind
+        assert "renderDevices" in unbind

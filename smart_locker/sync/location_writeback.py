@@ -354,42 +354,45 @@ def write_location_values(
 
         keyed = {pm_match_key(k): v for k, v in (wanted or {}).items() if pm_match_key(k)}
 
-        def _attempt(current: dict[str, str]) -> WritebackResult:
-            return _write_once(path, current)
+        def _attempt(snapshot: dict[str, str]) -> WritebackResult:
+            # Hold the lock for the whole workbook I/O, including after the
+            # waiter's timeout: the daemon thread cannot be killed, and a
+            # second writer must not _replace_into the same file on hung CIFS.
+            with _excel_writer_lock:
+                live = snapshot
+                if engine is not None:
+                    with Session(engine) as session:
+                        live = _wanted_by_pm(session)
+                return _write_once(path, live)
 
         try:
-            with _excel_writer_lock:
-                for attempt in range(1, _MAX_RETRIES + 1):
-                    current = keyed
-                    if engine is not None:
-                        with Session(engine) as session:
-                            current = _wanted_by_pm(session)
-                    try:
-                        result = _call_with_timeout(
-                            _attempt, _IO_TIMEOUT_SECONDS, current
+            for attempt in range(1, _MAX_RETRIES + 1):
+                try:
+                    result = _call_with_timeout(
+                        _attempt, _IO_TIMEOUT_SECONDS, keyed
+                    )
+                    return result
+                except TimeoutError:
+                    logger.warning(
+                        "Location write-back timed out after %ss (%s).",
+                        _IO_TIMEOUT_SECONDS, path,
+                    )
+                    result.error = "timeout"
+                    return result
+                except _StaleWorkbook:
+                    if attempt < _MAX_RETRIES:
+                        logger.info(
+                            "Location write-back: %s changed during edit, "
+                            "retrying (%d/%d).",
+                            path, attempt, _MAX_RETRIES,
                         )
-                        return result
-                    except TimeoutError:
-                        logger.warning(
-                            "Location write-back timed out after %ss (%s).",
-                            _IO_TIMEOUT_SECONDS, path,
-                        )
-                        result.error = "timeout"
-                        return result
-                    except _StaleWorkbook:
-                        if attempt < _MAX_RETRIES:
-                            logger.info(
-                                "Location write-back: %s changed during edit, "
-                                "retrying (%d/%d).",
-                                path, attempt, _MAX_RETRIES,
-                            )
-                            continue
-                        logger.warning(
-                            "Location write-back skipped — %s kept changing during edit.",
-                            path,
-                        )
-                        result.error = "stale"
-                        return result
+                        continue
+                    logger.warning(
+                        "Location write-back skipped — %s kept changing during edit.",
+                        path,
+                    )
+                    result.error = "stale"
+                    return result
         except PermissionError:
             logger.warning(
                 "Location write-back skipped — %s is locked (open in Excel).",

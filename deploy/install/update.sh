@@ -48,13 +48,17 @@ fi
 # root-owned so the passwordless sudoers target is not user-writable.
 if [ -z "${SMART_LOCKER_USER:-}" ]; then
   _svc_user="$(systemctl show -p User --value "${SERVICE:-smart-locker}.service" 2>/dev/null || true)"
-  if [ -n "$_svc_user" ] && [ "$_svc_user" != "-" ]; then
+  if [ -n "$_svc_user" ] && [ "$_svc_user" != "-" ] && [ "$_svc_user" != "root" ]; then
     SMART_LOCKER_USER="$_svc_user"
   elif [ -d "$APP_DIR/logs" ]; then
-    SMART_LOCKER_USER="$(stat -c '%U' "$APP_DIR/logs" 2>/dev/null || true)"
+    _log_user="$(stat -c '%U' "$APP_DIR/logs" 2>/dev/null || true)"
+    if [ -n "$_log_user" ] && [ "$_log_user" != "root" ]; then
+      SMART_LOCKER_USER="$_log_user"
+    fi
   fi
 fi
 APP_USER="${SMART_LOCKER_USER:-locker}"
+export SMART_LOCKER_USER="$APP_USER"
 VENV_DIR="$APP_DIR/venv"
 PY="$VENV_DIR/bin/python"
 WHEELHOUSE="$APP_DIR/deploy/wheelhouse"

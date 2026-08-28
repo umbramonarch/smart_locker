@@ -133,3 +133,17 @@ class TestSudoersPoweroff:
         """Fresh install still writes sudoers (via the shared apply script)."""
         text = (DEPLOY_INSTALL / "install.sh").read_text(encoding="utf-8")
         assert "apply-sudoers.sh" in text
+
+    def test_sudoers_user_is_service_account_not_root(self):
+        """After C3, sudoers must not be rewritten for root from stat APP_DIR."""
+        apply = (DEPLOY_INSTALL / "apply-sudoers.sh").read_text(encoding="utf-8")
+        install = (DEPLOY_INSTALL / "install.sh").read_text(encoding="utf-8")
+        update = (DEPLOY_INSTALL / "update.sh").read_text(encoding="utf-8")
+        assert "export SMART_LOCKER_USER" in update
+        assert 'stat -c \'%U\' "$APP_DIR"' not in apply
+        assert 'stat -c \'%U\' "$APP_DIR/logs"' in apply
+        assert "systemctl show -p User" in apply
+        assert 'APP_USER="${SMART_LOCKER_USER:-locker}"' in apply
+        assert '[ "$APP_USER" = "root" ]' in apply
+        assert "export SMART_LOCKER_USER" in install
+        assert '[ "$APP_USER" = "root" ]' in install or "!= \"root\"" in install

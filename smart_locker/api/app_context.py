@@ -12,6 +12,7 @@ Notes: The module-level singleton 'context' is initialized by server.py's
 
 import asyncio
 import logging
+import threading
 import time
 from dataclasses import dataclass, field
 
@@ -22,6 +23,9 @@ logger = logging.getLogger(__name__)
 
 # How long a self-registration attempt remains valid before the user must restart
 REGISTRATION_TIMEOUT_SECONDS = 60
+
+# HTTP threadpool and the NFC bridge both write pending bind/registration.
+pending_state_lock = threading.Lock()
 
 
 @dataclass
@@ -46,18 +50,32 @@ class PendingRegistration:
 class PendingTagBind:
     """Holds state for an admin device-tag bind awaiting an NFC sticker tap.
 
-    Created when an admin picks a locker device in Register Device. Valid for
+    Created when an admin picks a locker device in Register Device, or when
+    dashboard staff arm a bind with the admin secret. Valid for
     ``REGISTRATION_TIMEOUT_SECONDS`` (60s). The next insert binds that row
-    instead of borrowing.
+    instead of borrowing. ``from_dashboard`` marks a secret-armed window so
+    public ``POST /api/register/cancel`` cannot clear it.
     """
 
     device_id: int
     created_at: float = field(default_factory=time.monotonic)
+    from_dashboard: bool = False
 
     @property
     def is_expired(self) -> bool:
         """Whether the bind window has elapsed without a sticker tap."""
         return (time.monotonic() - self.created_at) > REGISTRATION_TIMEOUT_SECONDS
+
+
+def assign_pending_tag_bind(ctx, bind: PendingTagBind | None) -> None:
+    """Set ``pending_tag_bind`` under the HTTP/NFC shared lock.
+
+    Args:
+        ctx: Application context (or test double with the same attribute).
+        bind: New pending bind, or None to clear.
+    """
+    with pending_state_lock:
+        ctx.pending_tag_bind = bind
 
 
 class AppContext:
@@ -82,6 +100,7 @@ class AppContext:
         self.session_mgr = SessionManager(timeout_seconds=SESSION_TIMEOUT_SECONDS)
         self.sse_queue: asyncio.Queue = asyncio.Queue()
         self._bridge_task: asyncio.Task | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._nfc_available = False
         self.pending_registration: PendingRegistration | None = None
         self.pending_tag_bind: PendingTagBind | None = None
@@ -102,6 +121,7 @@ class AppContext:
         """
         from smart_locker.nfc.exceptions import NFCError
 
+        self._loop = asyncio.get_running_loop()
         try:
             reader_name = self.reader.start()
             self._nfc_available = True
@@ -155,7 +175,7 @@ class AppContext:
             currently_active = self.session_mgr.has_active_session
             if had_session and not currently_active:
                 self.admin_overlay_open = False
-                self.pending_tag_bind = None
+                assign_pending_tag_bind(self, None)
                 await self.sse_queue.put({"event": "session_timeout"})
                 logger.info("Session timeout detected by NFC bridge.")
             had_session = currently_active
@@ -189,7 +209,7 @@ class AppContext:
                     if self.session_mgr.has_active_session:
                         self.session_mgr.end_session()
                     self.admin_overlay_open = False
-                    self.pending_tag_bind = None
+                    assign_pending_tag_bind(self, None)
                     await self.sse_queue.put({"event": "reader_disconnected"})
                 elif event.event_type == ReaderEventType.CONNECTED:
                     logger.info("NFC reader reconnected.")
@@ -223,7 +243,7 @@ class AppContext:
                     "Device tag bind window expired for device_id=%d.",
                     self.pending_tag_bind.device_id,
                 )
-                self.pending_tag_bind = None
+                assign_pending_tag_bind(self, None)
             elif self._uid_is_work_card(uid, get_session):
                 # Bind is for stickers. A work card must still log in (or stay
                 # logged in) rather than consuming the window as tag_bind_failed.
@@ -259,7 +279,7 @@ class AppContext:
         if result.event in ("session_ended", "auth_success"):
             self.admin_overlay_open = False
             if result.event == "session_ended":
-                self.pending_tag_bind = None
+                assign_pending_tag_bind(self, None)
 
         sse = result.to_sse()
         if sse is not None:
@@ -405,8 +425,9 @@ class AppContext:
         from smart_locker.database.repositories import DeviceRepository
         from smart_locker.security.key_manager import key_manager
 
-        pending = self.pending_tag_bind
-        self.pending_tag_bind = None
+        with pending_state_lock:
+            pending = self.pending_tag_bind
+            self.pending_tag_bind = None
         if pending is None:
             return
 

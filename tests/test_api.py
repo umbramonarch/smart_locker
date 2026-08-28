@@ -237,6 +237,61 @@ class TestSessionEndpoints:
         resp = client.post("/api/session/end")
         assert resp.status_code == 401
 
+    def test_lan_cannot_end_kiosk_session(self, lan_client, mock_context, test_user):
+        """A LAN client must not ride the process-global kiosk session."""
+        mock_context.session_mgr.start_session(test_user)
+        resp = lan_client.post("/api/session/end")
+        assert resp.status_code == 403
+        assert mock_context.session_mgr.has_active_session
+
+    def test_lan_cannot_bind_tag_with_kiosk_session(
+        self, lan_client, mock_context, admin_user, test_devices
+    ):
+        """Kiosk bind-tag is session+admin+loopback, not LAN."""
+        mock_context.session_mgr.start_session(admin_user)
+        mock_context.pending_tag_bind = None
+        resp = lan_client.post(
+            f"/api/admin/devices/{test_devices[0].id}/bind-tag"
+        )
+        assert resp.status_code == 403
+        assert mock_context.pending_tag_bind is None
+
+    def test_lan_cannot_unbind_tag_with_kiosk_session(
+        self, lan_client, mock_context, admin_user, test_devices, db_session, hmac_key
+    ):
+        """Kiosk unbind-tag is session+admin+loopback, not LAN."""
+        DeviceRepository.bind_tag(
+            db_session,
+            test_devices[0],
+            compute_uid_hmac("AABBCCDD", hmac_key),
+        )
+        db_session.commit()
+        mock_context.session_mgr.start_session(admin_user)
+        resp = lan_client.post(
+            f"/api/admin/devices/{test_devices[0].id}/unbind-tag"
+        )
+        assert resp.status_code == 403
+        db_session.expire_all()
+        assert test_devices[0].tag_hmac is not None
+
+    def test_lan_cannot_borrow_with_kiosk_session(
+        self, lan_client, mock_context, test_user, test_devices
+    ):
+        """Borrow is a require_session mutation; LAN must not ride NFC login."""
+        mock_context.session_mgr.start_session(test_user)
+        resp = lan_client.post(f"/api/devices/{test_devices[0].id}/borrow")
+        assert resp.status_code == 403
+        assert test_devices[0].status == DeviceStatus.AVAILABLE
+
+    def test_dashboard_catalog_gets_stay_public_from_lan(
+        self, lan_client, mock_context, test_user, test_devices
+    ):
+        """Public Inventory/Locker GET stays open for LAN even with a kiosk session."""
+        mock_context.session_mgr.start_session(test_user)
+        locker = lan_client.get("/api/dashboard/devices")
+        assert locker.status_code == 200
+        assert any(d["pm_number"] == "PM-001" for d in locker.json())
+
     def test_touch_session(self, client, mock_context, test_user):
         """Verify POST /api/session/touch succeeds when a session is active."""
         mock_context.session_mgr.start_session(test_user)
@@ -860,11 +915,22 @@ class TestAdminOverlaySession:
         assert mock_context.session_mgr.current_session.user.id == test_user.id
 
     def test_register_cancel_clears_pending_tag_bind(self, client, mock_context):
-        """POST /api/register/cancel clears a pending device-tag bind."""
+        """POST /api/register/cancel clears a pending kiosk device-tag bind."""
         mock_context.pending_tag_bind = PendingTagBind(device_id=1)
         resp = client.post("/api/register/cancel")
         assert resp.status_code == 200
         assert mock_context.pending_tag_bind is None
+
+    def test_register_cancel_keeps_dashboard_armed_bind(self, client, mock_context):
+        """Public cancel must not clear a dashboard-secret-armed bind."""
+        mock_context.pending_tag_bind = PendingTagBind(
+            device_id=1, from_dashboard=True
+        )
+        resp = client.post("/api/register/cancel")
+        assert resp.status_code == 200
+        assert mock_context.pending_tag_bind is not None
+        assert mock_context.pending_tag_bind.device_id == 1
+        assert mock_context.pending_tag_bind.from_dashboard is True
 
     def test_list_devices_duplicate_name_distinct_pm(
         self, client, mock_context, test_user, db_session
@@ -1009,9 +1075,8 @@ class TestDevEndpoints:
 
 class TestAdminSyncAndUpdateEndpoints:
     """Auth-gate tests for the sync-preview, sync-status, and software-update
-    admin endpoints -- these read/mutate sync state or launch a root-privileged
-    updater, so require_session + the admin-role check is the only thing
-    standing between a LAN client and those actions.
+    admin endpoints. Kiosk mutations are loopback + session + admin role.
+    Dashboard catalog GETs stay public; dashboard mutations use the admin secret.
     """
 
     def test_sync_preview_requires_session(self, client, mock_context):
@@ -1098,6 +1163,17 @@ class TestAdminSyncAndUpdateEndpoints:
         resp = client.post("/api/admin/update")
         assert resp.status_code == 503
 
+    def test_trigger_update_refuses_lan(
+        self, lan_client, mock_context, admin_user, monkeypatch
+    ):
+        """LAN cannot launch Software Update even with a live admin session."""
+        import smart_locker.api.routes as routes_module
+
+        monkeypatch.setattr(routes_module, "_SYSTEMD_RUN", "/usr/bin/systemd-run")
+        mock_context.session_mgr.start_session(admin_user)
+        resp = lan_client.post("/api/admin/update")
+        assert resp.status_code == 403
+
     def test_exit_kiosk_requires_session(self, client, mock_context):
         resp = client.post("/api/admin/exit-kiosk")
         assert resp.status_code == 401
@@ -1130,6 +1206,8 @@ class TestAdminSyncAndUpdateEndpoints:
         resp = client.post("/api/admin/exit-kiosk")
         assert resp.status_code == 200
         assert resp.json().get("ok") is True
+        assert not mock_context.session_mgr.has_active_session
+        assert mock_context.admin_overlay_open is False
 
     def test_exit_kiosk_refuses_lan(
         self, lan_client, mock_context, admin_user, monkeypatch
@@ -1541,6 +1619,21 @@ class TestDashboardTagApi:
         assert mock_context.pending_tag_bind is not None
         assert mock_context.pending_tag_bind.device_id == test_devices[0].id
         assert mock_context.pending_tag_bind.is_expired is False
+        assert mock_context.pending_tag_bind.from_dashboard is True
+
+    def test_dashboard_bind_from_lan_is_secret_not_loopback(
+        self, lan_client, mock_context, test_devices, dashboard_secret
+    ):
+        """Dashboard bind stays secret-gated for LAN staff, not loopback-only."""
+        mock_context.pending_tag_bind = None
+        resp = lan_client.post(
+            "/api/dashboard/bind-tag",
+            json={"pm_number": "PM-001"},
+            headers=_dashboard_admin_headers(dashboard_secret),
+        )
+        assert resp.status_code == 200
+        assert mock_context.pending_tag_bind is not None
+        assert mock_context.pending_tag_bind.from_dashboard is True
 
     def test_unbind_tag_with_secret_clears_hmac(
         self, client, test_devices, db_session, hmac_key, dashboard_secret

@@ -7,7 +7,9 @@
  *              admin Register Device (PM + slot + NFC), Exit kiosk / Shut down.
  * Project: smart_locker/frontend
  * Notes: Custom properties in :root control the colour theme. Designed for
- *        a fullscreen kiosk touch display at 1920x1080. System fonts only.
+ *        a fullscreen kiosk touch display at 1920x1080 and the Riverdi 10.1"
+ *        (Register name list scrolls; Cancel/Continue stay pinned). System
+ *        fonts only.
  */
 
 /* ============================================================
@@ -163,19 +165,25 @@ body::after {
   background: var(--bg);
   clip-path: polygon(100% 0, 100% 0, 100% 100%, 100% 100%);
   transition: clip-path 0.9s var(--ease-smooth);
+  /* Hidden / closing overlays must not eat hover on the menu underneath
+     (lite fades with opacity only; clip-path none still covers the viewport). */
+  pointer-events: none;
 }
 .overlay.visible {
   clip-path: polygon(0 0, 100% 0, 100% 100%, 0 100%);
+  pointer-events: auto;
 }
 /* Close toward the left (used by inactivity overlay) */
 .overlay.hidden-left {
   clip-path: polygon(0 0, 0 0, 0 100%, 0 100%);
   transition: clip-path 0.7s var(--ease-smooth);
+  pointer-events: none;
 }
 /* Close toward the right — reverses the opening wipe (used by device detail) */
 .overlay.hidden-right {
   clip-path: polygon(100% 0, 100% 0, 100% 100%, 100% 100%);
   transition: clip-path 0.7s var(--ease-smooth);
+  pointer-events: none;
 }
 
 /* ============================================================
@@ -636,65 +644,65 @@ body::after {
   border: 1px solid var(--border);
   background: var(--surface);
   cursor: pointer;
-  transition:
-    transform 0.4s var(--ease-smooth),
-    box-shadow 0.4s var(--ease-smooth),
-    border-color 0.4s var(--ease-smooth),
-    background 0.4s var(--ease-smooth);
+  /* Hover is compositor-cheap: transform + border-color. Stagger lives on
+     a one-shot animation so it cannot delay :hover (Locker / Return / End). */
+  transition: transform 0.15s var(--ease-smooth), border-color 0.15s var(--ease-smooth);
   text-align: left;
   overflow: hidden;
   position: relative;
-  /* Stagger entrance: start hidden */
-  opacity: 0;
-  transform: translateY(40px) scale(0.95);
+  opacity: 1;
+  transform: none;
 }
 .screen.active .action-btn {
-  opacity: 1;
-  transform: translateY(0) scale(1);
+  animation: action-tile-in 0.35s var(--ease-smooth) backwards;
+  animation-delay: calc(var(--i, 0) * 0.1s);
 }
-.screen.active .action-btn:nth-child(1) { transition-delay: 0.15s; }
-.screen.active .action-btn:nth-child(2) { transition-delay: 0.25s; }
-.screen.active .action-btn:nth-child(3) { transition-delay: 0.35s; }
+@keyframes action-tile-in {
+  from {
+    opacity: 0;
+    transform: translateY(24px);
+  }
+}
+.action-btn:nth-child(1) { --i: 0; }
+.action-btn:nth-child(2) { --i: 1; }
+.action-btn:nth-child(3) { --i: 2; }
 
-/* Option 2: Ellipse-reveal background image on action buttons
-   Entrance: image reveals via expanding ellipse when screen appears.
-   Hover (mouse bonus): image scales up and tint fades slightly. */
+/* Ellipse-reveal background: entrance is a one-shot animation; hover is opacity only. */
 .btn-reveal-img {
   position: absolute;
   inset: 0;
   background-size: cover;
   background-position: center;
-  clip-path: ellipse(0% 0% at 50% 100%);
-  transition: clip-path 0.8s var(--ease-smooth), transform 0.6s var(--ease-smooth);
-  transform: scale(1.15);
+  clip-path: ellipse(120% 120% at 50% 100%);
+  transform: none;
   opacity: 0.18;
+  transition: opacity 0.2s ease;
   pointer-events: none;
 }
 .screen.active .action-btn .btn-reveal-img {
-  clip-path: ellipse(120% 120% at 50% 100%);
-  transform: scale(1.0);
+  animation: action-reveal-in 0.45s var(--ease-smooth) backwards;
+  animation-delay: calc(var(--i, 0) * 0.08s + 0.08s);
 }
-.screen.active .action-btn:nth-child(1) .btn-reveal-img { transition-delay: 0.35s; }
-.screen.active .action-btn:nth-child(2) .btn-reveal-img { transition-delay: 0.45s; }
-/* Hover bonus: image scales up slightly */
+@keyframes action-reveal-in {
+  from {
+    clip-path: ellipse(0% 0% at 50% 100%);
+  }
+}
 .action-btn:hover .btn-reveal-img {
-  transform: scale(1.08);
   opacity: 0.25;
 }
-/* Cyan tint overlay over the image */
 .btn-reveal-tint {
   position: absolute;
   inset: 0;
   background: linear-gradient(140deg, rgba(0,150,65,0.22), rgba(0,150,65,0.05));
-  clip-path: ellipse(0% 0% at 50% 100%);
-  transition: clip-path 0.8s var(--ease-smooth), opacity 0.4s var(--ease-smooth);
+  clip-path: ellipse(120% 120% at 50% 100%);
+  transition: opacity 0.2s ease;
   pointer-events: none;
 }
 .screen.active .action-btn .btn-reveal-tint {
-  clip-path: ellipse(120% 120% at 50% 100%);
+  animation: action-reveal-in 0.45s var(--ease-smooth) backwards;
+  animation-delay: calc(var(--i, 0) * 0.08s + 0.08s);
 }
-.screen.active .action-btn:nth-child(1) .btn-reveal-tint { transition-delay: 0.35s; }
-.screen.active .action-btn:nth-child(2) .btn-reveal-tint { transition-delay: 0.45s; }
 .action-btn:hover .btn-reveal-tint {
   opacity: 0.6;
 }
@@ -706,13 +714,16 @@ body::after {
   inset: 0;
   background: var(--accent-dim);
   opacity: 0;
-  transition: opacity 0.28s;
+  transition: opacity 0.2s ease;
+  pointer-events: none;
 }
-/* Enhancement D: magnetic hover handled by JS; CSS just enables smooth transform */
+.action-btn:hover {
+  border-color: var(--border-accent);
+  transform: translateY(-2px);
+}
 .action-btn:active { transform: scale(0.965) !important; }
 .action-btn.primary:hover {
   border-color: var(--border-accent);
-  box-shadow: 0 14px 50px rgba(0,150,65,0.1), 0 0 0 1px rgba(0,150,65,0.15);
 }
 .action-btn.primary:hover::after { opacity: 1; }
 .action-btn.primary {
@@ -1394,20 +1405,34 @@ body::after {
 
 /* ============================================================
    SCREEN — REGISTRATION
+   Name-pick is a flex column: search + chrome stay put, the name list
+   scrolls (flex: 1; min-height: 0; overflow-y: auto), Continue is a
+   flex-shrink: 0 foot. Bottom padding leaves room for Cancel so N names
+   cannot shove either button off the Riverdi 10.1" (typically 1280×800).
 ============================================================ */
 #screen-register {
-  justify-content: center;
-  align-items: center;
+  justify-content: flex-start;
+  align-items: stretch;
+  padding: 1rem 1.5rem 5.75rem;
 }
 
 .register-center {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 2rem;
+  justify-content: flex-start;
+  gap: 0;
   z-index: 2;
   width: 100%;
   max-width: 480px;
+  margin: 0 auto;
+  flex: 1 1 0%;
+  min-height: 0;
+  overflow: visible;
+}
+/* Tap / success / error stay centered; name-pick must start at the top. */
+.register-center:has(.register-step:not(.hidden):not(.register-step-pick)) {
+  justify-content: center;
 }
 
 .register-step {
@@ -1421,6 +1446,44 @@ body::after {
 @keyframes register-step-in {
   from { opacity: 0; transform: translateY(20px); }
   to   { opacity: 1; transform: translateY(0); }
+}
+
+/* Self-service name pick: fill the screen so the list, not the footer, yields. */
+#register-step-name,
+.register-step-pick {
+  flex: 1 1 0%;
+  min-height: 0;
+  height: 100%;
+  max-height: 100%;
+  overflow: visible;
+  justify-content: flex-start;
+  gap: 0.75rem;
+}
+#register-step-name > .register-icon-circle,
+#register-step-name > .register-title,
+#register-step-name > .register-sub,
+#register-step-name > .register-search-group,
+#register-step-name > .register-hint,
+#register-step-name > .register-next-btn {
+  flex-shrink: 0;
+}
+.register-step-head {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.55rem;
+  flex-shrink: 0;
+  width: 100%;
+  overflow: visible;
+  padding: 0.2rem 0.15rem 0.15rem;
+}
+.register-step-foot {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.75rem;
+  flex-shrink: 0;
+  width: 100%;
 }
 
 .register-icon-circle {
@@ -1473,8 +1536,15 @@ body::after {
   letter-spacing: 0.07em;
   text-transform: uppercase;
   text-align: center;
-  line-height: 1;
+  line-height: 1.12;
+  padding: 0.08em 0.12em;
+  overflow: visible;
   color: var(--text);
+}
+/* Slide-up mask must not crop glyph overshoot (Space Grotesk 800 / line box). */
+.register-title .reveal-wrap {
+  overflow: hidden;
+  padding: 0.12em 0.08em;
 }
 .register-title-sm {
   font-size: clamp(2rem, 5vw, 3.5rem);
@@ -1563,11 +1633,14 @@ body::after {
   color: var(--accent);
 }
 
-/* Scrollable name list container */
+/* Scrollable name list — takes leftover height; must not push Continue off-screen.
+   Overflow lives here only (not on the REGISTER heading). */
 .register-name-list {
   width: 100%;
   max-width: 420px;
-  max-height: 340px;
+  flex: 1 1 0%;
+  min-height: 0;
+  overflow-x: visible;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
@@ -1590,7 +1663,8 @@ body::after {
   background: transparent;
 }
 
-/* Individual name item — button styled as selectable card */
+/* Individual name item — button styled as selectable card.
+   Entrance stagger is a one-shot animation so it cannot delay :hover. */
 .name-item {
   display: block;
   width: 100%;
@@ -1604,24 +1678,23 @@ body::after {
   font-weight: 500;
   text-align: left;
   cursor: pointer;
-  transition: border-color 0.25s var(--ease-smooth),
-              background 0.25s var(--ease-smooth),
-              box-shadow 0.25s var(--ease-smooth),
-              transform 0.2s var(--ease-smooth),
-              opacity 0.5s var(--ease-smooth);
-  opacity: 0;
-  transform: translateY(12px);
   flex-shrink: 0;
-}
-.name-item.in {
   opacity: 1;
-  transform: translateY(0);
+  transform: none;
+  transition: transform 0.15s var(--ease-smooth), border-color 0.15s var(--ease-smooth);
+  animation: name-item-in 0.35s var(--ease-smooth) backwards;
+  animation-delay: calc(var(--i, 0) * 0.03s);
+}
+@keyframes name-item-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
 }
 .name-item:hover {
   border-color: var(--border-accent);
   background: var(--surface-2);
   transform: translateY(-1px);
-  box-shadow: 0 4px 16px rgba(0, 150, 65, 0.06);
 }
 .name-item.selected {
   border-color: var(--accent);
@@ -1638,8 +1711,9 @@ body::after {
   font-size: 0.82rem;
   color: var(--text-muted);
   text-align: center;
-  margin-top: 0.5rem;
+  margin-top: 0;
   line-height: 1.5;
+  flex-shrink: 0;
 }
 
 /* Admin manual registration icon — warning-tinted */
@@ -1672,6 +1746,7 @@ body::after {
   letter-spacing: 0.08em;
   text-transform: uppercase;
   cursor: pointer;
+  flex-shrink: 0;
   box-shadow: 0 8px 28px rgba(0,150,65,0.28);
   transition: transform 0.22s var(--ease), box-shadow 0.22s var(--ease), opacity 0.3s;
 }
@@ -1708,7 +1783,7 @@ body::after {
   border-radius: 999px;
 }
 
-/* Cancel button (bottom-left) */
+/* Cancel button (bottom-left, outside the scrolling name column) */
 .register-cancel-btn {
   position: absolute;
   bottom: 2rem;
@@ -1728,6 +1803,7 @@ body::after {
   text-transform: uppercase;
   cursor: pointer;
   z-index: 3;
+  flex-shrink: 0;
   transition: background 0.22s, border-color 0.22s, color 0.22s, transform 0.22s var(--ease);
 }
 .register-cancel-btn svg {
@@ -1744,6 +1820,16 @@ body::after {
   border-color: rgba(239,68,68,0.3);
   color: var(--danger);
   transform: translateX(-3px);
+}
+
+/* Circle-reveal collapses toward the click. Cancel is the click target, so
+   it would stay painted until the 1.2s clip finishes. Snap it off with the
+   screen instead of riding the shrinking circle. */
+#screen-register.exit .register-cancel-btn,
+#screen-register:not(.active) .register-cancel-btn {
+  opacity: 0;
+  pointer-events: none;
+  transition: none;
 }
 
 /* Smaller NFC wrapper for registration tap step */
@@ -1846,19 +1932,21 @@ body::after {
   border-radius: 16px;
   cursor: pointer;
   text-align: left;
-  transition:
-    transform 0.3s var(--ease-smooth),
-    border-color 0.3s var(--ease-smooth),
-    box-shadow 0.3s var(--ease-smooth),
-    background 0.3s var(--ease-smooth);
-  /* Staggered entrance */
-  opacity: 0;
-  transform: translateY(16px);
+  /* Hover is compositor-cheap: transform + border-color only. Stagger
+     lives on a one-shot animation so it cannot delay :hover. */
+  transition: transform 0.15s var(--ease-smooth), border-color 0.15s var(--ease-smooth);
+  opacity: 1;
+  transform: none;
 }
 .overlay.visible .admin-action-btn {
-  opacity: 1;
-  transform: translateY(0);
-  transition-delay: calc(var(--i, 0) * 0.07s + 0.15s);
+  animation: admin-tile-in 0.3s var(--ease-smooth) backwards;
+  animation-delay: calc(var(--i, 0) * 0.05s);
+}
+@keyframes admin-tile-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
 }
 .admin-action-btn:nth-child(1) { --i: 0; }
 .admin-action-btn:nth-child(2) { --i: 1; }
@@ -1873,14 +1961,12 @@ body::after {
 
 .admin-action-btn:hover {
   border-color: rgba(245,158,11,0.3);
-  box-shadow: 0 8px 28px rgba(245,158,11,0.08);
   transform: translateY(-2px);
 }
 .admin-action-btn:active { transform: scale(0.97); }
 
 .admin-action-btn.danger:hover {
   border-color: rgba(239,68,68,0.3);
-  box-shadow: 0 8px 28px rgba(239,68,68,0.08);
 }
 
 /* Sync button awaiting a confirm tap after a preview (W3a). */
@@ -1918,13 +2004,6 @@ body::after {
 
 .admin-btn-icon.sync-icon svg {
   animation: none;
-}
-.admin-action-btn:hover .sync-icon svg {
-  animation: admin-spin 1.2s var(--ease-smooth) infinite;
-}
-@keyframes admin-spin {
-  0%   { transform: rotate(0deg); }
-  100% { transform: rotate(360deg); }
 }
 
 .admin-btn-text { display: flex; flex-direction: column; gap: 0.15rem; }
@@ -2250,6 +2329,25 @@ html.lite #overlay-update     { background: rgba(24,29,36,0.97); }
 html.lite #overlay-power      { background: rgba(24,29,36,0.97); }
 html.lite #overlay-slot       { background: rgba(24,29,36,0.97); }
 
+/* — Admin tiles: skip stagger + hover lift in lite (Pi / reduced motion) — */
+html.lite .admin-action-btn {
+  opacity: 1;
+  transform: none;
+  animation: none !important;
+  transition: border-color 0.15s ease;
+}
+html.lite .admin-action-btn:hover,
+html.lite .admin-action-btn:active {
+  transform: none;
+}
+
+/* Register name rows: skip stagger so hover is not waiting on entrance delay. */
+html.lite .name-item {
+  animation: none !important;
+  opacity: 1;
+  transform: none;
+}
+
 /* — Custom cursor off; restore the native pointer — */
 html.lite #cursor,
 html.lite #cursor-ring      { display: none !important; }
@@ -2270,11 +2368,29 @@ html.lite .screen.exit      { opacity: 0; visibility: hidden; }
 html.lite .overlay {
   clip-path: none !important;
   opacity: 0;
+  pointer-events: none;
   transition: opacity 0.2s ease;
 }
-html.lite .overlay.visible       { opacity: 1; }
+html.lite .overlay.visible       { opacity: 1; pointer-events: auto; }
 html.lite .overlay.hidden-left,
-html.lite .overlay.hidden-right  { opacity: 0; }
+html.lite .overlay.hidden-right  { opacity: 0; pointer-events: none; }
+/* Opacity-only hide still covers the locker grid; descendants default to auto. */
+html.lite .overlay:not(.visible) *,
+html.lite .overlay.hidden-left *,
+html.lite .overlay.hidden-right * {
+  pointer-events: none;
+}
+
+html.lite .action-btn {
+  opacity: 1;
+  transform: none;
+  animation: none !important;
+  transition: border-color 0.15s ease;
+}
+html.lite .action-btn:hover,
+html.lite .action-btn:active {
+  transform: none;
+}
 
 /* — Device cards: no per-card blur animation, no parallax, no extra
      compositor layers; keep a cheap fade/slide entrance — */
@@ -2298,6 +2414,7 @@ html.lite .card-hover-reveal { display: none; }   /* blurred/filtered hover imag
 html.lite .btn-reveal-img,
 html.lite .btn-reveal-tint {
   transition: none !important;
+  animation: none !important;
   clip-path: ellipse(120% 120% at 50% 100%) !important;
   transform: none !important;
 }

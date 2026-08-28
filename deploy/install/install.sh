@@ -21,7 +21,8 @@
 #
 # Overridable via environment variables:
 #   SMART_LOCKER_DIR   (default: the repo this script lives in)
-#   SMART_LOCKER_USER  (default: the owner of that repo directory)
+#   SMART_LOCKER_USER  (default: systemd service User, then logs owner,
+#                       then APP_DIR owner if not root, else locker)
 #   SMART_LOCKER_MOUNT (default: /mnt/locker)
 set -euo pipefail
 
@@ -40,7 +41,27 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # after an exFAT copy. Harmless if already executable.
 chmod +x "$SCRIPT_DIR/install.sh" "$SCRIPT_DIR/update.sh" "$SCRIPT_DIR/build-wheelhouse.sh" "$SCRIPT_DIR/apply-sudoers.sh" 2>/dev/null || true
 APP_DIR="${SMART_LOCKER_DIR:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
-APP_USER="${SMART_LOCKER_USER:-$(stat -c '%U' "$APP_DIR")}"
+# After C3 the tree is root-owned. Never take the service account from
+# stat APP_DIR when that owner is root (USB re-install would write User=root).
+if [ -z "${SMART_LOCKER_USER:-}" ]; then
+  _svc_user="$(systemctl show -p User --value smart-locker.service 2>/dev/null || true)"
+  if [ -n "$_svc_user" ] && [ "$_svc_user" != "-" ] && [ "$_svc_user" != "root" ]; then
+    SMART_LOCKER_USER="$_svc_user"
+  elif [ -d "$APP_DIR/logs" ]; then
+    _log_user="$(stat -c '%U' "$APP_DIR/logs" 2>/dev/null || true)"
+    if [ -n "$_log_user" ] && [ "$_log_user" != "root" ]; then
+      SMART_LOCKER_USER="$_log_user"
+    fi
+  fi
+  if [ -z "${SMART_LOCKER_USER:-}" ]; then
+    _dir_user="$(stat -c '%U' "$APP_DIR" 2>/dev/null || true)"
+    if [ -n "$_dir_user" ] && [ "$_dir_user" != "root" ]; then
+      SMART_LOCKER_USER="$_dir_user"
+    fi
+  fi
+fi
+APP_USER="${SMART_LOCKER_USER:-locker}"
+export SMART_LOCKER_USER="$APP_USER"
 APP_GROUP="$(id -gn "$APP_USER")"
 MOUNT_POINT="${SMART_LOCKER_MOUNT:-/mnt/locker}"
 VENV_DIR="$APP_DIR/venv"

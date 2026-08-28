@@ -29,9 +29,15 @@ def dashboard_public_url(public_url: str) -> str:
 
     Returns:
         URL ending in ``/dashboard`` with no trailing slash.
+
+    Raises:
+        ValueError: If the origin is not ``http://`` or ``https://``.
     """
     base = (public_url or "").strip().rstrip("/")
-    if base.lower().endswith("/dashboard"):
+    lowered = base.lower()
+    if not (lowered.startswith("http://") or lowered.startswith("https://")):
+        raise ValueError("PUBLIC_URL must be an http:// or https:// origin")
+    if lowered.endswith("/dashboard"):
         return base
     return f"{base}/dashboard"
 
@@ -119,7 +125,13 @@ def write_dashboard_launcher(
         )
         return False
 
-    target = dashboard_public_url(str(public_url))
+    try:
+        target = dashboard_public_url(str(public_url))
+    except ValueError:
+        logger.warning(
+            "Dashboard launcher skipped — PUBLIC_URL must be http:// or https://."
+        )
+        return False
     try:
         _atomic_write(html_path, _html_page(target))
         _atomic_write(url_path, _url_shortcut(target))

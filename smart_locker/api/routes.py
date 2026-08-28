@@ -9,14 +9,14 @@ Description: REST API endpoints and SSE event stream for the Smart Locker kiosk.
              public owner edit, 5-tap admin unbind / arm-bind), an admin-only Excel export download, admin
              Exit kiosk / Shut down, and source sync that writes Location back.
 Project: smart_locker/api
-Notes: All device/session endpoints require an active kiosk session enforced by
-       the require_session dependency. SSE stream at /api/events pushes NFC and
-       session events to the browser. Self-registration validates against the
-       approved registrants list; admin registration bypasses this check.
-       Catalog GETs under /api/dashboard/ stay public. Dashboard mutations
-       require SMART_LOCKER_DASHBOARD_ADMIN_SECRET (header
-       X-Smart-Locker-Admin). Appliance session/shutdown/exit/update are
-       kiosk-loopback only.
+Notes: Kiosk session mutations require an active session AND a loopback
+       client (require_session). LAN browsers must not ride the process-global
+       kiosk session. SSE stream at /api/events pushes NFC and session events
+       to the browser. Self-registration validates against the approved
+       registrants list; admin registration bypasses this check. Catalog GETs
+       under /api/dashboard/ stay public. Dashboard mutations require
+       SMART_LOCKER_DASHBOARD_ADMIN_SECRET (header X-Smart-Locker-Admin), not
+       loopback. Appliance session/shutdown/exit/update are kiosk-loopback only.
 """
 
 import asyncio
@@ -34,7 +34,12 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session, selectinload
 
 import smart_locker.api.app_context as ctx_module
-from smart_locker.api.app_context import PendingRegistration, PendingTagBind
+from smart_locker.api.app_context import (
+    PendingRegistration,
+    PendingTagBind,
+    assign_pending_tag_bind,
+    pending_state_lock,
+)
 from smart_locker.auth.session_manager import UserSession
 from config.settings import (
     BASE_DIR,
@@ -231,19 +236,33 @@ def get_db() -> Session:
         session.close()
 
 
-def require_session() -> UserSession:
-    """Require an active kiosk session, refreshing the inactivity timer.
+def require_session(request: Request) -> UserSession:
+    """Require an active kiosk session from a loopback client.
 
     FastAPI dependency that checks for an active session and returns it.
     Automatically calls ``touch()`` to reset the inactivity timer on
     every request that uses this dependency.
 
+    A process-global session started from the Riverdi is not authorization
+    for a LAN browser: bind, unbind, borrow, export, and session-end stay
+    kiosk-local. Dashboard catalog GETs stay public; dashboard mutations
+    use ``require_dashboard_admin``.
+
+    Args:
+        request: Incoming ASGI request (client address, not X-Forwarded-For).
+
     Returns:
         UserSession: The currently active kiosk session.
 
     Raises:
-        HTTPException: 401 if no session is active.
+        HTTPException: 403 if the client is not loopback; 401 if no session
+            is active.
     """
+    if not _is_loopback_request(request):
+        raise HTTPException(
+            status_code=403,
+            detail="Kiosk-local access required.",
+        )
     if ctx_module.context is None or not ctx_module.context.session_mgr.has_active_session:
         raise HTTPException(status_code=401, detail="No active session.")
     session = ctx_module.context.session_mgr.current_session
@@ -301,6 +320,46 @@ def require_loopback(request: Request) -> None:
         )
 
 
+def _push_sse(payload: dict) -> None:
+    """Enqueue an SSE payload; safe from the Starlette threadpool.
+
+    ``asyncio.Queue.put_nowait`` is not thread-safe. When the event loop
+    is known, schedule the put on that loop.
+
+    Args:
+        payload: Event dict for the kiosk SSE stream.
+    """
+    ctx = ctx_module.context
+    if ctx is None:
+        return
+    queue = getattr(ctx, "sse_queue", None)
+    if queue is None:
+        return
+    loop = getattr(ctx, "_loop", None)
+    try:
+        if isinstance(loop, asyncio.AbstractEventLoop) and loop.is_running():
+            loop.call_soon_threadsafe(queue.put_nowait, payload)
+        else:
+            queue.put_nowait(payload)
+    except Exception:
+        pass
+
+
+def _end_kiosk_session(*, sse_reason: str = "explicit") -> None:
+    """Drop the process-global kiosk session and overlay bind state.
+
+    Args:
+        sse_reason: ``reason`` field on the ``session_ended`` SSE event.
+    """
+    ctx = ctx_module.context
+    if ctx is None:
+        return
+    ctx.session_mgr.end_session()
+    ctx.admin_overlay_open = False
+    assign_pending_tag_bind(ctx, None)
+    _push_sse({"event": "session_ended", "reason": sse_reason})
+
+
 def require_dashboard_admin(request: Request) -> None:
     """Require the dashboard admin secret header. Fail closed if unset.
 
@@ -332,12 +391,13 @@ def _clear_expired_pending() -> None:
     ctx = ctx_module.context
     if ctx is None:
         return
-    pending_reg = ctx.pending_registration
-    if pending_reg is not None and pending_reg.is_expired:
-        ctx.pending_registration = None
-    pending_bind = ctx.pending_tag_bind
-    if pending_bind is not None and pending_bind.is_expired:
-        ctx.pending_tag_bind = None
+    with pending_state_lock:
+        pending_reg = ctx.pending_registration
+        if pending_reg is not None and pending_reg.is_expired:
+            ctx.pending_registration = None
+        pending_bind = ctx.pending_tag_bind
+        if pending_bind is not None and pending_bind.is_expired:
+            ctx.pending_tag_bind = None
 
 
 def _pending_nfc_conflict() -> str | None:
@@ -513,16 +573,7 @@ def end_session(user_session: UserSession = Depends(require_session)):
     Returns:
         dict: ``{"success": True}``.
     """
-    ctx_module.context.session_mgr.end_session()
-    ctx_module.context.admin_overlay_open = False
-    ctx_module.context.pending_tag_bind = None
-    # Push SSE event so other tabs / SSE listeners know
-    try:
-        ctx_module.context.sse_queue.put_nowait(
-            {"event": "session_ended", "reason": "explicit"},
-        )
-    except Exception:
-        pass
+    _end_kiosk_session()
     return {"success": True}
 
 
@@ -785,7 +836,7 @@ def start_registration(body: RegisterRequest, db: Session = Depends(get_db)):
             detail="Name not found in approved list. Contact an admin for manual registration.",
         )
 
-    ctx_module.context.pending_tag_bind = None
+    assign_pending_tag_bind(ctx_module.context, None)
     ctx_module.context.pending_registration = PendingRegistration(
         display_name=body.name.strip(),
     )
@@ -798,11 +849,12 @@ def cancel_registration():
     """Cancel a pending self-registration.
 
     Clears the pending registration state so the next card tap will not
-    trigger enrollment.
+    trigger enrollment. Does not clear a dashboard-secret-armed device-tag
+    bind.
 
     Returns:
         dict: ``{"success": True, "cancelled": bool}`` — ``cancelled`` is
-              True if a registration was actually pending.
+              True if a registration (or kiosk bind) was actually pending.
 
     Raises:
         HTTPException: 503 if system not ready.
@@ -810,12 +862,18 @@ def cancel_registration():
     if ctx_module.context is None:
         raise HTTPException(status_code=503, detail="System not ready.")
 
-    was_pending = (
-        ctx_module.context.pending_registration is not None
-        or ctx_module.context.pending_tag_bind is not None
-    )
-    ctx_module.context.pending_registration = None
-    ctx_module.context.pending_tag_bind = None
+    ctx = ctx_module.context
+    with pending_state_lock:
+        bind = ctx.pending_tag_bind
+        keep_dashboard = bind is not None and bool(
+            getattr(bind, "from_dashboard", False)
+        )
+        was_pending = ctx.pending_registration is not None or (
+            bind is not None and not keep_dashboard
+        )
+        ctx.pending_registration = None
+        if not keep_dashboard:
+            ctx.pending_tag_bind = None
     return {"success": True, "cancelled": was_pending}
 
 
@@ -978,7 +1036,7 @@ def start_admin_registration(
     if conflict:
         raise HTTPException(status_code=409, detail=conflict)
 
-    ctx_module.context.pending_tag_bind = None
+    assign_pending_tag_bind(ctx_module.context, None)
     ctx_module.context.pending_registration = PendingRegistration(
         display_name=body.name.strip(),
     )
@@ -1048,7 +1106,9 @@ def register_locker_device(
     except InvalidSlot as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
 
-    ctx_module.context.pending_tag_bind = PendingTagBind(device_id=device.id)
+    assign_pending_tag_bind(
+        ctx_module.context, PendingTagBind(device_id=device.id)
+    )
     logger.info(
         "Locker device registered %s (pm=%s, slot=%s) by admin %s. Awaiting sticker.",
         device.name,
@@ -1154,7 +1214,9 @@ def start_device_tag_bind(
     if conflict:
         raise HTTPException(status_code=409, detail=conflict)
 
-    ctx_module.context.pending_tag_bind = PendingTagBind(device_id=device_id)
+    assign_pending_tag_bind(
+        ctx_module.context, PendingTagBind(device_id=device_id)
+    )
     logger.info(
         "Device tag bind started for %s (pm=%s) by admin %s. Awaiting sticker.",
         device.name,
@@ -1192,7 +1254,7 @@ def unbind_device_tag(
 
     DeviceRepository.unbind_tag(db, device)
     if ctx_module.context is not None:
-        ctx_module.context.pending_tag_bind = None
+        assign_pending_tag_bind(ctx_module.context, None)
     logger.info(
         "Unbound device tag for %s (pm=%s) by admin %s.",
         device.name,
@@ -1486,6 +1548,7 @@ def admin_exit_kiosk(
         raise HTTPException(status_code=503, detail=str(e)) from e
     except ApplianceError as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
+    _end_kiosk_session()
     logger.info("Kiosk browser stopped by admin %s.", user_session.user.display_name)
     return {"ok": True, "message": "Kiosk browser closed. Service is still running."}
 
@@ -1761,7 +1824,10 @@ def dashboard_bind_tag(
     if device is None:
         raise HTTPException(status_code=404, detail="Device not found.")
 
-    ctx_module.context.pending_tag_bind = PendingTagBind(device_id=device.id)
+    assign_pending_tag_bind(
+        ctx_module.context,
+        PendingTagBind(device_id=device.id, from_dashboard=True),
+    )
     logger.info(
         "Dashboard tag bind armed for %s (pm=%s). Awaiting sticker at kiosk.",
         device.name,
@@ -1803,7 +1869,7 @@ def dashboard_unbind_tag(
 
     DeviceRepository.unbind_tag(db, device)
     if ctx_module.context is not None:
-        ctx_module.context.pending_tag_bind = None
+        assign_pending_tag_bind(ctx_module.context, None)
     logger.info(
         "Dashboard unbound device tag for %s (pm=%s).",
         device.name,

@@ -20,7 +20,24 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_DIR="${SMART_LOCKER_DIR:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
-APP_USER="${SMART_LOCKER_USER:-$(stat -c '%U' "$APP_DIR")}"
+# After C3, APP_DIR is root-owned. Prefer the exported service account from
+# update.sh / install.sh, then systemd User / logs owner — never root from
+# stat APP_DIR (that rewrites sudoers for root and breaks sudo -n poweroff).
+if [ -z "${SMART_LOCKER_USER:-}" ]; then
+  _svc_user="$(systemctl show -p User --value "${SMART_LOCKER_SERVICE:-smart-locker}.service" 2>/dev/null || true)"
+  if [ -n "$_svc_user" ] && [ "$_svc_user" != "-" ] && [ "$_svc_user" != "root" ]; then
+    SMART_LOCKER_USER="$_svc_user"
+  elif [ -d "$APP_DIR/logs" ]; then
+    _log_user="$(stat -c '%U' "$APP_DIR/logs" 2>/dev/null || true)"
+    if [ -n "$_log_user" ] && [ "$_log_user" != "root" ]; then
+      SMART_LOCKER_USER="$_log_user"
+    fi
+  fi
+fi
+APP_USER="${SMART_LOCKER_USER:-locker}"
+if [ "$APP_USER" = "root" ]; then
+  APP_USER="locker"
+fi
 TEMPLATE="$SCRIPT_DIR/sudoers-smart-locker"
 
 if [ ! -f "$TEMPLATE" ]; then

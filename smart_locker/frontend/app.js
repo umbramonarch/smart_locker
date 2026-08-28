@@ -312,6 +312,9 @@ function setRevealOrigin(el) {
   }
 }
 
+/** @type {number|undefined} Timeout handle for hiding the device-detail overlay */
+let detailHideTimer;
+
 /**
  * Navigate to a different screen or overlay using circle-reveal (screens) or
  * polygon-wipe (overlays) transitions. Handles exit animations on the outgoing
@@ -330,7 +333,9 @@ function navigate(toId) {
 
   if (toIsOverlay) {
     // Overlays use the polygon wipe — open immediately
+    toEl.classList.remove('hidden-left', 'hidden-right');
     toEl.style.display = '';
+    if (toEl.id === 'overlay-device-detail') clearTimeout(detailHideTimer);
     requestAnimationFrame(() => requestAnimationFrame(() => {
       toEl.classList.add('visible');
       triggerSplitText(toEl);
@@ -1090,15 +1095,19 @@ function openDetail(dev, mode) {
 
 /**
  * Close the device detail overlay with a slide-right exit animation and restore
- * the previous screen (borrow or return grid).
+ * the previous screen (borrow or return grid). Lite fades with opacity only, so
+ * hidden-right (and a shorter hide) must drop hit-testing before display:none.
  */
 function closeDetail() {
   const overlay = document.getElementById('overlay-device-detail');
+  clearTimeout(detailHideTimer);
   overlay.classList.add('hidden-right');
-  setTimeout(() => {
+  const hideMs = PERF.lite ? 220 : 710;
+  detailHideTimer = setTimeout(() => {
     overlay.classList.remove('visible', 'hidden-right');
     overlay.style.display = 'none';
-  }, 710);
+    detailHideTimer = undefined;
+  }, hideMs);
   S.screen = S.prevScreen || (S.mode === 'return' ? 'return' : 'borrow');
   reportKioskDisplay(S.screen);
 }
@@ -1265,32 +1274,16 @@ function initCursor() {
 if (canHover && !PERF.lite) initCursor();
 
 /* ============================================================
-   Enhancement D: MAGNETIC HOVER on action buttons
-   Buttons subtly shift toward the cursor position on hover.
+   Enhancement D: MAGNETIC HOVER (back / close / stay / confirm)
+   Main-menu Locker / Return / End Session tiles are CSS-only hover.
 ============================================================ */
 /**
- * Initialize magnetic hover effect on action buttons, back buttons, close buttons,
- * stay button, and confirm button. Buttons subtly shift toward the cursor on hover,
- * clamped to +/-4px on action buttons to prevent overlap with neighbors.
+ * Initialize magnetic hover on back, close, stay, and confirm buttons.
+ * Main-menu `.action-btn` tiles (Locker / Return / End Session) stay CSS-only:
+ * per-mousemove getBoundingClientRect plus a 0.4s transform transition made
+ * hover feel late on a mouse.
  */
 function initMagneticHover() {
-  document.querySelectorAll('.action-btn').forEach(btn => {
-    btn.addEventListener('mousemove', e => {
-      if (PERF.lite) return;             // runtime downgrade — stop applying transforms
-      const rect = btn.getBoundingClientRect();
-      const x = e.clientX - rect.left - rect.width / 2;
-      const y = e.clientY - rect.top - rect.height / 2;
-      // Clamp to ±4px so adjacent buttons never overlap
-      const tx = Math.max(-4, Math.min(4, x * 0.04)); // 0.04 sensitivity, ±4px max shift
-      const ty = Math.max(-4, Math.min(4, y * 0.04));
-      btn.style.transform = `translate(${tx}px, ${ty}px) scale(1.01)`;
-    });
-    btn.addEventListener('mouseleave', () => {
-      btn.style.transform = '';
-    });
-  });
-
-  // Also on back buttons, close button, stay button
   document.querySelectorAll('.back-btn, .detail-close, .stay-btn, .confirm-btn').forEach(btn => {
     btn.addEventListener('mousemove', e => {
       if (PERF.lite) return;             // runtime downgrade — stop applying transforms
@@ -1425,7 +1418,8 @@ async function openRegister() {
 /**
  * Populate the registrant name list with selectable name items. Each name
  * becomes a button that the user can click to select it for registration.
- * Items are stagger-animated on entrance.
+ * Entrance stagger uses CSS --i / name-item-in (not transitionDelay), so
+ * hover is not lagged after the list appears.
  * @param {string[]} names - Array of approved registrant names to display.
  */
 function populateNameList(names) {
@@ -1446,15 +1440,10 @@ function populateNameList(names) {
     btn.type = 'button';
     btn.dataset.name = name;
     btn.textContent = name;
-    // Stagger entrance animation delay (capped at 0.6s for long lists)
-    btn.style.transitionDelay = `${Math.min(i * 0.03, 0.6)}s`;
+    // Cap stagger at 0.6s (20 × 0.03s), matching the previous entrance cap
+    btn.style.setProperty('--i', String(Math.min(i, 20)));
     btn.addEventListener('click', () => { clickSound(); selectRegistrantName(name, btn); });
     list.appendChild(btn);
-  });
-
-  // Trigger entrance animation after a frame so the initial state is captured
-  requestAnimationFrame(() => {
-    list.querySelectorAll('.name-item').forEach(el => el.classList.add('in'));
   });
 }
 
@@ -1652,6 +1641,8 @@ function toggleAdminPanel() {
  */
 async function openAdminPanel() {
   clickSound();
+  if (S.screen === 'idle') S.screen = 'admin';
+  armIdle();
   const overlay = document.getElementById('overlay-admin');
   overlay.style.display = '';
   requestAnimationFrame(() => requestAnimationFrame(() => {
@@ -2235,6 +2226,8 @@ async function adminRegisterDevice() {
   overlay.style.display = '';
   showBindStep('bind-step-list');
   document.getElementById('bind-search').value = '';
+  S.screen = 'admin';
+  armIdle();
   requestAnimationFrame(() => requestAnimationFrame(() => {
     overlay.classList.add('visible');
   }));
@@ -3010,14 +3003,18 @@ function connectSSE() {
 
 /**
  * Check if a user session is already active on the backend (handles browser refresh).
- * If an active session exists, restores the UI to the main menu for that user.
+ * Restores the main menu only for a real work-card (or admin shortcut) session.
+ * A leftover 5-tap overlay is not a login: stay on idle and do not POST overlay=false.
  * @returns {Promise<void>}
  */
 async function checkExistingSession() {
   try {
     const res = await fetch('/api/session');
     const data = await res.json();
-    if (data.active && data.user) {
+    // Leftover 5-tap overlay is not a work-card login. Do not open the
+    // Locker menu or POST overlay=false (device tags would borrow/return
+    // as that admin with no card).
+    if (data.active && data.user && !data.overlay) {
       S.user = data.user;
       fillMainMenu(data.user);
       navigate('main-menu');

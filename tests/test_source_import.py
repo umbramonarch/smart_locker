@@ -601,6 +601,25 @@ class TestRegistrantExtraction:
         finally:
             path.unlink(missing_ok=True)
 
+    def test_sync_names_failure_is_not_clean_success(self, db_session, monkeypatch):
+        """If registrant prune/sync fails, import must surface an error count."""
+        path = _create_test_excel([
+            ["Equipment", "Slot", "Location"],
+            ["PM-001", "Bay 1", "Alice"],
+        ])
+        try:
+            from smart_locker.database.engine import get_engine
+
+            def boom(session, names):
+                raise RuntimeError("prune failed")
+
+            monkeypatch.setattr(RegistrantRepository, "sync_names", boom)
+            result = import_from_source_excel(get_engine(), path)
+            assert result.errors >= 1
+            assert any("Registrant sync" in d for d in result.error_details)
+        finally:
+            path.unlink(missing_ok=True)
+
 
 class TestSiteHeaderAliases:
     """Extra Excel header names come from env; built-in English aliases still match."""
