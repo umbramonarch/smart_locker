@@ -1,15 +1,17 @@
 <!--
   File: dashboard.html
-  Description: Public network dashboard. Three tabs: Inventory (live Excel),
-               Locker (SQLite), Display (what the kiosk is showing). No login.
-               Anyone can change owner on Inventory (confirm), not for locker
-               PMs. 5-tap the header clock for users, logs, and NFC unbind /
-               arm-bind. Locker shows Tagged / No tag.
+  Description: Network dashboard. Three tabs: Inventory (live Excel),
+               Locker (SQLite), Display (what the kiosk is showing).
+               Inventory and Locker GETs are public. Owner change on
+               Inventory (confirm) needs X-Smart-Locker-Admin; not for
+               locker PMs. 5-tap the header clock reveals users, logs,
+               and NFC unbind / arm-bind — it is not authorization.
+               Locker shows Tagged / No tag.
   Project: smart_locker/frontend
   Notes: Kiosk colours (#181d24 / #009641) with a normal desktop cursor,
          text selection, and scroll. dashboard.js polls Inventory/Locker
          every 30s and Display more often. Dashboard 5-tap does not start
-         a kiosk admin session.
+         a kiosk admin session and is not auth.
 -->
 <!DOCTYPE html>
 <html lang="en">
@@ -119,7 +121,7 @@
         <p class="display-hint">View only — this does not control the kiosk.</p>
         <p class="display-label">Screen</p>
         <p class="display-value" id="display-screen">—</p>
-        <p class="display-label">Current user</p>
+        <p class="display-label">Kiosk</p>
         <p class="display-value" id="display-user">—</p>
       </div>
     </section>

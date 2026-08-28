@@ -76,8 +76,15 @@ class TestDashboardPublicTabs:
         assert "/api/dashboard/display" in js
         assert "/api/kiosk/display" not in js
         html = _html()
+        js = _js()
         assert 'id="display-screen"' in html
         assert 'id="display-user"' in html
+        assert "data.occupied" in js
+        assert "In use" in js
+        fetch = js.split("async function fetchDisplay", 1)[1].split(
+            "async function ", 1
+        )[0]
+        assert "user_name" not in fetch
 
 
 class TestDashboardFiveTapAdmin:
@@ -195,6 +202,7 @@ class TestDashboardPollAndAdminFetch:
         assert "tablesInFlight" in js
         assert "Promise.all" in js
         assert "SEARCH_DEBOUNCE_MS" in js
+        assert "visibilitychange" in js
 
     def test_fetch_admin_does_not_copy_inventory_excel(self):
         """Opening 5-tap must not await fetchTables / GET inventory."""
@@ -206,4 +214,26 @@ class TestDashboardPollAndAdminFetch:
         assert "/api/dashboard/inventory" not in fn
         assert "/api/dashboard/users" in fn
         assert "/api/dashboard/transactions" in fn
-        assert "_escEl" in js
+        assert "visibilitychange" in js
+        assert "sessionStorage.removeItem" in js
+        assert "ADMIN_SECRET_KEY" in js
+        unbind = js.split("async function unbindTag", 1)[1].split(
+            "async function ", 1
+        )[0]
+        assert "fetchAdminTables" in unbind
+
+
+class TestDashboardEsc:
+    """esc() must be safe for HTML attributes (data-pm, data-owner)."""
+
+    def test_esc_encodes_quotes(self):
+        """Attribute interpolation encodes quotes, not only &<>."""
+        js = _js()
+        fn = js.split("function esc(str)", 1)[1].split("function ", 1)[0]
+        assert "&quot;" in fn
+        assert "&#39;" in fn
+        assert "&amp;" in fn
+        assert "&lt;" in fn
+        assert "&gt;" in fn
+        assert "data-pm=\"${esc(pm)}\"" in js or 'data-pm="${esc(pm)}"' in js
+        assert "data-owner=\"${esc(owner" in js or 'data-owner="${esc(owner' in js

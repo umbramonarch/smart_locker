@@ -297,10 +297,9 @@ class DeviceRepository:
         from smart_locker.sync.source_import import pm_match_key
 
         key = pm_match_key(want)
-        for device in session.execute(select(Device)).scalars():
-            if pm_match_key(device.pm_number) == key:
-                return device
-        return None
+        return session.execute(
+            select(Device).where(func.lower(Device.pm_number) == key)
+        ).scalar_one_or_none()
 
     @staticmethod
     def find_by_slot(session: Session, locker_slot: int) -> Device | None:

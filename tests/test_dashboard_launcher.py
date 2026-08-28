@@ -38,6 +38,13 @@ class TestDashboardPublicUrl:
             "http://192.168.1.10:8000/dashboard"
         )
 
+    def test_rejects_scheme_less(self):
+        """Host:port without http(s) must not be treated as a web origin."""
+        import pytest
+
+        with pytest.raises(ValueError, match="http"):
+            dashboard_public_url("192.168.1.10:8000")
+
 
 class TestWriteDashboardLauncher:
     """HTML + .url are written next to each other on the share path."""
@@ -87,3 +94,21 @@ class TestWriteDashboardLauncher:
         missing = tmp_path / "not-mounted" / "locker"
         assert write_dashboard_launcher(missing, "http://192.168.1.10:8000") is False
         assert not missing.exists()
+
+    def test_scheme_less_url_is_rejected(self, tmp_path):
+        """A host:port PUBLIC_URL must not become a file:// shortcut target."""
+        share = tmp_path / "locker"
+        share.mkdir()
+        assert write_dashboard_launcher(share, "192.168.1.10:8000") is False
+        assert list(share.iterdir()) == []
+
+    def test_retries_when_share_becomes_available(self, tmp_path):
+        """Share down at first call is skipped; a later call writes once the path exists."""
+        share = tmp_path / "locker"
+        origin = "http://192.168.1.10:8000"
+        assert write_dashboard_launcher(share, origin) is False
+        assert not share.exists()
+        share.mkdir()
+        assert write_dashboard_launcher(share, origin) is True
+        assert (share / "dashboard.html").is_file()
+        assert (share / "dashboard.url").is_file()

@@ -248,6 +248,22 @@ class TestDeviceRepository:
         assert device.tag_hmac == digest
         assert device.name == "New"
 
+    def test_find_by_pm_is_sql_equality_not_full_scan(self, db_session, monkeypatch):
+        """Miss and case-insensitive hit use SQL, not DeviceRepository.list_all."""
+        DeviceRepository.create(
+            db_session, name="Meter", device_type="t", pm_number="PM-001",
+        )
+        db_session.commit()
+
+        def boom(*_a, **_k):
+            raise AssertionError("find_by_pm must not scan every Device")
+
+        monkeypatch.setattr(DeviceRepository, "list_all", boom)
+        found = DeviceRepository.find_by_pm(db_session, "pm-001")
+        assert found is not None
+        assert found.pm_number == "PM-001"
+        assert DeviceRepository.find_by_pm(db_session, "PM-MISSING") is None
+
     def test_update_metadata_ignores_status_and_borrower(self, db_session):
         """Re-import must not overwrite locker status or current borrower."""
         user = UserRepository.create(

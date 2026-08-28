@@ -285,3 +285,45 @@ class TestImportMutex:
             release.set()
             t.join(2)
 
+
+class TestSchedulerExceptionLogging:
+    """Interval/watch/startup wrappers log failures instead of swallowing them."""
+
+    def test_interval_logs_import_exception(self, monkeypatch):
+        """A raised import still logs at exception and retries the dashboard launcher."""
+        calls = []
+
+        monkeypatch.setattr(
+            "smart_locker.sync.dashboard_launcher.write_dashboard_launcher",
+            lambda *_a, **_k: calls.append("launcher") or True,
+        )
+        monkeypatch.setattr("config.settings.DASHBOARD_SHARE_PATH", "/mnt/locker")
+        monkeypatch.setattr("config.settings.PUBLIC_URL", "http://192.168.1.10:8000")
+
+        with patch(
+            "smart_locker.sync.scheduler.run_source_import_exclusive",
+            side_effect=RuntimeError("import failed"),
+        ):
+            with patch("smart_locker.sync.scheduler.logger") as mock_logger:
+                sched._interval_import(MagicMock(), "/x.xlsx")
+                mock_logger.exception.assert_called()
+                logged = " ".join(str(c) for c in mock_logger.exception.call_args_list)
+                assert "Periodic source import failed" in logged
+        assert calls == ["launcher"]
+
+    def test_startup_retries_dashboard_launcher(self, monkeypatch):
+        """Startup still tries the share launcher after the immediate import."""
+        calls = []
+        monkeypatch.setattr(
+            "smart_locker.sync.dashboard_launcher.write_dashboard_launcher",
+            lambda *_a, **_k: calls.append("launcher") or True,
+        )
+        monkeypatch.setattr("config.settings.DASHBOARD_SHARE_PATH", "/mnt/locker")
+        monkeypatch.setattr("config.settings.PUBLIC_URL", "http://192.168.1.10:8000")
+        with patch(
+            "smart_locker.sync.scheduler.run_source_import_exclusive",
+            return_value=None,
+        ):
+            sched._try_dashboard_launcher()
+        assert calls == ["launcher"]
+

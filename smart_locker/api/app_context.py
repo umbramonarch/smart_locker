@@ -12,6 +12,7 @@ Notes: The module-level singleton 'context' is initialized by server.py's
 
 import asyncio
 import logging
+import threading
 import time
 from dataclasses import dataclass, field
 
@@ -22,6 +23,9 @@ logger = logging.getLogger(__name__)
 
 # How long a self-registration attempt remains valid before the user must restart
 REGISTRATION_TIMEOUT_SECONDS = 60
+
+# HTTP threadpool and the NFC bridge both write pending bind/registration.
+pending_state_lock = threading.RLock()
 
 
 @dataclass
@@ -46,18 +50,43 @@ class PendingRegistration:
 class PendingTagBind:
     """Holds state for an admin device-tag bind awaiting an NFC sticker tap.
 
-    Created when an admin picks a locker device in Register Device. Valid for
+    Created when an admin picks a locker device in Register Device, or when
+    dashboard staff arm a bind with the admin secret. Valid for
     ``REGISTRATION_TIMEOUT_SECONDS`` (60s). The next insert binds that row
-    instead of borrowing.
+    instead of borrowing. ``from_dashboard`` marks a secret-armed window so
+    public ``POST /api/register/cancel`` cannot clear it.
     """
 
     device_id: int
     created_at: float = field(default_factory=time.monotonic)
+    from_dashboard: bool = False
 
     @property
     def is_expired(self) -> bool:
         """Whether the bind window has elapsed without a sticker tap."""
         return (time.monotonic() - self.created_at) > REGISTRATION_TIMEOUT_SECONDS
+
+
+def assign_pending_tag_bind(ctx, bind: PendingTagBind | None) -> None:
+    """Set ``pending_tag_bind`` under the HTTP/NFC shared lock.
+
+    Args:
+        ctx: Application context (or test double with the same attribute).
+        bind: New pending bind, or None to clear.
+    """
+    with pending_state_lock:
+        ctx.pending_tag_bind = bind
+
+
+def assign_pending_registration(ctx, pending: PendingRegistration | None) -> None:
+    """Set ``pending_registration`` under the HTTP/NFC shared lock.
+
+    Args:
+        ctx: Application context (or test double with the same attribute).
+        pending: New pending registration, or None to clear.
+    """
+    with pending_state_lock:
+        ctx.pending_registration = pending
 
 
 class AppContext:
@@ -81,7 +110,10 @@ class AppContext:
         self.authenticator = Authenticator(hmac_key=key_manager.hmac_key)
         self.session_mgr = SessionManager(timeout_seconds=SESSION_TIMEOUT_SECONDS)
         self.sse_queue: asyncio.Queue = asyncio.Queue()
+        self._sse_subscribers: list[asyncio.Queue] = []
+        self._sse_lock = threading.Lock()
         self._bridge_task: asyncio.Task | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._nfc_available = False
         self.pending_registration: PendingRegistration | None = None
         self.pending_tag_bind: PendingTagBind | None = None
@@ -102,6 +134,7 @@ class AppContext:
         """
         from smart_locker.nfc.exceptions import NFCError
 
+        self._loop = asyncio.get_running_loop()
         try:
             reader_name = self.reader.start()
             self._nfc_available = True
@@ -133,6 +166,57 @@ class AppContext:
         if self._nfc_available:
             self.reader.stop()
 
+    def subscribe_sse(self) -> asyncio.Queue:
+        """Register a new SSE subscriber queue (one per EventSource client).
+
+        Returns:
+            Queue that will receive a copy of every kiosk SSE payload.
+        """
+        queue: asyncio.Queue = asyncio.Queue()
+        with self._sse_lock:
+            self._sse_subscribers.append(queue)
+        return queue
+
+    def unsubscribe_sse(self, queue: asyncio.Queue) -> None:
+        """Drop a subscriber queue when the EventSource client disconnects.
+
+        Args:
+            queue: Queue previously returned by ``subscribe_sse``.
+        """
+        with self._sse_lock:
+            try:
+                self._sse_subscribers.remove(queue)
+            except ValueError:
+                pass
+
+    def _sse_targets(self) -> list[asyncio.Queue]:
+        """Queues that should receive the next event.
+
+        HTTP EventSource clients each have a subscriber queue. Tests and the
+        NFC bridge still use ``sse_queue`` when nobody is subscribed.
+        """
+        with self._sse_lock:
+            extras = list(self._sse_subscribers)
+        if extras:
+            return extras
+        return [self.sse_queue]
+
+    def broadcast_sse(self, payload: dict) -> None:
+        """Copy ``payload`` onto every SSE queue. Safe from the threadpool.
+
+        Args:
+            payload: Event dict for kiosk / dashboard SSE clients.
+        """
+        loop = self._loop
+        for queue in self._sse_targets():
+            try:
+                if isinstance(loop, asyncio.AbstractEventLoop) and loop.is_running():
+                    loop.call_soon_threadsafe(queue.put_nowait, dict(payload))
+                else:
+                    queue.put_nowait(dict(payload))
+            except Exception:
+                logger.debug("SSE fan-out drop", exc_info=True)
+
     async def _nfc_bridge_loop(self) -> None:
         """Poll NFC events and push SSE events to the browser.
 
@@ -155,8 +239,8 @@ class AppContext:
             currently_active = self.session_mgr.has_active_session
             if had_session and not currently_active:
                 self.admin_overlay_open = False
-                self.pending_tag_bind = None
-                await self.sse_queue.put({"event": "session_timeout"})
+                assign_pending_tag_bind(self, None)
+                self.broadcast_sse({"event": "session_timeout"})
                 logger.info("Session timeout detected by NFC bridge.")
             had_session = currently_active
 
@@ -189,11 +273,11 @@ class AppContext:
                     if self.session_mgr.has_active_session:
                         self.session_mgr.end_session()
                     self.admin_overlay_open = False
-                    self.pending_tag_bind = None
-                    await self.sse_queue.put({"event": "reader_disconnected"})
+                    assign_pending_tag_bind(self, None)
+                    self.broadcast_sse({"event": "reader_disconnected"})
                 elif event.event_type == ReaderEventType.CONNECTED:
                     logger.info("NFC reader reconnected.")
-                    await self.sse_queue.put({"event": "reader_connected"})
+                    self.broadcast_sse({"event": "reader_connected"})
 
     async def _dispatch_insert(
         self, uid: str, get_session, reader_name: str = ""
@@ -203,35 +287,49 @@ class AppContext:
         Expired registration and bind windows are dropped so the tap is
         classified instead of consumed as a failed enroll/bind. A leftover
         overlay session is ended when a registration window expires so the
-        same tap can log in rather than log out.
+        same tap can log in rather than log out. Bind + registration are
+        snapshotted under ``pending_state_lock`` so HTTP cancel/arm cannot
+        interleave with this branch.
         """
-        if self.pending_registration is not None:
-            if self.pending_registration.is_expired:
-                logger.info(
-                    "Registration window expired for '%s'.",
-                    self.pending_registration.display_name,
-                )
-                self.pending_registration = None
-                self._end_leftover_session()
-            else:
-                await self._handle_registration_tap(uid, get_session)
-                return
+        with pending_state_lock:
+            pending_reg = self.pending_registration
+            pending_bind = self.pending_tag_bind
+            expired_reg = bool(pending_reg is not None and pending_reg.is_expired)
+            expired_bind = bool(pending_bind is not None and pending_bind.is_expired)
+            if expired_reg:
+                assign_pending_registration(self, None)
+                pending_reg = None
+            if expired_bind:
+                assign_pending_tag_bind(self, None)
+                pending_bind = None
 
-        if self.pending_tag_bind is not None:
-            if self.pending_tag_bind.is_expired:
-                logger.info(
-                    "Device tag bind window expired for device_id=%d.",
-                    self.pending_tag_bind.device_id,
-                )
-                self.pending_tag_bind = None
-            elif self._uid_is_work_card(uid, get_session):
+        if expired_reg:
+            logger.info("Registration window expired.")
+            self._end_leftover_session()
+
+        if expired_bind:
+            logger.info("Device tag bind window expired.")
+
+        if pending_reg is not None:
+            await self._handle_registration_tap(uid, get_session)
+            return
+
+        if pending_bind is not None:
+            if self._uid_is_work_card(uid, get_session):
                 # Bind is for stickers. A work card must still log in (or stay
                 # logged in) rather than consuming the window as tag_bind_failed.
-                logger.info(
-                    "Work card tapped during device-tag bind; bind window kept."
-                )
                 if self.session_mgr.has_active_session:
+                    logger.info(
+                        "Work card tapped during device-tag bind; bind window kept."
+                    )
                     return
+                logger.info(
+                    "Work card login during device-tag bind; bind window will clear."
+                )
+            elif self._uid_is_borrowed_device_tag(uid, get_session):
+                logger.info(
+                    "Borrowed device tag during bind; unattended return wins."
+                )
             else:
                 await self._handle_tag_bind_tap(uid, get_session)
                 return
@@ -258,12 +356,11 @@ class AppContext:
 
         if result.event in ("session_ended", "auth_success"):
             self.admin_overlay_open = False
-            if result.event == "session_ended":
-                self.pending_tag_bind = None
+            assign_pending_tag_bind(self, None)
 
         sse = result.to_sse()
         if sse is not None:
-            await self.sse_queue.put(sse)
+            self.broadcast_sse(sse)
 
     async def _handle_registration_tap(self, uid: str, get_session) -> None:
         """Enroll a new user when a card is tapped during pending registration.
@@ -285,15 +382,17 @@ class AppContext:
         from smart_locker.security.key_manager import key_manager
         from smart_locker.services.user_service import UserService
 
-        pending = self.pending_registration
-        self.pending_registration = None
+        pending = None
+        with pending_state_lock:
+            pending = self.pending_registration
+            assign_pending_registration(self, None)
         try:
             if pending is None:
                 return
 
             if pending.is_expired:
                 logger.info("Registration expired for '%s'.", pending.display_name)
-                await self.sse_queue.put({
+                self.broadcast_sse({
                     "event": "registration_failed",
                     "reason": "Registration timed out. Please try again.",
                 })
@@ -308,7 +407,7 @@ class AppContext:
                     uid_hmac = compute_uid_hmac(uid, key_manager.hmac_key)
                     if DeviceRepository.find_by_tag_hmac(db_session, uid_hmac) is not None:
                         logger.warning("Registration failed: UID is already a device tag.")
-                        await self.sse_queue.put({
+                        self.broadcast_sse({
                             "event": "registration_failed",
                             "reason": "This tag is already bound to a device.",
                         })
@@ -321,7 +420,7 @@ class AppContext:
                             "Registration failed: card already enrolled to %s.",
                             existing.display_name,
                         )
-                        await self.sse_queue.put({
+                        self.broadcast_sse({
                             "event": "registration_failed",
                             "reason": "This card is already registered.",
                         })
@@ -338,7 +437,7 @@ class AppContext:
                         user.display_name,
                         user.id,
                     )
-                    await self.sse_queue.put({
+                    self.broadcast_sse({
                         "event": "registration_success",
                         "user": {
                             "id": user.id,
@@ -348,7 +447,7 @@ class AppContext:
                     })
             except Exception:
                 logger.exception("Registration failed for '%s'.", pending.display_name)
-                await self.sse_queue.put({
+                self.broadcast_sse({
                     "event": "registration_failed",
                     "reason": "Registration failed. Please try again.",
                 })
@@ -381,6 +480,34 @@ class AppContext:
             logger.exception("Work-card lookup failed during tag-bind intercept.")
             return False
 
+    def _uid_is_borrowed_device_tag(self, uid: str, get_session) -> bool:
+        """Whether this UID is a sticker on a currently borrowed locker device.
+
+        Unattended return of a borrowed sticker must win over an armed bind
+        window so the slot overlay still runs. Lookup failures are treated
+        as not-borrowed so a new/available tag can still bind.
+
+        Args:
+            uid: Hex-encoded UID from the NFC reader.
+            get_session: Callable returning a SQLAlchemy session context manager.
+
+        Returns:
+            True if the UID matches a device whose status is BORROWED.
+        """
+        try:
+            from smart_locker.database.models import DeviceStatus
+            from smart_locker.database.repositories import DeviceRepository
+            from smart_locker.security.hashing import compute_uid_hmac
+            from smart_locker.security.key_manager import key_manager
+
+            digest = compute_uid_hmac(uid, key_manager.hmac_key)
+            with get_session() as db_session:
+                device = DeviceRepository.find_by_tag_hmac(db_session, digest)
+            return device is not None and device.status == DeviceStatus.BORROWED
+        except Exception:
+            logger.exception("Borrowed-tag lookup failed during tag-bind intercept.")
+            return False
+
     def _end_leftover_session(self) -> None:
         """Drop a leftover overlay session with no session_ended SSE.
 
@@ -405,8 +532,9 @@ class AppContext:
         from smart_locker.database.repositories import DeviceRepository
         from smart_locker.security.key_manager import key_manager
 
-        pending = self.pending_tag_bind
-        self.pending_tag_bind = None
+        with pending_state_lock:
+            pending = self.pending_tag_bind
+            assign_pending_tag_bind(self, None)
         if pending is None:
             return
 
@@ -414,7 +542,7 @@ class AppContext:
 
         if pending.is_expired:
             logger.info("Device tag bind timed out for device_id=%d.", pending.device_id)
-            await self.sse_queue.put({
+            self.broadcast_sse({
                 "event": "tag_bind_failed",
                 "reason": "Bind timed out. Please try again.",
             })
@@ -424,7 +552,7 @@ class AppContext:
             with get_session() as db_session:
                 device = DeviceRepository.find_by_id(db_session, pending.device_id)
                 if device is None:
-                    await self.sse_queue.put({
+                    self.broadcast_sse({
                         "event": "tag_bind_failed",
                         "reason": "Device not found.",
                     })
@@ -437,14 +565,14 @@ class AppContext:
                     device.name,
                     device.pm_number,
                 )
-                await self.sse_queue.put({
+                self.broadcast_sse({
                     "event": "tag_bind_success",
                     "device_id": device.id,
                     "device_name": device.name,
                     "pm_number": device.pm_number,
                 })
         except ValueError as e:
-            await self.sse_queue.put({
+            self.broadcast_sse({
                 "event": "tag_bind_failed",
                 "reason": str(e),
             })
@@ -452,7 +580,7 @@ class AppContext:
             logger.exception(
                 "Device tag bind failed for device_id=%d.", pending.device_id
             )
-            await self.sse_queue.put({
+            self.broadcast_sse({
                 "event": "tag_bind_failed",
                 "reason": "Bind failed. Please try again.",
             })

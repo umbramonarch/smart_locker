@@ -136,7 +136,11 @@ class ImportResult:
 
 @dataclass(frozen=True)
 class CatalogRow:
-    """Catalog fields copied from one Excel PM row into a locker device."""
+    """Catalog fields copied from one Excel PM row into a locker device.
+
+    ``present`` names the catalog fields whose Excel columns exist on this
+    sheet so import can skip missing columns instead of wiping SQLite.
+    """
 
     pm_number: str
     name: str
@@ -145,6 +149,7 @@ class CatalogRow:
     manufacturer: str | None
     model: str | None
     calibration_due: date | None
+    present: frozenset[str] = field(default_factory=frozenset)
 
 
 class CatalogReadError(Exception):
@@ -401,6 +406,19 @@ def _catalog_from_row(
 
     manufacturer = _cell_str(row, cols["manufacturer"])
     model_val = _cell_str(row, cols["model"])
+    name_cell = _cell_str(row, cols["name"])
+    present: set[str] = set()
+    if cols["name"] is not None and name_cell:
+        present.add("name")
+    if cols["type"] is not None and row[cols["type"]]:
+        present.add("device_type")
+    if cols["serial"] is not None and _cell_str(row, cols["serial"]):
+        present.add("serial_number")
+    if cols["manufacturer"] is not None and manufacturer:
+        present.add("manufacturer")
+    if cols["model"] is not None and model_val:
+        present.add("model")
+
     if compose_name:
         name_parts = []
         if manufacturer:
@@ -409,7 +427,7 @@ def _catalog_from_row(
             name_parts.append(model_val)
         name = " ".join(name_parts) if name_parts else pm_number
     else:
-        name = _cell_str(row, cols["name"]) or pm_number
+        name = name_cell or pm_number
 
     device_type = default_type
     if cols["type"] is not None and row[cols["type"]]:
@@ -418,6 +436,8 @@ def _catalog_from_row(
     calibration_due = None
     if cols["calibration"] is not None:
         calibration_due = parse_date(row[cols["calibration"]])
+        if calibration_due is not None:
+            present.add("calibration_due")
 
     return CatalogRow(
         pm_number=pm_number,
@@ -427,6 +447,7 @@ def _catalog_from_row(
         manufacturer=manufacturer,
         model=model_val,
         calibration_due=calibration_due,
+        present=frozenset(present),
     )
 
 
@@ -568,19 +589,27 @@ def import_from_source_excel(
                     result.non_locker_skipped += 1
                     continue
                 serial = catalog.serial_number
-                if serial:
+                if "serial_number" in catalog.present and serial:
                     holder = DeviceRepository.find_by_serial(session, serial)
                     if holder is not None and holder.id != existing.id:
-                        serial = existing.serial_number
+                        serial = None
+                updates: dict = {}
+                if "name" in catalog.present:
+                    updates["name"] = catalog.name
+                if "device_type" in catalog.present and catalog.device_type:
+                    updates["device_type"] = catalog.device_type
+                if "serial_number" in catalog.present and serial:
+                    updates["serial_number"] = serial
+                if "manufacturer" in catalog.present and catalog.manufacturer:
+                    updates["manufacturer"] = catalog.manufacturer
+                if "model" in catalog.present and catalog.model:
+                    updates["model"] = catalog.model
+                if "calibration_due" in catalog.present and catalog.calibration_due is not None:
+                    updates["calibration_due"] = catalog.calibration_due
                 changed = DeviceRepository.update_metadata(
                     session,
                     existing,
-                    name=catalog.name,
-                    device_type=catalog.device_type,
-                    serial_number=serial,
-                    manufacturer=catalog.manufacturer,
-                    model=catalog.model,
-                    calibration_due=catalog.calibration_due,
+                    **updates,
                 )
                 if changed:
                     result.updated += 1
@@ -616,6 +645,8 @@ def import_from_source_excel(
                 reg_session.commit()
         except Exception as e:
             logger.warning("Registrant name sync failed: %s", e)
+            result.errors += 1
+            result.error_details.append(f"Registrant sync: {e}")
 
     if result.updated > 0:
         from config.settings import EXCEL_AUTO_EXPORT, EXCEL_SYNC_PATH

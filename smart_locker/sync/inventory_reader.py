@@ -4,8 +4,9 @@ Description: Read the full catalog Excel for the dashboard Inventory tab.
              Live share file, not SQLite. Missing or locked workbook is an
              error so the tab can fail without taking Locker down.
 Project: smart_locker/sync
-Notes: Reuses source_import column detection. Does not insert or update
-       locker rows. Owner edits belong in a later change.
+Notes: Reuses source_import column detection. This module is read-only and
+       does not insert or update locker rows. Owner POST lives on the
+       dashboard route (SMART_LOCKER_DASHBOARD_ADMIN_SECRET), not here.
 """
 
 from dataclasses import dataclass

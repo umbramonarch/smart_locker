@@ -1281,14 +1281,14 @@ that bridges card taps to the browser.
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/session` | Current session state |
+| `GET` | `/api/session` | Current session state (kiosk loopback; LAN 403) |
 | `POST` | `/api/session/end` | End the session |
 | `POST` | `/api/session/touch` | Reset the inactivity timer |
 | `GET` | `/api/devices` | All devices with status, borrower, metadata |
 | `POST` | `/api/devices/{id}/borrow` | Borrow a device |
 | `POST` | `/api/devices/{id}/return` | Return a device (admins on behalf) |
-| `POST` | `/api/register` | Start self-registration (validates the name) |
-| `POST` | `/api/register/cancel` | Cancel a pending self-registration |
+| `POST` | `/api/register` | Start self-registration (validates the name; kiosk loopback) |
+| `POST` | `/api/register/cancel` | Cancel a pending self-registration (kiosk loopback) |
 | `GET` | `/api/registrants` | Approved names for self-registration |
 | `POST` | `/api/admin/session` | Start the hidden admin-panel session |
 | `POST` | `/api/admin/register` | Admin manual enrolment (skips name check) |
@@ -1298,7 +1298,7 @@ that bridges card taps to the browser.
 | `GET` | `/api/admin/export-excel` | Download the full database as `.xlsx` |
 | `GET` | `/api/dashboard/devices` | Public locker inventory (SQLite, no auth) |
 | `GET` | `/api/dashboard/inventory` | Public company catalog (live Excel, no auth) |
-| `GET` | `/api/dashboard/display` | Public kiosk screen snapshot (no auth) |
+| `GET` | `/api/dashboard/display` | Public kiosk screen snapshot (no person names; no auth) |
 | `GET` | `/api/dashboard/owners` | Owner dropdown names (users + registrants + in-locker token); admin secret |
 | `POST` | `/api/dashboard/owner` | Change owner of a non-locker PM (Excel only; 409 if in locker); admin secret |
 | `POST` | `/api/dashboard/bind-tag` | Arm 60s NFC bind for a locker PM (admin secret; tap at the reader) |
@@ -1306,7 +1306,7 @@ that bridges card taps to the browser.
 | `POST` | `/api/kiosk/display` | Kiosk heartbeat of the current screen |
 | `GET` | `/api/dashboard/transactions` | Transaction history, last 500 (gated; 5-tap overlay is not auth) |
 | `GET` | `/api/dashboard/users` | Registered-users list (gated; 5-tap overlay is not auth) |
-| `GET` | `/api/events` | SSE stream — card-tap, auth, and session events |
+| `GET` | `/api/events` | SSE stream — card-tap, auth, and session events (kiosk loopback only) |
 
 `GET /api/devices` returns per device: `id`, `pm_number`, `name`, `device_type`,
 `serial_number`, `manufacturer`, `model`, `locker_slot`, `description`,
@@ -1315,9 +1315,9 @@ digest). Device-tag HMAC is never on this payload, the public dashboard, or Exce
 (export uses Tagged Yes/No). `GET /api/dashboard/devices` also includes `has_tag`.
 
 **The NFC → browser bridge:** the background NFC listener detects a tap and puts an event on
-a queue; `GET /api/events` streams it to the browser, which then runs the auth/registration
-flow. FastAPI serves the kiosk UI (`index.html`) and the dashboard as static files from
-`smart_locker/api/server.py`.
+a queue; `GET /api/events` streams it to the kiosk browser (loopback only), which then runs
+the auth/registration flow. FastAPI serves the kiosk UI (`index.html`) and the dashboard as
+static files from `smart_locker/api/server.py`.
 
 ---
 
