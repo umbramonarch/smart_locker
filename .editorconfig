@@ -1,0 +1,21 @@
+root = true
+
+[*]
+charset = utf-8
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.{js,html,css,yml,yaml,json,md}]
+indent_style = space
+indent_size = 2
+
+[*.{py,c,h}]
+indent_style = space
+indent_size = 4
+
+# Match .gitattributes: Pi deploy artifacts must stay LF.
+[*.{sh,service,desktop,mount,snippet}]
+end_of_line = lf
+
+[deploy/**]
+end_of_line = lf

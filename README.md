@@ -2,13 +2,17 @@
 
 Equipment borrowing/returning system using NFC work cards. Users tap their card on an ACR1252U NFC reader to authenticate, then borrow or return devices on a touch-display kiosk UI. All transactions are logged in a SQLite database. Card UIDs are encrypted (AES-256-GCM) and looked up by HMAC-SHA256 — only admins can view raw card UIDs.
 
+## Status
+
+**usable / shipped** — tagged `v0.1.0` (2026-08-20). Work on `main` after that tag is **Unreleased** (see `CHANGELOG.md`). Merging to `main` is not a release; tag `vX.Y.Z` only when shipping.
+
 ## Requirements
 
 - **Raspberry Pi 4** (2 GB+), 64-bit Raspberry Pi OS — production target. (Also runs on
   Windows/macOS for development.)
 - A running **PC/SC** service: `pcscd` on Linux/Pi, the **Smart Card** service on Windows
 - ACR1252U NFC reader (USB)
-- Python 3.11+
+- Python **3.11+** on Windows/dev (floor); **Python 3.13 / cp313** on Raspberry Pi OS trixie (production pin, `.python-version`)
 - NFC cards (MIFARE Classic, Ultralight, NTAG, DESFire — any card type with a UID)
 - For the appliance: a touch display, and a CIFS/SMB file share for the device Excel.
   No internet is needed at runtime. See **GUIDE.md** and **`deploy/`**.
@@ -28,7 +32,7 @@ Work branches (cut from `main`): `feature/`, `fix/`, `refactor/`, `docs/`, `chor
   `main` has moved. Merge hotfix into `main` **and** into the living `release/x.y` if both
   exist.
 
-Pytest is the merge gate for `main`. Run it on the work branch before opening the MR.
+Pytest is the merge gate for `main`. Run it on the work branch before opening the MR. CI (`.git/workflows/ci.yml`) runs `python -m pytest tests/ -v` on Python 3.11 and 3.13.
 
 ## Project Structure
 
@@ -100,8 +104,13 @@ smart_locker/
 │   ├── sync_source.py           # Manually trigger source Excel import
 │   └── pack_release.py          # Pack a signed release (tracked-file snapshot + HMAC sidecar)
 ├── tests/                       # hardware-free pytest suite
+├── docs/adr/                    # architecture decision records
+├── docs/planning/               # historical plans (keep nfc-device-tags.md)
+├── .git/                     # Issue/MR templates + pytest CI
 ├── requirements.txt
 ├── .env.example
+├── CHANGELOG.md
+├── LICENSE
 ├── PROJECT-NOTES.md                    # project rules
 ├── GUIDE.md                     # Step-by-step setup and usage guide
 └── README.md
@@ -274,3 +283,11 @@ python -m pytest tests/ -v
 ```
 
 All tests run without NFC hardware (in-memory SQLite, no reader needed).
+
+## Work method
+
+House playbook: `D:\projects\guide`. Work types start at `00-start-here.md`. This repo's project notes are in `PROJECT-NOTES.md`. Step-by-step Pi setup and operation stay in **GUIDE.md**.
+
+## License
+
+MIT. See `LICENSE`.
