@@ -134,6 +134,7 @@ rollback() {
   sudo systemctl stop "$SERVICE" 2>/dev/null || true
   if [ -n "$CODE_BACKUP" ] && [ -f "$CODE_BACKUP" ]; then
     tar -xzf "$CODE_BACKUP" -C "$APP_DIR"
+    chown -R root:root "$APP_DIR" 2>/dev/null || true
     log "Restored code from $CODE_BACKUP"
   fi
   if [ -n "$DB_BACKUP" ] && [ -f "$DB_BACKUP" ]; then

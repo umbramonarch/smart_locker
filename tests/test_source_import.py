@@ -256,6 +256,72 @@ class TestImportFromSourceExcel:
         finally:
             path.unlink(missing_ok=True)
 
+    def test_missing_catalog_columns_do_not_wipe_sqlite(self, db_session):
+        """Serial/Type/Calibration absent from Excel must not clear SQLite values."""
+        from datetime import date
+
+        DeviceRepository.create(
+            db_session,
+            name="Fluke 87V",
+            device_type="Multimeter",
+            pm_number="PM-001",
+            serial_number="FL-87V-007",
+            manufacturer="Fluke",
+            model="87V",
+            calibration_due=date(2026, 6, 30),
+            locker_slot=1,
+        )
+        db_session.commit()
+
+        path = _create_test_excel([
+            ["Equipment", "Manufacturer", "Model"],
+            ["PM-001", "Fluke", "87-V MAX"],
+        ])
+        try:
+            from smart_locker.database.engine import get_engine
+            result = import_from_source_excel(get_engine(), path)
+            assert result.updated == 1
+            device = DeviceRepository.find_by_pm(db_session, "PM-001")
+            assert device.model == "87-V MAX"
+            assert device.serial_number == "FL-87V-007"
+            assert device.device_type == "Multimeter"
+            assert device.calibration_due == date(2026, 6, 30)
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_empty_catalog_cells_do_not_wipe_sqlite(self, db_session):
+        """A Serial/Type/Calibration column with a blank cell does not clear SQLite."""
+        from datetime import date
+
+        DeviceRepository.create(
+            db_session,
+            name="Fluke 87V",
+            device_type="Multimeter",
+            pm_number="PM-001",
+            serial_number="FL-87V-007",
+            manufacturer="Fluke",
+            model="87V",
+            calibration_due=date(2026, 6, 30),
+            locker_slot=1,
+        )
+        db_session.commit()
+
+        path = _create_test_excel([
+            ["Equipment", "Type", "Serial", "Manufacturer", "Model", "Calibration due"],
+            ["PM-001", None, None, "Fluke", "87-V MAX", None],
+        ])
+        try:
+            from smart_locker.database.engine import get_engine
+            result = import_from_source_excel(get_engine(), path)
+            assert result.updated == 1
+            device = DeviceRepository.find_by_pm(db_session, "PM-001")
+            assert device.model == "87-V MAX"
+            assert device.serial_number == "FL-87V-007"
+            assert device.device_type == "Multimeter"
+            assert device.calibration_due == date(2026, 6, 30)
+        finally:
+            path.unlink(missing_ok=True)
+
     def test_file_not_found(self):
         """Nonexistent file returns error result without crashing."""
         result = import_from_source_excel(None, "/nonexistent/file.xlsx")

@@ -2,19 +2,22 @@
 File: test_app_context.py
 Description: Tests for NFC insert intercepts on AppContext — pending
              registration vs pending tag-bind, bind success/fail, expired
-             bind/registration fall-through, and leftover admin session
-             after enroll. In-memory SQLite, no hardware.
+             bind/registration fall-through, leftover admin session after
+             enroll, SSE fan-out, and unattended-return write-back.
 Project: smart_locker/tests
 Notes: Run with: python -m pytest tests/test_app_context.py -v
 """
 
 import asyncio
+import threading
 import time
 
 from smart_locker.api.app_context import (
     AppContext,
     PendingRegistration,
     PendingTagBind,
+    assign_pending_registration,
+    assign_pending_tag_bind,
 )
 from smart_locker.database.engine import get_session
 from smart_locker.database.models import DeviceStatus
@@ -129,14 +132,14 @@ class TestDispatchBind:
         assert events[0]["event"] == "auth_success"
         assert events[0]["user"]["name"] == "Alice"
         assert ctx.session_mgr.has_active_session
-        assert ctx.pending_tag_bind is not None
+        assert ctx.pending_tag_bind is None
         db_session.expire_all()
         assert DeviceRepository.find_by_id(db_session, device.id).tag_hmac is None
 
-    def test_armed_bind_blocks_idle_return(
+    def test_idle_return_wins_over_armed_bind_for_other_pm(
         self, db_session, enc_key, hmac_key, monkeypatch
     ):
-        """A borrowed sticker tap during bind is consumed as bind, not unattended return."""
+        """A borrowed sticker of a different PM still returns; bind stays armed."""
         tag_uid = "AABBCCDD"
         user = UserRepository.create(
             db_session,
@@ -144,24 +147,35 @@ class TestDispatchBind:
             uid_hmac=compute_uid_hmac("A1B2C3D4", hmac_key),
             encrypted_card_uid=encrypt("A1B2C3D4", enc_key),
         )
-        device = DeviceRepository.create(
+        borrowed = DeviceRepository.create(
             db_session, name="Fluke 87V", device_type="t", pm_number="PM-001",
+            locker_slot=1,
+        )
+        pending = DeviceRepository.create(
+            db_session, name="Scope", device_type="t", pm_number="PM-002",
+            locker_slot=2,
         )
         DeviceRepository.bind_tag(
-            db_session, device, compute_uid_hmac(tag_uid, hmac_key)
+            db_session, borrowed, compute_uid_hmac(tag_uid, hmac_key)
         )
-        device.status = DeviceStatus.BORROWED
-        device.current_borrower_id = user.id
+        borrowed.status = DeviceStatus.BORROWED
+        borrowed.current_borrower_id = user.id
         db_session.commit()
         ctx = _make_ctx(monkeypatch)
-        ctx.pending_tag_bind = PendingTagBind(device_id=device.id)
+        ctx.pending_tag_bind = PendingTagBind(device_id=pending.id)
         _run(ctx, tag_uid)
         events = _events(ctx)
-        assert events[0]["event"] == "tag_bind_success"
+        assert any(e.get("event") == "device_action" for e in events)
+        action = next(e for e in events if e.get("event") == "device_action")
+        assert action.get("action") == "return"
+        assert action.get("locker_slot") == 1
+        assert ctx.pending_tag_bind is not None
+        assert ctx.pending_tag_bind.device_id == pending.id
         db_session.expire_all()
-        found = DeviceRepository.find_by_id(db_session, device.id)
-        assert found.status == DeviceStatus.BORROWED
-        assert found.current_borrower_id == user.id
+        found = DeviceRepository.find_by_id(db_session, borrowed.id)
+        assert found.status == DeviceStatus.AVAILABLE
+        assert found.current_borrower_id is None
+        assert DeviceRepository.find_by_id(db_session, pending.id).tag_hmac is None
 
     def test_other_device_tag_fails_first_keeps_hmac(
         self, db_session, hmac_key, monkeypatch
@@ -184,6 +198,23 @@ class TestDispatchBind:
         db_session.expire_all()
         assert DeviceRepository.find_by_id(db_session, first.id).tag_hmac == digest
         assert DeviceRepository.find_by_id(db_session, second.id).tag_hmac is None
+
+    def test_unbound_tag_still_binds_during_armed_window(
+        self, db_session, hmac_key, monkeypatch
+    ):
+        """Available/unbound sticker during bind still binds to the pending PM."""
+        device = DeviceRepository.create(
+            db_session, name="Fluke 87V", device_type="t", pm_number="PM-001",
+        )
+        db_session.commit()
+        ctx = _make_ctx(monkeypatch)
+        ctx.pending_tag_bind = PendingTagBind(device_id=device.id)
+        _run(ctx, "FEEDBEEF")
+        events = _events(ctx)
+        assert events[0]["event"] == "tag_bind_success"
+        assert ctx.pending_tag_bind is None
+        db_session.expire_all()
+        assert DeviceRepository.find_by_id(db_session, device.id).tag_hmac is not None
 
     def test_expired_bind_falls_through_to_classify(
         self, db_session, enc_key, hmac_key, monkeypatch
@@ -393,3 +424,115 @@ class TestDispatchReturnsBeforeExcel:
         events = _events(ctx)
         assert any(e.get("event") == "device_action" for e in events)
         flush_scheduled_writeback()
+
+
+    def test_idle_return_schedules_location_writeback(
+        self, db_session, enc_key, hmac_key, monkeypatch
+    ):
+        """Unattended return requests Location write-back for the returned device."""
+        from smart_locker.sync import location_writeback as wb
+
+        tag_uid = "AABBCCDD"
+        user = UserRepository.create(
+            db_session,
+            display_name="Alice",
+            uid_hmac=compute_uid_hmac("A1B2C3D4", hmac_key),
+            encrypted_card_uid=encrypt("A1B2C3D4", enc_key),
+        )
+        device = DeviceRepository.create(
+            db_session, name="Fluke 87V", device_type="t", pm_number="PM-001",
+            locker_slot=1,
+        )
+        DeviceRepository.bind_tag(
+            db_session, device, compute_uid_hmac(tag_uid, hmac_key)
+        )
+        device.status = DeviceStatus.BORROWED
+        device.current_borrower_id = user.id
+        db_session.commit()
+
+        called = []
+
+        def capture():
+            called.append(device.pm_number)
+
+        monkeypatch.setattr(wb, "schedule_write_location", capture)
+        ctx = _make_ctx(monkeypatch)
+        _run(ctx, tag_uid)
+        events = _events(ctx)
+        assert any(e.get("event") == "device_action" for e in events)
+        assert called == ["PM-001"]
+        db_session.expire_all()
+        found = DeviceRepository.find_by_id(db_session, device.id)
+        assert found.status == DeviceStatus.AVAILABLE
+
+
+class TestSseFanout:
+    """Each EventSource subscriber gets a copy; a second client cannot starve the kiosk."""
+
+    def test_two_subscriber_queues_both_receive(self, monkeypatch):
+        """broadcast_sse copies the same event onto every subscriber queue."""
+        ctx = _make_ctx(monkeypatch)
+        q1 = ctx.subscribe_sse()
+        q2 = ctx.subscribe_sse()
+        ctx.broadcast_sse({"event": "auth_success", "user": {"name": "Alice"}})
+        a = q1.get_nowait()
+        b = q2.get_nowait()
+        assert a["event"] == "auth_success"
+        assert b["event"] == "auth_success"
+        assert a is not b
+        try:
+            ctx.sse_queue.get_nowait()
+            raise AssertionError("sse_queue should not receive when subscribers exist")
+        except asyncio.QueueEmpty:
+            pass
+
+    def test_dispatch_reaches_both_subscribers(
+        self, db_session, enc_key, hmac_key, monkeypatch
+    ):
+        """A work-card login is delivered to two concurrent SSE queues."""
+        uid = "A1B2C3D4"
+        UserRepository.create(
+            db_session,
+            display_name="Alice",
+            uid_hmac=compute_uid_hmac(uid, hmac_key),
+            encrypted_card_uid=encrypt(uid, enc_key),
+        )
+        db_session.commit()
+        ctx = _make_ctx(monkeypatch)
+        q1 = ctx.subscribe_sse()
+        q2 = ctx.subscribe_sse()
+        _run(ctx, uid)
+        e1 = q1.get_nowait()
+        e2 = q2.get_nowait()
+        assert e1["event"] == "auth_success"
+        assert e2["event"] == "auth_success"
+
+
+class TestPendingStateLock:
+    """HTTP and NFC share pending_state_lock for bind/registration writes."""
+
+    def test_concurrent_assign_and_clear(self, monkeypatch):
+        """Helpers serialize assign/clear; no unlocked writes remain."""
+        ctx = _make_ctx(monkeypatch)
+        errors: list[BaseException] = []
+
+        def writer(i: int) -> None:
+            try:
+                assign_pending_registration(
+                    ctx, PendingRegistration(display_name=f"n{i}")
+                )
+                assign_pending_tag_bind(ctx, PendingTagBind(device_id=i + 1))
+                assign_pending_tag_bind(ctx, None)
+                assign_pending_registration(ctx, None)
+            except BaseException as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=writer, args=(i,)) for i in range(24)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert errors == []
+        assert ctx.pending_registration is None
+        assert ctx.pending_tag_bind is None
+

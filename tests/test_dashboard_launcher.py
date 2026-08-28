@@ -101,3 +101,14 @@ class TestWriteDashboardLauncher:
         share.mkdir()
         assert write_dashboard_launcher(share, "192.168.1.10:8000") is False
         assert list(share.iterdir()) == []
+
+    def test_retries_when_share_becomes_available(self, tmp_path):
+        """Share down at first call is skipped; a later call writes once the path exists."""
+        share = tmp_path / "locker"
+        origin = "http://192.168.1.10:8000"
+        assert write_dashboard_launcher(share, origin) is False
+        assert not share.exists()
+        share.mkdir()
+        assert write_dashboard_launcher(share, origin) is True
+        assert (share / "dashboard.html").is_file()
+        assert (share / "dashboard.url").is_file()

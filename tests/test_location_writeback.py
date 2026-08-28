@@ -127,6 +127,30 @@ class TestWriteLocation:
         assert result.written == 1
         assert _location_by_pm(path)["PM-002"] == "Alice"
 
+    def test_borrowed_without_borrower_skips_in_locker_token(
+        self, db_session, tmp_path
+    ):
+        """Corrupt BORROWED-with-no-borrower must not claim the device is in the locker."""
+        path = _workbook(tmp_path / "device-list.xlsx", [
+            ["Equipment", "Location"],
+            ["PM-001", "Workshop"],
+        ])
+        DeviceRepository.create(
+            db_session,
+            name="Meter",
+            device_type="general",
+            pm_number="PM-001",
+            locker_slot=1,
+            status=DeviceStatus.BORROWED.value,
+            current_borrower_id=None,
+        )
+        db_session.flush()
+
+        result = write_location(db_session, path)
+
+        assert result.written == 0
+        assert _location_by_pm(path)["PM-001"] == "Workshop"
+
     def test_formula_like_location_stored_as_text(self, tmp_path):
         """Location starting with =+@- is stored as text, not an Excel formula."""
         from smart_locker.sync.location_writeback import write_location_value
@@ -460,6 +484,8 @@ class TestWritebackWiring:
         ])
 
         register_locker_device(db_session, str(path), "PM-NEW", 4)
+        db_session.commit()
+        write_location(db_session, path)
 
         assert _location_by_pm(path)["PM-NEW"] == IN_LOCKER_TOKEN
 
@@ -785,4 +811,36 @@ class TestWritebackOffRequestPath:
             time.sleep(0.02)
         t2.join(timeout=3)
         assert len(entered) == 2
+
+
+class TestScheduledWritebackThreads:
+    """schedule_write_location must prune finished workers so the list stays bounded."""
+
+    def test_schedule_prunes_dead_threads(self, tmp_path, monkeypatch):
+        """A finished thread is dropped on the next schedule, not left forever."""
+        import threading
+
+        from smart_locker.sync import location_writeback as wb
+
+        path = tmp_path / "device-list.xlsx"
+        path.write_bytes(b"")
+        monkeypatch.setattr("config.settings.SOURCE_EXCEL_PATH", str(path))
+        monkeypatch.setattr(wb, "write_location_with_engine", lambda *_a, **_k: None)
+        monkeypatch.setattr("smart_locker.database.engine.get_engine", lambda: object())
+
+        dead = threading.Thread(target=lambda: None)
+        dead.start()
+        dead.join()
+        with wb._scheduled_lock:
+            wb._scheduled_threads.clear()
+            wb._scheduled_threads.append(dead)
+
+        wb.schedule_write_location()
+        wb.flush_scheduled_writeback()
+        with wb._scheduled_lock:
+            assert dead not in wb._scheduled_threads
+            leftover = list(wb._scheduled_threads)
+            wb._scheduled_threads.clear()
+        for t in leftover:
+            t.join(timeout=2)
 

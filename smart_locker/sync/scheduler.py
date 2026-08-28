@@ -43,6 +43,21 @@ _import_lock = threading.Lock()
 _DEBOUNCE_SECONDS = 3.0
 
 
+def _try_dashboard_launcher() -> None:
+    """Write dashboard.html onto the share if it is mounted. Never raises.
+
+    Startup may see the CIFS share down; the interval job retries until the
+    launcher files appear. Does not busy-loop.
+    """
+    try:
+        from config.settings import DASHBOARD_SHARE_PATH, PUBLIC_URL
+        from smart_locker.sync.dashboard_launcher import write_dashboard_launcher
+
+        write_dashboard_launcher(DASHBOARD_SHARE_PATH, PUBLIC_URL)
+    except Exception:
+        logger.exception("Dashboard launcher retry failed.")
+
+
 class ImportInProgress(Exception):
     """A catalog import is already running in this process."""
 
@@ -81,7 +96,8 @@ def _interval_import(engine, source_path: str | Path, trigger: str = "interval")
     except ImportInProgress:
         logger.info("Source import already running — interval skipped.")
     except Exception:
-        pass
+        logger.exception("Periodic source import failed.")
+    _try_dashboard_launcher()
 
 
 def _run_source_import(engine, source_path: str | Path, trigger: str = "interval"):
@@ -242,7 +258,7 @@ class _SourceFileHandler(FileSystemEventHandler):
         except ImportInProgress:
             logger.info("Source import already running — watch event skipped.")
         except Exception:
-            pass
+            logger.exception("Watch-triggered source import failed.")
 
 
 def start_scheduler(
@@ -288,7 +304,9 @@ def start_scheduler(
     except ImportInProgress:
         logger.info("Source import already running — startup import skipped.")
     except Exception:
-        pass
+        logger.exception("Startup source import failed.")
+
+    _try_dashboard_launcher()
 
     # --- 2. File watcher for live changes (local filesystems only) ---
     # inotify does not deliver events for writes made by other hosts on a network

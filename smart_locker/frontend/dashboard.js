@@ -47,8 +47,6 @@ let inventorySearchTimer = 0;
 let lastInventoryStamp = '';
 /** Last Locker render fingerprint. */
 let lastDevicesStamp = '';
-/** Reused node for ``esc()`` so each cell does not allocate a DIV. */
-const _escEl = document.createElement('div');
 
 /** Names for the owner datalist (users + registrants + in-locker token). */
 let ownerNames = [];
@@ -252,7 +250,7 @@ async function fetchDisplay() {
     const screenEl = document.getElementById('display-screen');
     const userEl = document.getElementById('display-user');
     if (screenEl) screenEl.textContent = data.label || data.screen || '—';
-    if (userEl) userEl.textContent = data.user_name || 'None';
+    if (userEl) userEl.textContent = data.occupied ? 'In use' : 'Idle';
   } catch (_) { /* keep last snapshot */ }
 }
 
@@ -444,8 +442,12 @@ function renderDevices() {
  */
 function esc(str) {
   if (str == null) return '';
-  _escEl.textContent = String(str);
-  return _escEl.innerHTML;
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 

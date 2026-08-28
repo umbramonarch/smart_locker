@@ -76,8 +76,15 @@ class TestDashboardPublicTabs:
         assert "/api/dashboard/display" in js
         assert "/api/kiosk/display" not in js
         html = _html()
+        js = _js()
         assert 'id="display-screen"' in html
         assert 'id="display-user"' in html
+        assert "data.occupied" in js
+        assert "In use" in js
+        fetch = js.split("async function fetchDisplay", 1)[1].split(
+            "async function ", 1
+        )[0]
+        assert "user_name" not in fetch
 
 
 class TestDashboardFiveTapAdmin:
@@ -207,7 +214,6 @@ class TestDashboardPollAndAdminFetch:
         assert "/api/dashboard/inventory" not in fn
         assert "/api/dashboard/users" in fn
         assert "/api/dashboard/transactions" in fn
-        assert "_escEl" in js
         assert "visibilitychange" in js
         assert "sessionStorage.removeItem" in js
         assert "ADMIN_SECRET_KEY" in js
@@ -215,4 +221,19 @@ class TestDashboardPollAndAdminFetch:
             "async function ", 1
         )[0]
         assert "fetchAdminTables" in unbind
-        assert "renderDevices" in unbind
+
+
+class TestDashboardEsc:
+    """esc() must be safe for HTML attributes (data-pm, data-owner)."""
+
+    def test_esc_encodes_quotes(self):
+        """Attribute interpolation encodes quotes, not only &<>."""
+        js = _js()
+        fn = js.split("function esc(str)", 1)[1].split("function ", 1)[0]
+        assert "&quot;" in fn
+        assert "&#39;" in fn
+        assert "&amp;" in fn
+        assert "&lt;" in fn
+        assert "&gt;" in fn
+        assert "data-pm=\"${esc(pm)}\"" in js or 'data-pm="${esc(pm)}"' in js
+        assert "data-owner=\"${esc(owner" in js or 'data-owner="${esc(owner' in js

@@ -147,3 +147,16 @@ class TestSudoersPoweroff:
         assert '[ "$APP_USER" = "root" ]' in apply
         assert "export SMART_LOCKER_USER" in install
         assert '[ "$APP_USER" = "root" ]' in install or "!= \"root\"" in install
+
+    def test_rollback_rechowns_tree_root_root(self):
+        """Failed C3 update must not leave a locker-owned tree after tar restore."""
+        text = (DEPLOY_INSTALL / "update.sh").read_text(encoding="utf-8")
+        start = text.find("rollback() {")
+        end = text.find("\non_err()")
+        assert start != -1
+        assert end > start
+        body = text[start:end]
+        tar_idx = body.find('tar -xzf "$CODE_BACKUP"')
+        chown_idx = body.find('chown -R root:root "$APP_DIR"')
+        assert tar_idx != -1
+        assert chown_idx > tar_idx

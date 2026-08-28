@@ -411,3 +411,27 @@ class TestRegisterNameListFitsViewport:
         )[0]
         assert "navigate('idle')" in cancel
         assert "setTimeout" not in cancel
+
+
+class TestSlotOverlay:
+    """Returned devices show the slot overlay from the device_action SSE payload."""
+
+    def test_html_has_overlay_slot(self):
+        """Kiosk markup includes the return-slot overlay the overlay JS targets."""
+        html = _html()
+        assert 'id="overlay-slot"' in html
+        assert 'id="slot-return-name"' in html
+        assert 'id="slot-return-num"' in html
+
+    def test_js_wires_device_action_to_slot_overlay(self):
+        """SSE device_action return shows the overlay; payload includes locker_slot."""
+        js = _js()
+        assert "function showSlotOverlay" in js
+        assert "addEventListener('device_action'" in js
+        action = js.split("addEventListener('device_action'", 1)[1].split(
+            "addEventListener(", 1
+        )[0]
+        assert "showSlotOverlay" in action
+        assert "data.action === 'return'" in action
+        assert "data.locker_slot" in action
+        assert "data.device_name" in action

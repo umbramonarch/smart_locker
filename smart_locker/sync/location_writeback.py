@@ -111,10 +111,21 @@ def _location_value(device: Device) -> str | None:
     """
     if device.status == DeviceStatus.MAINTENANCE:
         return None
-    if device.status == DeviceStatus.BORROWED and device.current_borrower is not None:
+    if device.status == DeviceStatus.BORROWED:
+        if device.current_borrower is None:
+            logger.warning(
+                "Location write-back skipped for %s — BORROWED with no borrower.",
+                device.pm_number,
+            )
+            return None
         name = (device.current_borrower.display_name or "").strip()
-        if name:
-            return name
+        if not name:
+            logger.warning(
+                "Location write-back skipped for %s — BORROWED with empty borrower name.",
+                device.pm_number,
+            )
+            return None
+        return name
     return in_locker_token()
 
 
@@ -559,6 +570,7 @@ def schedule_write_location() -> None:
             target=_run, daemon=True, name="location-writeback"
         )
         with _scheduled_lock:
+            _scheduled_threads[:] = [t for t in _scheduled_threads if t.is_alive()]
             _scheduled_threads.append(worker)
         worker.start()
     except Exception:

@@ -4,9 +4,10 @@ Description: REST API endpoints and SSE event stream for the Smart Locker kiosk.
              Provides session management, device listing, borrow/return operations,
              user self-registration (with registrant name validation), admin-only
              manual registration, Register Device (PM + slot + NFC), device-tag
-             bind/unbind, registrant list retrieval, source sync, public dashboard
-             (Inventory from Excel, Locker from SQLite, Display snapshot,
-             public owner edit, 5-tap admin unbind / arm-bind), an admin-only Excel export download, admin
+             bind/unbind, registrant list retrieval, source sync, dashboard
+             (public Inventory from Excel and Locker from SQLite, Display
+             snapshot without person names, admin-secret owner edit and 5-tap
+             unbind / arm-bind), an admin-only Excel export download, admin
              Exit kiosk / Shut down, and source sync that writes Location back.
 Project: smart_locker/api
 Notes: Kiosk session mutations require an active session AND a loopback
@@ -37,6 +38,7 @@ import smart_locker.api.app_context as ctx_module
 from smart_locker.api.app_context import (
     PendingRegistration,
     PendingTagBind,
+    assign_pending_registration,
     assign_pending_tag_bind,
     pending_state_lock,
 )
@@ -324,7 +326,8 @@ def _push_sse(payload: dict) -> None:
     """Enqueue an SSE payload; safe from the Starlette threadpool.
 
     ``asyncio.Queue.put_nowait`` is not thread-safe. When the event loop
-    is known, schedule the put on that loop.
+    is known, schedule the put on that loop. Fan-out copies the payload
+    to every EventSource subscriber.
 
     Args:
         payload: Event dict for the kiosk SSE stream.
@@ -332,6 +335,14 @@ def _push_sse(payload: dict) -> None:
     ctx = ctx_module.context
     if ctx is None:
         return
+    broadcast = getattr(ctx, "broadcast_sse", None)
+    subscribers = getattr(ctx, "_sse_subscribers", None)
+    if callable(broadcast) and isinstance(subscribers, list):
+        try:
+            broadcast(payload)
+            return
+        except Exception:
+            pass
     queue = getattr(ctx, "sse_queue", None)
     if queue is None:
         return
@@ -394,10 +405,10 @@ def _clear_expired_pending() -> None:
     with pending_state_lock:
         pending_reg = ctx.pending_registration
         if pending_reg is not None and pending_reg.is_expired:
-            ctx.pending_registration = None
+            assign_pending_registration(ctx, None)
         pending_bind = ctx.pending_tag_bind
         if pending_bind is not None and pending_bind.is_expired:
-            ctx.pending_tag_bind = None
+            assign_pending_tag_bind(ctx, None)
 
 
 def _pending_nfc_conflict() -> str | None:
@@ -423,24 +434,36 @@ def _pending_nfc_conflict() -> str | None:
 async def sse_events():
     """Server-Sent Events stream for NFC and session events.
 
-    Returns an SSE ``StreamingResponse`` that forwards events from the
-    application's async queue to the browser. Sends a keepalive comment
-    every 15 seconds to prevent proxy/browser timeout.
+    Each client gets its own queue so a second EventSource cannot steal
+    events from the kiosk. Keepalive comments every 15 seconds.
 
     Returns:
         StreamingResponse: An SSE text/event-stream response.
     """
+    ctx = ctx_module.context
+    if ctx is None:
+        raise HTTPException(status_code=503, detail="System not ready.")
+
+    subscribe = getattr(ctx, "subscribe_sse", None)
+    unsubscribe = getattr(ctx, "unsubscribe_sse", None)
+    if callable(subscribe) and isinstance(getattr(ctx, "_sse_subscribers", None), list):
+        queue = subscribe()
+    else:
+        queue = ctx.sse_queue
 
     async def event_generator():
-        """Yield SSE-formatted events from the application queue."""
-        while True:
-            try:
-                data = await asyncio.wait_for(ctx_module.context.sse_queue.get(), timeout=15.0)
-                event_name = data.get("event", "message")
-                yield f"event: {event_name}\ndata: {json.dumps(data)}\n\n"
-            except asyncio.TimeoutError:
-                # Keepalive heartbeat
-                yield ": keepalive\n\n"
+        """Yield SSE-formatted events from this client's queue."""
+        try:
+            while True:
+                try:
+                    data = await asyncio.wait_for(queue.get(), timeout=15.0)
+                    event_name = data.get("event", "message")
+                    yield f"event: {event_name}\ndata: {json.dumps(data)}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+        finally:
+            if callable(unsubscribe) and queue is not getattr(ctx, "sse_queue", None):
+                unsubscribe(queue)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
@@ -502,14 +525,17 @@ def dev_status():
 
 
 @router.post("/api/dev/tap")
-def dev_tap(body: TapRequest):
+def dev_tap(request: Request, body: TapRequest):
     """Inject a simulated card tap (simulation mode only).
 
     Enqueues a ``CardEvent(INSERTED)`` so the normal NFC bridge runs exactly as
     for a real tap — work-card login/logout, device-tag auto-intent, or a
     pending registration / tag-bind intercept. The UID is never logged.
+    When the fake reader is on, the caller must be loopback so a LAN host
+    cannot inject taps.
 
     Args:
+        request: Incoming ASGI request (loopback check; not X-Forwarded-For).
         body: TapRequest with an optional ``uid`` (falls back to the
             ``SMART_LOCKER_FAKE_DEFAULT_UID`` env var).
 
@@ -517,11 +543,17 @@ def dev_tap(body: TapRequest):
         dict: ``{"ok": True}`` once the event is queued.
 
     Raises:
-        HTTPException: 404 if simulation mode is off; 400 if no UID is available.
+        HTTPException: 404 if simulation mode is off; 403 if not loopback;
+            400 if no UID is available.
     """
     import os
 
     reader = _running_fake_reader()
+    if not _is_loopback_request(request):
+        raise HTTPException(
+            status_code=403,
+            detail="Kiosk-local access required.",
+        )
     uid = (body.uid or os.getenv("SMART_LOCKER_FAKE_DEFAULT_UID") or "").strip()
     if not uid:
         raise HTTPException(
@@ -535,8 +567,10 @@ def dev_tap(body: TapRequest):
 # --- Session Endpoints ------------------------------------------------------
 
 @router.get("/api/session")
-def get_session_status():
-    """Check current session state (used on page load to restore state).
+def get_session_status(_: None = Depends(require_loopback)):
+    """Check current session state (kiosk Chromium / loopback only).
+
+    LAN browsers must not hitchhike the process-global kiosk identity.
 
     Returns:
         dict: ``{"active": bool, "user": dict|None, "overlay": bool}`` with
@@ -778,7 +812,7 @@ def _kiosk_display_snapshot() -> dict:
     """Build the public Display-tab payload from AppContext.
 
     Returns:
-        ``screen``, human ``label``, and ``user_name`` (or None when idle).
+        ``screen`` and human ``label``. Person names are omitted.
     """
     ctx = ctx_module.context
     screen = "idle"
@@ -787,18 +821,20 @@ def _kiosk_display_snapshot() -> dict:
         screen = _normalize_kiosk_screen(raw)
     if bool(getattr(ctx, "admin_overlay_open", False)):
         screen = "admin"
-    user_name = None
+    occupied = False
     session_mgr = getattr(ctx, "session_mgr", None)
-    if session_mgr is not None:
-        session = session_mgr.current_session
-        if session is not None:
-            user_name = session.user.display_name
+    if session_mgr is not None and getattr(session_mgr, "has_active_session", False):
+        occupied = True
     label = _KIOSK_SCREEN_LABELS.get(screen, screen.replace("-", " ").title())
-    return {"screen": screen, "label": label, "user_name": user_name}
+    return {"screen": screen, "label": label, "occupied": occupied}
 
 
 @router.post("/api/register")
-def start_registration(body: RegisterRequest, db: Session = Depends(get_db)):
+def start_registration(
+    body: RegisterRequest,
+    db: Session = Depends(get_db),
+    _: None = Depends(require_loopback),
+):
     """Begin self-registration: validate name against approved list, await NFC tap.
 
     The submitted name must exist in the ``registrants`` table (populated from
@@ -837,27 +873,28 @@ def start_registration(body: RegisterRequest, db: Session = Depends(get_db)):
         )
 
     assign_pending_tag_bind(ctx_module.context, None)
-    ctx_module.context.pending_registration = PendingRegistration(
-        display_name=body.name.strip(),
+    assign_pending_registration(
+        ctx_module.context,
+        PendingRegistration(display_name=body.name.strip()),
     )
     logger.info("Registration started for '%s'. Awaiting card tap.", body.name.strip())
     return {"success": True, "message": "Tap your NFC card to complete registration."}
 
 
 @router.post("/api/register/cancel")
-def cancel_registration():
+def cancel_registration(_: None = Depends(require_loopback)):
     """Cancel a pending self-registration.
 
     Clears the pending registration state so the next card tap will not
     trigger enrollment. Does not clear a dashboard-secret-armed device-tag
-    bind.
+    bind. Loopback-only so a LAN client cannot cancel a kiosk or dashboard bind.
 
     Returns:
         dict: ``{"success": True, "cancelled": bool}`` — ``cancelled`` is
               True if a registration (or kiosk bind) was actually pending.
 
     Raises:
-        HTTPException: 503 if system not ready.
+        HTTPException: 503 if system not ready; 403 if not loopback.
     """
     if ctx_module.context is None:
         raise HTTPException(status_code=503, detail="System not ready.")
@@ -871,9 +908,9 @@ def cancel_registration():
         was_pending = ctx.pending_registration is not None or (
             bind is not None and not keep_dashboard
         )
-        ctx.pending_registration = None
+        assign_pending_registration(ctx, None)
         if not keep_dashboard:
-            ctx.pending_tag_bind = None
+            assign_pending_tag_bind(ctx, None)
     return {"success": True, "cancelled": was_pending}
 
 
@@ -1037,8 +1074,9 @@ def start_admin_registration(
         raise HTTPException(status_code=409, detail=conflict)
 
     assign_pending_tag_bind(ctx_module.context, None)
-    ctx_module.context.pending_registration = PendingRegistration(
-        display_name=body.name.strip(),
+    assign_pending_registration(
+        ctx_module.context,
+        PendingRegistration(display_name=body.name.strip()),
     )
     logger.info(
         "Admin-initiated registration for '%s' by admin %s. Awaiting card tap.",
@@ -1106,6 +1144,15 @@ def register_locker_device(
     except InvalidSlot as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
 
+    db.flush()
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    from smart_locker.sync.location_writeback import schedule_write_location
+
+    schedule_write_location()
     assign_pending_tag_bind(
         ctx_module.context, PendingTagBind(device_id=device.id)
     )
@@ -1586,7 +1633,9 @@ def admin_shutdown(
     return {"ok": True, "message": "Shutting down."}
 
 
-# --- Dashboard Endpoints (public, no auth) ----------------------------------
+# --- Dashboard Endpoints ----------------------------------------------------
+# Public GETs: Inventory (Excel), Locker (SQLite), Display (no person names).
+# Mutations and users/tx lists require SMART_LOCKER_DASHBOARD_ADMIN_SECRET.
 
 @router.post("/api/kiosk/display")
 def kiosk_display_heartbeat(
@@ -1616,7 +1665,8 @@ def dashboard_display() -> dict:
     """Public snapshot of what the kiosk is showing.
 
     Returns:
-        dict: ``screen`` id, human ``label``, and ``user_name`` or null.
+        dict: ``screen`` id, human ``label``, and ``occupied`` (session
+            active, without naming the user).
     """
     return _kiosk_display_snapshot()
 
@@ -1883,11 +1933,11 @@ def dashboard_transactions(
     db: Session = Depends(get_db),
     _: None = Depends(require_dashboard_admin),
 ):
-    """Public transaction history for the network dashboard.
+    """Transaction history for the network dashboard (admin secret).
 
     Returns the most recent 500 borrow/return transactions in reverse
-    chronological order. No session required — this replaces the
-    Transactions sheet from the old shared Excel file.
+    chronological order. Requires ``X-Smart-Locker-Admin``. The 5-tap
+    overlay is not authorization.
 
     Args:
         db: Active database session (injected by ``get_db``).
@@ -1926,12 +1976,11 @@ def dashboard_users(
     db: Session = Depends(get_db),
     _: None = Depends(require_dashboard_admin),
 ):
-    """Public registered-users list for the network dashboard.
+    """Registered-users list for the network dashboard (admin secret).
 
     Returns all registered users with their role and registration date.
     Sensitive fields (uid_hmac, encrypted_card_uid) are never included.
-    No session required — this replaces the Users sheet from the old
-    shared Excel file.
+    Requires ``X-Smart-Locker-Admin``. The 5-tap overlay is not authorization.
 
     Args:
         db: Active database session (injected by ``get_db``).
