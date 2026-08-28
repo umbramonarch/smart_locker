@@ -122,8 +122,8 @@ class ImportResult:
     """Summary of a source import run with per-category counts.
 
     ``imported`` stays 0 — Sync never inserts locker rows. ``non_locker_skipped``
-    is Excel PMs that are not already in SQLite. Also records registrant names
-    extracted from the Location column.
+    is Excel PMs that are not already in SQLite. Also replaces the registrant
+    list with person names currently in the Location column.
     """
     imported: int = 0
     updated: int = 0
@@ -606,12 +606,12 @@ def import_from_source_excel(
         )
         return result
 
-    if registrant_names:
+    if cols["location"] is not None:
         from smart_locker.database.repositories import RegistrantRepository
 
         try:
             with EngineSession(engine) as reg_session:
-                added = RegistrantRepository.add_names(reg_session, registrant_names)
+                added = RegistrantRepository.sync_names(reg_session, registrant_names)
                 result.registrants_added = added
                 reg_session.commit()
         except Exception as e:

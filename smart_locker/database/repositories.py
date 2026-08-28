@@ -564,9 +564,10 @@ class RegistrantRepository:
     Manages the approved-names list used by the self-service registration
     screen. Names originate from the "Location" column of the
     source Excel and are synced into the ``registrants`` table
-    during each source import. The repository provides methods for
-    retrieving the sorted name list, bulk-adding new names (skipping
-    duplicates), and case-insensitive name lookup for validation.
+    during each source import (add new names, delete names that left
+    Location). The repository provides methods for retrieving the sorted
+    name list, replacing the list from Excel, bulk-adding names
+    (skipping duplicates), and case-insensitive name lookup.
     """
 
     @staticmethod
@@ -584,6 +585,38 @@ class RegistrantRepository:
         """
         stmt = select(Registrant).order_by(Registrant.display_name)
         return list(session.execute(stmt).scalars().all())
+
+    @staticmethod
+    def sync_names(session: Session, names: set[str]) -> int:
+        """Replace the registrant list with the current Excel Location names.
+
+        Adds names that are not already present (case-insensitive) and
+        deletes rows whose display name is no longer in ``names``. Callers
+        that could not read a Location column should skip this method so
+        an import without that column does not wipe the list.
+
+        Args:
+            session: Active database session.
+            names: Person names currently in Excel Location (not in-locker
+                tokens). An empty set removes every registrant row.
+
+        Returns:
+            Number of newly inserted registrant names.
+        """
+        wanted = {n.strip() for n in names if n and str(n).strip()}
+        wanted_lower = {n.lower() for n in wanted}
+        existing = list(session.execute(select(Registrant)).scalars().all())
+        removed = 0
+        for row in existing:
+            if row.display_name.lower() not in wanted_lower:
+                session.delete(row)
+                removed += 1
+        if removed:
+            session.flush()
+            logger.info(
+                "Removed %d registrant name(s) no longer in Location.", removed
+            )
+        return RegistrantRepository.add_names(session, wanted)
 
     @staticmethod
     def add_names(session: Session, names: set[str]) -> int:

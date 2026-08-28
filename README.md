@@ -47,9 +47,9 @@ smart_locker/
 │   │   ├── index.html           # Kiosk UI — 6 screens + overlays
 │   │   ├── style.css            # kiosk theme (#009641 on #181d24)
 │   │   ├── app.js               # Kiosk state machine, API calls, NFC-driven navigation
-│   │   ├── dashboard.html       # Network dashboard: tabs + 5-tap admin overlay
+│   │   ├── dashboard.html       # Network dashboard: tabs + 5-tap UI overlay
 │   │   ├── dashboard.css        # Dashboard styling (kiosk colours, desktop cursor)
-│   │   ├── dashboard.js         # Tabs, Excel/SQLite fetch, Display poll, owner edit, 5-tap admin
+│   │   ├── dashboard.js         # Tabs, Excel/SQLite fetch, Display poll, owner edit (admin secret)
 │   │   └── images/              # Device photos + hero background
 │   ├── nfc/                     # NFC reader interface (pyscard + APDU)
 │   │   ├── apdu.py              # APDU command definitions + response parsing
@@ -123,7 +123,7 @@ smart_locker/
 | Location write-back | ✅ Done | Pi writes Location by PM (`Locker` / borrower); locked file skipped |
 | Device import | ✅ Done | English Excel headers and aliases, PM-based catalog update, no auto locker insert |
 | Photo import | ✅ Done | By PM number (`update_device`) or by model (photo watcher) |
-| Web dashboard | ✅ Done | `/dashboard` — Inventory / Locker / Display; owner edit; 5-tap admin; share launcher |
+| Web dashboard | ✅ Done | `/dashboard` — public Inventory/Locker GET; owner/bind/unbind + users/tx/owners need admin secret; 5-tap is UI reveal |
 | Frontend UI | ✅ Done | 6-screen kiosk UI + overlays |
 | Unit tests | ✅ Done | ~371 tests, hardware-free |
 | NFC device tags | ✅ Done | Same ACR1252U; `devices.tag_hmac`; auto borrow/return after login |
@@ -172,8 +172,8 @@ See **GUIDE.md** for detailed step-by-step instructions.
 │  Touch Display (Chromium kiosk)          Any browser on the network    │
 │  ┌────────────────────────────┐         ┌───────────────────────────┐ │
 │  │ Kiosk UI  (frontend/)      │         │ Dashboard  (/dashboard)   │ │
-│  │ index.html · app.js        │         │ tabs · 5-tap admin        │ │
-│  │ 6 screens · green theme    │         │ no login                  │ │
+│  │ index.html · app.js        │         │ tabs · 5-tap UI reveal    │ │
+│  │ 6 screens · green theme    │         │ catalog GET public        │ │
 │  └─────────────┬──────────────┘         └─────────────┬─────────────┘ │
 │   REST (fetch) │  SSE (NFC/session events)            │ REST          │
 │  ┌─────────────▼──────────────────────────────────────▼─────────────┐ │
@@ -211,14 +211,14 @@ Overlays: **device detail** (photo, PM, type, serial, confirm), **return slot** 
 
 ## Web Dashboard
 
-A dashboard is served at **`/dashboard`** for anyone on the local network — no login.
+A dashboard is served at **`/dashboard`**. Public GET Inventory and Locker catalog stay unauthenticated. Dashboard mutations (owner POST, bind/unbind) and gated users/tx/owners GETs need `SMART_LOCKER_DASHBOARD_ADMIN_SECRET` (header `X-Smart-Locker-Admin`); 401 if unset (fail closed). The 5-tap overlay is a client UI reveal, not authorization (`overlay=true` is not auth).
 Three tabs:
 
-- **Inventory** — live `device-list.xlsx` (full catalog). Search and sort. Click owner to change it (confirm) for PMs that are **not** in the locker. Share down shows an error here only.
+- **Inventory** — live `device-list.xlsx` (full catalog). Search and sort. Click owner to change it (confirm) for PMs that are **not** in the locker — that POST needs the admin secret. Share down shows an error here only.
 - **Locker** — SQLite devices registered into a slot (status, borrower, slot, Tagged / No tag). Owner is set at the kiosk (borrow/return), not here.
 - **Display** — what the kiosk is showing right now, plus the signed-in user. View only.
 
-Tap the header clock **5× within 3 s** (same gesture as the kiosk) for registered users, the last 500 transactions, and NFC **Unbind** / **Bind** / **Replace tag**. Arm-bind waits for the sticker on the ACR1252U; the dashboard does not start a kiosk admin session.
+Tap the header clock **5× within 3 s** (same gesture as the kiosk) to reveal registered users, the last 500 transactions, and NFC **Unbind** / **Bind** / **Replace tag**. Those GETs/POSTs still need the admin secret. Arm-bind waits for the sticker on the ACR1252U; the dashboard does not start a kiosk admin session.
 
 Colleagues can double-click `dashboard.html` or `dashboard.url` on the locker share if the Pi is configured with `SMART_LOCKER_PUBLIC_URL` and `SMART_LOCKER_DASHBOARD_SHARE_PATH` (startup writes those files). The live page is still `GET /dashboard`.
 
@@ -229,7 +229,7 @@ Colours match the kiosk (`#181d24` / `#009641`); this is a normal desktop page (
 New users can enroll their own card without an admin at the kiosk:
 
 1. On the idle screen, tap **"Register your card"**.
-2. Search and select your name from the approved list (`GET /api/registrants`). Approved names come from the **Location** column during source Excel import (stored in the `registrants` table).
+2. Search and select your name from the approved list (`GET /api/registrants`). Approved names come from the **Location** column during source Excel import (stored in the `registrants` table). A later import removes names that have left Location.
 3. Submit (`POST /api/register`). If your name isn't on the list, registration is refused ("Contact an admin").
 4. Tap your NFC card within the registration window (default 60s) — the card is enrolled under your approved name.
 

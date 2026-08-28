@@ -117,8 +117,8 @@ class Registrant(Base):
 
     Stores unique person names extracted from the source Excel file
     (specifically the Location column). During source import, every value
-    that is not an in-locker token is treated as a person's name and added
-    to this table.
+    that is not an in-locker token is treated as a person's name and the
+    table is replaced to match that set.
 
     The kiosk registration screen presents these names as a selectable list.
     Users whose names appear here may self-register by selecting their name
@@ -127,8 +127,8 @@ class Registrant(Base):
     panel). This acts as a lightweight authentication gate — only people
     listed in the catalog spreadsheet can self-register.
 
-    Names are deduplicated (unique constraint) and only grow over successive
-    imports — an import never removes existing registrant rows.
+    Names are deduplicated (unique constraint). A later import removes
+    rows whose names have left Excel Location (former employees).
     """
 
     __tablename__ = "registrants"

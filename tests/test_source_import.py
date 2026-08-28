@@ -3,7 +3,7 @@ File: test_source_import.py
 Description: Tests for the source Excel import module. Validates column
              auto-detection, catalog-only updates (never insert locker rows),
              metadata-only updates, date parsing from common Excel formats,
-             and registrant name extraction from the Location
+             and registrant list replace from the Location
              column for the self-service registration name list.
 Project: smart_locker/tests
 Notes: Run with: python -m pytest tests/test_source_import.py -v
@@ -484,8 +484,9 @@ class TestRegistrantExtraction:
     """Tests for registrant name extraction from the 'Location' column.
 
     During source import, unique person names (not in-locker values) from the
-    location column across ALL rows are added to the registrants table for
-    use in the self-service registration name list.
+    location column across ALL rows become the registrants table for
+    the self-service registration name list. Names that leave Location
+    are removed.
     """
 
     def test_names_extracted_from_all_rows(self, db_session):
@@ -534,9 +535,8 @@ class TestRegistrantExtraction:
         finally:
             path.unlink(missing_ok=True)
 
-    def test_registrant_sync_additive(self, db_session):
-        """Subsequent imports add new names but keep existing ones."""
-        # First import with two names
+    def test_registrant_sync_replaces_list(self, db_session):
+        """Subsequent imports drop names that left Excel Location."""
         path1 = _create_test_excel([
             ["Equipment", "Slot", "Location"],
             ["PM-001", "Bay 1", "Alice"],
@@ -549,7 +549,6 @@ class TestRegistrantExtraction:
         finally:
             path1.unlink(missing_ok=True)
 
-        # Second import with one new name and one existing
         path2 = _create_test_excel([
             ["Equipment", "Slot", "Location"],
             ["PM-003", "Bay 3", "Bob"],
@@ -557,13 +556,12 @@ class TestRegistrantExtraction:
         ])
         try:
             result2 = import_from_source_excel(get_engine(), path2)
-            # Only Carol is new; Bob already exists
             assert result2.registrants_added == 1
 
             registrants = RegistrantRepository.get_all(db_session)
             names = [r.display_name for r in registrants]
-            assert len(names) == 3
-            assert "Alice" in names
+            assert len(names) == 2
+            assert "Alice" not in names
             assert "Bob" in names
             assert "Carol" in names
         finally:
