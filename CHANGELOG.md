@@ -4,7 +4,17 @@ Keep user-facing bullets. Internal refactors stay out unless they change how som
 
 ## [Unreleased]
 
-Work on `main` after the `v0.1.0` tag. Merging to `main` is not a release; the next ship gets a `vX.Y.Z` tag.
+Work on `main` after the `v0.2.0` tag. Merging to `main` is not a release; the next ship gets a `vX.Y.Z` tag.
+
+### Added
+
+### Fixed
+
+### Changed
+
+## [0.2.0] — 2026-08-28
+
+Second tagged appliance ship (`v0.2.0`). NFC stickers, Location write-back, dashboard tabs, and house bootstrap (changelog, ADRs, MIT, pytest CI).
 
 ### Added
 
@@ -16,6 +26,15 @@ Work on `main` after the `v0.1.0` tag. Merging to `main` is not a release; the n
 - Locker availability overlay with PM numbers on kiosk cards.
 - Admin **Exit kiosk** (closes Chromium, service stays) and **Shut down** (`systemctl poweroff` via sudoers).
 - Signed `pack_release` tarball + HMAC sidecar for Pi updates from the locker share.
+- MIT license (`LICENSE`).
+- Keep a Changelog, architecture decision records (ADRs 0001–0009), and git Issue/MR templates.
+- CI CI runs `python -m pytest tests/ -v` on Python 3.11 and 3.13 via `requirements.txt`.
+
+### Fixed
+
+- Excel re-import no longer wipes locker occupancy or tag bindings from missing catalog fields.
+- Register User no longer leaves a leftover admin session; the next work-card tap logs in.
+- Kiosk session and NFC stay on loopback; LAN browsers use the dashboard, not the Riverdi session.
 
 ### Changed
 
@@ -25,12 +44,7 @@ Work on `main` after the `v0.1.0` tag. Merging to `main` is not a release; the n
 - Person names in Excel Location replace the self-register list; names that leave Location are removed.
 - `devices.barcode` is unused leftover and is no longer imported or shown.
 - Offline Pi kit hardened for Raspberry Pi OS trixie (Python 3.13 / cp313 wheelhouse, pcscd polkit, no-apt install).
-
-### Fixed
-
-- Excel re-import no longer wipes locker occupancy or tag bindings from missing catalog fields.
-- Register User no longer leaves a leftover admin session; the next work-card tap logs in.
-- Kiosk session and NFC stay on loopback; LAN browsers use the dashboard, not the Riverdi session.
+- README and PROJECT-NOTES.md record the house playbook, language pack, status, and license. GUIDE.md stays the operator guide.
 
 ## [0.1.0] — 2026-08-20
 

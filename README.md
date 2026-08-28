@@ -4,7 +4,7 @@ Equipment borrowing/returning system using NFC work cards. Users tap their card 
 
 ## Status
 
-**usable / shipped** — tagged `v0.1.0` (2026-08-20). Work on `main` after that tag is **Unreleased** (see `CHANGELOG.md`). Merging to `main` is not a release; tag `vX.Y.Z` only when shipping.
+**usable / shipped** — tagged `v0.2.0` (2026-08-28). Work on `main` after that tag is **Unreleased** (see `CHANGELOG.md`). Merging to `main` is not a release; tag `vX.Y.Z` only when shipping.
 
 ## Requirements
 
