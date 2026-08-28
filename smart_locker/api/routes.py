@@ -12,9 +12,10 @@ Description: REST API endpoints and SSE event stream for the Smart Locker kiosk.
 Project: smart_locker/api
 Notes: Kiosk session mutations require an active session AND a loopback
        client (require_session). LAN browsers must not ride the process-global
-       kiosk session. SSE stream at /api/events pushes NFC and session events
-       to the browser. Self-registration validates against the approved
-       registrants list; admin registration bypasses this check. Catalog GETs
+       kiosk session. SSE at /api/events is kiosk-loopback only (dashboard
+       polls public GETs; it does not use EventSource). Self-registration
+       validates against the approved registrants list; admin registration
+       bypasses this check. Catalog GETs
        under /api/dashboard/ stay public. Dashboard mutations require
        SMART_LOCKER_DASHBOARD_ADMIN_SECRET (header X-Smart-Locker-Admin), not
        loopback. Appliance session/shutdown/exit/update are kiosk-loopback only.
@@ -306,8 +307,8 @@ def _is_loopback_request(request: Request) -> bool:
 def require_loopback(request: Request) -> None:
     """Refuse appliance and kiosk-session-start calls from the LAN.
 
-    FastAPI dependency. Session start, shutdown, exit-kiosk, and software
-    update are kiosk-local.
+    FastAPI dependency. Session start, SSE ``/api/events``, shutdown,
+    exit-kiosk, and software update are kiosk-local.
 
     Args:
         request: Incoming ASGI request.
@@ -431,14 +432,20 @@ def _pending_nfc_conflict() -> str | None:
 # --- SSE Event Stream -------------------------------------------------------
 
 @router.get("/api/events")
-async def sse_events():
+async def sse_events(_: None = Depends(require_loopback)):
     """Server-Sent Events stream for NFC and session events.
 
-    Each client gets its own queue so a second EventSource cannot steal
-    events from the kiosk. Keepalive comments every 15 seconds.
+    Loopback only (kiosk Chromium). A LAN EventSource must not observe
+    auth_success or other session identity. Each client gets its own
+    queue so a second EventSource cannot steal events from the kiosk.
+    Keepalive comments every 15 seconds.
 
     Returns:
         StreamingResponse: An SSE text/event-stream response.
+
+    Raises:
+        HTTPException: 403 if the client is not loopback; 503 if the
+            app context is not ready.
     """
     ctx = ctx_module.context
     if ctx is None:
@@ -768,7 +775,11 @@ class KioskDisplayBody(BaseModel):
 
 
 class OwnerEditBody(BaseModel):
-    """Public dashboard owner change for one catalog PM."""
+    """Admin-secret-gated dashboard owner change for one catalog PM.
+
+    Inventory/Locker GETs stay public. This POST requires
+    ``X-Smart-Locker-Admin``; clock 5-tap is not authorization.
+    """
 
     pm_number: str = Field(..., min_length=1, max_length=50)
     owner: str = Field("", max_length=100)

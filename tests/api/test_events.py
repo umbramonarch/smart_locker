@@ -1,11 +1,13 @@
 """
 File: test_events.py
 Description: Tests for SSE /api/events fan-out so a second client cannot
-             starve the kiosk EventSource.
+             starve the kiosk EventSource, and loopback gating so a LAN
+             EventSource cannot observe kiosk auth/session events.
 Project: smart_locker/tests/api
 Notes: Run with: python -m pytest tests/api/test_events.py -v
 """
 import asyncio
+import contextlib
 from unittest.mock import MagicMock
 
 import pytest
@@ -39,4 +41,66 @@ class TestSseEvents:
             assert q2.get_nowait()["event"] == "auth_success"
         finally:
             ctx_module.context = None
+
+    def test_lan_cannot_open_sse(self, lan_client, mock_context):
+        """LAN EventSource must not observe kiosk SSE (auth_success, etc.)."""
+        mock_context.sse_queue.put_nowait({"event": "auth_success"})
+        resp = lan_client.get("/api/events")
+        assert resp.status_code == 403
+        assert mock_context.sse_queue.qsize() == 1
+
+    def test_loopback_sse_receives_events(self, client, mock_context):
+        """Kiosk loopback EventSource still receives SSE payloads.
+
+        Starlette TestClient buffers the whole body, so an infinite SSE
+        stream hangs there. Drive the ASGI app and stop after the first
+        chunk instead.
+        """
+        mock_context.subscribe_sse = None
+        mock_context.sse_queue.put_nowait({"event": "auth_success"})
+        messages = []
+
+        async def _first_chunk():
+            got_body = asyncio.Event()
+
+            async def receive():
+                await got_body.wait()
+                return {"type": "http.disconnect"}
+
+            async def send(message):
+                messages.append(message)
+                if message["type"] == "http.response.body":
+                    got_body.set()
+
+            scope = {
+                "type": "http",
+                "asgi": {"version": "3.0", "spec_version": "2.3"},
+                "http_version": "1.1",
+                "method": "GET",
+                "scheme": "http",
+                "path": "/api/events",
+                "raw_path": b"/api/events",
+                "root_path": "",
+                "query_string": b"",
+                "headers": [(b"host", b"testserver")],
+                "client": ("127.0.0.1", 50000),
+                "server": ("testserver", 80),
+            }
+            task = asyncio.create_task(client.app(scope, receive, send))
+            try:
+                await asyncio.wait_for(got_body.wait(), timeout=2.0)
+            finally:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+
+        asyncio.run(_first_chunk())
+        start = next(m for m in messages if m["type"] == "http.response.start")
+        assert start["status"] == 200
+        body = b"".join(
+            m.get("body", b"")
+            for m in messages
+            if m["type"] == "http.response.body"
+        ).decode()
+        assert "auth_success" in body
 

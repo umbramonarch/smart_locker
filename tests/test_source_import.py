@@ -667,6 +667,24 @@ class TestRegistrantExtraction:
         finally:
             path.unlink(missing_ok=True)
 
+    def test_no_location_column_preserves_existing_registrants(self, db_session):
+        """Missing Location column must keep self-register names already in SQLite."""
+        RegistrantRepository.add_names(db_session, {"Alice", "Bob"})
+        db_session.commit()
+        path = _create_test_excel([
+            ["Equipment", "Manufacturer", "Slot"],
+            ["PM-001", "Fluke", "Bay 1"],
+        ])
+        try:
+            from smart_locker.database.engine import get_engine
+            result = import_from_source_excel(get_engine(), path)
+            assert result.registrants_added == 0
+            db_session.expire_all()
+            names = {r.display_name for r in RegistrantRepository.get_all(db_session)}
+            assert names == {"Alice", "Bob"}
+        finally:
+            path.unlink(missing_ok=True)
+
     def test_sync_names_failure_is_not_clean_success(self, db_session, monkeypatch):
         """If registrant prune/sync fails, import must surface an error count."""
         path = _create_test_excel([
