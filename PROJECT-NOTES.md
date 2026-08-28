@@ -9,8 +9,9 @@
 ## Stack
 
 - **Languages:** Python (backend, scripts, tests) + vanilla HTML/CSS/JS (kiosk and `/dashboard`)
+- **Language pack(s) to follow:** python (TypeScript-React is not used)
 - **Conventions:** Google docstrings, existing layout (`smart_locker/` package at repo root, `requirements.txt` not `pyproject.toml`)
-- **Important versions:** Python 3.11+ on Windows/dev; **Python 3.13 / cp313** on Raspberry Pi OS trixie. pytest 8. No Node runtime for the product.
+- **Important versions:** Python 3.11+ on Windows/dev (floor); **Python 3.13 / cp313** on Raspberry Pi OS trixie (production pin, also `.python-version`). pytest 8. No Node runtime for the product.
 
 ## How to build / test / flash
 
@@ -31,7 +32,7 @@ sudo bash deploy/install/install.sh
 # then .env from deploy/.env.pi.example, init_db, enroll admin, mount the locker share, start service
 ```
 
-- **CI:** none in this repo. Pytest on the work branch is the merge gate for `main`.
+- **CI:** CI `.git/workflows/ci.yml` on merge requests and on push to `main`. Matrix Python 3.11 and 3.13: `pip install -r requirements.txt` then `python -m pytest tests/ -v`. No ruff. No `pip install -e .`. Pytest on the work branch remains the merge gate.
 - **Manual verification:** real ACR1252U work-card tap, then device-sticker borrow/return, Riverdi touch screen, CIFS import/export. Checklist: `deploy/PI-VALIDATION-CHECKLIST.md`.
 
 ## Hardware risk
@@ -41,6 +42,7 @@ sudo bash deploy/install/install.sh
 
 ## Do
 
+- Follow the personal engineering playbook (work type → checklist). Full method: `D:\projects\guide` — start at `00-start-here.md`.
 - Write tests from the stated acceptance / bug / current behavior only.
 - Keep diffs on-Issue. New dependencies need an explicit why, pin, and license.
 - Work on a short-lived branch from `main` (`feature/`, `fix/`, `refactor/`, `docs/`, `chore/`, `hotfix/`, `spike/`). MR into `main`. Delete the branch after merge.
