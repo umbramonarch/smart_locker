@@ -36,6 +36,9 @@ deploy/system-packages/*.deb
 smart_locker/frontend/images/*
 !smart_locker/frontend/images/hero_bg.jpg
 
+# Operator-built unpacked update tree (python -m scripts.copy_update)
+locker-updates/
+
 # Operator-built release tarballs (pack_release default output is the repo cwd)
 smart-locker-*.tar.gz
 smart-locker-*.tar.gz.hmac
