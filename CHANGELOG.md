@@ -12,7 +12,7 @@ Work on `main` after the `v0.2.0` tag. Merging to `main` is not a release; the n
 
 ### Changed
 
-- Pi **Software Update** takes an unpacked repo tree from a USB stick (Windows git checkout → copy needed files → plug in → hidden-admin button). `update.sh` copies the tree off the stick, then stop / backup / rsync-preserve / pip from the existing Pi wheelhouse / migrate / health / rollback. Missing wheels fail closed with package names (`deploy/install/build-wheelhouse.sh`). Signed tarball + HMAC remains fallback only.
+- Pi **Software Update** uses `python -m scripts.copy_update` → gitignored `locker-updates/` on a USB stick. `update.sh` copies USB `locker-updates` into `$APP_DIR/locker-updates`, then stop / backup / rsync-preserve / pip / migrate / health / rollback. Missing wheels are warned at copy time; pip failure on the Pi rolls back. Signed tarball + HMAC remains fallback only.
 
 ## [0.2.0] — 2026-08-28
 

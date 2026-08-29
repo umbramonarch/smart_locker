@@ -68,7 +68,7 @@ table at the end.
       Admin last-sync line is not "never" if a previous import was recorded.
 - [ ] Auto-export of `smart_locker_data.xlsx` is off unless `SMART_LOCKER_EXCEL_AUTO_EXPORT=1`.
       Admin **Export Excel** still downloads a snapshot.
-- [ ] Software update from a USB repo tree: admin **Software Update** overlay, or SSH `sudo bash deploy/install/update.sh`. Do not overlay the stick onto `/home/locker/smart_locker` in the file manager.
+- [ ] Software update from USB `locker-updates/` (`python -m scripts.copy_update` on Windows): admin **Software Update** overlay, or SSH `sudo bash deploy/install/update.sh`. Do not overlay the stick onto `/home/locker/smart_locker` in the file manager.
 - [ ] Admin **Register Device**: Add from Excel (PM in the sheet + free slot) creates the locker row and waits for the sticker; unknown PM / share down does not create a row. Existing rows Bind / **Replace tag** / Unbind / Slot still work. **Sync Source** updates catalog only (does not add locker devices).
 - [ ] Admin **Exit kiosk** (confirm) closes Chromium; `smart-locker` stays `active`; dashboard on `:8000` still answers. Chromium does not return until login/reboot.
 - [ ] Admin **Shut down** (confirm) powers the Pi off. After the first update of this feature, if the button errors, SSH `sudo bash deploy/install/apply-sudoers.sh` once.

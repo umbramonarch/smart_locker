@@ -72,14 +72,12 @@ sudo bash deploy/install/install.sh
 - **NFC device tags:** same ACR1252U as work cards. Store `devices.tag_hmac` only (same HMAC key as `users.uid_hmac`). Kiosk `GET /api/devices` and dashboard Locker JSON may expose `has_tag: bool`, never the digest; Excel export is Tagged Yes/No. Idle tap of a **borrowed** sticker returns it (no work card; slot overlay); available tags do not borrow from idle.
 - **Excel auto-export** only if `SMART_LOCKER_EXCEL_AUTO_EXPORT=1` (off in the Pi template; admin Export Excel stays).
 - **Photos:** filename stem = device **model**. `scripts/update_device.py --auto` matches **PM number** — different scheme.
-- **Pi updates:** Windows git checkout → copy needed repo files onto a USB stick →
-  hidden-admin **Software Update**. `update.sh` finds an unpacked tree (USB first;
-  optional local `locker-updates/`; CIFS `SMART_LOCKER_UPDATE_DIR` last), copies it
-  off the stick, then stop / backup / rsync-preserve / pip from the **existing** Pi
-  wheelhouse / migrate / health / rollback. No HMAC on the USB-tree path. Signed
-  tarball + HMAC remains fallback only. Rebuild `deploy/wheelhouse` only when
-  requirements need wheels the Pi does not have; missing wheels fail closed with
-  package names. Git reset is not a full update.
+- **Pi updates:** `python -m scripts.copy_update` (optional `--dest D:\\`) writes gitignored
+  `locker-updates/` and copies it onto a USB stick. Hidden-admin **Software Update** applies
+  `$APP_DIR/locker-updates` (USB `locker-updates/` is copied there first). CIFS
+  `SMART_LOCKER_UPDATE_DIR` is last fallback. No HMAC on the USB-tree path. Missing wheels
+  are **warned** by `copy_update` (does not abort); pip failure on the Pi rolls back.
+  Git reset is not a full update.
 - **Hidden admin:** idle screen, tap the **clock 5× within 3 s**. **Register User** returns to idle after enroll (next work-card tap logs in). **Register Device** is PM + free slot + NFC (catalog from Excel; Sync never inserts). List shows **name + PM**; tagged rows say **Replace tag**. CLI bind: `python -m scripts.enroll_device_tag --pm PM-001`. **Exit kiosk** closes Chromium (service stays); **Shut down** is `systemctl poweroff` (needs `/etc/sudoers.d/smart-locker` via `apply-sudoers.sh`). Dashboard (`http://<pi>:8000/dashboard`): public GET **Inventory** (live Excel) and **Locker** (SQLite; Tagged / No tag) stay unauthenticated. Owner POST, bind/unbind, and gated users/tx/owners GETs need `SMART_LOCKER_DASHBOARD_ADMIN_SECRET` (header `X-Smart-Locker-Admin`); 401 if unset (fail closed). Same 5-tap on the dashboard clock reveals users, last 500 transactions, unbind / arm-bind in the client — it is not authorization (`overlay=true` is not auth). Share launcher: `SMART_LOCKER_PUBLIC_URL` + `SMART_LOCKER_DASHBOARD_SHARE_PATH` writes `dashboard.html` + `dashboard.url`. Health: `/api/health`.
 - **Entry / layout:** `smart_locker/app.py`, `config/`, `scripts/`, `deploy/`, `tests/`, `GUIDE.md`. Frontend: `smart_locker/frontend/`.
 - **Logging:** `config/logging_config.py` → `logs/smart_locker.log` (5 MB × 5) + stdout INFO.

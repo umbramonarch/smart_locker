@@ -267,7 +267,7 @@ used — this trips people up because most of them are only ever invoked *indire
 | `systemd/smart-locker.service` | Defines the backend as a systemd service (auto-restart, boot-start) | Installed by `install.sh`; started manually the first time — Section 5 |
 | `install/sudoers-smart-locker` | Grants the app account passwordless sudo for *only* restarting its own service, running updates, and `systemctl poweroff` | Installed by `apply-sudoers.sh`; powers **Software Update** and **Shut down** — Section 9 |
 | `install/apply-sudoers.sh` | Renders the sudoers template to `/etc/sudoers.d/smart-locker` after `visudo -cf` | Called by `install.sh` and `update.sh`; SSH once on an existing Pi if Shut down 500s |
-| `install/update.sh` | Applies an unpacked repo tree from USB (backup + health-check + auto-rollback); signed tarball on the share is fallback | Runs later, whenever you ship an update — Section 9 |
+| `install/update.sh` | Applies gitignored locker-updates/ from USB (backup + health-check + auto-rollback); signed tarball on the share is fallback | Runs later, whenever you ship an update — Section 9 |
 | `kiosk/start-kiosk.sh` | Launches Chromium fullscreen once the backend is up | Installed by `install.sh`; runs automatically at every graphical login — Section 5 |
 | `kiosk/smart-locker-kiosk.desktop` | The autostart entry that triggers `start-kiosk.sh` | Installed by `install.sh` into the app user's autostart folder |
 | `mount/fstab.snippet` | The `/etc/fstab` line template for the CIFS mount | You copy/edit it by hand — Section 6 (done **last**) |
@@ -301,10 +301,10 @@ your local copy of the project, which you then carry over via the USB stick.
 
 **`install/update.sh`** is what actually runs, weeks or months later, when you ship a new
 version. You never run this by hand during initial setup — it's what the admin panel's
-**Software Update** button calls (via the sudoers rule from `install.sh`). Copy the
-Windows git checkout onto a USB stick (same idea as first install) and tap the button;
-`SMART_LOCKER_UPDATE_DIR` is only a last-resort share folder (unpacked tree, or still
-a signed tarball). HMAC is not used for the USB-tree path.
+**Software Update** button calls (via the sudoers rule from `install.sh`). On Windows run
+`python -m scripts.copy_update --dest D:\\`, plug the stick into the Pi, and tap the
+button. `SMART_LOCKER_UPDATE_DIR` is only a last-resort share folder. HMAC is not used for
+the USB-tree path.
 
 **Why is `PI-VALIDATION-CHECKLIST.md` a separate file instead of being folded into this
 guide?** Two reasons: (1) it's a different *kind* of document — a fill-in-the-blanks
@@ -857,9 +857,9 @@ Pi on the LAN can use them — the lock is **physical access**, not a password.
      comes from Excel). Existing rows can bind / unbind / change slot. The list shows
      **name + PM** (and slot).
    - **Export to Excel** — download a snapshot of devices / transactions / users.
-   - **Software Update** — plug in a USB stick with the Windows git checkout, then apply.
-     Full-screen updating overlay, then the kiosk reloads. Do not copy onto
-     `/home/locker/smart_locker` in the file manager.
+   - **Software Update** — plug in the USB stick (`locker-updates/` from
+     `python -m scripts.copy_update`), then apply. Full-screen overlay, then the kiosk
+     reloads. Do not copy onto `/home/locker/smart_locker` in the file manager.
    - **Exit kiosk** — close Chromium; the locker service stays up. Chromium does not
      come back until the next graphical login or reboot. Confirm first.
    - **Shut down** — `systemctl poweroff` the Pi. Confirm first. Needs the sudoers
@@ -1039,43 +1039,42 @@ The Pi lives in the locker, far from you, so it is built to heal itself:
 
 ### Updating the software (no internet)
 
-There is one update path: copy **needed repo files** from your Windows git checkout onto a
-USB stick (same mental model as first install — the tree is the payload), plug the stick
-into the Pi, and tap hidden-admin **Software Update**. Do not copy onto the live
+There is one update path: on Windows run `python -m scripts.copy_update`, plug the USB
+stick into the Pi, and tap hidden-admin **Software Update**. Do not copy onto the live
 `/home/locker/smart_locker` folder in the file manager. Do not `git reset` on the
 appliance — that is not a full update.
 
 **1. On Windows**
 
-From your git checkout, copy the project folder onto a USB stick the same way as Step 0b
-(the whole `smart_locker` folder is fine). Skip `.env`, `venv/`, `*.db`, `logs/`, and
-`backups/` even if they exist on the PC — `update.sh` ignores those on the stick anyway.
+From your git checkout:
 
-**Do not rebuild or copy `deploy/wheelhouse` unless `requirements.txt` changed** (or the
-overlay later says wheels are missing). The Pi already has a wheelhouse from first
-install. If new packages were added, rebuild on Windows:
+```bash
+python -m scripts.copy_update --dest D:\\
+```
+
+Omit `--dest` if exactly one removable drive is plugged in. That writes gitignored
+`locker-updates/` in the checkout (needed files only — not `.env`, `venv/`, databases,
+`logs/`, or `backups/`) and copies the same folder onto the stick as `D:\locker-updates`.
+
+If `requirements.txt` has packages with no matching file in `deploy/wheelhouse`, the
+command **warns** with those package names and still copies. Rebuild the wheelhouse only
+when you see that warning:
 
 ```bash
 deploy/install/build-wheelhouse.sh
+python -m scripts.copy_update --dest D:\\
 ```
-
-Then copy that `deploy/wheelhouse/` folder onto the stick (USB is fine) so the Pi can
-pick up only the wheels it does not already have.
 
 **2. Apply on the Pi**
 
-Plug the stick in. Hidden admin (idle clock 5×) → **Software Update**. The script looks
-for a repo tree in this order: USB mounts (`/media/*/*`, including a `locker-updates/`
-subfolder) → optional local `/home/locker/smart_locker/locker-updates/` → optional CIFS
-`SMART_LOCKER_UPDATE_DIR` (tree preferred; a leftover signed `.tar.gz` + `.hmac` still
-works). It copies the tree onto local disk so you can unplug the stick, then stops the
-service, snapshots code + database, rsyncs with the preserve list, installs from the
-**existing** Pi wheelhouse, runs `scripts.migrate_db`, starts the service, and checks
-`/api/health`. If the new version does not come up, it restores the snapshot.
+Plug the stick in. Hidden admin (idle clock 5×) → **Software Update**. `update.sh`
+looks for `locker-updates/` on USB (`/media/*/*`), copies it to
+`/home/locker/smart_locker/locker-updates` (so you can unplug), then stop / backup /
+rsync-preserve / pip from the existing Pi wheelhouse / migrate / health / rollback.
+Last resort: CIFS `SMART_LOCKER_UPDATE_DIR` (unpacked tree, or a leftover signed tarball).
 
-If the wheelhouse cannot satisfy the new `requirements.txt`, the overlay names the
-**missing packages** and tells you to rebuild `deploy/wheelhouse` on Windows and copy
-that folder onto the Pi. It does not skip new dependencies.
+If pip cannot install from the wheelhouse, the update **rolls back**. The overlay does
+not refuse solely because wheels were missing; the Windows script already warned.
 
 **First apply of this `update.sh`:** copy only `deploy/install/update.sh` onto the Pi
 (keep LF — do not open it in Notepad), then SSH:
@@ -1106,7 +1105,7 @@ already up to date.
 - `.env`
 - `smart_locker.db` (plus `-wal` / `-shm`)
 - `venv/`
-- `deploy/wheelhouse/` (copy this folder only when the overlay says wheels are missing)
+- `deploy/wheelhouse/` (copy extra wheels via `copy_update` only when it warns)
 - `deploy/system-packages/`
 - `logs/`
 - `backups/`
