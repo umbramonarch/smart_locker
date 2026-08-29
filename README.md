@@ -102,7 +102,7 @@ smart_locker/
 │   ├── import_devices.py        # Catalog refresh from Excel (English headers / aliases)
 │   ├── update_device.py         # Update device fields / match photos by PM number
 │   ├── sync_source.py           # Manually trigger source Excel import
-│   └── pack_release.py          # Pack a signed release (tracked-file snapshot + HMAC sidecar)
+│   └── pack_release.py          # Optional signed tarball fallback for update.sh
 ├── tests/                       # hardware-free pytest suite
 ├── docs/adr/                    # architecture decision records
 ├── docs/planning/               # historical plans (keep nfc-device-tags.md)

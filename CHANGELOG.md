@@ -12,6 +12,8 @@ Work on `main` after the `v0.2.0` tag. Merging to `main` is not a release; the n
 
 ### Changed
 
+- Pi **Software Update** takes an unpacked repo tree from a USB stick (Windows git checkout → copy needed files → plug in → hidden-admin button). `update.sh` copies the tree off the stick, then stop / backup / rsync-preserve / pip from the existing Pi wheelhouse / migrate / health / rollback. Missing wheels fail closed with package names (`deploy/install/build-wheelhouse.sh`). Signed tarball + HMAC remains fallback only.
+
 ## [0.2.0] — 2026-08-28
 
 Second tagged appliance ship (`v0.2.0`). NFC stickers, Location write-back, dashboard tabs, and house bootstrap (changelog, ADRs, MIT, pytest CI).

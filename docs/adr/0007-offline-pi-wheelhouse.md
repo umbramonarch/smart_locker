@@ -21,7 +21,7 @@ Dev/Windows is Python **3.11+**. CI may run 3.11 and 3.13. Do not treat 3.12 as 
 
 ## Decision
 
-We pick **option 2** because the site can be air-gapped. Updates are a signed tarball from `python -m scripts.pack_release` (`.tar.gz` + `.hmac` on `/mnt/locker/locker-updates`). `update.sh` stops, backups, pip, migrates, health-checks, rollbacks, then refreshes sudoers. `SMART_LOCKER_UPDATE_HMAC_KEY` is the env **string** for openssl, not decoded 32 bytes. Git reset is not a full update. Keep `requirements.txt` (no `pyproject.toml` for this product).
+We pick **option 2** because the site can be air-gapped. In-field updates are an unpacked repo tree from a USB stick (Windows git checkout; `update.sh` copies it off the stick, then stop / backup / rsync-preserve / pip from the existing Pi wheelhouse / migrate / health / rollback). HMAC is not used on that path. A signed tarball from `python -m scripts.pack_release` (`.tar.gz` + `.hmac` on `/mnt/locker/locker-updates`) remains fallback only; `SMART_LOCKER_UPDATE_HMAC_KEY` is the env **string** for openssl, not decoded 32 bytes. Git reset is not a full update. Keep `requirements.txt` (no `pyproject.toml` for this product).
 
 ## Consequences
 
