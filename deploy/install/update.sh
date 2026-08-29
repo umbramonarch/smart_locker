@@ -2,12 +2,14 @@
 #
 # File: update.sh
 # Description: Offline software update for the Smart Locker Pi appliance.
-#              Finds an unpacked repo tree (USB first), copies it to local disk,
-#              then snapshots DB + code, swaps in the new tree, installs deps from
-#              the existing Pi wheelhouse, runs DB migrations, restarts the
-#              service, and health-checks /api/health. If the new version does not
-#              come up, the previous code and database are restored. A signed
-#              tarball on the share remains a backward-compatible fallback.
+#              Finds locker-updates/ (USB copy into $APP_DIR/locker-updates, or
+#              that folder already on disk), then snapshots DB + code, swaps in
+#              the new tree, installs deps from the existing Pi wheelhouse, runs
+#              DB migrations, restarts the service, and health-checks /api/health.
+#              If the new version does not come up, the previous code and database
+#              are restored. A signed tarball on the share remains a last-resort
+#              fallback. Missing wheels are warned at USB-prep
+#              (python -m scripts.copy_update); pip failure here rolls back.
 # Project: smart_locker/deploy
 # Notes: Run on the Pi as: sudo bash deploy/install/update.sh   (the admin-panel
 #        "Software Update" button runs exactly this). Use `sudo bash <script>` —
@@ -20,9 +22,10 @@
 #        PRESERVE keeps runtime files (.env, DB, last_sync.json, venv, logs, backups,
 #        wheelhouse, deploy/system-packages, device photos) across rsync --delete;
 #        committed UI images from the incoming tree are overlaid afterwards without
-#        --delete. Wheelhouse is not recopied on every update — only missing/new
-#        wheels, and only when preflight would otherwise fail. Set
-#        SMART_LOCKER_UPDATE_LIB=1 before sourcing this file from tests.
+#        --delete. Extra .whl files in the incoming locker-updates tree are copied
+#        into the Pi wheelhouse when the Pi does not already have that filename.
+#        Missing wheels are not a refuse; pip failure after backup rolls back.
+#        Set SMART_LOCKER_UPDATE_LIB=1 before sourcing this file from tests.
 #
 set -Eeuo pipefail
 
@@ -71,10 +74,11 @@ SERVICE="${SMART_LOCKER_SERVICE:-smart-locker}"
 HEALTH_URL="${SMART_LOCKER_HEALTH_URL:-http://127.0.0.1:8000/api/health}"
 HEALTH_TIMEOUT="${SMART_LOCKER_HEALTH_TIMEOUT:-45}"   # seconds to wait for a healthy boot
 
-# Optional CIFS/share folder (tree preferred; signed tarball is fallback only).
+# Optional CIFS/share folder (last fallback: tree preferred; signed tarball).
 UPDATE_DIR="${SMART_LOCKER_UPDATE_DIR:-/mnt/locker/locker-updates}"
-# Raspberry Pi OS auto-mounts USB sticks at /media/<user>/<label>. Tests override.
-USB_MEDIA_ROOT="${SMART_LOCKER_USB_MEDIA_ROOT:-/media}"
+# Raspberry Pi OS auto-mounts USB sticks at /media/<user>/<label>. Not an .env key.
+USB_MEDIA_ROOT="/media"
+# Apply source: Windows copy_update payload, or USB locker-updates copied here.
 LOCAL_UPDATES="$APP_DIR/locker-updates"
 
 DB_PATH="${SMART_LOCKER_DB_PATH:-$APP_DIR/smart_locker.db}"
@@ -88,12 +92,16 @@ KEEP_BACKUPS="${SMART_LOCKER_KEEP_BACKUPS:-5}"
 # Runtime paths preserved across the code swap (never overwritten by a release).
 PRESERVE=(".env" "smart_locker.db" "smart_locker.db-wal" "smart_locker.db-shm"
           "last_sync.json" "logs" "venv" "deploy/wheelhouse" "deploy/system-packages"
-          "backups" ".update-staging" ".git" "smart_locker/frontend/images" "VERSION")
+          "backups" ".update-staging" ".git" "smart_locker/frontend/images" "VERSION"
+          "locker-updates")
 
-# Skip these from an incoming Windows/USB tree even if they were copied onto the stick.
+# Skip these from an incoming tree even if they were copied onto the stick.
 INCOMING_SKIP=(".env" "venv" "logs" "backups" "smart_locker.db" "smart_locker.db-wal"
                "smart_locker.db-shm" "deploy/wheelhouse" "deploy/system-packages"
                ".update-staging" ".git")
+# USB → $APP_DIR/locker-updates may include extra wheels the Pi does not have.
+PAYLOAD_SKIP=(".env" "venv" "logs" "backups" "smart_locker.db" "smart_locker.db-wal"
+              "smart_locker.db-shm" ".update-staging" ".git" "locker-updates")
 
 mkdir -p "$BACKUP_DIR" "$APP_DIR/logs"
 
@@ -272,7 +280,7 @@ _tree_mtime() {
   stat -c '%Y' "$d/requirements.txt" 2>/dev/null || echo 0
 }
 
-# Newest USB repo tree under USB_MEDIA_ROOT (/media/*/* and /media/*).
+# Newest USB locker-updates tree under USB_MEDIA_ROOT (/media/*/* and /media/*).
 find_usb_tree() {
   local root="${1:-$USB_MEDIA_ROOT}"
   [ -d "$root" ] || return 1
@@ -282,7 +290,13 @@ find_usb_tree() {
   shopt -s nullglob
   for cand in "$root"/*/* "$root"/*; do
     [ -d "$cand" ] || continue
-    tree="$(find_tree_under "$cand" || true)"
+    tree=""
+    if [ -d "$cand/locker-updates" ]; then
+      tree="$(find_tree_under "$cand/locker-updates" || true)"
+    fi
+    if [ -z "$tree" ] && [ "$(basename "$cand")" = "locker-updates" ]; then
+      tree="$(find_tree_under "$cand" || true)"
+    fi
     [ -n "$tree" ] || continue
     m="$(_tree_mtime "$tree")"
     if [ "$m" -ge "$best_m" ]; then
@@ -307,7 +321,7 @@ newest_tarball_in() {
   printf '%s\n' "$tarball"
 }
 
-# Search order: USB → local $APP_DIR/locker-updates/ → CIFS UPDATE_DIR (tree, then tarball).
+# Search order: USB locker-updates → local $APP_DIR/locker-updates/ → CIFS UPDATE_DIR.
 # Prints: TREE<TAB>path   or   TARBALL<TAB>path
 discover_update_source() {
   local tree tarball
@@ -382,91 +396,26 @@ version_is_older() {
   [ "$first" = "$incoming" ]
 }
 
-copy_incoming_tree() {
+copy_tree_with_skip() {
   local src="${1:-}" dest="${2:-}"
+  shift 2
   [ -n "$src" ] && [ -d "$src" ] || return 1
   [ -n "$dest" ] || return 1
   mkdir -p "$dest"
   local excludes=() p
-  for p in "${INCOMING_SKIP[@]}"; do
+  for p in "$@"; do
     excludes+=( --exclude="/$p" --exclude="/$p/" )
   done
   excludes+=( --exclude='*.db' )
   rsync -a "${excludes[@]}" "$src"/ "$dest"/
 }
 
-# Names from requirements.txt that have no matching .whl in the wheelhouse,
-# unioned with packages pip reported as unsatisfiable.
-list_missing_wheels() {
-  local reqs="${1:-}" wheelhouse="${2:-}" pip_log="${3:-}"
-  local pybin
-  pybin="$(_status_python)" || return 1
-  "$pybin" - "$reqs" "$wheelhouse" "$pip_log" <<'PY'
-import re
-import sys
-from pathlib import Path
-
-reqs_path, wheelhouse, pip_log = sys.argv[1], sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else ""
-
-def norm(name: str) -> str:
-    name = name.strip()
-    name = re.split(r"[<>=!~;\[]", name, 1)[0].strip()
-    return re.sub(r"[-_.]+", "-", name).lower()
-
-def req_names(text: str) -> list[str]:
-    names = []
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        name = re.split(r"[<>=!~;\[]", line, 1)[0].strip()
-        if not name or name.lower() == "pyscard":
-            continue
-        names.append(name)
-    return names
-
-def wheel_dist(filename: str) -> str:
-    m = re.match(r"^(.+?)-(\d.*)\.whl$", filename)
-    if m:
-        return norm(m.group(1))
-    return norm(filename.rsplit(".whl", 1)[0])
-
-names = req_names(Path(reqs_path).read_text(encoding="utf-8") if Path(reqs_path).is_file() else "")
-wh_dir = Path(wheelhouse)
-wheels = {wheel_dist(p.name) for p in wh_dir.glob("*.whl")} if wh_dir.is_dir() else set()
-missing = []
-seen = set()
-for name in names:
-    key = norm(name)
-    if key not in wheels and key not in seen:
-        missing.append(name)
-        seen.add(key)
-
-log_text = Path(pip_log).read_text(encoding="utf-8", errors="replace") if pip_log and Path(pip_log).is_file() else (pip_log or "")
-for line in log_text.splitlines():
-    m = re.search(r"(?:No matching distribution found for|satisfies the requirement)\s+([^\s(]+)", line)
-    if not m:
-        continue
-    raw = m.group(1).strip().rstrip(",")
-    name = re.split(r"[<>=!~;\[]", raw, 1)[0].strip()
-    if not name or name.lower() == "pyscard":
-        continue
-    key = norm(name)
-    if key not in seen:
-        missing.append(name)
-        seen.add(key)
-
-print(", ".join(missing))
-PY
+copy_incoming_tree() {
+  copy_tree_with_skip "$1" "$2" "${INCOMING_SKIP[@]}"
 }
 
-missing_wheels_message() {
-  local names="${1:-}" cur="${2:-${CUR_VERSION:-unknown}}"
-  if [ -z "$names" ]; then
-    printf 'Wheelhouse cannot satisfy requirements (see logs/update.log). Rebuild deploy/wheelhouse on Windows (deploy/install/build-wheelhouse.sh) and copy that folder onto the Pi (USB is fine). Update refused; still on %s.' "$cur"
-    return 0
-  fi
-  printf 'Missing wheels: %s. Rebuild deploy/wheelhouse on Windows (deploy/install/build-wheelhouse.sh) and copy that folder onto the Pi (USB is fine). Update refused; still on %s.' "$names" "$cur"
+copy_payload_tree() {
+  copy_tree_with_skip "$1" "$2" "${PAYLOAD_SKIP[@]}"
 }
 
 copy_new_wheels_from_incoming() {
@@ -491,14 +440,6 @@ copy_new_wheels_from_incoming() {
   [ "$copied" -gt 0 ]
 }
 
-wheelhouse_has_wheels() {
-  local f
-  for f in "$WHEELHOUSE"/*.whl; do
-    [ -f "$f" ] && return 0
-  done
-  return 1
-}
-
 # --- Sourced by tests: stop before mutating the live appliance --------------
 if [ "${SMART_LOCKER_UPDATE_LIB:-}" = "1" ]; then
   return 0 2>/dev/null || exit 0
@@ -516,7 +457,7 @@ CUR_VERSION="$( [ -f "$VERSION_FILE" ] && tr -d '[:space:]' < "$VERSION_FILE" ||
 OLD_VERSION="$CUR_VERSION"
 
 log "=== Smart Locker update check (current version: $CUR_VERSION) ==="
-write_status "checking" "Looking for an unpacked repo tree (USB first)."
+write_status "checking" "Looking for locker-updates/ (USB, then local, then the share)."
 
 # Fail closed before stop/backup: the USB/local copy and the code swap need rsync.
 # openssl is required only for the signed-tarball fallback, not the USB-tree path.
@@ -528,8 +469,8 @@ fi
 
 FOUND="$(discover_update_source || true)"
 if [ -z "$FOUND" ]; then
-  log "No unpacked repo tree on USB, $LOCAL_UPDATES, or $UPDATE_DIR, and no signed tarball — nothing to do."
-  write_status "idle" "No update found on USB, local locker-updates, or the share; staying on $CUR_VERSION."
+  log "No locker-updates tree on USB, $LOCAL_UPDATES, or $UPDATE_DIR, and no signed tarball — nothing to do."
+  write_status "idle" "No locker-updates tree found; staying on $CUR_VERSION."
   exit 0
 fi
 SOURCE_KIND="${FOUND%%$'\t'*}"
@@ -556,6 +497,20 @@ if version_is_older "$NEW_VERSION" "$CUR_VERSION"; then
 fi
 log "New release available: $CUR_VERSION -> $NEW_VERSION ($SOURCE_KIND $SOURCE_PATH)"
 write_status "updating" "Copying $NEW_VERSION onto local disk."
+
+# USB (or CIFS tree) → $APP_DIR/locker-updates so the stick can be unplugged.
+if [ "$SOURCE_KIND" = "TREE" ]; then
+  _src_abs="$(cd "$SOURCE_PATH" && pwd)"
+  mkdir -p "$LOCAL_UPDATES"
+  _local_abs="$(cd "$LOCAL_UPDATES" && pwd)"
+  if [ "$_src_abs" != "$_local_abs" ]; then
+    log "Copying incoming tree to $LOCAL_UPDATES (USB can be unplugged after this)."
+    rm -rf "$LOCAL_UPDATES"
+    copy_payload_tree "$SOURCE_PATH" "$LOCAL_UPDATES"
+    SOURCE_PATH="$LOCAL_UPDATES"
+    log "Incoming tree is at $LOCAL_UPDATES."
+  fi
+fi
 
 # ============================================================================
 # 3. Stage onto local disk (USB can be unplugged after this)
@@ -588,79 +543,17 @@ else
   log "Incoming tree staged at $STAGING_DIR."
 fi
 [ -f "$STAGING_DIR/requirements.txt" ] || { log "Staged tree looks invalid (no requirements.txt) — aborting."; write_status "failed" "Incoming tree is invalid."; rm -rf "$STAGING_DIR"; exit 1; }
-write_status "updating" "Checking the Pi wheelhouse for $NEW_VERSION."
+write_status "updating" "Applying $NEW_VERSION."
 
-# ============================================================================
-# 3b. Offline wheelhouse preflight (BEFORE stop/rsync — kiosk stays on old version)
-# ============================================================================
-# Mirror install.sh: filter pyscard (system .deb, never in the wheelhouse), require a
-# wheelhouse, and pip --dry-run so a stale/wrong-ABI kit fails closed without touching
-# the live tree. The Pi is never-networked in production — if the preserved wheelhouse
-# cannot satisfy the staged release's requirements, refuse the update now unless the
-# incoming tree has *new* wheels the Pi does not already have.
-# deploy/wheelhouse is in PRESERVE, so the kit on disk is the one that must work.
+# Copy extra wheels the Pi does not already have. Do not refuse if some are still
+# missing — python -m scripts.copy_update warned on Windows; pip failure rolls back.
 REQS_FOR_UPDATE="$(mktemp)"
 grep -vi '^pyscard' "$STAGING_DIR/requirements.txt" > "$REQS_FOR_UPDATE"
-# Keep cleaned up on every exit path (success, refuse, or ERR rollback).
 trap 'rm -f "$REQS_FOR_UPDATE"' EXIT
-if ! wheelhouse_has_wheels; then
-  if [ "$SOURCE_KIND" = "TREE" ] && copy_new_wheels_from_incoming "$SOURCE_PATH"; then
-    log "Copied wheels from the incoming tree into an empty Pi wheelhouse."
-  fi
-fi
-if ! wheelhouse_has_wheels; then
-  log "FATAL: no wheelhouse at $WHEELHOUSE — cannot safely update deps in-field."
-  log "    The Pi has no internet; a release without a matching offline wheelhouse is refused."
-  log "    Service was NOT stopped; live code was NOT swapped — still running $CUR_VERSION."
-  MISSING_NAMES="$(list_missing_wheels "$STAGING_DIR/requirements.txt" "$WHEELHOUSE" || true)"
-  write_status "failed" "$(missing_wheels_message "$MISSING_NAMES" "$CUR_VERSION")"
-  rm -rf "$STAGING_DIR"
-  exit 1
-fi
-
-run_wheel_preflight() {
-  local dry_log="$1"
-  "$VENV_DIR/bin/pip" install --dry-run --ignore-installed --no-index --find-links "$WHEELHOUSE" -r "$REQS_FOR_UPDATE" >"$dry_log" 2>&1
-}
-
-refuse_wheelhouse() {
-  local dry_log="$1"
-  log "FATAL: wheelhouse cannot satisfy the staged requirements.txt for this Python."
-  log "    Rebuild with deploy/install/build-wheelhouse.sh on Windows, then copy"
-  log "    deploy/wheelhouse/ onto the Pi (USB is fine). Service was NOT stopped;"
-  log "    live code was NOT swapped — still running $CUR_VERSION."
-  log "    --- pip dry-run output (last 30 lines) ---"
-  tail -n 30 "$dry_log" >>"$LOG_FILE" 2>&1 || true
-  local missing_names
-  missing_names="$(list_missing_wheels "$STAGING_DIR/requirements.txt" "$WHEELHOUSE" "$dry_log" || true)"
-  write_status "failed" "$(missing_wheels_message "$missing_names" "$CUR_VERSION")"
-  rm -f "$dry_log"
-  rm -rf "$STAGING_DIR"
-  exit 1
-}
-
-log "Preflight: verifying wheelhouse satisfies staged requirements (pip --dry-run)..."
-DRY_LOG="$(mktemp)"
-PREFLIGHT_OK=0
-if run_wheel_preflight "$DRY_LOG"; then
-  PREFLIGHT_OK=1
-elif [ "$SOURCE_KIND" = "TREE" ] && copy_new_wheels_from_incoming "$SOURCE_PATH"; then
-  log "Preflight: retrying after copying new wheels the Pi did not already have..."
-  if run_wheel_preflight "$DRY_LOG"; then
-    PREFLIGHT_OK=1
-  fi
-fi
-if [ "$PREFLIGHT_OK" != "1" ]; then
-  refuse_wheelhouse "$DRY_LOG"
-fi
-rm -f "$DRY_LOG"
-log "Preflight OK — wheelhouse can satisfy staged requirements."
 if [ "$SOURCE_KIND" = "TREE" ]; then
-  log "USB stick can be unplugged; applying $NEW_VERSION from local staging."
-  write_status "updating" "Applying $NEW_VERSION. USB stick can be unplugged."
-else
-  write_status "updating" "Applying $NEW_VERSION."
+  copy_new_wheels_from_incoming "$SOURCE_PATH" || true
 fi
+write_status "updating" "Applying $NEW_VERSION. USB stick can be unplugged."
 
 # ============================================================================
 # 4. Backup (the rollback point) — from here on, failure triggers rollback
@@ -714,8 +607,7 @@ log "New code in place."
 # ============================================================================
 # 6. Dependencies (offline wheelhouse) + DB migrations
 # ============================================================================
-# Preflight already proved the wheelhouse resolves REQS_FOR_UPDATE; install for real.
-# On failure, ERR trap → rollback (BACKED_UP=1) restores previous code + restarts service.
+# Installing from the Pi wheelhouse. On failure, ERR trap → rollback.
 log "Installing dependencies from offline wheelhouse..."
 "$VENV_DIR/bin/pip" install --ignore-installed --no-index --find-links "$WHEELHOUSE" -r "$REQS_FOR_UPDATE" >>"$LOG_FILE" 2>&1
 

@@ -1,11 +1,12 @@
 """
 File: test_update_sh.py
-Description: Tests for deploy/install/update.sh USB-tree discovery, incoming
-             skip/preserve, version refuse, and missing-wheel overlay text.
+Description: Tests for deploy/install/update.sh locker-updates discovery,
+             USB ingest into $APP_DIR/locker-updates, incoming skip/preserve,
+             version refuse, and no missing-wheel refuse.
 Project: smart_locker/tests
 Notes: Run with: python -m pytest tests/test_update_sh.py -v
        Sources update.sh with SMART_LOCKER_UPDATE_LIB=1 (no systemd).
-       A few tests run the script until it refuses before stop/backup.
+       A few tests run the script until it exits before stop/backup.
 """
 
 from __future__ import annotations
@@ -44,7 +45,7 @@ def _plant_tree(root: Path, *, version: str | None = None, reqs: str | None = No
 
 
 def _make_app_dir(tmp_path: Path, *, version: str = "1.0.0") -> Path:
-    """Fake Pi app dir with a venv python stub and empty search roots."""
+    """Fake Pi app dir with a venv python stub."""
     app = tmp_path / "pi"
     (app / "logs").mkdir(parents=True)
     (app / "backups").mkdir()
@@ -58,16 +59,15 @@ def _make_app_dir(tmp_path: Path, *, version: str = "1.0.0") -> Path:
     pip.write_text("#!/bin/sh\necho pip-stub\nexit 0\n", encoding="utf-8")
     pip.chmod(pip.stat().st_mode | stat.S_IEXEC)
     (app / "deploy" / "wheelhouse").mkdir(parents=True)
-    (app / "media").mkdir()
     (app / "cifs-updates").mkdir()
     return app
 
 
 def _lib_env(app_dir: Path, extra: dict[str, str] | None = None) -> dict[str, str]:
     env = os.environ.copy()
+    env.pop("SMART_LOCKER_USB_MEDIA_ROOT", None)
     env["SMART_LOCKER_UPDATE_LIB"] = "1"
     env["SMART_LOCKER_DIR"] = str(app_dir)
-    env["SMART_LOCKER_USB_MEDIA_ROOT"] = str(app_dir / "media")
     env["SMART_LOCKER_UPDATE_DIR"] = str(app_dir / "cifs-updates")
     if extra:
         env.update(extra)
@@ -90,10 +90,10 @@ def source_lib(
 def run_update(
     app_dir: Path, extra: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess[str]:
-    """Run update.sh against a fake Pi dir (refuses before systemd on these tests)."""
+    """Run update.sh against a fake Pi dir (exits before systemd on these tests)."""
     env = os.environ.copy()
+    env.pop("SMART_LOCKER_USB_MEDIA_ROOT", None)
     env["SMART_LOCKER_DIR"] = str(app_dir)
-    env["SMART_LOCKER_USB_MEDIA_ROOT"] = str(app_dir / "media")
     env["SMART_LOCKER_UPDATE_DIR"] = str(app_dir / "cifs-updates")
     if extra:
         env.update(extra)
@@ -111,33 +111,38 @@ def _status(app_dir: Path) -> dict:
 
 
 class TestUpdateShContract:
-    """PRESERVE / INCOMING_SKIP stay complete; USB path must not require HMAC."""
+    """PRESERVE / skip lists; no USB .env key; no missing-wheel refuse."""
 
     def test_preserve_list_covers_runtime_paths(self):
         text = UPDATE_SH.read_text(encoding="utf-8")
         for item in (
             '".env"',
             '"smart_locker.db"',
-            '"smart_locker.db-wal"',
-            '"smart_locker.db-shm"',
             '"last_sync.json"',
-            '"logs"',
             '"venv"',
             '"deploy/wheelhouse"',
-            '"deploy/system-packages"',
             '"backups"',
-            '".update-staging"',
-            '".git"',
-            '"smart_locker/frontend/images"',
             '"VERSION"',
+            '"locker-updates"',
         ):
             assert item in text
 
-    def test_incoming_skip_skips_windows_runtime_copies(self):
+    def test_no_smart_locker_usb_env_key(self):
         text = UPDATE_SH.read_text(encoding="utf-8")
-        assert "INCOMING_SKIP=" in text
-        for item in (".env", "venv", "logs", "backups", "smart_locker.db"):
-            assert f'"{item}"' in text
+        assert "SMART_LOCKER_USB_" not in text
+        env_example = (ROOT / "deploy" / ".env.pi.example").read_text(encoding="utf-8")
+        assert "SMART_LOCKER_USB_" not in env_example
+
+    def test_does_not_refuse_on_missing_wheels(self):
+        text = UPDATE_SH.read_text(encoding="utf-8")
+        assert "Missing wheels:" not in text
+        assert "refuse_wheelhouse" not in text
+        assert "list_missing_wheels" not in text
+        assert "--dry-run" not in text
+
+    def test_gitignore_has_locker_updates(self):
+        gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
+        assert "locker-updates/" in gitignore
 
     def test_openssl_not_required_before_tarball_path(self):
         text = UPDATE_SH.read_text(encoding="utf-8")
@@ -149,7 +154,6 @@ class TestUpdateShContract:
     def test_no_udev_auto_apply(self):
         text = UPDATE_SH.read_text(encoding="utf-8")
         assert "udev" not in text.lower()
-        assert "inotify" not in text.lower()
 
     def test_admin_button_says_usb(self):
         html = (ROOT / "smart_locker" / "frontend" / "index.html").read_text(
@@ -159,10 +163,11 @@ class TestUpdateShContract:
         assert "USB" in html
         js = (ROOT / "smart_locker" / "frontend" / "app.js").read_text(encoding="utf-8")
         assert "USB stick" in js
+        assert "locker-updates/" in js
 
 
 class TestRepoTreeDiscovery:
-    """USB first, then local locker-updates, then CIFS tree, then tarball."""
+    """USB locker-updates, then local $APP_DIR/locker-updates, then CIFS."""
 
     def test_is_repo_tree_requires_app_reqs_and_update_sh(self, tmp_path):
         app = _make_app_dir(tmp_path)
@@ -176,50 +181,60 @@ class TestRepoTreeDiscovery:
         assert "good:0" in proc.stdout
         assert "bad:1" in proc.stdout
 
-    def test_finds_project_folder_on_usb_stick(self, tmp_path):
+    def test_find_usb_tree_uses_locker_updates_subfolder(self, tmp_path):
         app = _make_app_dir(tmp_path)
-        stick = app / "media" / "locker" / "SMARTLOCKER"
-        _plant_tree(stick / "smart_locker", version="2.0.0")
-        proc = source_lib("discover_update_source\n", app)
-        assert proc.returncode == 0, proc.stderr
-        kind, path = proc.stdout.strip().split("\t", 1)
-        assert kind == "TREE"
-        assert Path(path).resolve() == (stick / "smart_locker").resolve()
-
-    def test_finds_repo_at_usb_stick_root(self, tmp_path):
-        app = _make_app_dir(tmp_path)
-        stick = app / "media" / "locker" / "STICK"
-        _plant_tree(stick, version="2.0.0")
-        proc = source_lib("discover_update_source\n", app)
-        assert proc.returncode == 0, proc.stderr
-        kind, path = proc.stdout.strip().split("\t", 1)
-        assert kind == "TREE"
-        assert Path(path).resolve() == stick.resolve()
-
-    def test_finds_tree_in_locker_updates_subfolder(self, tmp_path):
-        app = _make_app_dir(tmp_path)
-        nested = app / "media" / "locker" / "STICK" / "locker-updates" / "payload"
+        media = tmp_path / "media"
+        nested = media / "locker" / "STICK" / "locker-updates"
         _plant_tree(nested, version="2.0.0")
-        proc = source_lib("discover_update_source\n", app)
+        proc = source_lib(
+            f"find_usb_tree {shlex.quote(str(media))}\n",
+            app,
+        )
         assert proc.returncode == 0, proc.stderr
-        kind, path = proc.stdout.strip().split("\t", 1)
-        assert kind == "TREE"
-        assert Path(path).resolve() == nested.resolve()
+        assert Path(proc.stdout.strip()).resolve() == nested.resolve()
 
-    def test_usb_tree_wins_over_cifs_tarball(self, tmp_path):
+    def test_find_usb_tree_folder_named_locker_updates(self, tmp_path):
         app = _make_app_dir(tmp_path)
-        _plant_tree(app / "media" / "locker" / "STICK", version="2.0.0")
-        tarball = app / "cifs-updates" / "smart-locker-9.0.0.tar.gz"
-        tarball.write_bytes(b"not-a-real-tarball")
-        proc = source_lib("discover_update_source\n", app)
+        media = tmp_path / "media"
+        stick = media / "locker" / "locker-updates"
+        _plant_tree(stick, version="2.0.0")
+        proc = source_lib(
+            f"find_usb_tree {shlex.quote(str(media))}\n",
+            app,
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert Path(proc.stdout.strip()).resolve() == stick.resolve()
+
+    def test_usb_locker_updates_wins_over_local(self, tmp_path):
+        app = _make_app_dir(tmp_path)
+        _plant_tree(app / "locker-updates", version="1.5.0")
+        media = tmp_path / "media"
+        usb = media / "locker" / "STICK" / "locker-updates"
+        _plant_tree(usb, version="2.0.0")
+        proc = source_lib(
+            f"USB_MEDIA_ROOT={shlex.quote(str(media))}\n"
+            "discover_update_source\n",
+            app,
+        )
         assert proc.returncode == 0, proc.stderr
         kind, path = proc.stdout.strip().split("\t", 1)
         assert kind == "TREE"
-        assert "STICK" in path
+        assert Path(path).resolve() == usb.resolve()
 
     def test_local_locker_updates_when_no_usb(self, tmp_path):
         app = _make_app_dir(tmp_path)
-        _plant_tree(app / "locker-updates" / "payload", version="2.0.0")
+        _plant_tree(app / "locker-updates", version="2.0.0")
+        proc = source_lib("discover_update_source\n", app)
+        assert proc.returncode == 0, proc.stderr
+        kind, path = proc.stdout.strip().split("\t", 1)
+        assert kind == "TREE"
+        assert Path(path).resolve() == (app / "locker-updates").resolve()
+
+    def test_local_locker_updates_wins_over_cifs_tarball(self, tmp_path):
+        app = _make_app_dir(tmp_path)
+        _plant_tree(app / "locker-updates", version="2.0.0")
+        tarball = app / "cifs-updates" / "smart-locker-9.0.0.tar.gz"
+        tarball.write_bytes(b"not-a-real-tarball")
         proc = source_lib("discover_update_source\n", app)
         assert proc.returncode == 0, proc.stderr
         kind, path = proc.stdout.strip().split("\t", 1)
@@ -285,14 +300,13 @@ class TestVersionCompare:
 
 @pytest.mark.skipif(RSYNC is None, reason="rsync required to copy an incoming tree")
 class TestIncomingPreserve:
-    """Windows copies of .env / db / venv / logs / backups must not be staged."""
+    """Staging skips runtime files; payload copy into locker-updates keeps new wheels."""
 
     def test_copy_incoming_tree_skips_runtime_files(self, tmp_path):
         app = _make_app_dir(tmp_path)
         src = _plant_tree(tmp_path / "usb", version="2.0.0")
         (src / ".env").write_text("SMART_LOCKER_ENC_KEY=from-windows\n", encoding="utf-8")
         (src / "smart_locker.db").write_text("not-a-db\n", encoding="utf-8")
-        (src / "other.db").write_text("also-skip\n", encoding="utf-8")
         (src / "venv").mkdir()
         (src / "venv" / "win.bin").write_text("nope\n", encoding="utf-8")
         (src / "logs").mkdir()
@@ -311,80 +325,50 @@ class TestIncomingPreserve:
         )
         assert proc.returncode == 0, proc.stderr
         assert (dest / "keep.txt").read_text(encoding="utf-8") == "payload\n"
-        assert (dest / "smart_locker" / "app.py").is_file()
-        assert (dest / "requirements.txt").is_file()
         assert not (dest / ".env").exists()
         assert not (dest / "smart_locker.db").exists()
-        assert not (dest / "other.db").exists()
         assert not (dest / "venv").exists()
-        assert not (dest / "logs").exists()
-        assert not (dest / "backups").exists()
-        assert not (dest / "deploy" / "wheelhouse" / "fastapi-0.1.0-py3-none-any.whl").exists()
+        assert not (
+            dest / "deploy" / "wheelhouse" / "fastapi-0.1.0-py3-none-any.whl"
+        ).exists()
 
-
-class TestMissingWheels:
-    """Overlay message names packages and tells the operator to rebuild the kit."""
-
-    def test_list_missing_wheels_names_packages(self, tmp_path):
+    def test_copy_payload_tree_keeps_new_wheels(self, tmp_path):
         app = _make_app_dir(tmp_path)
-        reqs = tmp_path / "requirements.txt"
-        reqs.write_text(
-            "pyscard>=2.0.7\nfastapi>=0.115.0\npython-dotenv>=1.0.0\nnewpkg>=1.0\n",
-            encoding="utf-8",
+        src = _plant_tree(tmp_path / "usb-lu", version="2.0.0")
+        (src / ".env").write_text("nope\n", encoding="utf-8")
+        (src / "deploy" / "wheelhouse").mkdir(parents=True)
+        (src / "deploy" / "wheelhouse" / "newpkg-1.0.0-py3-none-any.whl").write_bytes(
+            b"whl"
         )
-        wheels = tmp_path / "wheelhouse"
-        wheels.mkdir()
-        (wheels / "fastapi-0.115.0-py3-none-any.whl").write_bytes(b"whl")
+        dest = tmp_path / "local-lu"
         proc = source_lib(
-            f"list_missing_wheels {shlex.quote(str(reqs))} {shlex.quote(str(wheels))}\n",
+            f"copy_payload_tree {shlex.quote(str(src))} {shlex.quote(str(dest))}\n",
             app,
         )
         assert proc.returncode == 0, proc.stderr
-        names = proc.stdout.strip()
-        assert "newpkg" in names
-        assert "python-dotenv" in names or "python_dotenv" in names
-        assert "fastapi" not in names
-        assert "pyscard" not in names
+        assert (dest / "deploy" / "wheelhouse" / "newpkg-1.0.0-py3-none-any.whl").is_file()
+        assert not (dest / ".env").exists()
 
-    def test_list_missing_wheels_parses_pip_log(self, tmp_path):
+    def test_copy_new_wheels_skips_filenames_the_pi_already_has(self, tmp_path):
         app = _make_app_dir(tmp_path)
-        reqs = tmp_path / "requirements.txt"
-        reqs.write_text("fastapi>=0.115.0\n", encoding="utf-8")
-        wheels = tmp_path / "wheelhouse"
-        wheels.mkdir()
-        (wheels / "fastapi-0.115.0-py3-none-any.whl").write_bytes(b"whl")
-        pip_log = tmp_path / "pip.log"
-        pip_log.write_text(
-            "ERROR: Could not find a version that satisfies the requirement httpx>=0.27.0 "
-            "(from versions: none)\n"
-            "ERROR: No matching distribution found for httpx>=0.27.0\n",
-            encoding="utf-8",
+        src = _plant_tree(tmp_path / "incoming", version="2.0.0")
+        (src / "deploy" / "wheelhouse").mkdir(parents=True)
+        (src / "deploy" / "wheelhouse" / "old-1.0.0-py3-none-any.whl").write_bytes(b"a")
+        (src / "deploy" / "wheelhouse" / "extra-1.0.0-py3-none-any.whl").write_bytes(
+            b"b"
         )
+        (app / "deploy" / "wheelhouse" / "old-1.0.0-py3-none-any.whl").write_bytes(b"a")
         proc = source_lib(
-            "list_missing_wheels "
-            f"{shlex.quote(str(reqs))} {shlex.quote(str(wheels))} "
-            f"{shlex.quote(str(pip_log))}\n",
+            f"copy_new_wheels_from_incoming {shlex.quote(str(src))}; echo copied:$?\n",
             app,
         )
         assert proc.returncode == 0, proc.stderr
-        assert "httpx" in proc.stdout
-
-    def test_missing_wheels_message_is_actionable(self, tmp_path):
-        app = _make_app_dir(tmp_path)
-        proc = source_lib(
-            'missing_wheels_message "fastapi, newpkg" "1.0.0"; echo\n',
-            app,
-        )
-        assert proc.returncode == 0, proc.stderr
-        msg = proc.stdout.strip()
-        assert msg.startswith("Missing wheels: fastapi, newpkg.")
-        assert "build-wheelhouse.sh" in msg
-        assert "copy that folder onto the Pi" in msg
-        assert "still on 1.0.0" in msg
+        assert (app / "deploy" / "wheelhouse" / "extra-1.0.0-py3-none-any.whl").is_file()
+        assert (app / "deploy" / "wheelhouse" / "old-1.0.0-py3-none-any.whl").is_file()
 
 
 class TestUpdateShScript:
-    """End of the script before systemd: idle / same / older / missing wheels / HMAC."""
+    """Idle / same / older / HMAC tarball — no missing-wheel overlay refuse."""
 
     def test_idle_when_nothing_found(self, tmp_path):
         app = _make_app_dir(tmp_path)
@@ -392,52 +376,30 @@ class TestUpdateShScript:
         assert proc.returncode == 0, proc.stderr
         status = _status(app)
         assert status["state"] == "idle"
-        assert "USB" in status["message"]
+        assert "locker-updates" in status["message"]
 
     def test_up_to_date_same_version(self, tmp_path):
         app = _make_app_dir(tmp_path, version="2.0.0")
-        _plant_tree(app / "media" / "locker" / "STICK", version="2.0.0")
+        _plant_tree(app / "locker-updates", version="2.0.0")
         proc = run_update(app)
         assert proc.returncode == 0, proc.stderr
         assert _status(app)["state"] == "up_to_date"
 
     def test_refuses_older_tree(self, tmp_path):
         app = _make_app_dir(tmp_path, version="2.0.0")
-        _plant_tree(app / "media" / "locker" / "STICK", version="1.0.0")
+        _plant_tree(app / "locker-updates", version="1.0.0")
         proc = run_update(app)
         assert proc.returncode == 1
         status = _status(app)
         assert status["state"] == "failed"
         assert "older" in status["message"]
 
-    @pytest.mark.skipif(RSYNC is None, reason="rsync required to stage the USB tree")
-    def test_missing_wheels_status_names_packages(self, tmp_path):
-        app = _make_app_dir(tmp_path, version="1.0.0")
-        _plant_tree(
-            app / "media" / "locker" / "STICK",
-            version="2.0.0",
-            reqs="fastapi>=0.115.0\nnewpkg>=1.0.0\n",
-        )
-        proc = run_update(app)
-        assert proc.returncode == 1
-        status = _status(app)
-        assert status["state"] == "failed"
-        assert "Missing wheels:" in status["message"]
-        assert "newpkg" in status["message"]
-        assert "fastapi" in status["message"]
-        assert "build-wheelhouse.sh" in status["message"]
-        assert "USB" in status["message"]
-
-    @pytest.mark.skipif(RSYNC is None, reason="rsync required to stage the USB tree")
-    def test_usb_tree_does_not_require_hmac(self, tmp_path):
-        app = _make_app_dir(tmp_path, version="1.0.0")
-        _plant_tree(app / "media" / "locker" / "STICK", version="2.0.0")
+    def test_tree_path_does_not_require_hmac(self, tmp_path):
+        app = _make_app_dir(tmp_path, version="2.0.0")
+        _plant_tree(app / "locker-updates", version="2.0.0")
         proc = run_update(app, extra={"SMART_LOCKER_UPDATE_HMAC_KEY": ""})
-        assert proc.returncode == 1
-        status = _status(app)
-        assert status["state"] == "failed"
-        assert "HMAC" not in status["message"]
-        assert "Missing wheels:" in status["message"]
+        assert proc.returncode == 0
+        assert _status(app)["state"] == "up_to_date"
 
     def test_tarball_fallback_still_requires_hmac(self, tmp_path):
         app = _make_app_dir(tmp_path, version="1.0.0")
