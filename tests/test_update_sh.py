@@ -249,31 +249,31 @@ class TestVersionCompare:
     def test_equal_is_not_older(self, tmp_path):
         app = _make_app_dir(tmp_path)
         proc = source_lib(
-            "version_is_older 1.2.0 1.2.0; echo $?\n",
+            "if version_is_older 1.2.0 1.2.0; then echo older; else echo not_older; fi\n",
             app,
         )
         assert proc.returncode == 0, proc.stderr
-        assert proc.stdout.strip() == "1"
+        assert proc.stdout.strip() == "not_older"
 
     def test_semver_older_is_refused(self, tmp_path):
         app = _make_app_dir(tmp_path)
         proc = source_lib(
-            "version_is_older 1.0.0 2.0.0; echo older:$?\n"
-            "version_is_older 2.0.0 1.0.0; echo newer:$?\n",
+            "if version_is_older 1.0.0 2.0.0; then echo older; else echo not_older; fi\n"
+            "if version_is_older 2.0.0 1.0.0; then echo older2; else echo newer; fi\n",
             app,
         )
         assert proc.returncode == 0, proc.stderr
-        assert "older:0" in proc.stdout
-        assert "newer:1" in proc.stdout
+        assert "older" in proc.stdout.splitlines()
+        assert "newer" in proc.stdout.splitlines()
 
     def test_git_hashes_are_not_ordered(self, tmp_path):
         app = _make_app_dir(tmp_path)
         proc = source_lib(
-            "version_is_older abcdef0 1234567; echo $?\n",
+            "if version_is_older abcdef0 1234567; then echo older; else echo not_older; fi\n",
             app,
         )
         assert proc.returncode == 0, proc.stderr
-        assert proc.stdout.strip() == "1"
+        assert proc.stdout.strip() == "not_older"
 
     def test_tree_version_reads_version_file(self, tmp_path):
         app = _make_app_dir(tmp_path)

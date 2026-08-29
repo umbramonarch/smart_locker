@@ -209,7 +209,7 @@ is_repo_tree() {
     && [ -f "$d/deploy/install/update.sh" ]
 }
 
-# Look for a repo root at dir, dir/smart_locker, or dir/locker-updates/...
+# Look for a repo root at dir, dir/smart_locker, dir/locker-updates/..., or a child dir.
 find_tree_under() {
   local root="${1:-}" cand
   [ -n "$root" ] && [ -d "$root" ] || return 1
@@ -230,20 +230,39 @@ find_tree_under() {
       printf '%s\n' "$root/locker-updates/smart_locker"
       return 0
     fi
-    local best="" best_m=0 m
-    for cand in "$root/locker-updates"/*; do
-      [ -d "$cand" ] || continue
-      is_repo_tree "$cand" || continue
-      m="$(stat -c '%Y' "$cand/requirements.txt" 2>/dev/null || echo 0)"
-      if [ "$m" -ge "$best_m" ]; then
-        best_m="$m"
-        best="$cand"
-      fi
-    done
-    if [ -n "$best" ]; then
-      printf '%s\n' "$best"
+    cand="$(_newest_child_tree "$root/locker-updates" || true)"
+    if [ -n "$cand" ]; then
+      printf '%s\n' "$cand"
       return 0
     fi
+  fi
+  cand="$(_newest_child_tree "$root" || true)"
+  if [ -n "$cand" ]; then
+    printf '%s\n' "$cand"
+    return 0
+  fi
+  return 1
+}
+
+_newest_child_tree() {
+  local parent="${1:-}" cand best="" best_m=0 m
+  [ -n "$parent" ] && [ -d "$parent" ] || return 1
+  local _old_nullglob
+  _old_nullglob="$(shopt -p nullglob || true)"
+  shopt -s nullglob
+  for cand in "$parent"/*; do
+    [ -d "$cand" ] || continue
+    is_repo_tree "$cand" || continue
+    m="$(_tree_mtime "$cand")"
+    if [ "$m" -ge "$best_m" ]; then
+      best_m="$m"
+      best="$cand"
+    fi
+  done
+  eval "$_old_nullglob"
+  if [ -n "$best" ]; then
+    printf '%s\n' "$best"
+    return 0
   fi
   return 1
 }
