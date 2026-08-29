@@ -267,7 +267,7 @@ used — this trips people up because most of them are only ever invoked *indire
 | `systemd/smart-locker.service` | Defines the backend as a systemd service (auto-restart, boot-start) | Installed by `install.sh`; started manually the first time — Section 5 |
 | `install/sudoers-smart-locker` | Grants the app account passwordless sudo for *only* restarting its own service, running updates, and `systemctl poweroff` | Installed by `apply-sudoers.sh`; powers **Software Update** and **Shut down** — Section 9 |
 | `install/apply-sudoers.sh` | Renders the sudoers template to `/etc/sudoers.d/smart-locker` after `visudo -cf` | Called by `install.sh` and `update.sh`; SSH once on an existing Pi if Shut down 500s |
-| `install/update.sh` | Applies gitignored locker-updates/ from USB (backup + health-check + auto-rollback); signed tarball on the share is fallback | Runs later, whenever you ship an update — Section 9 |
+| `install/update.sh` | Applies gitignored locker-updates/ from USB (backup + health-check + auto-rollback) | Runs later, whenever you ship an update — Section 9 |
 | `kiosk/start-kiosk.sh` | Launches Chromium fullscreen once the backend is up | Installed by `install.sh`; runs automatically at every graphical login — Section 5 |
 | `kiosk/smart-locker-kiosk.desktop` | The autostart entry that triggers `start-kiosk.sh` | Installed by `install.sh` into the app user's autostart folder |
 | `mount/fstab.snippet` | The `/etc/fstab` line template for the CIFS mount | You copy/edit it by hand — Section 6 (done **last**) |
@@ -303,8 +303,7 @@ your local copy of the project, which you then carry over via the USB stick.
 version. You never run this by hand during initial setup — it's what the admin panel's
 **Software Update** button calls (via the sudoers rule from `install.sh`). On Windows run
 `python -m scripts.copy_update --dest D:\\`, plug the stick into the Pi, and tap the
-button. `SMART_LOCKER_UPDATE_DIR` is only a last-resort share folder. HMAC is not used for
-the USB-tree path.
+button. That is the only software-update path.
 
 **Why is `PI-VALIDATION-CHECKLIST.md` a separate file instead of being folded into this
 guide?** Two reasons: (1) it's a different *kind* of document — a fill-in-the-blanks
@@ -322,7 +321,7 @@ clearly-scoped, physically-holdable page.
 ### 3b. What files actually need to go on the Pi
 
 Not everything in this repository belongs on the appliance. If you're copying the project
-folder by hand (rather than a clean `git archive`/release tarball), here's the real split:
+folder by hand, here's the real split:
 
 | Goes on the Pi | Stays off (dev-only, or created fresh) |
 |---|---|
@@ -506,7 +505,7 @@ An empty list `[]` means the reader isn't plugged in or `pcscd` isn't running.
 
 ### 4.4 Encryption keys and the `.env` file
 
-The system encrypts every card UID. Generate the three keys:
+The system encrypts every card UID. Generate the two keys:
 
 ```bash
 python -m scripts.generate_key
@@ -516,7 +515,7 @@ Create your `.env` from the Pi template, then paste the keys into it:
 
 ```bash
 cp deploy/.env.pi.example .env
-nano .env          # paste SMART_LOCKER_ENC_KEY, SMART_LOCKER_HMAC_KEY, and SMART_LOCKER_UPDATE_HMAC_KEY
+nano .env          # paste SMART_LOCKER_ENC_KEY and SMART_LOCKER_HMAC_KEY
 ```
 
 The template already points the Excel paths at /mnt/locker (`/mnt/locker/...`, connected
@@ -533,10 +532,6 @@ is Section 11 — this is the same information, walked through in the order it a
 - `SMART_LOCKER_HMAC_KEY` — a *separate* key used to compute a one-way fingerprint of each
   card UID, so the app can look up "have I seen this card before?" by comparing
   fingerprints, without ever decrypting every stored UID to check. Also just generated.
-- `SMART_LOCKER_UPDATE_HMAC_KEY` — a *third*, unrelated key that has nothing to do with
-  cards. Only the old signed-tarball fallback uses it (`python -m scripts.pack_release`).
-  The USB-tree **Software Update** path does not need HMAC. Paste the generated value
-  anyway so a leftover tarball on the share can still verify.
 - `SMART_LOCKER_DB_PATH` — where the SQLite database file lives. Leave this pointing at the
   Pi's local disk (the template already does) — never move it onto the locker share.
 - `SMART_LOCKER_READER_NAME` — a text filter used to pick the right reader if more than one
@@ -575,9 +570,6 @@ is Section 11 — this is the same information, walked through in the order it a
 - `SMART_LOCKER_PHOTO_INPUT_PATH` — a folder (can be on the share or local) the app scans for
   device photos, matched by filename to the device model. Empty disables photo import
   entirely.
-- `SMART_LOCKER_UPDATE_DIR` — last-resort folder (usually `/mnt/locker/locker-updates`) if
-  there is no USB stick. `update.sh` prefers an unpacked repo tree there; a signed
-  `.tar.gz` + `.hmac` pair still works. USB is the normal path (Section 9).
 - `SMART_LOCKER_KEEP_BACKUPS` — how many old code+database backup pairs `update.sh` keeps
   under `./backups` before deleting the oldest. `5` by default.
 
@@ -683,14 +675,13 @@ pause until it's back (see Section 5's systemd unit comments, and Section 9).
 ### 6.1 Mount the locker share (CIFS)
 
 The Pi mounts the locker file share at `/mnt/locker` (CIFS/SMB). On a Windows PC that is
-whatever drive letter or UNC path IT mapped for this locker. Keep the Excel file, photos,
-and updates in the **root of that share**, not inside a git working copy.
+whatever drive letter or UNC path IT mapped for this locker. Keep the Excel file and photos
+in the **root of that share**, not inside a git working copy.
 
 ```
 /mnt/locker/                    (same folder your PC sees as the locker share)
   device-list.xlsx          import — device master list
   photos/                       optional; filename = model, e.g. 87V.jpg
-  locker-updates/               optional last-resort update tree (or old .tar.gz + .hmac)
   smart_locker_data.xlsx        written by the Pi; open it, don't edit it
 ```
 
@@ -1071,7 +1062,7 @@ Plug the stick in. Hidden admin (idle clock 5×) → **Software Update**. `updat
 looks for `locker-updates/` on USB (`/media/*/*`), copies it to
 `/home/locker/smart_locker/locker-updates` (so you can unplug), then stop / backup /
 rsync-preserve / pip from the existing Pi wheelhouse / migrate / health / rollback.
-Last resort: CIFS `SMART_LOCKER_UPDATE_DIR` (unpacked tree, or a leftover signed tarball).
+CIFS is Excel and photos only — not a software-update drop.
 
 If pip cannot install from the wheelhouse, the update **rolls back**. The overlay does
 not refuse solely because wheels were missing; the Windows script already warned.
@@ -1135,7 +1126,6 @@ All settings live in `.env` (loaded by `config/settings.py`). The Pi template
 |---|---|---|
 | `SMART_LOCKER_ENC_KEY` | (required) | AES-256-GCM key, base64 — from `generate_key` |
 | `SMART_LOCKER_HMAC_KEY` | (required) | HMAC-SHA256 key, base64 — from `generate_key` |
-| `SMART_LOCKER_UPDATE_HMAC_KEY` | (tarball fallback) | HMAC-SHA256 key, base64 — from `generate_key`; only the old `pack_release` tarball path uses it, see "Updating the software" in Section 9 |
 | `SMART_LOCKER_DB_PATH` | `smart_locker.db` | SQLite path — keep on the Pi's local disk |
 | `SMART_LOCKER_READER_NAME` | `ACR1252` | Substring filter for the NFC reader name |
 | `SMART_LOCKER_SESSION_TIMEOUT` | `120` | Idle session timeout (seconds) |
@@ -1150,7 +1140,6 @@ All settings live in `.env` (loaded by `config/settings.py`). The Pi template
 | `SMART_LOCKER_PUBLIC_URL` | (empty) | Origin of this Pi as other PCs see it (e.g. `http://192.168.1.10:8000`); with the share path, startup writes a dashboard launcher |
 | `SMART_LOCKER_DASHBOARD_SHARE_PATH` | (empty) | Folder (or `.html` path) on the locker share for `dashboard.html` + `dashboard.url`; empty skips the launcher |
 | `SMART_LOCKER_PHOTO_INPUT_PATH` | (empty) | Folder watched for device photos; empty disables |
-| `SMART_LOCKER_UPDATE_DIR` | `/mnt/locker/locker-updates` | last-resort share folder if no USB stick; unpacked tree preferred, signed `.tar.gz` + `.hmac` still works — see "Updating the software" in Section 9 |
 | `SMART_LOCKER_KEEP_BACKUPS` | `5` | How many old code+DB backup pairs `update.sh` keeps under `./backups` before pruning |
 
 ---

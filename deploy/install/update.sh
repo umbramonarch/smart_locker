@@ -7,9 +7,9 @@
 #              the new tree, installs deps from the existing Pi wheelhouse, runs
 #              DB migrations, restarts the service, and health-checks /api/health.
 #              If the new version does not come up, the previous code and database
-#              are restored. A signed tarball on the share remains a last-resort
-#              fallback. Missing wheels are warned at USB-prep
-#              (python -m scripts.copy_update); pip failure here rolls back.
+#              are restored. The only payload is an unpacked locker-updates tree
+#              (python -m scripts.copy_update). Missing wheels are warned at
+#              USB-prep (copy_update); pip failure here rolls back.
 # Project: smart_locker/deploy
 # Notes: Run on the Pi as: sudo bash deploy/install/update.sh   (the admin-panel
 #        "Software Update" button runs exactly this). Use `sudo bash <script>` —
@@ -33,11 +33,11 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_DIR="${SMART_LOCKER_DIR:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 
-# Load the operator's .env so this script honors the same share/service knobs the
-# app uses everywhere else (SMART_LOCKER_UPDATE_DIR, SMART_LOCKER_KEEP_BACKUPS,
-# ...) — one config file to edit, not a second one. The transient systemd-run
-# unit that launches this script carries no environment of its own, so without
-# this the update folder could never be changed except by editing this script.
+# Load the operator's .env so this script honors the same service knobs the
+# app uses everywhere else (SMART_LOCKER_KEEP_BACKUPS, SMART_LOCKER_USER, ...).
+# The transient systemd-run unit that launches this script carries no
+# environment of its own. Apply source is USB locker-updates/ then
+# $APP_DIR/locker-updates — not a CIFS drop.
 #
 # This script runs as root, but .env is owned by the app's non-root service
 # account -- so it is read as plain KEY=VALUE data (never `source`d/`.`-ed),
@@ -74,8 +74,6 @@ SERVICE="${SMART_LOCKER_SERVICE:-smart-locker}"
 HEALTH_URL="${SMART_LOCKER_HEALTH_URL:-http://127.0.0.1:8000/api/health}"
 HEALTH_TIMEOUT="${SMART_LOCKER_HEALTH_TIMEOUT:-45}"   # seconds to wait for a healthy boot
 
-# Optional CIFS/share folder (last fallback: tree preferred; signed tarball).
-UPDATE_DIR="${SMART_LOCKER_UPDATE_DIR:-/mnt/locker/locker-updates}"
 # Raspberry Pi OS auto-mounts USB sticks at /media/<user>/<label>. Not an .env key.
 USB_MEDIA_ROOT="/media"
 # Apply source: Windows copy_update payload, or USB locker-updates copied here.
@@ -312,19 +310,10 @@ find_usb_tree() {
   return 1
 }
 
-newest_tarball_in() {
-  local dir="${1:-}"
-  [ -n "$dir" ] && [ -d "$dir" ] || return 1
-  local tarball
-  tarball="$(ls -1t "$dir"/smart-locker-*.tar.gz 2>/dev/null | head -n1 || true)"
-  [ -n "$tarball" ] || return 1
-  printf '%s\n' "$tarball"
-}
-
-# Search order: USB locker-updates → local $APP_DIR/locker-updates/ → CIFS UPDATE_DIR.
-# Prints: TREE<TAB>path   or   TARBALL<TAB>path
+# Search order: USB locker-updates → local $APP_DIR/locker-updates.
+# Prints: TREE<TAB>path
 discover_update_source() {
-  local tree tarball
+  local tree
   tree="$(find_usb_tree "$USB_MEDIA_ROOT" || true)"
   if [ -n "$tree" ]; then
     printf 'TREE\t%s\n' "$tree"
@@ -333,16 +322,6 @@ discover_update_source() {
   tree="$(find_tree_under "$LOCAL_UPDATES" || true)"
   if [ -n "$tree" ]; then
     printf 'TREE\t%s\n' "$tree"
-    return 0
-  fi
-  tree="$(find_tree_under "$UPDATE_DIR" || true)"
-  if [ -n "$tree" ]; then
-    printf 'TREE\t%s\n' "$tree"
-    return 0
-  fi
-  tarball="$(newest_tarball_in "$UPDATE_DIR" || true)"
-  if [ -n "$tarball" ]; then
-    printf 'TARBALL\t%s\n' "$tarball"
     return 0
   fi
   return 1
@@ -457,10 +436,9 @@ CUR_VERSION="$( [ -f "$VERSION_FILE" ] && tr -d '[:space:]' < "$VERSION_FILE" ||
 OLD_VERSION="$CUR_VERSION"
 
 log "=== Smart Locker update check (current version: $CUR_VERSION) ==="
-write_status "checking" "Looking for locker-updates/ (USB, then local, then the share)."
+write_status "checking" "Looking for locker-updates/ (USB, then $APP_DIR/locker-updates)."
 
 # Fail closed before stop/backup: the USB/local copy and the code swap need rsync.
-# openssl is required only for the signed-tarball fallback, not the USB-tree path.
 if ! command -v rsync >/dev/null 2>&1; then
   log "rsync not found on PATH — refusing to update (needed to copy the incoming tree off USB and swap it in). Service was NOT stopped; still running $CUR_VERSION."
   write_status "failed" "rsync not found; update refused; still on $CUR_VERSION."
@@ -469,7 +447,7 @@ fi
 
 FOUND="$(discover_update_source || true)"
 if [ -z "$FOUND" ]; then
-  log "No locker-updates tree on USB, $LOCAL_UPDATES, or $UPDATE_DIR, and no signed tarball — nothing to do."
+  log "No locker-updates tree on USB or $LOCAL_UPDATES — nothing to do."
   write_status "idle" "No locker-updates tree found; staying on $CUR_VERSION."
   exit 0
 fi
@@ -479,11 +457,7 @@ SOURCE_PATH="${FOUND#*$'\t'}"
 # ============================================================================
 # 2. Identify the incoming version and refuse same/older
 # ============================================================================
-if [ "$SOURCE_KIND" = "TARBALL" ]; then
-  NEW_VERSION="$(basename "$SOURCE_PATH" | sed -E 's/^smart-locker-(.*)\.tar\.gz$/\1/')"
-else
-  NEW_VERSION="$(tree_version "$SOURCE_PATH")"
-fi
+NEW_VERSION="$(tree_version "$SOURCE_PATH")"
 
 if [ "$NEW_VERSION" = "$CUR_VERSION" ]; then
   log "Already on this tree ($CUR_VERSION) — nothing to do."
@@ -498,18 +472,16 @@ fi
 log "New release available: $CUR_VERSION -> $NEW_VERSION ($SOURCE_KIND $SOURCE_PATH)"
 write_status "updating" "Copying $NEW_VERSION onto local disk."
 
-# USB (or CIFS tree) → $APP_DIR/locker-updates so the stick can be unplugged.
-if [ "$SOURCE_KIND" = "TREE" ]; then
-  _src_abs="$(cd "$SOURCE_PATH" && pwd)"
-  mkdir -p "$LOCAL_UPDATES"
-  _local_abs="$(cd "$LOCAL_UPDATES" && pwd)"
-  if [ "$_src_abs" != "$_local_abs" ]; then
-    log "Copying incoming tree to $LOCAL_UPDATES (USB can be unplugged after this)."
-    rm -rf "$LOCAL_UPDATES"
-    copy_payload_tree "$SOURCE_PATH" "$LOCAL_UPDATES"
-    SOURCE_PATH="$LOCAL_UPDATES"
-    log "Incoming tree is at $LOCAL_UPDATES."
-  fi
+# USB → $APP_DIR/locker-updates so the stick can be unplugged.
+_src_abs="$(cd "$SOURCE_PATH" && pwd)"
+mkdir -p "$LOCAL_UPDATES"
+_local_abs="$(cd "$LOCAL_UPDATES" && pwd)"
+if [ "$_src_abs" != "$_local_abs" ]; then
+  log "Copying incoming tree to $LOCAL_UPDATES (USB can be unplugged after this)."
+  rm -rf "$LOCAL_UPDATES"
+  copy_payload_tree "$SOURCE_PATH" "$LOCAL_UPDATES"
+  SOURCE_PATH="$LOCAL_UPDATES"
+  log "Incoming tree is at $LOCAL_UPDATES."
 fi
 
 # ============================================================================
@@ -517,31 +489,9 @@ fi
 # ============================================================================
 rm -rf "$STAGING_DIR"; mkdir -p "$STAGING_DIR"
 
-if [ "$SOURCE_KIND" = "TARBALL" ]; then
-  if ! command -v openssl >/dev/null 2>&1; then
-    log "openssl not found on PATH — refusing to verify the release HMAC. Service was NOT stopped; still running $CUR_VERSION."
-    write_status "failed" "openssl not found; tarball update refused; still on $CUR_VERSION."
-    rm -rf "$STAGING_DIR"
-    exit 1
-  fi
-  # Mandatory integrity + authenticity check for the old signed-tarball path only.
-  [ -n "${SMART_LOCKER_UPDATE_HMAC_KEY:-}" ] \
-    || { log "SMART_LOCKER_UPDATE_HMAC_KEY not set — refusing to apply an unverifiable tarball. Generate one with: python -m scripts.generate_key"; write_status "failed" "Update HMAC key not configured; tarball refused."; rm -rf "$STAGING_DIR"; exit 1; }
-  [ -f "$SOURCE_PATH.hmac" ] \
-    || { log "No $SOURCE_PATH.hmac sidecar — refusing to apply an unsigned tarball. Pack it with: python -m scripts.pack_release"; write_status "failed" "Release is unsigned; tarball refused."; rm -rf "$STAGING_DIR"; exit 1; }
-
-  log "Verifying tarball signature..."
-  EXPECTED_HMAC="$(tr -d '[:space:]' < "$SOURCE_PATH.hmac")"
-  ACTUAL_HMAC="$(openssl dgst -sha256 -hmac "$SMART_LOCKER_UPDATE_HMAC_KEY" "$SOURCE_PATH" | awk '{print $NF}')"
-  [ "$EXPECTED_HMAC" = "$ACTUAL_HMAC" ] \
-    || { log "Signature FAILED — refusing to apply $SOURCE_PATH."; write_status "failed" "Release signature did not match; tarball refused."; rm -rf "$STAGING_DIR"; exit 1; }
-  log "Signature OK."
-  tar -xzf "$SOURCE_PATH" -C "$STAGING_DIR" --strip-components=1
-else
-  log "Copying incoming tree from $SOURCE_PATH to $STAGING_DIR (skipping .env, databases, venv, logs, backups, wheelhouse)..."
-  copy_incoming_tree "$SOURCE_PATH" "$STAGING_DIR"
-  log "Incoming tree staged at $STAGING_DIR."
-fi
+log "Copying incoming tree from $SOURCE_PATH to $STAGING_DIR (skipping .env, databases, venv, logs, backups, wheelhouse)..."
+copy_incoming_tree "$SOURCE_PATH" "$STAGING_DIR"
+log "Incoming tree staged at $STAGING_DIR."
 [ -f "$STAGING_DIR/requirements.txt" ] || { log "Staged tree looks invalid (no requirements.txt) — aborting."; write_status "failed" "Incoming tree is invalid."; rm -rf "$STAGING_DIR"; exit 1; }
 write_status "updating" "Applying $NEW_VERSION."
 
@@ -550,9 +500,7 @@ write_status "updating" "Applying $NEW_VERSION."
 REQS_FOR_UPDATE="$(mktemp)"
 grep -vi '^pyscard' "$STAGING_DIR/requirements.txt" > "$REQS_FOR_UPDATE"
 trap 'rm -f "$REQS_FOR_UPDATE"' EXIT
-if [ "$SOURCE_KIND" = "TREE" ]; then
-  copy_new_wheels_from_incoming "$SOURCE_PATH" || true
-fi
+copy_new_wheels_from_incoming "$SOURCE_PATH" || true
 write_status "updating" "Applying $NEW_VERSION. USB stick can be unplugged."
 
 # ============================================================================

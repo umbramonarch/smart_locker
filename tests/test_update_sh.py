@@ -1,8 +1,8 @@
 """
 File: test_update_sh.py
-Description: Tests for deploy/install/update.sh locker-updates discovery,
-             USB ingest into $APP_DIR/locker-updates, incoming skip/preserve,
-             version refuse, and no missing-wheel refuse.
+Description: Tests for deploy/install/update.sh locker-updates discovery
+             (USB then $APP_DIR/locker-updates only), USB ingest, incoming
+             skip/preserve, version refuse, and no missing-wheel refuse.
 Project: smart_locker/tests
 Notes: Run with: python -m pytest tests/test_update_sh.py -v
        Sources update.sh with SMART_LOCKER_UPDATE_LIB=1 (no systemd).
@@ -59,7 +59,6 @@ def _make_app_dir(tmp_path: Path, *, version: str = "1.0.0") -> Path:
     pip.write_text("#!/bin/sh\necho pip-stub\nexit 0\n", encoding="utf-8")
     pip.chmod(pip.stat().st_mode | stat.S_IEXEC)
     (app / "deploy" / "wheelhouse").mkdir(parents=True)
-    (app / "cifs-updates").mkdir()
     return app
 
 
@@ -68,7 +67,6 @@ def _lib_env(app_dir: Path, extra: dict[str, str] | None = None) -> dict[str, st
     env.pop("SMART_LOCKER_USB_MEDIA_ROOT", None)
     env["SMART_LOCKER_UPDATE_LIB"] = "1"
     env["SMART_LOCKER_DIR"] = str(app_dir)
-    env["SMART_LOCKER_UPDATE_DIR"] = str(app_dir / "cifs-updates")
     if extra:
         env.update(extra)
     return env
@@ -94,7 +92,6 @@ def run_update(
     env = os.environ.copy()
     env.pop("SMART_LOCKER_USB_MEDIA_ROOT", None)
     env["SMART_LOCKER_DIR"] = str(app_dir)
-    env["SMART_LOCKER_UPDATE_DIR"] = str(app_dir / "cifs-updates")
     if extra:
         env.update(extra)
     return subprocess.run(
@@ -144,12 +141,18 @@ class TestUpdateShContract:
         gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
         assert "locker-updates/" in gitignore
 
-    def test_openssl_not_required_before_tarball_path(self):
+    def test_copy_update_is_the_only_update_packer(self):
+        assert not (ROOT / "scripts" / "pack_release.py").exists()
         text = UPDATE_SH.read_text(encoding="utf-8")
-        assert "openssl is required only for the signed-tarball fallback" in text
-        pre, _, post = text.partition('SOURCE_KIND" = "TARBALL"')
-        assert "command -v openssl" not in pre
-        assert "command -v openssl" in post
+        assert "pack_release" not in text
+        assert "TARBALL" not in text
+        assert "SMART_LOCKER_UPDATE_DIR" not in text
+        assert "SMART_LOCKER_UPDATE_HMAC_KEY" not in text
+        assert "command -v openssl" not in text
+        env_example = (ROOT / "deploy" / ".env.pi.example").read_text(encoding="utf-8")
+        assert "SMART_LOCKER_UPDATE_DIR" not in env_example
+        assert "SMART_LOCKER_UPDATE_HMAC_KEY" not in env_example
+        assert "pack_release" not in env_example
 
     def test_no_udev_auto_apply(self):
         text = UPDATE_SH.read_text(encoding="utf-8")
@@ -167,7 +170,7 @@ class TestUpdateShContract:
 
 
 class TestRepoTreeDiscovery:
-    """USB locker-updates, then local $APP_DIR/locker-updates, then CIFS."""
+    """USB locker-updates, then local $APP_DIR/locker-updates. No CIFS tarball."""
 
     def test_is_repo_tree_requires_app_reqs_and_update_sh(self, tmp_path):
         app = _make_app_dir(tmp_path)
@@ -230,26 +233,31 @@ class TestRepoTreeDiscovery:
         assert kind == "TREE"
         assert Path(path).resolve() == (app / "locker-updates").resolve()
 
-    def test_local_locker_updates_wins_over_cifs_tarball(self, tmp_path):
+    def test_tarball_on_share_is_ignored(self, tmp_path):
+        app = _make_app_dir(tmp_path)
+        share = tmp_path / "mnt" / "locker" / "locker-updates"
+        share.mkdir(parents=True)
+        (share / "smart-locker-9.0.0.tar.gz").write_bytes(b"not-a-real-tarball")
+        (share / "smart-locker-9.0.0.tar.gz.hmac").write_text("deadbeef\n", encoding="utf-8")
+        proc = source_lib(
+            f"export SMART_LOCKER_UPDATE_DIR={shlex.quote(str(share))}\n"
+            "discover_update_source || echo NONE:$?\n",
+            app,
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert "NONE:1" in proc.stdout
+        assert "TARBALL" not in proc.stdout
+
+    def test_local_tree_wins_even_if_a_tarball_exists(self, tmp_path):
         app = _make_app_dir(tmp_path)
         _plant_tree(app / "locker-updates", version="2.0.0")
-        tarball = app / "cifs-updates" / "smart-locker-9.0.0.tar.gz"
+        tarball = app / "smart-locker-9.0.0.tar.gz"
         tarball.write_bytes(b"not-a-real-tarball")
         proc = source_lib("discover_update_source\n", app)
         assert proc.returncode == 0, proc.stderr
         kind, path = proc.stdout.strip().split("\t", 1)
         assert kind == "TREE"
-        assert "locker-updates" in path
-
-    def test_cifs_tarball_is_last_resort(self, tmp_path):
-        app = _make_app_dir(tmp_path)
-        tarball = app / "cifs-updates" / "smart-locker-9.0.0.tar.gz"
-        tarball.write_bytes(b"not-a-real-tarball")
-        proc = source_lib("discover_update_source\n", app)
-        assert proc.returncode == 0, proc.stderr
-        kind, path = proc.stdout.strip().split("\t", 1)
-        assert kind == "TARBALL"
-        assert path.endswith("smart-locker-9.0.0.tar.gz")
+        assert Path(path).resolve() == (app / "locker-updates").resolve()
 
     def test_nothing_found(self, tmp_path):
         app = _make_app_dir(tmp_path)
@@ -368,7 +376,7 @@ class TestIncomingPreserve:
 
 
 class TestUpdateShScript:
-    """Idle / same / older / HMAC tarball — no missing-wheel overlay refuse."""
+    """Idle / same / older — copy_update tree only; no HMAC tarball apply."""
 
     def test_idle_when_nothing_found(self, tmp_path):
         app = _make_app_dir(tmp_path)
@@ -394,19 +402,20 @@ class TestUpdateShScript:
         assert status["state"] == "failed"
         assert "older" in status["message"]
 
-    def test_tree_path_does_not_require_hmac(self, tmp_path):
+    def test_tree_path_does_not_use_hmac(self, tmp_path):
         app = _make_app_dir(tmp_path, version="2.0.0")
         _plant_tree(app / "locker-updates", version="2.0.0")
         proc = run_update(app, extra={"SMART_LOCKER_UPDATE_HMAC_KEY": ""})
         assert proc.returncode == 0
         assert _status(app)["state"] == "up_to_date"
 
-    def test_tarball_fallback_still_requires_hmac(self, tmp_path):
+    def test_tarball_alone_is_idle_not_applied(self, tmp_path):
         app = _make_app_dir(tmp_path, version="1.0.0")
-        tarball = app / "cifs-updates" / "smart-locker-9.0.0.tar.gz"
+        tarball = app / "smart-locker-9.0.0.tar.gz"
         tarball.write_bytes(b"unsigned")
+        (app / "smart-locker-9.0.0.tar.gz.hmac").write_text("deadbeef\n", encoding="utf-8")
         proc = run_update(app)
-        assert proc.returncode == 1
+        assert proc.returncode == 0, proc.stderr
         status = _status(app)
-        assert status["state"] == "failed"
-        assert "unsigned" in status["message"].lower() or "hmac" in status["message"].lower()
+        assert status["state"] == "idle"
+        assert "locker-updates" in status["message"]

@@ -10,7 +10,7 @@ Notes: Usage:
        the payload lands at <dest>/locker-updates. On Windows, a single
        removable drive is used when --dest is omitted. Warns about
        requirements.txt packages that have no matching wheel in
-       deploy/wheelhouse (does not abort). Not a tar.gz / HMAC packer.
+       deploy/wheelhouse (does not abort). Unpacked tree only — not an archive.
 """
 
 from __future__ import annotations

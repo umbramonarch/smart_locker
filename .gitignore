@@ -38,7 +38,3 @@ smart_locker/frontend/images/*
 
 # Operator-built unpacked update tree (python -m scripts.copy_update)
 locker-updates/
-
-# Operator-built release tarballs (pack_release default output is the repo cwd)
-smart-locker-*.tar.gz
-smart-locker-*.tar.gz.hmac

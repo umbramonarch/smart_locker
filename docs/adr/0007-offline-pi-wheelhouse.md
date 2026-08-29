@@ -1,4 +1,4 @@
-# ADR 0007: Offline Pi wheelhouse and signed pack_release
+# ADR 0007: Offline Pi wheelhouse and USB copy_update
 
 **Architecture Decision Record** — a short note for a choice that is expensive to undo (protocol, pinout, crate vs vendor HAL, flash layout). **Not** a Rust-only file. Most work never needs one; put tiny decisions in the git Issue.
 
@@ -21,7 +21,7 @@ Dev/Windows is Python **3.11+**. CI may run 3.11 and 3.13. Do not treat 3.12 as 
 
 ## Decision
 
-We pick **option 2** because the site can be air-gapped. In-field updates are an unpacked repo tree from a USB stick (Windows git checkout; `update.sh` copies it off the stick, then stop / backup / rsync-preserve / pip from the existing Pi wheelhouse / migrate / health / rollback). HMAC is not used on that path. A signed tarball from `python -m scripts.pack_release` (`.tar.gz` + `.hmac` on `/mnt/locker/locker-updates`) remains fallback only; `SMART_LOCKER_UPDATE_HMAC_KEY` is the env **string** for openssl, not decoded 32 bytes. Git reset is not a full update. Keep `requirements.txt` (no `pyproject.toml` for this product).
+We pick **option 2** because the site can be air-gapped. In-field updates are an unpacked repo tree from a USB stick: `python -m scripts.copy_update` writes gitignored `locker-updates/`; `update.sh` copies that into `$APP_DIR/locker-updates`, then stop / backup / rsync-preserve / pip from the existing Pi wheelhouse / migrate / health / rollback. That is the only software-update path. CIFS stays for Excel import/export/photos, not for a tarball drop. Git reset is not a full update. Keep `requirements.txt` (no `pyproject.toml` for this product).
 
 ## Consequences
 
