@@ -102,7 +102,7 @@ smart_locker/
 │   ├── import_devices.py        # Catalog refresh from Excel (English headers / aliases)
 │   ├── update_device.py         # Update device fields / match photos by PM number
 │   ├── sync_source.py           # Manually trigger source Excel import
-│   └── pack_release.py          # Pack a signed release (tracked-file snapshot + HMAC sidecar)
+│   └── copy_update.py           # Fill locker-updates/ and copy onto a USB stick
 ├── tests/                       # hardware-free pytest suite
 ├── docs/adr/                    # architecture decision records
 ├── docs/planning/               # historical plans (keep nfc-device-tags.md)
@@ -176,27 +176,37 @@ See **GUIDE.md** for detailed step-by-step instructions.
 
 ## System Architecture
 
-```
-┌──────────────────────────────────────────────────────────────────────┐
-│  Touch Display (Chromium kiosk)          Any browser on the network    │
-│  ┌────────────────────────────┐         ┌───────────────────────────┐ │
-│  │ Kiosk UI  (frontend/)      │         │ Dashboard  (/dashboard)   │ │
-│  │ index.html · app.js        │         │ tabs · 5-tap UI reveal    │ │
-│  │ 6 screens · green theme    │         │ catalog GET public        │ │
-│  └─────────────┬──────────────┘         └─────────────┬─────────────┘ │
-│   REST (fetch) │  SSE (NFC/session events)            │ REST          │
-│  ┌─────────────▼──────────────────────────────────────▼─────────────┐ │
-│  │  FastAPI Backend  (smart_locker/app.py + api/routes.py)          │ │
-│  │  /api/session · /api/devices · /api/devices/{id}/borrow|return   │ │
-│  │  /api/register · /api/admin/* · /api/dashboard/* · /api/events   │ │
-│  └──────┬────────────────────┬───────────────────────┬─────────────┘ │
-│  ┌──────▼───────────┐  ┌──────▼──────────────┐  ┌──────▼────────────┐ │
-│  │ SQLite + ORM     │  │ NFC reader (ACR1252U)│  │ Excel sync        │ │
-│  │ users · devices  │  │ background listener  │  │ catalog import    │ │
-│  │ registrants      │  │ tap → HMAC → auth    │  │ Location back     │ │
-│  │ transaction_logs │  └──────────────────────┘  │ on-demand export  │ │
-│  └──────────────────┘                            └───────────────────┘ │
-└──────────────────────────────────────────────────────────────────────┘
+git renders this mermaid flowchart (three tiers: clients, FastAPI, then SQLite / NFC / Excel).
+
+```mermaid
+flowchart TB
+    subgraph client["Client"]
+        kiosk["Touch Display — Chromium kiosk<br/>frontend/, index.html, app.js<br/>6 screens, green theme"]
+        dash["Any browser — Dashboard /dashboard<br/>tabs, 5-tap reveal, public catalog GET"]
+    end
+
+    subgraph application["Application"]
+        api["FastAPI — smart_locker/app.py, api/routes.py<br/>/api/session, /api/devices, borrow/return<br/>/api/register, /api/admin/*, /api/dashboard/*, /api/events"]
+    end
+
+    subgraph hardware["Data and hardware"]
+        sqlite["SQLite + ORM<br/>users, devices, registrants, transaction_logs"]
+        nfc["NFC ACR1252U<br/>background listener<br/>tap, HMAC, auth"]
+        excel["Excel sync<br/>catalog import, Location write-back<br/>on-demand export"]
+    end
+
+    kiosk -->|"REST fetch + SSE NFC/session"| api
+    dash -->|"REST"| api
+    api --> sqlite
+    api --> nfc
+    api --> excel
+
+    classDef clientFill fill:#e8f4fc,stroke:#4a7a9c,color:#1b2a38
+    classDef appFill fill:#e8f5e9,stroke:#4a8f54,color:#1b2a38
+    classDef dataFill fill:#f6f1e7,stroke:#8a7348,color:#1b2a38
+    class kiosk,dash clientFill
+    class api appFill
+    class sqlite,nfc,excel dataFill
 ```
 
 ## Touch Display UI

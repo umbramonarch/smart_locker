@@ -1525,11 +1525,12 @@ def trigger_update(
 ):
     """Launch the safe software-update script out-of-process (admin only).
 
-    Backs the admin-panel "Update now" button. The update itself is applied by
-    ``deploy/install/update.sh``, which picks up a release tarball delivered to
-    the locker share, snapshots the DB + code, swaps in the new version, migrates,
-    restarts the service, health-checks, and AUTO-ROLLS-BACK on failure — so a
-    bad update self-reverts on a box no one is standing next to.
+    Backs the admin-panel "Software Update" button. The update itself is applied by
+    ``deploy/install/update.sh``, which finds an unpacked ``locker-updates`` tree
+    (USB first, then ``$APP_DIR/locker-updates``), snapshots the DB + code, swaps
+    in the new version, migrates, restarts the service, health-checks, and
+    AUTO-ROLLS-BACK on failure — so a bad update self-reverts on a box no one is
+    standing next to.
 
     The script restarts the very systemd service that hosts this request, so it
     must run in its OWN cgroup; we launch it as a transient ``systemd-run`` unit

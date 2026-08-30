@@ -2021,7 +2021,7 @@ function dismissUpdateOverlay() {
  */
 async function adminUpdate() {
   if (S.updating) return;
-  if (!confirm('Apply a software update now? The kiosk will show an update screen and restart briefly; a failed update rolls back automatically.')) {
+  if (!confirm('Apply a software update now? Plug in the USB stick with locker-updates/ first. The kiosk will show an update screen and restart briefly; a failed update rolls back automatically.')) {
     return;
   }
 

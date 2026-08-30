@@ -15,7 +15,7 @@ locker file-share (CIFS) mount, and an offline Python install.
 | `install/install.sh` | One-shot, idempotent provisioner. Run as root from the repo: `sudo bash deploy/install/install.sh` (`bash <script>` is intentional — exFAT copies strip the +x bit, see `../GUIDE.md` 3c). |
 | `install/sudoers-smart-locker` | Sudoers template: restart own service, launch `update.sh`, `systemctl poweroff`. |
 | `install/apply-sudoers.sh` | Renders the template to `/etc/sudoers.d/smart-locker` after `visudo -cf`. |
-| `install/update.sh` | Applies a signed release tarball from the share (backup, swap, health, rollback). |
+| `install/update.sh` | Applies gitignored `locker-updates/` from USB into `$APP_DIR/locker-updates` (backup, swap, health, rollback). |
 | `install/build-wheelhouse.sh` | Builds the **complete** offline kit in one run: downloads all Python wheels for offline install **and** auto-fetches the `python3-pyscard` `.deb` into `deploy/system-packages/`. Works from an aarch64 host directly, OR from any other machine (e.g. Windows/x86_64) via pip's cross-platform `--platform`/`--python-version`/`--abi` flags — no aarch64 hardware needed to build it. Targets Python 3.13 / cp313 (trixie). |
 | `wheelhouse/` | Where those wheels are staged (the `.whl` files are gitignored). |
 | `system-packages/` | Holds the `python3-pyscard` `.deb` — `pyscard` has no prebuilt Linux aarch64 wheel on PyPI, so it's installed via `dpkg`/`apt` instead of pip. See `system-packages/README.md`. |

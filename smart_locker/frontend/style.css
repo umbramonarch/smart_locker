@@ -2256,7 +2256,9 @@ body::after {
   color: var(--text-dim);
   text-align: center;
   line-height: 1.45;
-  max-width: 28rem;
+  max-width: 40rem;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 .update-version {
   font-family: var(--font-display);
