@@ -1030,6 +1030,9 @@ The Pi lives in the locker, far from you, so it is built to heal itself:
 
 ### Updating the software (no internet)
 
+Pi still on git `308a5aa2` (signed tarball updater): one-screen first-apply
+checklist in [`deploy/AFTER-UPDATE.md`](deploy/AFTER-UPDATE.md).
+
 There is one update path: on Windows run `python -m scripts.copy_update`, plug the USB
 stick into the Pi, and tap hidden-admin **Software Update**. Do not copy onto the live
 `/home/locker/smart_locker` folder in the file manager. Do not `git reset` on the
@@ -1067,8 +1070,9 @@ CIFS is Excel and photos only — not a software-update drop.
 If pip cannot install from the wheelhouse, the update **rolls back**. The overlay does
 not refuse solely because wheels were missing; the Windows script already warned.
 
-**First apply of this `update.sh`:** copy only `deploy/install/update.sh` onto the Pi
-(keep LF — do not open it in Notepad), then SSH:
+**First apply of this `update.sh`:** see [`deploy/AFTER-UPDATE.md`](deploy/AFTER-UPDATE.md).
+Copy only `deploy/install/update.sh` onto the Pi (keep LF — do not open it in
+Notepad), then SSH:
 
 `sudo bash /home/locker/smart_locker/deploy/install/update.sh`
 

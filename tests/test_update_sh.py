@@ -141,6 +141,13 @@ class TestUpdateShContract:
         gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
         assert "locker-updates/" in gitignore
 
+    def test_after_update_guide_exists(self):
+        guide = ROOT / "deploy" / "AFTER-UPDATE.md"
+        assert guide.is_file()
+        text = guide.read_text(encoding="utf-8")
+        assert "python -m scripts.copy_update" in text
+        assert "deploy/install/update.sh" in text
+
     def test_copy_update_is_the_only_update_packer(self):
         assert not (ROOT / "scripts" / "pack_release.py").exists()
         text = UPDATE_SH.read_text(encoding="utf-8")
