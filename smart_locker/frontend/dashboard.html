@@ -143,6 +143,20 @@
     </div>
   </div>
 
+  <div class="admin-secret-dialog" id="admin-secret-dialog" hidden>
+    <div class="admin-secret-card" role="dialog" aria-labelledby="admin-secret-title">
+      <h3 class="admin-secret-title" id="admin-secret-title">Admin access</h3>
+      <p class="admin-secret-hint">Enter the dashboard admin secret to open the admin panel.</p>
+      <label class="admin-secret-label" for="admin-secret-input">Secret</label>
+      <input type="password" class="search-input" id="admin-secret-input" autocomplete="off">
+      <p class="error-msg" id="admin-secret-error" style="display:none"></p>
+      <div class="admin-secret-actions">
+        <button type="button" class="admin-secret-cancel" id="admin-secret-cancel">Cancel</button>
+        <button type="button" class="admin-secret-confirm" id="admin-secret-confirm">Confirm</button>
+      </div>
+    </div>
+  </div>
+
   <div class="admin-overlay" id="admin-overlay" hidden>
     <div class="admin-overlay-card" role="dialog" aria-labelledby="admin-overlay-title">
       <div class="admin-overlay-header">

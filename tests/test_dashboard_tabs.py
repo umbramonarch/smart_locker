@@ -96,9 +96,13 @@ class TestDashboardFiveTapAdmin:
         js = _js()
         assert 'id="dash-clock"' in html
         assert 'id="admin-overlay"' in html
+        assert 'id="admin-secret-dialog"' in html
+        assert 'id="admin-secret-input"' in html
+        assert 'id="admin-secret-confirm"' in html
         assert "ADMIN_TAP_COUNT" in js or "adminTaps" in js
         assert "3000" in js
         assert "openAdminOverlay" in js or "checkAdminTapSequence" in js
+        assert "ensureDashboardAdminSecret" in js
 
     def test_overlay_has_users_logs_and_tag_actions(self):
         """5-tap overlay lists users, last transactions, and NFC unbind / arm-bind."""
@@ -164,6 +168,20 @@ class TestDashboardOwnerEdit:
         html = _html()
         assert 'id="owner-confirm"' in html
         assert "Confirm" in html
+
+    def test_location_click_does_not_prompt_secret(self):
+        """Opening the owner dialog must not ask for the admin secret."""
+        js = _js()
+        fn = js.split("function openOwnerDialog(", 1)[1].split(
+            "function ", 1
+        )[0]
+        assert "ensureDashboardAdminSecret" not in fn
+        assert "window.prompt" not in fn
+
+    def test_window_prompt_not_used(self):
+        """Dashboard.js must not use browser window.prompt for any flow."""
+        js = _js()
+        assert "window.prompt" not in js
 
 
 class TestDashboardDesktopTheme:

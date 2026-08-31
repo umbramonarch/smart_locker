@@ -81,18 +81,96 @@ function dashboardAdminHeaders() {
 }
 
 
+/** Promise resolve/reject callbacks for the active admin-secret modal. */
+let adminSecretResolve = null;
+
+
 /**
- * Prompt once per tab for the dashboard admin secret if it is not stored.
+ * Show the styled admin-secret modal.
+ */
+function openAdminSecretDialog() {
+  const dialog = document.getElementById('admin-secret-dialog');
+  const input = document.getElementById('admin-secret-input');
+  const err = document.getElementById('admin-secret-error');
+  if (err) {
+    err.textContent = '';
+    err.style.display = 'none';
+  }
+  if (input) input.value = '';
+  if (dialog) dialog.hidden = false;
+  if (input) input.focus();
+}
+
+
+/**
+ * Hide the admin-secret modal.
+ */
+function closeAdminSecretDialog() {
+  const dialog = document.getElementById('admin-secret-dialog');
+  if (dialog) dialog.hidden = true;
+}
+
+
+/**
+ * Resolve the pending admin-secret promise with the given value.
+ * @param {string} value - Secret string, or empty if cancelled.
+ */
+function resolveAdminSecret(value) {
+  if (adminSecretResolve) {
+    adminSecretResolve(value);
+    adminSecretResolve = null;
+  }
+  closeAdminSecretDialog();
+}
+
+
+/**
+ * Validate the typed admin secret before entering admin mode.
+ * On success store it and resolve; on 401 show an error and stay in the modal.
+ */
+async function submitAdminSecret() {
+  const input = document.getElementById('admin-secret-input');
+  const err = document.getElementById('admin-secret-error');
+  const secret = input ? input.value.trim() : '';
+  if (!secret) {
+    if (err) {
+      err.textContent = 'Enter the admin secret.';
+      err.style.display = '';
+    }
+    if (input) input.focus();
+    return;
+  }
+
+  const headers = { 'Content-Type': 'application/json' };
+  headers[ADMIN_HEADER] = secret;
+  try {
+    const res = await fetch('/api/dashboard/users', { headers }).catch(() => null);
+    if (res && res.ok) {
+      sessionStorage.setItem(ADMIN_SECRET_KEY, secret);
+      resolveAdminSecret(secret);
+      return;
+    }
+  } catch (_) { /* fall through to error */ }
+  if (err) {
+    err.textContent = 'Incorrect admin secret.';
+    err.style.display = '';
+  }
+  if (input) input.focus();
+}
+
+
+/**
+ * Prompt for the dashboard admin secret using the styled modal.
  *
- * @returns {string} Secret string, possibly empty if the prompt was cancelled.
+ * @returns {Promise<string>} Secret string, or empty string if cancelled.
  */
 function ensureDashboardAdminSecret() {
-  let secret = sessionStorage.getItem(ADMIN_SECRET_KEY) || '';
-  if (!secret) {
-    secret = window.prompt('Dashboard admin secret') || '';
-    if (secret) sessionStorage.setItem(ADMIN_SECRET_KEY, secret);
-  }
-  return secret;
+  const secret = sessionStorage.getItem(ADMIN_SECRET_KEY) || '';
+  if (secret) return Promise.resolve(secret);
+  openAdminSecretDialog();
+  return new Promise((resolve) => {
+    adminSecretResolve = resolve;
+  });
 }
 
 
@@ -484,7 +562,6 @@ function openOwnerDialog(pm, current) {
     err.textContent = '';
     err.style.display = 'none';
   }
-  ensureDashboardAdminSecret();
   fetchOwners();
   if (dialog) dialog.hidden = false;
   if (input) input.focus();
@@ -524,10 +601,15 @@ async function confirmOwnerEdit() {
     });
     if (!res.ok) {
       let detail = 'Could not change owner.';
-      try {
-        const body = await res.json();
-        if (body && body.detail) detail = String(body.detail);
-      } catch (_) { /* keep default */ }
+      if (res.status === 401) {
+        sessionStorage.removeItem(ADMIN_SECRET_KEY);
+        detail = 'Admin authorization failed. Tap the clock 5 times to enter the secret.';
+      } else {
+        try {
+          const body = await res.json();
+          if (body && body.detail) detail = String(body.detail);
+        } catch (_) { /* keep default */ }
+      }
       if (err) {
         err.textContent = detail;
         err.style.display = '';
@@ -564,7 +646,7 @@ function tickClock() {
 /**
  * Record a tap on the header clock. Five taps within 3s opens admin.
  */
-function checkAdminTapSequence() {
+async function checkAdminTapSequence() {
   const now = Date.now();
   adminTaps.push(now);
   while (adminTaps.length > 0 && (now - adminTaps[0]) > ADMIN_TAP_WINDOW) {
@@ -574,20 +656,22 @@ function checkAdminTapSequence() {
     adminTaps.length = 0;
     const overlay = document.getElementById('admin-overlay');
     if (overlay && !overlay.hidden) closeAdminOverlay();
-    else openAdminOverlay();
+    else await openAdminOverlay();
   }
 }
 
 
 /**
  * Show the 5-tap overlay and load users, logs, and locker tags.
+ * The admin secret is validated first; the overlay only opens on success.
  */
-function openAdminOverlay() {
+async function openAdminOverlay() {
+  const secret = await ensureDashboardAdminSecret();
+  if (!secret) return;
   const overlay = document.getElementById('admin-overlay');
   if (overlay) overlay.hidden = false;
   const status = document.getElementById('admin-tag-status');
   if (status) status.textContent = '';
-  ensureDashboardAdminSecret();
   fetchAdminTables();
 }
 
@@ -705,6 +789,11 @@ async function armBind(pm) {
       headers: dashboardAdminHeaders(),
       body: JSON.stringify({ pm_number: pm }),
     });
+    if (res.status === 401) {
+      sessionStorage.removeItem(ADMIN_SECRET_KEY);
+      if (status) status.textContent = 'Admin authorization failed. Tap the clock 5 times to enter the secret.';
+      return;
+    }
     let detail = 'Could not arm bind.';
     try {
       const body = await res.json();
@@ -736,10 +825,15 @@ async function unbindTag(pm) {
     });
     if (!res.ok) {
       let detail = 'Could not unbind.';
-      try {
-        const body = await res.json();
-        if (body && body.detail) detail = String(body.detail);
-      } catch (_) { /* keep default */ }
+      if (res.status === 401) {
+        sessionStorage.removeItem(ADMIN_SECRET_KEY);
+        detail = 'Admin authorization failed. Tap the clock 5 times to enter the secret.';
+      } else {
+        try {
+          const body = await res.json();
+          if (body && body.detail) detail = String(body.detail);
+        } catch (_) { /* keep default */ }
+      }
       if (status) status.textContent = detail;
       return;
     }
@@ -828,6 +922,26 @@ function initEvents() {
   if (adminOverlay) {
     adminOverlay.addEventListener('click', (e) => {
       if (e.target === adminOverlay) closeAdminOverlay();
+    });
+  }
+
+  const secretCancel = document.getElementById('admin-secret-cancel');
+  if (secretCancel) secretCancel.addEventListener('click', () => resolveAdminSecret(''));
+
+  const secretConfirm = document.getElementById('admin-secret-confirm');
+  if (secretConfirm) secretConfirm.addEventListener('click', submitAdminSecret);
+
+  const secretInput = document.getElementById('admin-secret-input');
+  if (secretInput) {
+    secretInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') submitAdminSecret();
+    });
+  }
+
+  const secretDialog = document.getElementById('admin-secret-dialog');
+  if (secretDialog) {
+    secretDialog.addEventListener('click', (e) => {
+      if (e.target === secretDialog) resolveAdminSecret('');
     });
   }
 }
