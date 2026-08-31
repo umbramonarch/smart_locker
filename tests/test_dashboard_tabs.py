@@ -183,6 +183,30 @@ class TestDashboardOwnerEdit:
         js = _js()
         assert "window.prompt" not in js
 
+    def test_stored_secret_is_revalidated_before_overlay(self):
+        """A cached secret is checked, and cleared when the API rejects it."""
+        js = _js()
+        fn = js.split("async function ensureDashboardAdminSecret(", 1)[1].split(
+            "\n/**", 1
+        )[0]
+        assert "validateAdminSecret(stored)" in fn
+        assert "sessionStorage.removeItem(ADMIN_SECRET_KEY)" in fn
+        assert "openAdminSecretDialog(" in fn
+
+    def test_validation_separates_rejection_from_outage(self):
+        """Only a 401/403 means wrong secret; other failures say try again."""
+        js = _js()
+        validate = js.split("async function validateAdminSecret(", 1)[1].split(
+            "\n/**", 1
+        )[0]
+        assert "res.status === 401" in validate
+        assert "'unavailable'" in validate
+        submit = js.split("async function submitAdminSecret(", 1)[1].split(
+            "\n/**", 1
+        )[0]
+        assert "result === 'invalid'" in submit
+        assert "ADMIN_SECRET_UNAVAILABLE_MSG" in submit
+
 
 class TestDashboardDesktopTheme:
     """Kiosk tokens, but a normal desktop page (cursor, select, scroll)."""

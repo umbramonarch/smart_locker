@@ -85,16 +85,23 @@ function dashboardAdminHeaders() {
 let adminSecretResolve = null;
 
 
+/** Message shown when the secret cannot be checked against the API. */
+const ADMIN_SECRET_UNAVAILABLE_MSG =
+  'Could not verify the admin secret right now. Try again.';
+
+
 /**
  * Show the styled admin-secret modal.
+ *
+ * @param {string} [message] - Optional error text to display on open.
  */
-function openAdminSecretDialog() {
+function openAdminSecretDialog(message) {
   const dialog = document.getElementById('admin-secret-dialog');
   const input = document.getElementById('admin-secret-input');
   const err = document.getElementById('admin-secret-error');
   if (err) {
-    err.textContent = '';
-    err.style.display = 'none';
+    err.textContent = message || '';
+    err.style.display = message ? '' : 'none';
   }
   if (input) input.value = '';
   if (dialog) dialog.hidden = false;
@@ -125,8 +132,30 @@ function resolveAdminSecret(value) {
 
 
 /**
+ * Check a secret against the admin API.
+ *
+ * @param {string} secret - Secret to send in the admin header.
+ * @returns {Promise<string>} 'ok', 'invalid' on 401, or 'unavailable'.
+ */
+async function validateAdminSecret(secret) {
+  const headers = { 'Content-Type': 'application/json' };
+  headers[ADMIN_HEADER] = secret;
+  let res = null;
+  try {
+    res = await fetch('/api/dashboard/users', { headers });
+  } catch (_) {
+    return 'unavailable';
+  }
+  if (!res) return 'unavailable';
+  if (res.ok) return 'ok';
+  if (res.status === 401 || res.status === 403) return 'invalid';
+  return 'unavailable';
+}
+
+
+/**
  * Validate the typed admin secret before entering admin mode.
- * On success store it and resolve; on 401 show an error and stay in the modal.
+ * On success store it and resolve; otherwise show an error and stay open.
  */
 async function submitAdminSecret() {
   const input = document.getElementById('admin-secret-input');
@@ -141,18 +170,16 @@ async function submitAdminSecret() {
     return;
   }
 
-  const headers = { 'Content-Type': 'application/json' };
-  headers[ADMIN_HEADER] = secret;
-  try {
-    const res = await fetch('/api/dashboard/users', { headers }).catch(() => null);
-    if (res && res.ok) {
-      sessionStorage.setItem(ADMIN_SECRET_KEY, secret);
-      resolveAdminSecret(secret);
-      return;
-    }
-  } catch (_) { /* fall through to error */ }
+  const result = await validateAdminSecret(secret);
+  if (result === 'ok') {
+    sessionStorage.setItem(ADMIN_SECRET_KEY, secret);
+    resolveAdminSecret(secret);
+    return;
+  }
   if (err) {
-    err.textContent = 'Incorrect admin secret.';
+    err.textContent = result === 'invalid'
+      ? 'Incorrect admin secret.'
+      : ADMIN_SECRET_UNAVAILABLE_MSG;
     err.style.display = '';
   }
   if (input) input.focus();
@@ -161,13 +188,20 @@ async function submitAdminSecret() {
 
 /**
  * Prompt for the dashboard admin secret using the styled modal.
+ * A stored secret is re-validated, and cleared if the API rejects it.
  *
  * @returns {Promise<string>} Secret string, or empty string if cancelled.
  */
-function ensureDashboardAdminSecret() {
-  const secret = sessionStorage.getItem(ADMIN_SECRET_KEY) || '';
-  if (secret) return Promise.resolve(secret);
-  openAdminSecretDialog();
+async function ensureDashboardAdminSecret() {
+  const stored = sessionStorage.getItem(ADMIN_SECRET_KEY) || '';
+  let message = '';
+  if (stored) {
+    const result = await validateAdminSecret(stored);
+    if (result === 'ok') return stored;
+    if (result === 'invalid') sessionStorage.removeItem(ADMIN_SECRET_KEY);
+    else message = ADMIN_SECRET_UNAVAILABLE_MSG;
+  }
+  openAdminSecretDialog(message);
   return new Promise((resolve) => {
     adminSecretResolve = resolve;
   });
