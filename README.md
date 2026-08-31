@@ -229,7 +229,7 @@ Three tabs:
 
 Tap the header clock **5× within 3 s** (same gesture as the kiosk) to reveal registered users, the last 500 transactions, and NFC **Unbind** / **Bind** / **Replace tag**. Those GETs/POSTs still need the admin secret. Arm-bind waits for the sticker on the ACR1252U; the dashboard does not start a kiosk admin session.
 
-Colleagues can double-click `dashboard.html` or `dashboard.url` on the locker share if the Pi is configured with `SMART_LOCKER_PUBLIC_URL` and `SMART_LOCKER_DASHBOARD_SHARE_PATH` (startup writes those files). The live page is still `GET /dashboard`.
+Colleagues can double-click `dashboard.url` on the locker share if the Pi is configured with `SMART_LOCKER_PUBLIC_URL` and `SMART_LOCKER_DASHBOARD_SHARE_PATH` (startup writes that file). The live page is still `GET /dashboard`.
 
 Colours match the kiosk (`#181d24` / `#009641`); this is a normal desktop page (cursor, select, scroll). Use **Export to Excel** from the kiosk admin panel for a downloadable snapshot (Devices sheet has Tagged Yes/No, never the HMAC).
 

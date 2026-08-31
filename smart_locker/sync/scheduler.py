@@ -44,7 +44,7 @@ _DEBOUNCE_SECONDS = 3.0
 
 
 def _try_dashboard_launcher() -> None:
-    """Write dashboard.html onto the share if it is mounted. Never raises.
+    """Write dashboard.url onto the share if it is mounted. Never raises.
 
     Startup may see the CIFS share down; the interval job retries until the
     launcher files appear. Does not busy-loop.

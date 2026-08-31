@@ -12,6 +12,8 @@ Work on `main` after the `v0.2.0` tag. Merging to `main` is not a release; the n
 
 ### Changed
 
+- Dashboard share launcher now writes only `dashboard.url`; the generated `dashboard.html` redirect is removed because the Windows shortcut is enough to open the live page.
+
 ## [0.2.0] — 2026-08-28
 
 Second tagged appliance ship (`v0.2.0`). NFC stickers, Location write-back, dashboard tabs, and house bootstrap (changelog, ADRs, MIT, pytest CI).
