@@ -96,9 +96,13 @@ class TestDashboardFiveTapAdmin:
         js = _js()
         assert 'id="dash-clock"' in html
         assert 'id="admin-overlay"' in html
+        assert 'id="admin-secret-dialog"' in html
+        assert 'id="admin-secret-input"' in html
+        assert 'id="admin-secret-confirm"' in html
         assert "ADMIN_TAP_COUNT" in js or "adminTaps" in js
         assert "3000" in js
         assert "openAdminOverlay" in js or "checkAdminTapSequence" in js
+        assert "ensureDashboardAdminSecret" in js
 
     def test_overlay_has_users_logs_and_tag_actions(self):
         """5-tap overlay lists users, last transactions, and NFC unbind / arm-bind."""
@@ -164,6 +168,44 @@ class TestDashboardOwnerEdit:
         html = _html()
         assert 'id="owner-confirm"' in html
         assert "Confirm" in html
+
+    def test_location_click_does_not_prompt_secret(self):
+        """Opening the owner dialog must not ask for the admin secret."""
+        js = _js()
+        fn = js.split("function openOwnerDialog(", 1)[1].split(
+            "function ", 1
+        )[0]
+        assert "ensureDashboardAdminSecret" not in fn
+        assert "window.prompt" not in fn
+
+    def test_window_prompt_not_used(self):
+        """Dashboard.js must not use browser window.prompt for any flow."""
+        js = _js()
+        assert "window.prompt" not in js
+
+    def test_stored_secret_is_revalidated_before_overlay(self):
+        """A cached secret is checked, and cleared when the API rejects it."""
+        js = _js()
+        fn = js.split("async function ensureDashboardAdminSecret(", 1)[1].split(
+            "\n/**", 1
+        )[0]
+        assert "validateAdminSecret(stored)" in fn
+        assert "sessionStorage.removeItem(ADMIN_SECRET_KEY)" in fn
+        assert "openAdminSecretDialog(" in fn
+
+    def test_validation_separates_rejection_from_outage(self):
+        """Only a 401/403 means wrong secret; other failures say try again."""
+        js = _js()
+        validate = js.split("async function validateAdminSecret(", 1)[1].split(
+            "\n/**", 1
+        )[0]
+        assert "res.status === 401" in validate
+        assert "'unavailable'" in validate
+        submit = js.split("async function submitAdminSecret(", 1)[1].split(
+            "\n/**", 1
+        )[0]
+        assert "result === 'invalid'" in submit
+        assert "ADMIN_SECRET_UNAVAILABLE_MSG" in submit
 
 
 class TestDashboardDesktopTheme:
