@@ -565,7 +565,7 @@ is Section 11 — this is the same information, walked through in the order it a
 - `SMART_LOCKER_PUBLIC_URL` — this Pi as other PCs see it, e.g. `http://192.168.1.10:8000`.
   Together with the next line, startup writes a double-click launcher on the share.
 - `SMART_LOCKER_DASHBOARD_SHARE_PATH` — folder on the share (or a `.html` path) for
-  `dashboard.html` and `dashboard.url`. Empty skips the launcher. After `update.sh`,
+  `dashboard.url`. Empty skips the launcher. After `update.sh`,
   set these in the live `.env` (the incoming tree does not overwrite `.env`).
 - `SMART_LOCKER_PHOTO_INPUT_PATH` — a folder (can be on the share or local) the app scans for
   device photos, matched by filename to the device model. Empty disables photo import
@@ -928,8 +928,7 @@ clock **5× within 3 s** to reveal registered users, the last 500 transactions, 
 unbind / arm-bind in the client — that gesture is not authorization (`overlay=true` is
 not auth). Those GETs/POSTs still need the admin secret (tap the sticker on the locker
 reader). If `SMART_LOCKER_PUBLIC_URL` and `SMART_LOCKER_DASHBOARD_SHARE_PATH` are set,
-startup writes `dashboard.html` and `dashboard.url` on the share so a double-click opens
-the live page.
+startup writes `dashboard.url` on the share so a double-click opens the live page.
 
 **Status workbook on the share:** the Pi can write `smart_locker_data.xlsx`
 at `SMART_LOCKER_EXCEL_PATH` (Devices + Transactions + Users) when
@@ -1138,7 +1137,7 @@ All settings live in `.env` (loaded by `config/settings.py`). The Pi template
 | `SMART_LOCKER_SOURCE_SYNC_INTERVAL_HOURS` | `6` | Hours between automatic source imports (startup + admin Sync still run) |
 | `SMART_LOCKER_LAST_SYNC_PATH` | `last_sync.json` next to the DB | Admin last-sync snapshot; keep on the Pi's local disk |
 | `SMART_LOCKER_PUBLIC_URL` | (empty) | Origin of this Pi as other PCs see it (e.g. `http://192.168.1.10:8000`); with the share path, startup writes a dashboard launcher |
-| `SMART_LOCKER_DASHBOARD_SHARE_PATH` | (empty) | Folder (or `.html` path) on the locker share for `dashboard.html` + `dashboard.url`; empty skips the launcher |
+| `SMART_LOCKER_DASHBOARD_SHARE_PATH` | (empty) | Folder (or `.html` path) on the locker share for `dashboard.url`; empty skips the launcher |
 | `SMART_LOCKER_PHOTO_INPUT_PATH` | (empty) | Folder watched for device photos; empty disables |
 | `SMART_LOCKER_KEEP_BACKUPS` | `5` | How many old code+DB backup pairs `update.sh` keeps under `./backups` before pruning |
 

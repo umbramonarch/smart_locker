@@ -157,8 +157,8 @@ def location_header_extras() -> list[str]:
 
 # --- Dashboard share launcher ---
 # Origin of this Pi as colleagues see it (e.g. http://192.168.1.10:8000).
-# Combined with DASHBOARD_SHARE_PATH, startup writes dashboard.html + dashboard.url
-# on the locker share so a double-click opens the live /dashboard.
+# Combined with DASHBOARD_SHARE_PATH, startup writes dashboard.url on the locker
+# share so a double-click opens the live /dashboard.
 PUBLIC_URL = os.getenv("SMART_LOCKER_PUBLIC_URL", "").strip()
 DASHBOARD_SHARE_PATH = os.getenv("SMART_LOCKER_DASHBOARD_SHARE_PATH", "").strip()
 
