@@ -184,9 +184,17 @@ class TestDashboardDesktopTheme:
     def test_inventory_table_uses_fixed_layout(self):
         """Wide cell content must wrap rather than push the rightmost column off screen."""
         css = _css()
-        assert "table-layout: fixed" in css
-        assert "overflow-wrap: break-word" in css or "word-break: break-word" in css
         assert "#inventory-table" in css
+        assert ".data-table {" in css
+        data_table_block = css.split(".data-table {", 1)[1].split("\n\n", 1)[0]
+        assert "table-layout: fixed" in data_table_block
+        assert "word-break: break-word" in css
+
+    def test_locker_table_scrolls_narrow_viewport(self):
+        """The eight-column Locker table is too wide for the 10\" viewport and must scroll."""
+        css = _css()
+        devices_block = css.split("#devices-table", 1)[1].split("\n\n", 1)[0]
+        assert "min-width" in devices_block
 
 
 class TestKioskDisplayHeartbeat:

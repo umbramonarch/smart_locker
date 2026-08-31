@@ -330,23 +330,30 @@ body {
 #inventory-table th:nth-child(7),
 #inventory-table td:nth-child(7) { width: 10%; }
 
-/* Locker: Slot, PM, Name, Type, Status, Borrower, Tag, Calibration Due */
+/* Locker: Slot, PM, Name, Type, Status, Borrower, Tag, Calibration Due.
+   The eight columns need more width than the 10" dashboard viewport provides,
+   so the table gets a min-width and scrolls inside .table-wrap instead of
+   compressing the status column below its badge width. */
+#devices-table {
+  min-width: 56rem;
+}
+
 #devices-table th:nth-child(1),
-#devices-table td:nth-child(1) { width: 7%; }
+#devices-table td:nth-child(1) { width: 6%; }
 #devices-table th:nth-child(2),
-#devices-table td:nth-child(2) { width: 11%; }
+#devices-table td:nth-child(2) { width: 12%; }
 #devices-table th:nth-child(3),
-#devices-table td:nth-child(3) { width: 21%; }
+#devices-table td:nth-child(3) { width: 22%; }
 #devices-table th:nth-child(4),
 #devices-table td:nth-child(4) { width: 12%; }
 #devices-table th:nth-child(5),
-#devices-table td:nth-child(5) { width: 10%; }
+#devices-table td:nth-child(5) { width: 11%; }
 #devices-table th:nth-child(6),
-#devices-table td:nth-child(6) { width: 13%; }
+#devices-table td:nth-child(6) { width: 16%; }
 #devices-table th:nth-child(7),
 #devices-table td:nth-child(7) { width: 9%; }
 #devices-table th:nth-child(8),
-#devices-table td:nth-child(8) { width: 10%; }
+#devices-table td:nth-child(8) { width: 12%; }
 
 /* --- Status badges ------------------------------------------------------- */
 .status-badge {
@@ -357,6 +364,10 @@ body {
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.02em;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .status-badge.available {
