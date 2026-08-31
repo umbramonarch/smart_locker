@@ -1240,6 +1240,8 @@ function dismissSlotOverlay() {
    HANDOVER OVERLAY — take over a device held by another user
 ============================================================ */
 let handoverData = null;
+/** @type {number|undefined} Timeout handle for the handover overlay hide animation */
+let handoverHideTimer;
 
 /**
  * Open the handover confirmation overlay with details from the SSE event.
@@ -1258,6 +1260,16 @@ function openHandover(data) {
   if (S.screen !== 'handover') {
     S.handoverFromScreen = S.screen;
   }
+  clearTimeout(handoverHideTimer);
+  handoverHideTimer = undefined;
+  if (S.screen === 'handover') {
+    const overlay = document.getElementById('overlay-handover');
+    if (overlay) {
+      overlay.classList.remove('hidden-left', 'hidden-right');
+      overlay.style.display = '';
+      overlay.classList.add('visible');
+    }
+  }
   navigate('handover');
 }
 
@@ -1265,13 +1277,16 @@ function openHandover(data) {
  * Close the handover overlay and return to the previous screen.
  */
 function closeHandover() {
+  clearTimeout(handoverHideTimer);
+  handoverHideTimer = undefined;
   const overlay = document.getElementById('overlay-handover');
   if (overlay && overlay.style.display !== 'none') {
     if (overlay.classList.contains('visible')) {
       overlay.classList.add('hidden-left');
-      setTimeout(() => {
+      handoverHideTimer = setTimeout(() => {
         overlay.classList.remove('visible', 'hidden-left');
         overlay.style.display = 'none';
+        handoverHideTimer = undefined;
       }, 710);
     } else {
       overlay.style.display = 'none';
@@ -1308,12 +1323,19 @@ async function acceptHandover() {
       await openReturn();
     } else if (from === 'device-detail') {
       const devices = await apiGetDevices();
-      S.devices = devices;
-      setMenuBorrowCount(devices);
-      const gridMode = S.prevScreen === 'return' ? 'return' : 'borrow';
-      buildGrid(gridMode + '-grid', devices, gridMode);
-      const updated = S.selected ? devices.find(d => d.id === S.selected.id) : null;
-      if (updated) openDetail(updated, S.mode || 'borrow');
+      if (!devices.length) {
+        // Failed or empty refresh: keep the last known list and drop the stale detail.
+        closeDetail();
+        showToast('Could not refresh the device list.', 'error');
+      } else {
+        S.devices = devices;
+        setMenuBorrowCount(devices);
+        const gridMode = S.prevScreen === 'return' ? 'return' : 'borrow';
+        buildGrid(gridMode + '-grid', devices, gridMode);
+        const updated = S.selected ? devices.find(d => d.id === S.selected.id) : null;
+        if (updated) openDetail(updated, S.mode || 'borrow');
+        else closeDetail();
+      }
     } else {
       await updateMenuBorrowCount();
     }
