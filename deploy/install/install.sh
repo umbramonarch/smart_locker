@@ -369,7 +369,7 @@ cat <<EOF
 
 ==> Done. Remaining manual steps (see GUIDE.md for the full walkthrough):
     1. cp deploy/.env.pi.example .env   &&  edit .env  (paths are pre-filled)
-    2. python -m scripts.generate_key   ->  paste all three keys into .env
+    2. python -m scripts.generate_key   ->  paste ENC and HMAC keys into .env
     3. Edit /etc/smart-locker/cifs-credentials with the real locker share login
     4. Add the fstab line from deploy/mount/fstab.snippet, then: sudo mount $MOUNT_POINT
     5. $VENV_DIR/bin/python -m scripts.init_db

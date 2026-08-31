@@ -20,7 +20,7 @@ python -m venv venv
 .\venv\Scripts\Activate
 pip install -r requirements.txt
 python -m scripts.generate_key
-Copy-Item .env.example .env          # then paste ENC / HMAC / UPDATE_HMAC keys
+Copy-Item .env.example .env          # then paste ENC / HMAC keys
 python -m scripts.init_db
 python -m scripts.enroll_card --name "Name" --role admin
 python -m smart_locker.app           # kiosk API + UI on :8000
@@ -64,15 +64,19 @@ sudo bash deploy/install/install.sh
 
 ## Repo-specific
 
-- **Secrets:** `.env` (gitignored). Three keys: `SMART_LOCKER_ENC_KEY` (AES-256-GCM), `SMART_LOCKER_HMAC_KEY` (HMAC-SHA256 card lookup), `SMART_LOCKER_UPDATE_HMAC_KEY` (release HMAC; openssl uses the env **string**, not decoded 32 bytes).
-- **Locker share (Pi: `/mnt/locker`):** Excel import, Excel export, photos, and signed updates live at the share root (`deploy/.env.pi.example`). Share down ≠ kiosk down.
+- **Secrets:** `.env` (gitignored). Two keys: `SMART_LOCKER_ENC_KEY` (AES-256-GCM), `SMART_LOCKER_HMAC_KEY` (HMAC-SHA256 card lookup).
+- **Locker share (Pi: `/mnt/locker`):** Excel import, Excel export, and photos live at the share root (`deploy/.env.pi.example`). Share down ≠ kiosk down. Software updates are USB `locker-updates/` only — not a tarball drop on the share.
 - **Excel import:** `smart_locker/sync/source_import.py` — catalog refresh for PMs already in SQLite (never inserts locker rows). English headers and aliases (case-insensitive); extra aliases via `SMART_LOCKER_ID_HEADERS` / `SMART_LOCKER_LOCATION_HEADERS`. Re-import never overwrites `locker_slot` / `image_path` / `description` / `tag_hmac` / `status` / `current_borrower_id`. Catalog fields (name, type, serial, manufacturer, model, calibration) still update. Person names in Location replace the self-register list (names that leave Excel are removed). `devices.barcode` is unused leftover (not imported). A Slot column is unused. Scheduler: startup + every 6 hours (`SMART_LOCKER_SOURCE_SYNC_INTERVAL_HOURS`) + admin Sync; last-sync persisted next to the DB.
 - **Excel write-back:** `smart_locker/sync/location_writeback.py` — after borrow/return, Register Device, and each source import, the Pi writes **only** the Location column by PM. Available → `SMART_LOCKER_IN_LOCKER_TOKEN` (default `Locker`); borrowed → borrower name. Other columns/sheets stay. Locked or missing workbook: log + retry, never crash the kiosk. Do not edit Location in Excel or on the dashboard for locker devices (the Pi overwrites that cell from kiosk borrow/return). Dashboard Inventory owner edit is for **non-locker** PMs only.
 - **Asset label:** `SMART_LOCKER_ASSET_LABEL` (default `PM number`) is the kiosk/dashboard noun. Storage and JSON stay `pm_number`. Public `GET /api/config` returns `{ "asset_label": ... }`.
 - **NFC device tags:** same ACR1252U as work cards. Store `devices.tag_hmac` only (same HMAC key as `users.uid_hmac`). Kiosk `GET /api/devices` and dashboard Locker JSON may expose `has_tag: bool`, never the digest; Excel export is Tagged Yes/No. Idle tap of a **borrowed** sticker returns it (no work card; slot overlay); available tags do not borrow from idle.
 - **Excel auto-export** only if `SMART_LOCKER_EXCEL_AUTO_EXPORT=1` (off in the Pi template; admin Export Excel stays).
 - **Photos:** filename stem = device **model**. `scripts/update_device.py --auto` matches **PM number** — different scheme.
-- **Pi updates:** signed tarball from `python -m scripts.pack_release` only (copy `.tar.gz` + `.hmac` to `/mnt/locker/locker-updates`). `update.sh` still does stop / backup / pip / migrate / health / rollback, then refreshes sudoers. Git reset is not a full update.
+- **Pi updates:** `python -m scripts.copy_update` (optional `--dest D:\\`) writes gitignored
+  `locker-updates/` and copies it onto a USB stick. Hidden-admin **Software Update** applies
+  `$APP_DIR/locker-updates` (USB `locker-updates/` is copied there first). That is the only
+  software-update path. Missing wheels are **warned** by `copy_update` (does not abort);
+  pip failure on the Pi rolls back. Git reset is not a full update.
 - **Hidden admin:** idle screen, tap the **clock 5× within 3 s**. **Register User** returns to idle after enroll (next work-card tap logs in). **Register Device** is PM + free slot + NFC (catalog from Excel; Sync never inserts). List shows **name + PM**; tagged rows say **Replace tag**. CLI bind: `python -m scripts.enroll_device_tag --pm PM-001`. **Exit kiosk** closes Chromium (service stays); **Shut down** is `systemctl poweroff` (needs `/etc/sudoers.d/smart-locker` via `apply-sudoers.sh`). Dashboard (`http://<pi>:8000/dashboard`): public GET **Inventory** (live Excel) and **Locker** (SQLite; Tagged / No tag) stay unauthenticated. Owner POST, bind/unbind, and gated users/tx/owners GETs need `SMART_LOCKER_DASHBOARD_ADMIN_SECRET` (header `X-Smart-Locker-Admin`); 401 if unset (fail closed). Same 5-tap on the dashboard clock reveals users, last 500 transactions, unbind / arm-bind in the client — it is not authorization (`overlay=true` is not auth). Share launcher: `SMART_LOCKER_PUBLIC_URL` + `SMART_LOCKER_DASHBOARD_SHARE_PATH` writes `dashboard.url`. Health: `/api/health`.
 - **Entry / layout:** `smart_locker/app.py`, `config/`, `scripts/`, `deploy/`, `tests/`, `GUIDE.md`. Frontend: `smart_locker/frontend/`.
 - **Logging:** `config/logging_config.py` → `logs/smart_locker.log` (5 MB × 5) + stdout INFO.

@@ -2,23 +2,30 @@
 #
 # File: update.sh
 # Description: Offline software update for the Smart Locker Pi appliance.
-#              Picks up a signed release tarball from the locker share, then
-#              snapshots DB + code, swaps in the new tree, installs deps from
-#              the wheelhouse, runs DB migrations, restarts the service, and
-#              health-checks /api/health. If the new version does not come up,
-#              the previous code and database are restored.
+#              Finds locker-updates/ (USB copy into $APP_DIR/locker-updates, or
+#              that folder already on disk), then snapshots DB + code, swaps in
+#              the new tree, installs deps from the existing Pi wheelhouse, runs
+#              DB migrations, restarts the service, and health-checks /api/health.
+#              If the new version does not come up, the previous code and database
+#              are restored. The only payload is an unpacked locker-updates tree
+#              (python -m scripts.copy_update). Missing wheels are warned at
+#              USB-prep (copy_update); pip failure here rolls back.
 # Project: smart_locker/deploy
 # Notes: Run on the Pi as: sudo bash deploy/install/update.sh   (the admin-panel
-#        "Update now" button runs exactly this). Use `sudo bash <script>` — copying
-#        via exFAT from Windows strips the +x bit and `sudo <path>` then fails with
-#        "command not found". A single-reader kiosk cannot be truly hitless — one
-#        process owns the NFC reader and the SQLite DB — so this trades a brief
-#        restart (seconds, invisible between card taps) for a SAFE, self-reverting
-#        update on a box no one is standing next to.
+#        "Software Update" button runs exactly this). Use `sudo bash <script>` —
+#        copying via exFAT from Windows strips the +x bit and `sudo <path>` then
+#        fails with "command not found". A single-reader kiosk cannot be truly
+#        hitless — one process owns the NFC reader and the SQLite DB — so this
+#        trades a brief restart (seconds, invisible between card taps) for a SAFE,
+#        self-reverting update on a box no one is standing next to.
 #        Must stay LF (enforced by .gitattributes); CRLF breaks it on the Pi.
-#        PRESERVE keeps runtime files (.env, DB, last_sync.json, venv, logs, backups, wheelhouse,
-#        deploy/system-packages, device photos) across rsync --delete; committed
-#        UI images from the release are overlaid afterwards without --delete.
+#        PRESERVE keeps runtime files (.env, DB, last_sync.json, venv, logs, backups,
+#        wheelhouse, deploy/system-packages, device photos) across rsync --delete;
+#        committed UI images from the incoming tree are overlaid afterwards without
+#        --delete. Extra .whl files in the incoming locker-updates tree are copied
+#        into the Pi wheelhouse when the Pi does not already have that filename.
+#        Missing wheels are not a refuse; pip failure after backup rolls back.
+#        Set SMART_LOCKER_UPDATE_LIB=1 before sourcing this file from tests.
 #
 set -Eeuo pipefail
 
@@ -26,11 +33,11 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_DIR="${SMART_LOCKER_DIR:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 
-# Load the operator's .env so this script honors the same share/service knobs the
-# app uses everywhere else (SMART_LOCKER_UPDATE_DIR, SMART_LOCKER_KEEP_BACKUPS,
-# ...) — one config file to edit, not a second one. The transient systemd-run
-# unit that launches this script carries no environment of its own, so without
-# this the update folder could never be changed except by editing this script.
+# Load the operator's .env so this script honors the same service knobs the
+# app uses everywhere else (SMART_LOCKER_KEEP_BACKUPS, SMART_LOCKER_USER, ...).
+# The transient systemd-run unit that launches this script carries no
+# environment of its own. Apply source is USB locker-updates/ then
+# $APP_DIR/locker-updates — not a CIFS drop.
 #
 # This script runs as root, but .env is owned by the app's non-root service
 # account -- so it is read as plain KEY=VALUE data (never `source`d/`.`-ed),
@@ -67,10 +74,10 @@ SERVICE="${SMART_LOCKER_SERVICE:-smart-locker}"
 HEALTH_URL="${SMART_LOCKER_HEALTH_URL:-http://127.0.0.1:8000/api/health}"
 HEALTH_TIMEOUT="${SMART_LOCKER_HEALTH_TIMEOUT:-45}"   # seconds to wait for a healthy boot
 
-# Where releases are dropped (a folder on the locker share). Each release is a
-# tarball named smart-locker-<version>.tar.gz. The Pi reads this folder over
-# the LAN; it does not need the internet.
-UPDATE_DIR="${SMART_LOCKER_UPDATE_DIR:-/mnt/locker/locker-updates}"
+# Raspberry Pi OS auto-mounts USB sticks at /media/<user>/<label>. Not an .env key.
+USB_MEDIA_ROOT="/media"
+# Apply source: Windows copy_update payload, or USB locker-updates copied here.
+LOCAL_UPDATES="$APP_DIR/locker-updates"
 
 DB_PATH="${SMART_LOCKER_DB_PATH:-$APP_DIR/smart_locker.db}"
 BACKUP_DIR="$APP_DIR/backups"
@@ -83,23 +90,57 @@ KEEP_BACKUPS="${SMART_LOCKER_KEEP_BACKUPS:-5}"
 # Runtime paths preserved across the code swap (never overwritten by a release).
 PRESERVE=(".env" "smart_locker.db" "smart_locker.db-wal" "smart_locker.db-shm"
           "last_sync.json" "logs" "venv" "deploy/wheelhouse" "deploy/system-packages"
-          "backups" ".update-staging" ".git" "smart_locker/frontend/images" "VERSION")
+          "backups" ".update-staging" ".git" "smart_locker/frontend/images" "VERSION"
+          "locker-updates")
+
+# Skip these from an incoming tree even if they were copied onto the stick.
+INCOMING_SKIP=(".env" "venv" "logs" "backups" "smart_locker.db" "smart_locker.db-wal"
+               "smart_locker.db-shm" "deploy/wheelhouse" "deploy/system-packages"
+               ".update-staging" ".git")
+# USB → $APP_DIR/locker-updates may include extra wheels the Pi does not have.
+PAYLOAD_SKIP=(".env" "venv" "logs" "backups" "smart_locker.db" "smart_locker.db-wal"
+              "smart_locker.db-shm" ".update-staging" ".git" "locker-updates")
 
 mkdir -p "$BACKUP_DIR" "$APP_DIR/logs"
 
 # --- Logging ----------------------------------------------------------------
 log() { printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" | tee -a "$LOG_FILE"; }
 
+_status_python() {
+  if [ -x "${PY:-}" ]; then
+    printf '%s' "$PY"
+  elif command -v python3 >/dev/null 2>&1; then
+    command -v python3
+  else
+    command -v python
+  fi
+}
+
 write_status() {  # write_status <state> <message>
-  local state="$1" msg="$2" ver="${NEW_VERSION:-${CUR_VERSION:-unknown}}"
+  local state="$1" msg="$2" ver="${NEW_VERSION:-${CUR_VERSION:-unknown}}" at
+  at="$(date '+%Y-%m-%dT%H:%M:%S%z')"
+  local pybin
+  pybin="$(_status_python)" || pybin=""
+  if [ -n "$pybin" ]; then
+    "$pybin" - "$STATUS_FILE" "$state" "$msg" "$ver" "$at" <<'PY' || true
+import json, sys
+path, state, msg, ver, at = sys.argv[1:6]
+payload = {"state": state, "message": msg, "version": ver, "at": at}
+with open(path, "w", encoding="utf-8") as fh:
+    fh.write(json.dumps(payload) + "\n")
+PY
+    return 0
+  fi
   printf '{"state":"%s","message":"%s","version":"%s","at":"%s"}\n' \
-    "$state" "$msg" "$ver" "$(date '+%Y-%m-%dT%H:%M:%S%z')" > "$STATUS_FILE" || true
+    "$state" "$msg" "$ver" "$at" > "$STATUS_FILE" || true
 }
 
 BACKED_UP=0
 CODE_BACKUP=""
 DB_BACKUP=""
 OLD_VERSION=""
+SOURCE_KIND=""
+SOURCE_PATH=""
 
 # --- Health check -----------------------------------------------------------
 wait_for_health() {  # returns 0 if /api/health reports status:ok within timeout
@@ -164,6 +205,225 @@ on_err() {
   rm -rf "$STAGING_DIR"
   exit 1
 }
+
+# --- Incoming tree discovery ---------------------------------------------------
+is_repo_tree() {
+  local d="${1:-}"
+  [ -n "$d" ] && [ -d "$d" ] \
+    && [ -f "$d/smart_locker/app.py" ] \
+    && [ -f "$d/requirements.txt" ] \
+    && [ -f "$d/deploy/install/update.sh" ]
+}
+
+# Look for a repo root at dir, dir/smart_locker, dir/locker-updates/..., or a child dir.
+find_tree_under() {
+  local root="${1:-}" cand
+  [ -n "$root" ] && [ -d "$root" ] || return 1
+  if is_repo_tree "$root"; then
+    printf '%s\n' "$root"
+    return 0
+  fi
+  if is_repo_tree "$root/smart_locker"; then
+    printf '%s\n' "$root/smart_locker"
+    return 0
+  fi
+  if [ -d "$root/locker-updates" ]; then
+    if is_repo_tree "$root/locker-updates"; then
+      printf '%s\n' "$root/locker-updates"
+      return 0
+    fi
+    if is_repo_tree "$root/locker-updates/smart_locker"; then
+      printf '%s\n' "$root/locker-updates/smart_locker"
+      return 0
+    fi
+    cand="$(_newest_child_tree "$root/locker-updates" || true)"
+    if [ -n "$cand" ]; then
+      printf '%s\n' "$cand"
+      return 0
+    fi
+  fi
+  cand="$(_newest_child_tree "$root" || true)"
+  if [ -n "$cand" ]; then
+    printf '%s\n' "$cand"
+    return 0
+  fi
+  return 1
+}
+
+_newest_child_tree() {
+  local parent="${1:-}" cand best="" best_m=0 m
+  [ -n "$parent" ] && [ -d "$parent" ] || return 1
+  local _old_nullglob
+  _old_nullglob="$(shopt -p nullglob || true)"
+  shopt -s nullglob
+  for cand in "$parent"/*; do
+    [ -d "$cand" ] || continue
+    is_repo_tree "$cand" || continue
+    m="$(_tree_mtime "$cand")"
+    if [ "$m" -ge "$best_m" ]; then
+      best_m="$m"
+      best="$cand"
+    fi
+  done
+  eval "$_old_nullglob"
+  if [ -n "$best" ]; then
+    printf '%s\n' "$best"
+    return 0
+  fi
+  return 1
+}
+
+_tree_mtime() {
+  local d="$1"
+  stat -c '%Y' "$d/requirements.txt" 2>/dev/null || echo 0
+}
+
+# Newest USB locker-updates tree under USB_MEDIA_ROOT (/media/*/* and /media/*).
+find_usb_tree() {
+  local root="${1:-$USB_MEDIA_ROOT}"
+  [ -d "$root" ] || return 1
+  local cand tree best="" best_m=0 m
+  local _old_nullglob
+  _old_nullglob="$(shopt -p nullglob || true)"
+  shopt -s nullglob
+  for cand in "$root"/*/* "$root"/*; do
+    [ -d "$cand" ] || continue
+    tree=""
+    if [ -d "$cand/locker-updates" ]; then
+      tree="$(find_tree_under "$cand/locker-updates" || true)"
+    fi
+    if [ -z "$tree" ] && [ "$(basename "$cand")" = "locker-updates" ]; then
+      tree="$(find_tree_under "$cand" || true)"
+    fi
+    [ -n "$tree" ] || continue
+    m="$(_tree_mtime "$tree")"
+    if [ "$m" -ge "$best_m" ]; then
+      best_m="$m"
+      best="$tree"
+    fi
+  done
+  eval "$_old_nullglob"
+  if [ -n "$best" ]; then
+    printf '%s\n' "$best"
+    return 0
+  fi
+  return 1
+}
+
+# Search order: USB locker-updates → local $APP_DIR/locker-updates.
+# Prints: TREE<TAB>path
+discover_update_source() {
+  local tree
+  tree="$(find_usb_tree "$USB_MEDIA_ROOT" || true)"
+  if [ -n "$tree" ]; then
+    printf 'TREE\t%s\n' "$tree"
+    return 0
+  fi
+  tree="$(find_tree_under "$LOCAL_UPDATES" || true)"
+  if [ -n "$tree" ]; then
+    printf 'TREE\t%s\n' "$tree"
+    return 0
+  fi
+  return 1
+}
+
+tree_version() {
+  local d="${1:-}" ver
+  [ -n "$d" ] && [ -d "$d" ] || return 1
+  if [ -f "$d/VERSION" ]; then
+    ver="$(tr -d '[:space:]' < "$d/VERSION")"
+    if [ -n "$ver" ]; then
+      printf '%s\n' "$ver"
+      return 0
+    fi
+  fi
+  if [ -d "$d/.git" ] && command -v git >/dev/null 2>&1; then
+    ver="$(git -C "$d" describe --tags --always 2>/dev/null || true)"
+    ver="${ver//\//-}"
+    ver="$(printf '%s' "$ver" | tr -s '[:space:]' '-')"
+    if [ -n "$ver" ]; then
+      printf '%s\n' "$ver"
+      return 0
+    fi
+  fi
+  printf 'mtime-%s\n' "$(_tree_mtime "$d")"
+}
+
+# Return 0 if incoming should be refused as older than current.
+# Equal versions are not older (caller treats those as up_to_date).
+# Hex-only ids (git hashes) are not ordered; only equality is used there.
+version_is_older() {
+  local incoming="${1:-}" current="${2:-}"
+  [ -n "$incoming" ] && [ -n "$current" ] || return 1
+  [ "$incoming" = "$current" ] && return 1
+  [ "$current" = "0" ] && return 1
+  if [[ "$incoming" =~ ^mtime- ]] || [[ "$current" =~ ^mtime- ]]; then
+    if [[ "$incoming" =~ ^mtime-([0-9]+)$ ]]; then
+      local in_m="${BASH_REMATCH[1]}"
+      if [[ "$current" =~ ^mtime-([0-9]+)$ ]]; then
+        [ "$in_m" -lt "${BASH_REMATCH[1]}" ]
+        return
+      fi
+    fi
+    return 1
+  fi
+  if [[ "$incoming" =~ ^[0-9a-f]{7,}$ ]] && [[ "$current" =~ ^[0-9a-f]{7,}$ ]]; then
+    return 1
+  fi
+  local first
+  first="$(printf '%s\n%s\n' "$incoming" "$current" | sort -V | head -n1)"
+  [ "$first" = "$incoming" ]
+}
+
+copy_tree_with_skip() {
+  local src="${1:-}" dest="${2:-}"
+  shift 2
+  [ -n "$src" ] && [ -d "$src" ] || return 1
+  [ -n "$dest" ] || return 1
+  mkdir -p "$dest"
+  local excludes=() p
+  for p in "$@"; do
+    excludes+=( --exclude="/$p" --exclude="/$p/" )
+  done
+  excludes+=( --exclude='*.db' )
+  rsync -a "${excludes[@]}" "$src"/ "$dest"/
+}
+
+copy_incoming_tree() {
+  copy_tree_with_skip "$1" "$2" "${INCOMING_SKIP[@]}"
+}
+
+copy_payload_tree() {
+  copy_tree_with_skip "$1" "$2" "${PAYLOAD_SKIP[@]}"
+}
+
+copy_new_wheels_from_incoming() {
+  local src="${1:-}"
+  local src_wh="$src/deploy/wheelhouse"
+  [ -d "$src_wh" ] || return 1
+  mkdir -p "$WHEELHOUSE"
+  local copied=0 f base
+  local _old_nullglob
+  _old_nullglob="$(shopt -p nullglob || true)"
+  shopt -s nullglob
+  for f in "$src_wh"/*.whl; do
+    [ -f "$f" ] || continue
+    base="$(basename "$f")"
+    if [ ! -f "$WHEELHOUSE/$base" ]; then
+      cp -f "$f" "$WHEELHOUSE/$base"
+      copied=$((copied + 1))
+      log "Copied new wheel $base into the Pi wheelhouse."
+    fi
+  done
+  eval "$_old_nullglob"
+  [ "$copied" -gt 0 ]
+}
+
+# --- Sourced by tests: stop before mutating the live appliance --------------
+if [ "${SMART_LOCKER_UPDATE_LIB:-}" = "1" ]; then
+  return 0 2>/dev/null || exit 0
+fi
+
 trap 'on_err $LINENO' ERR
 
 # ============================================================================
@@ -171,117 +431,77 @@ trap 'on_err $LINENO' ERR
 # ============================================================================
 STAMP="$(date '+%Y%m%d-%H%M%S')"
 [ -x "$PY" ] || { echo "venv python not found at $PY — run install.sh first." >&2; exit 2; }
-CUR_VERSION="$( [ -f "$VERSION_FILE" ] && cat "$VERSION_FILE" || echo "0" )"
+CUR_VERSION="$( [ -f "$VERSION_FILE" ] && tr -d '[:space:]' < "$VERSION_FILE" || echo "0" )"
+[ -n "$CUR_VERSION" ] || CUR_VERSION="0"
 OLD_VERSION="$CUR_VERSION"
 
 log "=== Smart Locker update check (current version: $CUR_VERSION) ==="
-write_status "checking" "Looking for a new release on the share."
+write_status "checking" "Looking for locker-updates/ (USB, then $APP_DIR/locker-updates)."
 
-# Fail closed before stop/backup: later HMAC verify needs openssl, the code
-# swap needs rsync. Missing either would leave the kiosk down with no swap.
+# Fail closed before stop/backup: the USB/local copy and the code swap need rsync.
 if ! command -v rsync >/dev/null 2>&1; then
-  log "rsync not found on PATH — refusing to update (needed to swap in the new tree). Service was NOT stopped; still running $CUR_VERSION."
+  log "rsync not found on PATH — refusing to update (needed to copy the incoming tree off USB and swap it in). Service was NOT stopped; still running $CUR_VERSION."
   write_status "failed" "rsync not found; update refused; still on $CUR_VERSION."
   exit 1
 fi
-if ! command -v openssl >/dev/null 2>&1; then
-  log "openssl not found on PATH — refusing to update (needed to verify the release HMAC). Service was NOT stopped; still running $CUR_VERSION."
-  write_status "failed" "openssl not found; update refused; still on $CUR_VERSION."
-  exit 1
-fi
 
-if [ ! -d "$UPDATE_DIR" ]; then
-  log "Update folder $UPDATE_DIR is not reachable (share down?) — nothing to do."
-  write_status "idle" "Update share not reachable; staying on $CUR_VERSION."
+FOUND="$(discover_update_source || true)"
+if [ -z "$FOUND" ]; then
+  log "No locker-updates tree on USB or $LOCAL_UPDATES — nothing to do."
+  write_status "idle" "No locker-updates tree found; staying on $CUR_VERSION."
   exit 0
 fi
+SOURCE_KIND="${FOUND%%$'\t'*}"
+SOURCE_PATH="${FOUND#*$'\t'}"
 
 # ============================================================================
-# 2. Find the newest release tarball and decide whether it is newer
+# 2. Identify the incoming version and refuse same/older
 # ============================================================================
-# Newest by version-sorted filename: smart-locker-<version>.tar.gz
-# Newest by mtime (not sort -V): pack_release names files from git describe,
-# which may be a short hash that does not version-sort.
-TARBALL="$(ls -1t "$UPDATE_DIR"/smart-locker-*.tar.gz 2>/dev/null | head -n1 || true)"
-if [ -z "$TARBALL" ]; then
-  log "No release tarball in $UPDATE_DIR — nothing to do."
-  write_status "idle" "No release found on the share; staying on $CUR_VERSION."
-  exit 0
-fi
-NEW_VERSION="$(basename "$TARBALL" | sed -E 's/^smart-locker-(.*)\.tar\.gz$/\1/')"
+NEW_VERSION="$(tree_version "$SOURCE_PATH")"
 
 if [ "$NEW_VERSION" = "$CUR_VERSION" ]; then
-  log "Already on the latest release ($CUR_VERSION) — nothing to do."
-  write_status "up_to_date" "Already running the latest release ($CUR_VERSION)."
+  log "Already on this tree ($CUR_VERSION) — nothing to do."
+  write_status "up_to_date" "Already running this version ($CUR_VERSION)."
   exit 0
 fi
-log "New release available: $CUR_VERSION -> $NEW_VERSION ($TARBALL)"
-write_status "updating" "Applying $NEW_VERSION."
+if version_is_older "$NEW_VERSION" "$CUR_VERSION"; then
+  log "Incoming tree $NEW_VERSION is older than running $CUR_VERSION — refusing."
+  write_status "failed" "Incoming tree $NEW_VERSION is older than $CUR_VERSION; update refused."
+  exit 1
+fi
+log "New release available: $CUR_VERSION -> $NEW_VERSION ($SOURCE_KIND $SOURCE_PATH)"
+write_status "updating" "Copying $NEW_VERSION onto local disk."
 
-# Mandatory integrity + authenticity check. A plain checksum sitting next to the
-# tarball on the same share only proves self-consistency -- anyone with SMB
-# write access to the share could forge both files together. Instead this
-# requires an HMAC-SHA256 sidecar keyed with SMART_LOCKER_UPDATE_HMAC_KEY, a
-# secret shared only between whoever signs releases (scripts.pack_release) and
-# this Pi's .env -- so a tarball dropped without the key cannot pass. Missing
-# key, missing sidecar, or a mismatch all refuse the update (fail closed).
-[ -n "${SMART_LOCKER_UPDATE_HMAC_KEY:-}" ] \
-  || { log "SMART_LOCKER_UPDATE_HMAC_KEY not set — refusing to apply an unverifiable release. Generate one with: python -m scripts.generate_key"; write_status "failed" "Update HMAC key not configured; refused."; rm -rf "$STAGING_DIR"; exit 1; }
-[ -f "$TARBALL.hmac" ] \
-  || { log "No $TARBALL.hmac sidecar — refusing to apply an unsigned release. Pack it with: python -m scripts.pack_release"; write_status "failed" "Release is unsigned; refused."; rm -rf "$STAGING_DIR"; exit 1; }
-
-log "Verifying release signature..."
-EXPECTED_HMAC="$(tr -d '[:space:]' < "$TARBALL.hmac")"
-ACTUAL_HMAC="$(openssl dgst -sha256 -hmac "$SMART_LOCKER_UPDATE_HMAC_KEY" "$TARBALL" | awk '{print $NF}')"
-[ "$EXPECTED_HMAC" = "$ACTUAL_HMAC" ] \
-  || { log "Signature FAILED — refusing to apply $TARBALL."; write_status "failed" "Release signature did not match; refused."; rm -rf "$STAGING_DIR"; exit 1; }
-log "Signature OK."
+# USB → $APP_DIR/locker-updates so the stick can be unplugged.
+_src_abs="$(cd "$SOURCE_PATH" && pwd)"
+mkdir -p "$LOCAL_UPDATES"
+_local_abs="$(cd "$LOCAL_UPDATES" && pwd)"
+if [ "$_src_abs" != "$_local_abs" ]; then
+  log "Copying incoming tree to $LOCAL_UPDATES (USB can be unplugged after this)."
+  rm -rf "$LOCAL_UPDATES"
+  copy_payload_tree "$SOURCE_PATH" "$LOCAL_UPDATES"
+  SOURCE_PATH="$LOCAL_UPDATES"
+  log "Incoming tree is at $LOCAL_UPDATES."
+fi
 
 # ============================================================================
-# 3. Stage the new code (strip the tarball's top-level dir)
+# 3. Stage onto local disk (USB can be unplugged after this)
 # ============================================================================
 rm -rf "$STAGING_DIR"; mkdir -p "$STAGING_DIR"
-tar -xzf "$TARBALL" -C "$STAGING_DIR" --strip-components=1
-[ -f "$STAGING_DIR/requirements.txt" ] || { log "Staged release looks invalid (no requirements.txt) — aborting."; write_status "failed" "Release archive is invalid."; rm -rf "$STAGING_DIR"; exit 1; }
 
-# ============================================================================
-# 3b. Offline wheelhouse preflight (BEFORE stop/rsync — kiosk stays on old version)
-# ============================================================================
-# Mirror install.sh: filter pyscard (system .deb, never in the wheelhouse), require a
-# wheelhouse, and pip --dry-run so a stale/wrong-ABI kit fails closed without touching
-# the live tree. The Pi is never-networked in production — if the preserved wheelhouse
-# cannot satisfy the staged release's requirements, refuse the update now.
-# deploy/wheelhouse is in PRESERVE, so the kit on disk is the one that must work.
+log "Copying incoming tree from $SOURCE_PATH to $STAGING_DIR (skipping .env, databases, venv, logs, backups, wheelhouse)..."
+copy_incoming_tree "$SOURCE_PATH" "$STAGING_DIR"
+log "Incoming tree staged at $STAGING_DIR."
+[ -f "$STAGING_DIR/requirements.txt" ] || { log "Staged tree looks invalid (no requirements.txt) — aborting."; write_status "failed" "Incoming tree is invalid."; rm -rf "$STAGING_DIR"; exit 1; }
+write_status "updating" "Applying $NEW_VERSION."
+
+# Copy extra wheels the Pi does not already have. Do not refuse if some are still
+# missing — python -m scripts.copy_update warned on Windows; pip failure rolls back.
 REQS_FOR_UPDATE="$(mktemp)"
 grep -vi '^pyscard' "$STAGING_DIR/requirements.txt" > "$REQS_FOR_UPDATE"
-# Keep cleaned up on every exit path (success, refuse, or ERR rollback).
 trap 'rm -f "$REQS_FOR_UPDATE"' EXIT
-if [ ! -d "$WHEELHOUSE" ] || ! ls "$WHEELHOUSE"/*.whl >/dev/null 2>&1; then
-  log "FATAL: no wheelhouse at $WHEELHOUSE — cannot safely update deps in-field."
-  log "    The Pi has no internet; a release without a matching offline wheelhouse is refused."
-  log "    Service was NOT stopped; live code was NOT swapped — still running $CUR_VERSION."
-  write_status "failed" "No wheelhouse; update refused; still on $CUR_VERSION."
-  rm -rf "$STAGING_DIR"
-  exit 1
-fi
-log "Preflight: verifying wheelhouse satisfies staged requirements (pip --dry-run)..."
-DRY_LOG="$(mktemp)"
-# --ignore-installed: system-site-packages must not mask an incomplete wheelhouse.
-if ! "$VENV_DIR/bin/pip" install --dry-run --ignore-installed --no-index --find-links "$WHEELHOUSE" -r "$REQS_FOR_UPDATE" >"$DRY_LOG" 2>&1; then
-  log "FATAL: wheelhouse cannot satisfy the staged requirements.txt for this Python."
-  log "    (typical cause: a stale cp311 wheelhouse on a cp313/trixie Pi.)"
-  log "    Rebuild with deploy/install/build-wheelhouse.sh on a machine with internet,"
-  log "    recopy deploy/wheelhouse/ to the Pi, then retry. Service was NOT stopped;"
-  log "    live code was NOT swapped — still running $CUR_VERSION."
-  log "    --- pip dry-run output (last 30 lines) ---"
-  tail -n 30 "$DRY_LOG" >>"$LOG_FILE" 2>&1 || true
-  rm -f "$DRY_LOG"
-  write_status "failed" "Wheelhouse cannot satisfy requirements; update refused; still on $CUR_VERSION."
-  rm -rf "$STAGING_DIR"
-  exit 1
-fi
-rm -f "$DRY_LOG"
-log "Preflight OK — wheelhouse can satisfy staged requirements."
+copy_new_wheels_from_incoming "$SOURCE_PATH" || true
+write_status "updating" "Applying $NEW_VERSION. USB stick can be unplugged."
 
 # ============================================================================
 # 4. Backup (the rollback point) — from here on, failure triggers rollback
@@ -335,8 +555,7 @@ log "New code in place."
 # ============================================================================
 # 6. Dependencies (offline wheelhouse) + DB migrations
 # ============================================================================
-# Preflight already proved the wheelhouse resolves REQS_FOR_UPDATE; install for real.
-# On failure, ERR trap → rollback (BACKED_UP=1) restores previous code + restarts service.
+# Installing from the Pi wheelhouse. On failure, ERR trap → rollback.
 log "Installing dependencies from offline wheelhouse..."
 "$VENV_DIR/bin/pip" install --ignore-installed --no-index --find-links "$WHEELHOUSE" -r "$REQS_FOR_UPDATE" >>"$LOG_FILE" 2>&1
 
