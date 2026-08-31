@@ -198,6 +198,60 @@ class TestLockerService:
         assert return_txn.user_id == user.id           # original borrower
         assert return_txn.performed_by_id == admin.id  # admin who acted
 
+    def test_transfer_device(self, db_session, enc_key, hmac_key):
+        """Verify transfer moves a borrowed device to another user and logs both sides."""
+        user1, device, session1 = self._setup(db_session, enc_key, hmac_key)
+        LockerService.borrow_device(db_session, session1, device.id)
+
+        user2 = UserRepository.create(
+            db_session,
+            display_name="Bob",
+            uid_hmac=compute_uid_hmac("BBBBBBBB", hmac_key),
+            encrypted_card_uid=encrypt("BBBBBBBB", enc_key),
+        )
+        db_session.flush()
+        session2 = SessionManager(timeout_seconds=60).start_session(user2)
+
+        result = LockerService.transfer_device(db_session, session2, device.id)
+        assert result is True
+        assert device.status == DeviceStatus.BORROWED
+        assert device.current_borrower_id == user2.id
+
+        history = TransactionRepository.get_device_history(db_session, device.id)
+        return_txn = next(t for t in history if t.transaction_type == TransactionType.RETURN)
+        borrow_txn = next(t for t in history if t.transaction_type == TransactionType.BORROW)
+        assert return_txn.user_id == user1.id
+        assert borrow_txn.user_id == user2.id
+        assert "transferred" in (return_txn.notes or "").lower()
+        assert "transferred" in (borrow_txn.notes or "").lower()
+
+    def test_transfer_device_fails_at_borrow_limit(self, db_session, enc_key, hmac_key, monkeypatch):
+        """Verify transfer is rejected when the receiving user is already at the limit."""
+        import smart_locker.services.locker_service as svc_module
+        monkeypatch.setattr(svc_module, "MAX_BORROWS", 1)
+
+        user1, device, session1 = self._setup(db_session, enc_key, hmac_key)
+        user2 = UserRepository.create(
+            db_session,
+            display_name="Bob",
+            uid_hmac=compute_uid_hmac("BBBBBBBB", hmac_key),
+            encrypted_card_uid=encrypt("BBBBBBBB", enc_key),
+        )
+        other = DeviceRepository.create(db_session, name="Scope", device_type="measurement", pm_number="PM-002", serial_number="SN002")
+        db_session.flush()
+
+        session2 = SessionManager(timeout_seconds=60).start_session(user2)
+        # Bob already has one borrowed device
+        DeviceRepository.borrow(db_session, other, user2.id)
+        TransactionRepository.log_borrow(db_session, user2.id, other.id)
+
+        # Alice borrows the device to be transferred
+        LockerService.borrow_device(db_session, session1, device.id)
+
+        result = LockerService.transfer_device(db_session, session2, device.id)
+        assert result is False
+        assert device.current_borrower_id == user1.id
+
 
 class TestUserService:
     """Tests for UserService enrollment, public info, and admin-only UID decryption."""

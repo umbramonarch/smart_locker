@@ -224,7 +224,7 @@ class TestSessionDeviceTags:
         assert device.status == DeviceStatus.AVAILABLE
         assert mgr.has_active_session
 
-    def test_someone_elses_tag_as_user_fails(self, db_session, enc_key, hmac_key):
+    def test_someone_elses_tag_requests_handover(self, db_session, enc_key, hmac_key):
         alice = self._user(db_session, enc_key, hmac_key, "Alice", "AAAA1111")
         bob = self._user(db_session, enc_key, hmac_key, "Bob", "BBBB2222")
         device = self._device_with_tag(
@@ -235,8 +235,11 @@ class TestSessionDeviceTags:
         mgr = SessionManager(timeout_seconds=60)
         mgr.start_session(bob)
         result = handle_insert(db_session, "AABBCCDD", hmac_key, mgr)
-        assert result.event == "device_action"
-        assert result.payload["success"] is False
+        assert result.event == "handover_requested"
+        assert result.payload["device_id"] == device.id
+        assert result.payload["current_holder_id"] == alice.id
+        assert result.payload["user_id"] == bob.id
+        assert "Alice" in result.payload["current_holder_name"]
         assert device.status == DeviceStatus.BORROWED
         assert device.current_borrower_id == alice.id
         assert mgr.has_active_session
@@ -371,7 +374,9 @@ class TestSessionDeviceTags:
         session.last_activity = time.monotonic() - 30
         before = session.last_activity
         result = handle_insert(db_session, "CCDDEEFF", hmac_key, mgr)
-        assert result.payload["success"] is False
+        assert result.event == "handover_requested"
+        assert result.payload["current_holder_id"] == bob.id
+        assert result.payload["user_id"] == alice.id
         assert session.last_activity > before
         before = session.last_activity
         handle_insert(db_session, "11223344", hmac_key, mgr)

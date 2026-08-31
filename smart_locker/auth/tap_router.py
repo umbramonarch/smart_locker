@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from sqlalchemy.orm import Session
 
 from smart_locker.auth.session_manager import SessionManager
-from smart_locker.database.models import Device, DeviceStatus, User
+from smart_locker.database.models import Device, DeviceStatus, User, UserRole
 from smart_locker.database.repositories import DeviceRepository, UserRepository
 from smart_locker.security.hashing import compute_uid_hmac
 from smart_locker.services.locker_service import LockerService
@@ -280,7 +280,7 @@ def _auto_intent(
     session_mgr: SessionManager,
     device: Device,
 ) -> TapResult:
-    """Borrow or return from device status. Session stays open. Always touch()."""
+    """Borrow, return, or request handover from device status. Session stays open. Always touch()."""
     user_session = session_mgr.current_session
     if user_session is None:
         return TapResult(event=None)
@@ -296,10 +296,28 @@ def _auto_intent(
         )
 
     if device.status == DeviceStatus.BORROWED:
-        success = LockerService.return_device(db_session, user_session, device.id)
-        message = f"{name} returned." if success else f"Could not return {name}."
-        return _device_action(
-            device, success=success, action="return", message=message
+        user = user_session.user
+        if device.current_borrower_id == user.id or user.role == UserRole.ADMIN:
+            success = LockerService.return_device(db_session, user_session, device.id)
+            message = f"{name} returned." if success else f"Could not return {name}."
+            return _device_action(
+                device, success=success, action="return", message=message
+            )
+
+        # Another user holds the device; offer a handover instead of failing.
+        current_holder = device.current_borrower
+        current_holder_name = current_holder.display_name if current_holder else "someone"
+        return TapResult(
+            event="handover_requested",
+            payload={
+                "device_id": device.id,
+                "device_name": device.name,
+                "current_holder_id": device.current_borrower_id,
+                "current_holder_name": current_holder_name,
+                "user_id": user.id,
+                "user_name": user.display_name,
+            },
+            cli_message=f"{name} is held by {current_holder_name}. Transfer to {user.display_name}?",
         )
 
     message = f"Could not borrow {name}."
