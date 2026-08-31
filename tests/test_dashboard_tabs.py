@@ -181,6 +181,13 @@ class TestDashboardDesktopTheme:
         assert "cursor: none" not in css
         assert "cursor:none" not in css
 
+    def test_inventory_table_uses_fixed_layout(self):
+        """Wide cell content must wrap rather than push the rightmost column off screen."""
+        css = _css()
+        assert "table-layout: fixed" in css
+        assert "overflow-wrap: break-word" in css or "word-break: break-word" in css
+        assert "#inventory-table" in css
+
 
 class TestKioskDisplayHeartbeat:
     """The kiosk reports its current screen so Display can poll it."""
