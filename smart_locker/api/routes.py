@@ -744,6 +744,37 @@ def return_device(
     return {"success": False, "message": f"Could not return {device_name}."}
 
 
+@router.post("/api/devices/{device_id}/transfer")
+def transfer_device(
+    device_id: int,
+    db: Session = Depends(get_db),
+    user_session: UserSession = Depends(require_session),
+):
+    """Transfer responsibility for a borrowed device to the current user.
+
+    Delegates to ``LockerService.transfer_device`` which records a return for
+    the original borrower, a borrow for the new user, and triggers the Excel
+    Location write-back. The device stays borrowed; only the current holder
+    changes.
+
+    Args:
+        device_id: Primary key of the device to transfer.
+        db: Database session (injected by ``get_db``).
+        user_session: The active session (injected by ``require_session``).
+
+    Returns:
+        dict: ``{"success": bool, "message": str}``.
+    """
+    device = DeviceRepository.find_by_id(db, device_id)
+    device_name = device.name if device else f"Device {device_id}"
+
+    success = LockerService.transfer_device(db, user_session, device_id)
+
+    if success:
+        return {"success": True, "message": f"{device_name} transferred to you."}
+    return {"success": False, "message": f"Could not transfer {device_name}."}
+
+
 # --- Registration Endpoints -------------------------------------------------
 
 class RegisterRequest(BaseModel):

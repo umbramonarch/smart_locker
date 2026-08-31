@@ -99,6 +99,8 @@ const S = {
   lastClickY: null,
   adminRegistration: false, // true when admin-initiated manual registration is in progress
   updating:   false,    // software-update overlay is up; SSE must not navigate
+  handoverDeviceId: null, // device awaiting handover confirmation
+  handoverFromScreen: null, // screen/overlay active when the handover opened
 };
 
 /** @type {string|null} Currently selected registrant name from the name list */
@@ -192,6 +194,23 @@ async function apiReturn(device_id) {
     return { success: true, message: `${d?.name ?? 'Device'} returned.` };
   }
   const res = await fetch(`/api/devices/${device_id}/return`, { method: 'POST' });
+  return await res.json();
+}
+
+/**
+ * Accept a handover of a borrowed device from another user. In demo mode, the
+ * local device row is updated so the current user appears as the new borrower.
+ * @param {number} device_id - The database ID of the device to transfer.
+ * @returns {Promise<Object>} Result with success boolean and message string.
+ */
+async function apiTransfer(device_id) {
+  if (USE_DEMO) {
+    await sleep(480);
+    const d = S.devices.find(x => x.id === device_id);
+    if (d) { d.status = 'borrowed'; d.borrower_name = 'You'; }
+    return { success: true, message: `${d?.name ?? 'Device'} transferred to you.` };
+  }
+  const res = await fetch(`/api/devices/${device_id}/transfer`, { method: 'POST' });
   return await res.json();
 }
 
@@ -1215,6 +1234,114 @@ function dismissSlotOverlay() {
     overlay.classList.remove('visible', 'hidden-left');
     overlay.style.display = 'none';
   }, 710);
+}
+
+/* ============================================================
+   HANDOVER OVERLAY — take over a device held by another user
+============================================================ */
+let handoverData = null;
+/** @type {number|undefined} Timeout handle for the handover overlay hide animation */
+let handoverHideTimer;
+
+/**
+ * Open the handover confirmation overlay with details from the SSE event.
+ * @param {Object} data - SSE handover_requested payload.
+ */
+function openHandover(data) {
+  if (S.updating) return;
+  handoverData = data;
+  S.handoverDeviceId = data.device_id;
+  const msgEl = document.getElementById('handover-msg');
+  if (msgEl) {
+    msgEl.textContent = data.device_name + ' is currently assigned to ' + data.current_holder_name + '. Transfer responsibility to ' + data.user_name + '?';
+  }
+  // Remember where the handover was opened from, but do not overwrite
+  // S.prevScreen — that already tracks the grid behind device-detail.
+  if (S.screen !== 'handover') {
+    S.handoverFromScreen = S.screen;
+  }
+  clearTimeout(handoverHideTimer);
+  handoverHideTimer = undefined;
+  if (S.screen === 'handover') {
+    const overlay = document.getElementById('overlay-handover');
+    if (overlay) {
+      overlay.classList.remove('hidden-left', 'hidden-right');
+      overlay.style.display = '';
+      overlay.classList.add('visible');
+    }
+  }
+  navigate('handover');
+}
+
+/**
+ * Close the handover overlay and return to the previous screen.
+ */
+function closeHandover() {
+  clearTimeout(handoverHideTimer);
+  handoverHideTimer = undefined;
+  const overlay = document.getElementById('overlay-handover');
+  if (overlay && overlay.style.display !== 'none') {
+    if (overlay.classList.contains('visible')) {
+      overlay.classList.add('hidden-left');
+      handoverHideTimer = setTimeout(() => {
+        overlay.classList.remove('visible', 'hidden-left');
+        overlay.style.display = 'none';
+        handoverHideTimer = undefined;
+      }, 710);
+    } else {
+      overlay.style.display = 'none';
+    }
+  }
+  handoverData = null;
+  S.handoverDeviceId = null;
+  S.screen = S.handoverFromScreen || 'main-menu';
+  S.handoverFromScreen = null;
+  reportKioskDisplay(S.screen);
+}
+
+/**
+ * Cancel a pending handover and dismiss the overlay.
+ */
+function cancelHandover() {
+  closeHandover();
+}
+
+/**
+ * Accept the handover by POSTing to the transfer endpoint.
+ */
+async function acceptHandover() {
+  const deviceId = S.handoverDeviceId;
+  const from = S.handoverFromScreen;
+  if (deviceId == null || !from) return;
+  const result = await apiTransfer(deviceId);
+  if (result && result.success) {
+    showToast(result.message, 'success');
+    closeHandover();
+    if (from === 'borrow') {
+      await openBorrow();
+    } else if (from === 'return') {
+      await openReturn();
+    } else if (from === 'device-detail') {
+      const devices = await apiGetDevices();
+      if (!devices.length) {
+        // Failed or empty refresh: keep the last known list and drop the stale detail.
+        closeDetail();
+        showToast('Could not refresh the device list.', 'error');
+      } else {
+        S.devices = devices;
+        setMenuBorrowCount(devices);
+        const gridMode = S.prevScreen === 'return' ? 'return' : 'borrow';
+        buildGrid(gridMode + '-grid', devices, gridMode);
+        const updated = S.selected ? devices.find(d => d.id === S.selected.id) : null;
+        if (updated) openDetail(updated, S.mode || 'borrow');
+        else closeDetail();
+      }
+    } else {
+      await updateMenuBorrowCount();
+    }
+  } else {
+    showToast((result && result.message) || 'Could not transfer device.', 'error');
+  }
 }
 
 /* ============================================================
@@ -2750,6 +2877,8 @@ document.getElementById('detail-close').addEventListener('click',  () => { click
 document.getElementById('confirm-btn').addEventListener('click',   () => { clickSound(); confirmAction();    });
 document.getElementById('stay-btn').addEventListener('click',      () => { clickSound(); dismissInactivity(); });
 document.getElementById('overlay-slot').addEventListener('click',  () => { clickSound(); dismissSlotOverlay(); });
+document.getElementById('handover-accept').addEventListener('click', () => { clickSound(); acceptHandover(); });
+document.getElementById('handover-cancel').addEventListener('click', () => { clickSound(); cancelHandover(); });
 
 // Registration — self-service (name list selection)
 document.getElementById('idle-register-link').addEventListener('click', () => { clickSound(); openRegister(); });
@@ -2969,6 +3098,13 @@ function connectSSE() {
       showToast(data.message || '', data.success ? 'success' : 'error');
     }
     if (S.user) refreshAfterDeviceAction(data);
+  });
+
+  source.addEventListener('handover_requested', e => {
+    if (S.updating) return;
+    const data = JSON.parse(e.data);
+    keepSessionAliveFromTag();
+    openHandover(data);
   });
 
   source.addEventListener('device_tag_idle', e => {

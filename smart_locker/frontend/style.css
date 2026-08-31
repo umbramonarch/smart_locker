@@ -2431,3 +2431,62 @@ html.lite .reveal-inner {
   transform: none !important;
   transition: none !important;
 }
+
+/* ============================================================
+   OVERLAY — HANDOVER REQUEST
+============================================================ */
+#overlay-handover {
+  background: rgba(24,29,36,0.92);
+  backdrop-filter: blur(16px);
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  z-index: 60;
+}
+.handover-center {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1.5rem;
+  width: min(720px, 86vw);
+  text-align: center;
+  padding: 2.5rem;
+}
+.handover-title {
+  font-family: var(--font-display);
+  font-size: 2.2rem;
+  font-weight: 700;
+  color: var(--text);
+}
+.handover-msg {
+  font-size: 1.25rem;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+.handover-actions {
+  display: flex;
+  gap: 1rem;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+.handover-btn {
+  min-width: 180px;
+  padding: 0.9rem 1.6rem;
+  border: none;
+  border-radius: 12px;
+  font-family: var(--font-display);
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform 0.15s var(--ease-smooth), background 0.15s var(--ease-smooth);
+}
+.handover-accept {
+  background: var(--accent);
+  color: #fff;
+}
+.handover-accept:hover { transform: scale(1.04); }
+.handover-cancel {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.handover-cancel:hover { transform: scale(1.04); }
