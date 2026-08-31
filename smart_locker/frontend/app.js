@@ -100,6 +100,7 @@ const S = {
   adminRegistration: false, // true when admin-initiated manual registration is in progress
   updating:   false,    // software-update overlay is up; SSE must not navigate
   handoverDeviceId: null, // device awaiting handover confirmation
+  handoverFromScreen: null, // screen/overlay active when the handover opened
 };
 
 /** @type {string|null} Currently selected registrant name from the name list */
@@ -1252,8 +1253,10 @@ function openHandover(data) {
   if (msgEl) {
     msgEl.textContent = data.device_name + ' is currently assigned to ' + data.current_holder_name + '. Transfer responsibility to ' + data.user_name + '?';
   }
+  // Remember where the handover was opened from, but do not overwrite
+  // S.prevScreen — that already tracks the grid behind device-detail.
   if (S.screen !== 'handover') {
-    S.prevScreen = S.screen;
+    S.handoverFromScreen = S.screen;
   }
   navigate('handover');
 }
@@ -1262,9 +1265,23 @@ function openHandover(data) {
  * Close the handover overlay and return to the previous screen.
  */
 function closeHandover() {
+  const overlay = document.getElementById('overlay-handover');
+  if (overlay && overlay.style.display !== 'none') {
+    if (overlay.classList.contains('visible')) {
+      overlay.classList.add('hidden-left');
+      setTimeout(() => {
+        overlay.classList.remove('visible', 'hidden-left');
+        overlay.style.display = 'none';
+      }, 710);
+    } else {
+      overlay.style.display = 'none';
+    }
+  }
   handoverData = null;
   S.handoverDeviceId = null;
-  navigate(S.prevScreen || 'main-menu');
+  S.screen = S.handoverFromScreen || 'main-menu';
+  S.handoverFromScreen = null;
+  reportKioskDisplay(S.screen);
 }
 
 /**
@@ -1279,15 +1296,24 @@ function cancelHandover() {
  */
 async function acceptHandover() {
   const deviceId = S.handoverDeviceId;
-  if (deviceId == null) return;
+  const from = S.handoverFromScreen;
+  if (deviceId == null || !from) return;
   const result = await apiTransfer(deviceId);
   if (result && result.success) {
     showToast(result.message, 'success');
     closeHandover();
-    if (S.screen === 'borrow') {
+    if (from === 'borrow') {
       await openBorrow();
-    } else if (S.screen === 'return') {
+    } else if (from === 'return') {
       await openReturn();
+    } else if (from === 'device-detail') {
+      const devices = await apiGetDevices();
+      S.devices = devices;
+      setMenuBorrowCount(devices);
+      const gridMode = S.prevScreen === 'return' ? 'return' : 'borrow';
+      buildGrid(gridMode + '-grid', devices, gridMode);
+      const updated = S.selected ? devices.find(d => d.id === S.selected.id) : null;
+      if (updated) openDetail(updated, S.mode || 'borrow');
     } else {
       await updateMenuBorrowCount();
     }
