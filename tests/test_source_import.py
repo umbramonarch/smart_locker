@@ -652,6 +652,24 @@ class TestRegistrantExtraction:
         finally:
             path.unlink(missing_ok=True)
 
+    def test_maintenance_location_excluded(self, db_session):
+        """The maintenance token is a status marker, not a person name."""
+        path = _create_test_excel([
+            ["Equipment", "Slot", "Location"],
+            ["PM-001", "Bay 1", "Maintenance"],
+            ["PM-002", "Bay 2", "maintenance"],
+            ["PM-003", "Bay 3", "Alice"],
+        ])
+        try:
+            from smart_locker.database.engine import get_engine
+            result = import_from_source_excel(get_engine(), path)
+
+            assert result.registrants_added == 1
+            assert RegistrantRepository.find_by_name(db_session, "Alice")
+            assert RegistrantRepository.find_by_name(db_session, "Maintenance") is None
+        finally:
+            path.unlink(missing_ok=True)
+
     def test_no_location_column_no_registrants(self, db_session):
         """Without a location column, no registrant names are extracted."""
         path = _create_test_excel([

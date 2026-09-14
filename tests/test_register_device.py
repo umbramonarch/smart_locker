@@ -91,3 +91,21 @@ class TestReplaceTagCopy:
         js = _js()
         assert "Replace tag" in js
         assert "bindBtn.textContent" in js
+
+
+class TestMaintenanceToggle:
+    """Register Device rows toggle maintenance (out for calibration)."""
+
+    def test_bind_list_has_maintenance_buttons(self):
+        """Available rows get To maintenance; maintenance rows Back in service."""
+        js = _js()
+        assert "To maintenance" in js
+        assert "Back in service" in js
+        assert "data-maint-id" in js or "maintId" in js
+        assert 'data.maintOn' in js or "maint-on" in js or "maintOn" in js
+
+    def test_js_posts_maintenance(self):
+        """adminSetMaintenance POSTs /api/admin/devices/{id}/maintenance."""
+        js = _js()
+        assert "adminSetMaintenance" in js
+        assert "/maintenance" in js

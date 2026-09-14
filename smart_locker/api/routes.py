@@ -4,11 +4,13 @@ Description: REST API endpoints and SSE event stream for the Smart Locker kiosk.
              Provides session management, device listing, borrow/return operations,
              user self-registration (with registrant name validation), admin-only
              manual registration, Register Device (PM + slot + NFC), device-tag
-             bind/unbind, registrant list retrieval, source sync, dashboard
+             bind/unbind, admin maintenance toggle, registrant list
+             retrieval, source sync, dashboard
              (public Inventory from Excel and Locker from SQLite, Display
              snapshot without person names, admin-secret owner edit and 5-tap
              unbind / arm-bind), an admin-only Excel export download, admin
-             Exit kiosk / Shut down, and source sync that writes Location back.
+             Exit kiosk / Shut down, calibration due-soon/overdue alerts
+             (warn only), and source sync that writes Location back.
 Project: smart_locker/api
 Notes: Kiosk session mutations require an active session AND a loopback
        client (require_session). LAN browsers must not ride the process-global
@@ -67,6 +69,7 @@ from smart_locker.services.appliance import (
     exit_kiosk,
     shutdown as appliance_shutdown,
 )
+from smart_locker.services.calibration import calibration_fields
 from smart_locker.services.locker_service import LockerService
 from smart_locker.services.owner_edit import (
     CatalogUnavailable,
@@ -142,9 +145,12 @@ def public_config() -> dict:
     Returns:
         dict: ``asset_label`` from ``SMART_LOCKER_ASSET_LABEL``.
     """
-    from config.settings import asset_label
+    from config.settings import CALIBRATION_WARN_DAYS, asset_label
 
-    return {"asset_label": asset_label()}
+    return {
+        "asset_label": asset_label(),
+        "calibration_warn_days": CALIBRATION_WARN_DAYS,
+    }
 
 
 @router.get("/api/health")
@@ -637,6 +643,51 @@ def touch_session(user_session: UserSession = Depends(require_session)):
 
 # --- Device Endpoints -------------------------------------------------------
 
+@router.get("/api/calibration/alerts")
+def calibration_alerts(
+    db: Session = Depends(get_db),
+    _: None = Depends(require_loopback),
+):
+    """Calibration due-soon / overdue summary for the kiosk idle banner.
+
+    Kiosk-local only (loopback, no session). Read-only: returns counts and
+    device rows — never person names. Overdue rows sort first, then nearest
+    due date.
+
+    Args:
+        db: Active database session (injected by ``get_db``).
+
+    Returns:
+        dict: ``{"overdue": n, "due_soon": n, "devices": [...]}`` for locker
+            devices flagged due_soon or overdue.
+    """
+    from config.settings import CALIBRATION_WARN_DAYS
+
+    flagged = []
+    overdue = 0
+    due_soon = 0
+    for d in DeviceRepository.list_all(db):
+        fields = calibration_fields(d.calibration_due, CALIBRATION_WARN_DAYS)
+        state = fields["calibration_state"]
+        if state not in ("due_soon", "overdue"):
+            continue
+        if state == "overdue":
+            overdue += 1
+        else:
+            due_soon += 1
+        flagged.append({
+            "name": d.name,
+            "pm_number": d.pm_number,
+            "locker_slot": d.locker_slot,
+            "calibration_due": d.calibration_due.isoformat(),
+            "calibration_state": state,
+            "calibration_days_left": fields["calibration_days_left"],
+        })
+    flagged.sort(key=lambda r: (r["calibration_state"] != "overdue",
+                                r["calibration_days_left"]))
+    return {"overdue": overdue, "due_soon": due_soon, "devices": flagged}
+
+
 @router.get("/api/devices")
 def list_devices(
     db: Session = Depends(get_db),
@@ -652,8 +703,11 @@ def list_devices(
         user_session: The active session (injected by ``require_session``).
 
     Returns:
-        list[dict]: One dict per device with id, name, status, borrower_name, etc.
+        list[dict]: One dict per device with id, name, status, borrower_name,
+            calibration_state, calibration_days_left, etc.
     """
+    from config.settings import CALIBRATION_WARN_DAYS
+
     devices = DeviceRepository.list_all(db)
     current_user_id = user_session.user.id
     result = []
@@ -678,6 +732,7 @@ def list_devices(
             "description": d.description,
             "image_path": d.image_path,
             "calibration_due": d.calibration_due.isoformat() if d.calibration_due else None,
+            **calibration_fields(d.calibration_due, CALIBRATION_WARN_DAYS),
             "status": d.status.value,
             "borrower_name": borrower_name,
             "has_tag": d.tag_hmac is not None,
@@ -797,6 +852,12 @@ class SetSlotRequest(BaseModel):
     """Admin change of the physical locker slot on an existing device."""
 
     locker_slot: int = Field(..., ge=1, le=MAX_LOCKER_SLOT)
+
+
+class MaintenanceRequest(BaseModel):
+    """Admin maintenance toggle on an existing locker device."""
+
+    maintenance: bool
 
 
 class KioskDisplayBody(BaseModel):
@@ -1266,6 +1327,77 @@ def set_device_slot(
     return {"success": True, "locker_slot": device.locker_slot}
 
 
+@router.post("/api/admin/devices/{device_id}/maintenance")
+def set_device_maintenance(
+    device_id: int,
+    body: MaintenanceRequest,
+    db: Session = Depends(get_db),
+    user_session: UserSession = Depends(require_session),
+):
+    """Flag a locker device as in/out of maintenance (admin).
+
+    Maintenance means out for calibration/service — warn only, the row
+    stays. Location write-back then writes ``SMART_LOCKER_MAINTENANCE_TOKEN``
+    (default ``Maintenance``) so the spreadsheet shows it is not in the
+    locker and not borrowed.
+
+    Args:
+        device_id: Primary key of the locker device.
+        body: ``{"maintenance": true|false}``.
+        db: Database session (injected by ``get_db``).
+        user_session: The active admin session (injected by ``require_session``).
+
+    Returns:
+        dict: ``{"success": True, "status": "maintenance"|"available"}``.
+
+    Raises:
+        HTTPException: 403 if not admin, 404 if missing, 409 on a borrowed
+            device or when the flag is already as requested.
+    """
+    if user_session.user.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Admin access required.")
+
+    device = DeviceRepository.find_by_id(db, device_id)
+    if device is None:
+        raise HTTPException(status_code=404, detail="Device not found.")
+
+    if body.maintenance:
+        if device.status == DeviceStatus.BORROWED:
+            raise HTTPException(
+                status_code=409, detail="Return the device first."
+            )
+        if device.status == DeviceStatus.MAINTENANCE:
+            raise HTTPException(
+                status_code=409, detail="Already in maintenance."
+            )
+        device.status = DeviceStatus.MAINTENANCE
+    else:
+        if device.status != DeviceStatus.MAINTENANCE:
+            raise HTTPException(
+                status_code=409, detail="Device is not in maintenance."
+            )
+        device.status = DeviceStatus.AVAILABLE
+
+    db.flush()
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+    from smart_locker.sync.location_writeback import schedule_write_location
+
+    schedule_write_location()
+    logger.info(
+        "Maintenance %s for %s (pm=%s) by admin %s.",
+        "set" if body.maintenance else "cleared",
+        device.name,
+        device.pm_number,
+        user_session.user.display_name,
+    )
+    return {"success": True, "status": device.status.value}
+
+
 @router.post("/api/admin/devices/{device_id}/bind-tag")
 def start_device_tag_bind(
     device_id: int,
@@ -1732,7 +1864,7 @@ def dashboard_inventory(db: Session = Depends(get_db)):
     Raises:
         HTTPException: 503 when the catalog path is empty or unreadable.
     """
-    from config.settings import SOURCE_EXCEL_PATH
+    from config.settings import CALIBRATION_WARN_DAYS, SOURCE_EXCEL_PATH
     from smart_locker.sync.source_import import pm_match_key
 
     if not SOURCE_EXCEL_PATH:
@@ -1757,6 +1889,7 @@ def dashboard_inventory(db: Session = Depends(get_db)):
             "serial_number": r.serial_number,
             "location": r.location,
             "calibration_due": r.calibration_due,
+            **calibration_fields(r.calibration_due, CALIBRATION_WARN_DAYS),
             "in_locker": pm_match_key(r.pm_number) in locker_keys,
         }
         for r in rows
@@ -1779,6 +1912,8 @@ def dashboard_devices(db: Session = Depends(get_db)):
                     ``has_tag`` (bool). Sensitive fields (internal IDs,
                     image paths, ``tag_hmac``) are excluded.
     """
+    from config.settings import CALIBRATION_WARN_DAYS
+
     devices = db.execute(
         select(Device).order_by(Device.locker_slot, Device.name)
     ).scalars().all()
@@ -1801,6 +1936,7 @@ def dashboard_devices(db: Session = Depends(get_db)):
             "status": d.status.value,
             "borrower_name": borrower_name,
             "calibration_due": d.calibration_due.isoformat() if d.calibration_due else None,
+            **calibration_fields(d.calibration_due, CALIBRATION_WARN_DAYS),
             "description": d.description,
             "has_tag": d.tag_hmac is not None,
         })

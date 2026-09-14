@@ -24,7 +24,12 @@ from zipfile import BadZipFile
 from openpyxl import load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
 
-from config.settings import id_header_extras, in_locker_token, location_header_extras
+from config.settings import (
+    id_header_extras,
+    in_locker_token,
+    location_header_extras,
+    maintenance_token,
+)
 from smart_locker.database.repositories import DeviceRepository
 
 logger = logging.getLogger(__name__)
@@ -200,22 +205,26 @@ def pm_match_key(value) -> str:
 
 
 def is_in_locker_location(value: str) -> bool:
-    """Return True when a Location cell means the device is in the locker.
+    """Return True when a Location cell is a non-person marker.
 
-    Exact ``in_locker_token()`` match, or a whole-word locker/cabinet marker.
-    ``"Blocker"`` is not in-locker.
+    Exact ``in_locker_token()`` match, an exact ``maintenance_token()``
+    match (device out for calibration — written by Location write-back),
+    or a whole-word locker/cabinet marker. ``"Blocker"`` is not in-locker.
 
     Args:
         value: Location cell text.
 
     Returns:
-        True if the text is a locker location, not a person name.
+        True if the text is a locker/maintenance marker, not a person name.
     """
     text = (value or "").strip().lower()
     if not text:
         return False
     token = (in_locker_token() or "").strip().lower()
     if token and text == token:
+        return True
+    maint = (maintenance_token() or "").strip().lower()
+    if maint and text == maint:
         return True
     return any(
         re.search(rf"(?<![a-z]){re.escape(marker)}(?![a-z])", text)

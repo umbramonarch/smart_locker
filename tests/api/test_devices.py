@@ -213,3 +213,33 @@ class TestBorrowReturn:
         data = resp.json()
         assert data["success"] is True
 
+
+
+class TestDeviceCalibrationFields:
+    """GET /api/devices carries calibration_state / calibration_days_left."""
+
+    def test_calibration_fields_present(
+        self, client, mock_context, test_user, db_session, monkeypatch
+    ):
+        """Overdue date → 'overdue'/negative; no date → None/None."""
+        from datetime import date, timedelta
+
+        monkeypatch.setattr("config.settings.CALIBRATION_WARN_DAYS", 14)
+        yesterday = date.today() - timedelta(days=1)
+        DeviceRepository.create(
+            db_session, name="Old Cal", device_type="Meter",
+            pm_number="PM-CAL", locker_slot=40, calibration_due=yesterday,
+        )
+        DeviceRepository.create(
+            db_session, name="No Cal", device_type="Meter",
+            pm_number="PM-NOCAL", locker_slot=41,
+        )
+        db_session.commit()
+        mock_context.session_mgr.start_session(test_user)
+        data = client.get("/api/devices").json()
+        over = next(d for d in data if d["pm_number"] == "PM-CAL")
+        assert over["calibration_state"] == "overdue"
+        assert over["calibration_days_left"] == -1
+        none = next(d for d in data if d["pm_number"] == "PM-NOCAL")
+        assert none["calibration_state"] is None
+        assert none["calibration_days_left"] is None

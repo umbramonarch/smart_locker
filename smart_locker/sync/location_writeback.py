@@ -29,7 +29,7 @@ from pathlib import Path
 from openpyxl import load_workbook
 from sqlalchemy.orm import Session
 
-from config.settings import in_locker_token
+from config.settings import in_locker_token, maintenance_token
 from smart_locker.database.models import Device, DeviceStatus
 from smart_locker.database.repositories import DeviceRepository
 from smart_locker.sync.source_import import (
@@ -106,11 +106,12 @@ def _location_value(device: Device) -> str | None:
         device: Locker row (status + optional borrower already loaded).
 
     Returns:
-        Borrower display name when borrowed, the in-locker token when
-        available, or None for MAINTENANCE (do not write Location).
+        Borrower display name when borrowed, the maintenance token when the
+        device is out for calibration, or the in-locker token when available.
+        None only for a BORROWED row with no borrower (skipped).
     """
     if device.status == DeviceStatus.MAINTENANCE:
-        return None
+        return maintenance_token()
     if device.status == DeviceStatus.BORROWED:
         if device.current_borrower is None:
             logger.warning(

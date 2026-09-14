@@ -3,7 +3,9 @@
   Description: Kiosk touch-display UI with six screens (Idle, Auth Failed,
     Main Menu, Locker availability, Return Grid, Device Detail) plus overlays
     for inactivity warning, return slot, self-registration, admin panel,
-    Register Device, software update, and appliance shut down.
+    Register Device, software update, and appliance shut down. Calibration
+    due-soon / overdue alerts show as card badges, a detail line, and an
+    idle banner (warn only).
   Project: smart_locker/frontend
   Notes: Served as a static file by FastAPI. Requires app.js and style.css.
     All interactivity is in app.js. Offline: system fonts only.
@@ -92,6 +94,8 @@
         <span class="reveal-wrap"><span class="reveal-inner" style="transition-delay:0.22s">or tap a borrowed device to return</span></span>
       </p>
     </div>
+
+    <div class="idle-cal-banner" id="idle-cal-banner" hidden></div>
 
     <button class="idle-register-link" id="idle-register-link">
       <span class="register-link-line"></span>
@@ -376,6 +380,10 @@
         <div class="detail-meta-row">
           <span class="meta-label">Status</span>
           <span class="meta-value" id="detail-status">—</span>
+        </div>
+        <div class="detail-meta-row hidden" id="detail-cal-row">
+          <span class="meta-label">Calibration</span>
+          <span class="meta-value" id="detail-cal">—</span>
         </div>
       </div>
       <p class="detail-desc" id="detail-desc"></p>

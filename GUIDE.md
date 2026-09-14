@@ -929,6 +929,9 @@ unbind / arm-bind in the client — that gesture is not authorization (`overlay=
 not auth). Those GETs/POSTs still need the admin secret (tap the sticker on the locker
 reader). If `SMART_LOCKER_PUBLIC_URL` and `SMART_LOCKER_DASHBOARD_SHARE_PATH` are set,
 startup writes `dashboard.url` on the share so a double-click opens the live page.
+Devices due for calibration within `SMART_LOCKER_CALIBRATION_WARN_DAYS` show amber in
+the Calibration column (red when overdue), the header counts them, and the Locker tab
+gets a **Calibration** filter showing just those rows.
 
 **Status workbook on the share:** the Pi can write `smart_locker_data.xlsx`
 at `SMART_LOCKER_EXCEL_PATH` (Devices + Transactions + Users) when
@@ -1129,6 +1132,8 @@ All settings live in `.env` (loaded by `config/settings.py`). The Pi template
 | `SMART_LOCKER_READER_NAME` | `ACR1252` | Substring filter for the NFC reader name |
 | `SMART_LOCKER_SESSION_TIMEOUT` | `120` | Idle session timeout (seconds) |
 | `SMART_LOCKER_MAX_BORROWS` | `5` | Max devices a user can hold at once |
+| `SMART_LOCKER_CALIBRATION_WARN_DAYS` | `14` | Days ahead of the Excel calibration date to flag "due soon" (0 = only today) |
+| `SMART_LOCKER_MAINTENANCE_TOKEN` | `Maintenance` | Location cell written while a locker device is in maintenance (out for calibration) |
 | `SMART_LOCKER_API_HOST` | `0.0.0.0` | Web server bind address |
 | `SMART_LOCKER_API_PORT` | `8000` | Web server port |
 | `SMART_LOCKER_SOURCE_EXCEL_PATH` | (empty) | Device master list on the share to import; empty disables auto-import |
@@ -1155,7 +1160,7 @@ write-back into `device-list.xlsx`, on-demand/auto export, photo assignment, the
 Chromium kiosk, fully offline install including the no-PyPI-wheel `pyscard` case), and a
 hardware-free pytest suite.
 
-**Next:** calibration-due notifications, a full admin web panel, MIFARE sector reading, and
+**Next:** a full admin web panel, MIFARE sector reading, and
 multi-reader support.
 
 ---
@@ -1283,6 +1288,8 @@ that bridges card taps to the browser.
 | `POST` | `/api/admin/register` | Admin manual enrolment (skips name check) |
 | `POST` | `/api/admin/devices/{id}/bind-tag` | 60s window to bind the next sticker to that device |
 | `POST` | `/api/admin/devices/{id}/unbind-tag` | Clear the sticker HMAC on that device |
+| `POST` | `/api/admin/devices/{id}/maintenance` | Flag a locker device in/out of maintenance (admin; refused while borrowed) |
+| `GET` | `/api/calibration/alerts` | Due-soon/overdue locker devices, counts sorted overdue first (kiosk loopback, no session) |
 | `POST` | `/api/admin/sync-source` | Trigger the source Excel import now |
 | `GET` | `/api/admin/export-excel` | Download the full database as `.xlsx` |
 | `GET` | `/api/dashboard/devices` | Public locker inventory (SQLite, no auth) |
@@ -1325,7 +1332,8 @@ still logs out; a device tag does not. An unknown UID while logged in stays logg
 **Register Device** (hidden admin panel): enter **PM**, pick a **free slot**, tap the
 sticker. Catalog (name, type, manufacturer, model, serial, cal) is copied from Excel.
 Unknown PM or share down fails with no ghost row. Existing rows can bind / unbind /
-change slot. The list shows **name + PM**. CLI bind-only:
+change slot, and **To maintenance** / **Back in service** flags a device out for
+calibration (refused while borrowed). The list shows **name + PM**. CLI bind-only:
 `python -m scripts.enroll_device_tag --pm PM-001` (or `--uid HEX`, `--force` to replace).
 There is no USB barcode scanner and no `GET /api/devices/barcode/{barcode}`.
 
@@ -1333,7 +1341,8 @@ There is no USB barcode scanner and no `GET /api/devices/barcode/{barcode}`.
 
 ## 16. Future improvements
 
-- **Calibration-due notifications** — calibration dates are stored; a reminder system is not.
+- **Calibration-due notifications** — shipped as warn-only alerts (kiosk badges/banner,
+  dashboard highlight, `GET /api/calibration/alerts`); no e-mail or blocking.
 - **Full admin web panel** — edit users/devices from the browser (today: dashboard owner edit behind the admin secret, 5-tap UI reveal for users/logs/NFC, + the kiosk's hidden admin panel).
 - **MIFARE sector reading** — APDU commands exist in `nfc/apdu.py` but aren't wired in.
 - **Multi-reader support** — currently the first matching reader is used.
