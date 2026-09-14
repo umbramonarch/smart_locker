@@ -91,3 +91,30 @@ class TestReplaceTagCopy:
         js = _js()
         assert "Replace tag" in js
         assert "bindBtn.textContent" in js
+
+
+class TestUsersOverlayMarkup:
+    """Users overlay + Register as admin toggle exist in kiosk markup/JS."""
+
+    def test_admin_users_button_and_overlay_exist(self):
+        """index.html carries the Users button and the Users overlay."""
+        html = _html()
+        assert 'id="admin-users"' in html
+        assert 'id="overlay-users"' in html
+        assert 'id="users-close"' in html
+        assert 'id="users-list"' in html
+        assert 'id="users-countdown"' in html
+
+    def test_register_admin_role_toggle_exists(self):
+        """Manual register step has the Register as admin switch."""
+        html = _html()
+        assert 'id="register-admin-role"' in html
+        assert "Register as admin" in html
+
+    def test_js_posts_role_to_admin_register(self):
+        """app.js sends {name, role} to /api/admin/register."""
+        js = _js()
+        assert "apiStartAdminRegistration" in js
+        assert "role" in js
+        assert "usersReplacePending" in js
+        assert "api/admin/users" in js

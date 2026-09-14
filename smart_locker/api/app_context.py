@@ -6,8 +6,9 @@ Description: Shared application state for the API layer. Bridges the NFC reader
              events into an asyncio.Queue consumed by the SSE endpoint.
 Project: smart_locker/api
 Notes: The module-level singleton 'context' is initialized by server.py's
-       lifespan handler. Also manages pending self-registration and
-       pending device-tag bind state.
+       lifespan handler. Also manages pending self-registration (incl. admin
+       manual register and lost-card replace) and pending device-tag bind
+       state.
 """
 
 import asyncio
@@ -32,12 +33,17 @@ pending_state_lock = threading.RLock()
 class PendingRegistration:
     """Holds state for a user self-registration awaiting an NFC card tap.
 
-    Created when a user submits their name on the registration screen. The
+    Created when a user submits their name on the registration screen, or
+    when an admin starts manual registration / card replacement. The
     registration is valid for ``REGISTRATION_TIMEOUT_SECONDS`` (60s) — if no
     card is tapped before then, the attempt expires and the user must retry.
+    ``replace_user_id`` set means the next tap moves that user's card
+    instead of enrolling a new user.
     """
 
     display_name: str
+    role: str = "user"
+    replace_user_id: int | None = None
     created_at: float = field(default_factory=time.monotonic)
 
     @property
@@ -363,12 +369,15 @@ class AppContext:
             self.broadcast_sse(sse)
 
     async def _handle_registration_tap(self, uid: str, get_session) -> None:
-        """Enroll a new user when a card is tapped during pending registration.
+        """Enroll or re-card a user when a card is tapped during pending registration.
 
         Validates that the registration has not expired and the card is not
-        already enrolled, then creates the user record and pushes a success
-        or failure SSE event to the frontend. Always ends a leftover overlay
-        session so the next work-card tap is login, not logout.
+        already enrolled, then creates the user record (or moves an existing
+        user to the tapped card when ``replace_user_id`` is set) and pushes a
+        success or failure SSE event to the frontend. The enrol path always
+        ends a leftover overlay session so the next work-card tap is login,
+        not logout; the replace path keeps the admin session on the Users
+        overlay.
 
         Args:
             uid: Hex-encoded card UID from the NFC reader.
@@ -377,7 +386,7 @@ class AppContext:
         Returns:
             None. Result is pushed to the SSE queue.
         """
-        from smart_locker.database.repositories import DeviceRepository
+        from smart_locker.database.repositories import DeviceRepository, UserRepository
         from smart_locker.security.hashing import compute_uid_hmac
         from smart_locker.security.key_manager import key_manager
         from smart_locker.services.user_service import UserService
@@ -386,6 +395,7 @@ class AppContext:
         with pending_state_lock:
             pending = self.pending_registration
             assign_pending_registration(self, None)
+        is_replace = pending is not None and pending.replace_user_id is not None
         try:
             if pending is None:
                 return
@@ -401,6 +411,46 @@ class AppContext:
             user_svc = UserService(
                 enc_key=key_manager.enc_key, hmac_key=key_manager.hmac_key
             )
+
+            if is_replace:
+                try:
+                    with get_session() as db_session:
+                        target = UserRepository.find_by_id(
+                            db_session, pending.replace_user_id
+                        )
+                        if target is None or not target.is_active:
+                            self.broadcast_sse({
+                                "event": "registration_failed",
+                                "reason": "User not found.",
+                            })
+                            return
+                        user_svc.replace_card(db_session, target, uid)
+                        logger.info(
+                            "Replaced card for user id=%d.", target.id
+                        )
+                        self.broadcast_sse({
+                            "event": "registration_success",
+                            "user": {
+                                "id": target.id,
+                                "name": target.display_name,
+                                "role": target.role.value,
+                            },
+                            "replaced": True,
+                        })
+                except ValueError as e:
+                    self.broadcast_sse({
+                        "event": "registration_failed",
+                        "reason": str(e),
+                    })
+                except Exception:
+                    logger.exception(
+                        "Card replace failed for '%s'.", pending.display_name
+                    )
+                    self.broadcast_sse({
+                        "event": "registration_failed",
+                        "reason": "Registration failed. Please try again.",
+                    })
+                return
 
             try:
                 with get_session() as db_session:
@@ -430,12 +480,13 @@ class AppContext:
                         db_session,
                         display_name=pending.display_name,
                         card_uid_hex=uid,
-                        role="user",
+                        role=pending.role,
                     )
                     logger.info(
-                        "Self-registered user: %s (id=%d)",
+                        "Self-registered user: %s (id=%d, role=%s)",
                         user.display_name,
                         user.id,
+                        user.role.value,
                     )
                     self.broadcast_sse({
                         "event": "registration_success",
@@ -444,6 +495,7 @@ class AppContext:
                             "name": user.display_name,
                             "role": user.role.value,
                         },
+                        "replaced": False,
                     })
             except Exception:
                 logger.exception("Registration failed for '%s'.", pending.display_name)
@@ -452,7 +504,8 @@ class AppContext:
                     "reason": "Registration failed. Please try again.",
                 })
         finally:
-            self._end_leftover_session()
+            if not is_replace:
+                self._end_leftover_session()
 
     def _uid_is_work_card(self, uid: str, get_session) -> bool:
         """Whether this UID is an enrolled work card (not a device sticker).

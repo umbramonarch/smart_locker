@@ -312,3 +312,60 @@ class TestUserService:
 
         info = svc.get_admin_user_info(db_session, target.id, requesting_user=regular)
         assert info is None
+
+
+class TestReplaceCard:
+    """Tests for UserService.replace_card — lost-card replacement."""
+
+    def _svc_and_user(self, db_session, enc_key, hmac_key):
+        """Build a UserService and enroll Alice on card A1B2C3D4."""
+        svc = UserService(enc_key=enc_key, hmac_key=hmac_key)
+        user = svc.enroll_user(db_session, "Alice", "A1B2C3D4")
+        db_session.flush()
+        return svc, user
+
+    def test_replace_card_success(self, db_session, enc_key, hmac_key):
+        """Replacing moves the user to the new UID; name/role unchanged."""
+        from smart_locker.auth.authenticator import Authenticator
+
+        svc, user = self._svc_and_user(db_session, enc_key, hmac_key)
+        old_hmac = user.uid_hmac
+        svc.replace_card(db_session, user, "e5e5e5e5")  # lowercase canonicalises
+        db_session.flush()
+        assert user.uid_hmac != old_hmac
+        assert decrypt(user.encrypted_card_uid, enc_key) == "E5E5E5E5"
+        assert user.display_name == "Alice"
+        # New card logs in; old card does not.
+        auth = Authenticator(hmac_key)
+        assert auth.authenticate(db_session, "A1B2C3D4") is None
+        assert auth.authenticate(db_session, "E5E5E5E5").id == user.id
+
+    def test_replace_card_same_card_is_noop(self, db_session, enc_key, hmac_key):
+        """Tapping the user's current card is a harmless success."""
+        svc, user = self._svc_and_user(db_session, enc_key, hmac_key)
+        old_hmac = user.uid_hmac
+        result = svc.replace_card(db_session, user, "A1B2C3D4")
+        assert result is user
+        assert user.uid_hmac == old_hmac
+
+    def test_replace_card_other_users_card_refused(
+        self, db_session, enc_key, hmac_key
+    ):
+        """A card already belonging to another user is refused."""
+        svc, user = self._svc_and_user(db_session, enc_key, hmac_key)
+        svc.enroll_user(db_session, "Bob", "BBBB2222")
+        db_session.flush()
+        with pytest.raises(ValueError, match="already registered"):
+            svc.replace_card(db_session, user, "BBBB2222")
+
+    def test_replace_card_device_tag_refused(self, db_session, enc_key, hmac_key):
+        """A UID bound to a device sticker is refused."""
+        device = DeviceRepository.create(
+            db_session, name="Fluke 87V", device_type="Multimeter",
+            pm_number="PM-COLLIDE",
+        )
+        uid = "AABBCCDD"
+        DeviceRepository.bind_tag(db_session, device, compute_uid_hmac(uid, hmac_key))
+        svc, user = self._svc_and_user(db_session, enc_key, hmac_key)
+        with pytest.raises(ValueError, match="already bound"):
+            svc.replace_card(db_session, user, uid)

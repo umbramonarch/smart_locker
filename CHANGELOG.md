@@ -8,6 +8,8 @@ Work on `main` after the `v0.2.0` tag. Merging to `main` is not a release; the n
 
 ### Added
 
+- Kiosk admin panel: **Register as admin** switch on Register User; **Users** overlay to **Replace card** (lost card, 60 s tap window) and **Deactivate** a user (refused for the last admin or while they still hold devices).
+
 ### Fixed
 
 ### Changed

@@ -466,3 +466,175 @@ class TestAdminSyncAndUpdateEndpoints:
         resp = lan_client.post("/api/admin/shutdown")
         assert resp.status_code == 403
 
+
+class TestAdminUsers:
+    """Admin Users overlay API: list, deactivate, replace card."""
+
+    def test_admin_register_role_admin_arms_pending_with_role(
+        self, client, mock_context, admin_user
+    ):
+        """POST /api/admin/register carries role; default is user; bad role 422."""
+        mock_context.session_mgr.start_session(admin_user)
+        mock_context.pending_registration = None
+        mock_context.pending_tag_bind = None
+        resp = client.post(
+            "/api/admin/register", json={"name": "New Admin", "role": "admin"}
+        )
+        assert resp.status_code == 200
+        assert mock_context.pending_registration.role == "admin"
+
+        mock_context.pending_registration = None
+        resp = client.post("/api/admin/register", json={"name": "Plain User"})
+        assert resp.status_code == 200
+        assert mock_context.pending_registration.role == "user"
+
+        resp = client.post(
+            "/api/admin/register", json={"name": "Root", "role": "root"}
+        )
+        assert resp.status_code == 422
+
+    def test_list_users_active_only_with_borrowed_count(
+        self, client, mock_context, admin_user, test_user, test_devices, db_session
+    ):
+        """GET /api/admin/users lists active users with held-device counts."""
+        gone = UserRepository.create(
+            db_session,
+            display_name="Gone User",
+            uid_hmac="gonehmac",
+            encrypted_card_uid="gone",
+        )
+        gone.is_active = False
+        DeviceRepository.borrow(db_session, test_devices[0], test_user.id)
+        db_session.commit()
+        mock_context.session_mgr.start_session(admin_user)
+        resp = client.get("/api/admin/users")
+        assert resp.status_code == 200
+        users = resp.json()["users"]
+        names = {u["name"] for u in users}
+        assert "Gone User" not in names
+        assert "Test User" in names
+        assert "Admin User" in names
+        row = next(u for u in users if u["name"] == "Test User")
+        assert set(row) == {"id", "name", "role", "borrowed_count"}
+        assert row["borrowed_count"] == 1
+        assert row["role"] == "user"
+
+    def test_list_users_requires_admin(
+        self, client, lan_client, mock_context, admin_user, test_user
+    ):
+        """Non-admin session is 403; a LAN client is 403 even with a session."""
+        mock_context.session_mgr.start_session(test_user)
+        assert client.get("/api/admin/users").status_code == 403
+        mock_context.session_mgr.start_session(admin_user)
+        assert lan_client.get("/api/admin/users").status_code == 403
+
+    def test_deactivate_user(
+        self, client, mock_context, admin_user, test_user, db_session
+    ):
+        """Deactivate hides the user from the list and keeps the session up."""
+        mock_context.session_mgr.start_session(admin_user)
+        resp = client.post(f"/api/admin/users/{test_user.id}/deactivate")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["success"] is True
+        assert body["session_ended"] is False
+        db_session.expire_all()
+        assert UserRepository.find_by_id(db_session, test_user.id).is_active is False
+        users = client.get("/api/admin/users").json()["users"]
+        assert "Test User" not in {u["name"] for u in users}
+        assert mock_context.session_mgr.has_active_session
+
+    def test_deactivate_last_admin_refused(
+        self, client, mock_context, admin_user
+    ):
+        """The only active admin cannot deactivate themselves."""
+        mock_context.session_mgr.start_session(admin_user)
+        resp = client.post(f"/api/admin/users/{admin_user.id}/deactivate")
+        assert resp.status_code == 409
+        assert resp.json()["detail"] == "Register another admin first."
+
+    def test_deactivate_user_holding_device_refused(
+        self, client, mock_context, admin_user, test_user, test_devices, db_session
+    ):
+        """A user still holding a device cannot be deactivated."""
+        DeviceRepository.borrow(db_session, test_devices[0], test_user.id)
+        db_session.commit()
+        mock_context.session_mgr.start_session(admin_user)
+        resp = client.post(f"/api/admin/users/{test_user.id}/deactivate")
+        assert resp.status_code == 409
+        assert resp.json()["detail"] == (
+            "Return or hand over this user's devices first."
+        )
+        db_session.expire_all()
+        assert UserRepository.find_by_id(db_session, test_user.id).is_active is True
+
+    def test_deactivate_self_when_other_admin_exists_ends_session(
+        self, client, mock_context, admin_user, db_session, session_mgr
+    ):
+        """Deactivating the panel's own admin ends the kiosk session."""
+        UserRepository.create(
+            db_session,
+            display_name="Second Admin",
+            uid_hmac="admin2hmac",
+            encrypted_card_uid="admin2",
+            role="admin",
+        )
+        db_session.commit()
+        mock_context.session_mgr.start_session(admin_user)
+        resp = client.post(f"/api/admin/users/{admin_user.id}/deactivate")
+        assert resp.status_code == 200
+        assert resp.json()["session_ended"] is True
+        assert session_mgr.has_active_session is False
+
+    def test_deactivate_unknown_or_inactive_is_404(
+        self, client, mock_context, admin_user, db_session
+    ):
+        """Missing users and already-inactive users are both 404."""
+        inactive = UserRepository.create(
+            db_session,
+            display_name="Inactive User",
+            uid_hmac="inactivehmac",
+            encrypted_card_uid="inactive",
+        )
+        inactive.is_active = False
+        db_session.commit()
+        mock_context.session_mgr.start_session(admin_user)
+        assert client.post("/api/admin/users/99999/deactivate").status_code == 404
+        assert (
+            client.post(f"/api/admin/users/{inactive.id}/deactivate").status_code
+            == 404
+        )
+
+    def test_replace_card_arms_pending(
+        self, client, mock_context, admin_user, test_user
+    ):
+        """Replace card arms pending_registration with replace_user_id."""
+        mock_context.session_mgr.start_session(admin_user)
+        mock_context.pending_registration = None
+        mock_context.pending_tag_bind = None
+        resp = client.post(f"/api/admin/users/{test_user.id}/replace-card")
+        assert resp.status_code == 200
+        pending = mock_context.pending_registration
+        assert pending is not None
+        assert pending.replace_user_id == test_user.id
+        assert pending.display_name == test_user.display_name
+        assert pending.role == test_user.role.value
+        # A second arm while the window is open is refused.
+        resp2 = client.post(f"/api/admin/users/{test_user.id}/replace-card")
+        assert resp2.status_code == 409
+        assert "waiting" in resp2.json()["detail"]
+
+    def test_replace_card_unknown_user_404(self, client, mock_context, admin_user):
+        """Replace card on a missing user is 404."""
+        mock_context.session_mgr.start_session(admin_user)
+        resp = client.post("/api/admin/users/99999/replace-card")
+        assert resp.status_code == 404
+
+    def test_replace_card_requires_admin_403(
+        self, client, mock_context, test_user
+    ):
+        """Replace card under a non-admin session is 403."""
+        mock_context.session_mgr.start_session(test_user)
+        resp = client.post(f"/api/admin/users/{test_user.id}/replace-card")
+        assert resp.status_code == 403
+

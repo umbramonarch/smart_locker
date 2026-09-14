@@ -3,7 +3,8 @@ File: routes.py
 Description: REST API endpoints and SSE event stream for the Smart Locker kiosk.
              Provides session management, device listing, borrow/return operations,
              user self-registration (with registrant name validation), admin-only
-             manual registration, Register Device (PM + slot + NFC), device-tag
+             manual registration (with role switch), admin Users (list,
+             deactivate, replace card), Register Device (PM + slot + NFC), device-tag
              bind/unbind, registrant list retrieval, source sync, dashboard
              (public Inventory from Excel and Locker from SQLite, Display
              snapshot without person names, admin-secret owner edit and 5-tap
@@ -29,6 +30,7 @@ import secrets
 import shutil
 import subprocess
 import time
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse, StreamingResponse
@@ -59,7 +61,11 @@ from smart_locker.database.models import (
     User,
     UserRole,
 )
-from smart_locker.database.repositories import DeviceRepository, RegistrantRepository
+from smart_locker.database.repositories import (
+    DeviceRepository,
+    RegistrantRepository,
+    UserRepository,
+)
 from smart_locker.nfc.factory import fake_reader_enabled
 from smart_locker.services.appliance import (
     ApplianceError,
@@ -786,6 +792,17 @@ class RegisterRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
 
 
+class AdminRegisterRequest(BaseModel):
+    """Request body for admin manual registration (Register User).
+
+    ``role`` lets the admin enrol a card as another admin; anything other
+    than ``user``/``admin`` is a 422.
+    """
+
+    name: str = Field(..., min_length=1, max_length=100)
+    role: Literal["user", "admin"] = "user"
+
+
 class RegisterDeviceRequest(BaseModel):
     """Admin Register Device: PM from Excel plus a free locker slot."""
 
@@ -1080,7 +1097,7 @@ def start_admin_session(
 
 @router.post("/api/admin/register")
 def start_admin_registration(
-    body: RegisterRequest,
+    body: AdminRegisterRequest,
     user_session: UserSession = Depends(require_session),
 ):
     """Begin admin-initiated manual registration for a user.
@@ -1089,21 +1106,23 @@ def start_admin_registration(
     validate the name against the registrants table — the admin can register
     anyone with any name. It also does NOT reject the request when a session
     is active (the admin is already logged in). The NFC bridge loop will
-    enroll the next card tap as a new user with the provided name.
+    enroll the next card tap as a new user with the provided name and role
+    (``user`` or ``admin``).
 
     Use case: when someone's name is not in the source Excel and they
     cannot self-register, an admin uses the "Register User" button in the
     admin panel to manually enroll them.
 
     Args:
-        body: Request body with the user's display name.
+        body: Request body with the user's display name and role.
         user_session: The active admin session (injected by ``require_session``).
 
     Returns:
         dict: ``{"success": True, "message": str}``.
 
     Raises:
-        HTTPException: 503 if system not ready, 403 if caller is not admin.
+        HTTPException: 503 if system not ready, 403 if caller is not admin,
+                       409 if a bind/registration window is already armed.
     """
     if ctx_module.context is None:
         raise HTTPException(status_code=503, detail="System not ready.")
@@ -1118,13 +1137,180 @@ def start_admin_registration(
     assign_pending_tag_bind(ctx_module.context, None)
     assign_pending_registration(
         ctx_module.context,
-        PendingRegistration(display_name=body.name.strip()),
+        PendingRegistration(display_name=body.name.strip(), role=body.role),
     )
     logger.info(
-        "Admin-initiated registration for '%s' by admin %s. Awaiting card tap.",
-        body.name.strip(), user_session.user.display_name,
+        "Admin-initiated registration for '%s' (role=%s) by admin %s. Awaiting card tap.",
+        body.name.strip(), body.role, user_session.user.display_name,
     )
     return {"success": True, "message": "Tap the new user's NFC card to complete registration."}
+
+
+@router.get("/api/admin/users")
+def admin_list_users(
+    db: Session = Depends(get_db),
+    user_session: UserSession = Depends(require_session),
+):
+    """List active users for the admin Users overlay (admin only).
+
+    Each row carries the display name, role, and how many locker devices the
+    user currently holds — the data the Deactivate guard needs.
+
+    Args:
+        db: Active database session (injected by ``get_db``).
+        user_session: The active admin session (injected by ``require_session``).
+
+    Returns:
+        dict: ``{"users": [{"id", "name", "role", "borrowed_count"}]}``.
+
+    Raises:
+        HTTPException: 503 if system not ready, 403 if caller is not admin.
+    """
+    if ctx_module.context is None:
+        raise HTTPException(status_code=503, detail="System not ready.")
+
+    if user_session.user.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Admin access required.")
+
+    users = [
+        {
+            "id": u.id,
+            "name": u.display_name,
+            "role": u.role.value,
+            "borrowed_count": UserRepository.borrowed_count(db, u.id),
+        }
+        for u in UserRepository.list_active(db)
+    ]
+    return {"users": users}
+
+
+@router.post("/api/admin/users/{user_id}/deactivate")
+def admin_deactivate_user(
+    user_id: int,
+    db: Session = Depends(get_db),
+    user_session: UserSession = Depends(require_session),
+):
+    """Deactivate a user so their card no longer logs in (admin only).
+
+    History is kept; the row is not deleted. Refused when the target is the
+    last active admin or still holds borrowed devices. Deactivating the user
+    whose session runs the panel ends that session (kiosk returns to idle).
+
+    Args:
+        user_id: Primary key of the user to deactivate.
+        db: Active database session (injected by ``get_db``).
+        user_session: The active admin session (injected by ``require_session``).
+
+    Returns:
+        dict: ``{"success": True, "session_ended": bool}``.
+
+    Raises:
+        HTTPException: 503 if not ready, 403 if not admin, 404 if the user
+            is missing or already inactive, 409 if the user is the last
+            active admin or still holds devices.
+    """
+    if ctx_module.context is None:
+        raise HTTPException(status_code=503, detail="System not ready.")
+
+    if user_session.user.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Admin access required.")
+
+    target = UserRepository.find_by_id(db, user_id)
+    if target is None or not target.is_active:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    if (
+        target.role == UserRole.ADMIN
+        and UserRepository.count_active_admins(db) == 1
+    ):
+        raise HTTPException(
+            status_code=409, detail="Register another admin first."
+        )
+    if UserRepository.borrowed_count(db, target.id) > 0:
+        raise HTTPException(
+            status_code=409,
+            detail="Return or hand over this user's devices first.",
+        )
+
+    UserRepository.deactivate(db, target)
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+    session_ended = False
+    if target.id == user_session.user.id:
+        _end_kiosk_session(sse_reason="deactivated")
+        session_ended = True
+
+    logger.info(
+        "Deactivated user id=%d by admin %s.",
+        target.id,
+        user_session.user.display_name,
+    )
+    return {"success": True, "session_ended": session_ended}
+
+
+@router.post("/api/admin/users/{user_id}/replace-card")
+def admin_replace_card(
+    user_id: int,
+    db: Session = Depends(get_db),
+    user_session: UserSession = Depends(require_session),
+):
+    """Arm a 60s window to move a user onto a new work card (admin only).
+
+    The next card tap replaces the user's card HMAC/ciphertext — the lost
+    card stops working and the new one logs in. Tapping a device sticker or
+    another user's card fails the replace; the user keeps the old card.
+    Shares the pending-registration window, so it cannot overlap with
+    Register User or a device-tag bind.
+
+    Args:
+        user_id: Primary key of the user whose card is replaced.
+        db: Active database session (injected by ``get_db``).
+        user_session: The active admin session (injected by ``require_session``).
+
+    Returns:
+        dict: ``{"success": True, "message": str}``.
+
+    Raises:
+        HTTPException: 503 if not ready, 403 if not admin, 404 if the user
+            is missing or inactive, 409 if a bind/registration window is
+            already armed.
+    """
+    if ctx_module.context is None:
+        raise HTTPException(status_code=503, detail="System not ready.")
+
+    if user_session.user.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Admin access required.")
+
+    target = UserRepository.find_by_id(db, user_id)
+    if target is None or not target.is_active:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    conflict = _pending_nfc_conflict()
+    if conflict:
+        raise HTTPException(status_code=409, detail=conflict)
+
+    assign_pending_tag_bind(ctx_module.context, None)
+    assign_pending_registration(
+        ctx_module.context,
+        PendingRegistration(
+            display_name=target.display_name,
+            role=target.role.value,
+            replace_user_id=target.id,
+        ),
+    )
+    logger.info(
+        "Card replace armed for user id=%d by admin %s. Awaiting card tap.",
+        target.id,
+        user_session.user.display_name,
+    )
+    return {
+        "success": True,
+        "message": "Tap the new card to replace this user's card.",
+    }
 
 
 @router.post("/api/admin/devices/register")

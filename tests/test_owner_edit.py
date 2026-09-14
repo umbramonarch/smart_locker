@@ -84,6 +84,18 @@ class TestOwnerChoices:
         assert "Alice" in names
         assert "Bob Field" in names
 
+    def test_inactive_users_are_excluded(self, db_session, enc_key, hmac_key):
+        """Deactivated users disappear from the owner dropdown."""
+        _add_user(db_session, enc_key, hmac_key, "Alice")
+        gone = _add_user(db_session, enc_key, hmac_key, "Gone")
+        gone.is_active = False
+        db_session.flush()
+
+        names = owner_choices(db_session)
+
+        assert "Alice" in names
+        assert "Gone" not in names
+
 
 class TestSetOwnerExcelOnly:
     """Inventory owner edit on a non-locker PM writes Excel, not SQLite."""
