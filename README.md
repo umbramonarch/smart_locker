@@ -53,7 +53,7 @@ smart_locker/
 │   │   ├── app.js               # Kiosk state machine, API calls, NFC-driven navigation
 │   │   ├── dashboard.html       # Network dashboard: tabs + 5-tap UI overlay
 │   │   ├── dashboard.css        # Dashboard styling (kiosk colours, desktop cursor)
-│   │   ├── dashboard.js         # Tabs, Excel/SQLite fetch, Display poll, owner edit (admin secret)
+│   │   ├── dashboard.js         # Tabs, Excel/SQLite fetch, Display poll, owner edit (public)
 │   │   └── images/              # Device photos + hero background
 │   ├── nfc/                     # NFC reader interface (pyscard + APDU)
 │   │   ├── apdu.py              # APDU command definitions + response parsing
@@ -132,7 +132,7 @@ smart_locker/
 | Location write-back | ✅ Done | Pi writes Location by PM (`Locker` / borrower); locked file skipped |
 | Device import | ✅ Done | English Excel headers and aliases, PM-based catalog update, no auto locker insert |
 | Photo import | ✅ Done | By PM number (`update_device`) or by model (photo watcher) |
-| Web dashboard | ✅ Done | `/dashboard` — public Inventory/Locker GET; owner/bind/unbind + users/tx/owners need admin secret; 5-tap is UI reveal |
+| Web dashboard | ✅ Done | `/dashboard` — public Inventory/Locker GET; owner edit public; bind/unbind + users/tx need admin secret; 5-tap is UI reveal |
 | Frontend UI | ✅ Done | 6-screen kiosk UI + overlays |
 | Unit tests | ✅ Done | ~371 tests, hardware-free |
 | NFC device tags | ✅ Done | Same ACR1252U; `devices.tag_hmac`; auto borrow/return after login |
@@ -230,10 +230,10 @@ Overlays: **device detail** (photo, PM, type, serial, confirm), **return slot** 
 
 ## Web Dashboard
 
-A dashboard is served at **`/dashboard`**. Public GET Inventory and Locker catalog stay unauthenticated. Dashboard mutations (owner POST, bind/unbind) and gated users/tx/owners GETs need `SMART_LOCKER_DASHBOARD_ADMIN_SECRET` (header `X-Smart-Locker-Admin`); 401 if unset (fail closed). The 5-tap overlay is a client UI reveal, not authorization (`overlay=true` is not auth).
+A dashboard is served at **`/dashboard`**. Public GET Inventory and Locker catalog stay unauthenticated; the owner POST and owners GET are public too. Dashboard bind/unbind and gated users/tx GETs need `SMART_LOCKER_DASHBOARD_ADMIN_SECRET` (header `X-Smart-Locker-Admin`); 401 if unset (fail closed). The 5-tap overlay is a client UI reveal, not authorization (`overlay=true` is not auth).
 Three tabs:
 
-- **Inventory** — live `device-list.xlsx` (full catalog). Search and sort. Click owner to change it (confirm) for PMs that are **not** in the locker — that POST needs the admin secret. Share down shows an error here only.
+- **Inventory** — live `device-list.xlsx` (full catalog). Search and sort. Click owner to change it (confirm) for PMs that are **not** in the locker — public, no secret needed. Share down shows an error here only.
 - **Locker** — SQLite devices registered into a slot (status, borrower, slot, Tagged / No tag). Owner is set at the kiosk (borrow/return), not here.
 - **Display** — what the kiosk is showing right now, plus the signed-in user. View only.
 

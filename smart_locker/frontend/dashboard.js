@@ -1,7 +1,8 @@
 /**
  * @fileoverview Public dashboard: Inventory (Excel), Locker (SQLite), and
  *               Display (kiosk snapshot). Sort, search, status filter, and
- *               polling. Owner change is Inventory only (not locker PMs).
+ *               polling. Owner change is Inventory only, public (not
+ *               locker PMs).
  *               5-tap the header clock for users, logs, and NFC unbind /
  *               arm-bind. No login. No remote control of the kiosk.
  * @project smart_locker/frontend
@@ -324,13 +325,11 @@ async function _fetchTablesWork() {
 
 /**
  * Load dropdown names (registered users + registrants + in-locker token).
- * Requires the dashboard admin secret header.
+ * Public; no secret header.
  */
 async function fetchOwners() {
   try {
-    const res = await fetch('/api/dashboard/owners', {
-      headers: dashboardAdminHeaders(),
-    });
+    const res = await fetch('/api/dashboard/owners');
     if (!res.ok) return;
     const data = await res.json();
     ownerNames = Array.isArray(data.names) ? data.names : [];
@@ -630,20 +629,15 @@ async function confirmOwnerEdit() {
   try {
     const res = await fetch('/api/dashboard/owner', {
       method: 'POST',
-      headers: dashboardAdminHeaders(),
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ pm_number: pm, owner }),
     });
     if (!res.ok) {
       let detail = 'Could not change owner.';
-      if (res.status === 401) {
-        sessionStorage.removeItem(ADMIN_SECRET_KEY);
-        detail = 'Admin authorization failed. Tap the clock 5 times to enter the secret.';
-      } else {
-        try {
-          const body = await res.json();
-          if (body && body.detail) detail = String(body.detail);
-        } catch (_) { /* keep default */ }
-      }
+      try {
+        const body = await res.json();
+        if (body && body.detail) detail = String(body.detail);
+      } catch (_) { /* keep default */ }
       if (err) {
         err.textContent = detail;
         err.style.display = '';

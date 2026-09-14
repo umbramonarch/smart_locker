@@ -10,6 +10,8 @@ Work on `main` after the `v0.2.0` tag. Merging to `main` is not a release; the n
 
 ### Fixed
 
+- Dashboard Inventory owner change no longer asks for the dashboard admin secret; anyone who can open the dashboard can change Location for non-locker PMs. Bind/unbind and users/transactions still need the secret.
+
 ### Changed
 
 - Dashboard share launcher now writes only `dashboard.url`; the generated `dashboard.html` redirect is removed because the Windows shortcut is enough to open the live page.
