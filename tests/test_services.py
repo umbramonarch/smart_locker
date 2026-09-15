@@ -131,6 +131,99 @@ class TestLockerService:
         result = LockerService.return_device(db_session, session2, device.id)
         assert result is False
 
+    def test_borrow_refuses_deactivated_user(self, db_session, enc_key, hmac_key):
+        """Borrow fails when the session user was deactivated, even if the
+        session still holds a stale active copy from login time."""
+        user, device, session = self._setup(db_session, enc_key, hmac_key)
+        # Simulate login-time staleness: the session keeps a detached copy
+        # while the database row is deactivated underneath it.
+        db_session.expunge(user)
+        assert session.user.is_active is True
+        UserRepository.deactivate(
+            db_session, UserRepository.find_by_id(db_session, user.id)
+        )
+        db_session.commit()
+
+        assert LockerService.borrow_device(db_session, session, device.id) is False
+        assert device.status == DeviceStatus.AVAILABLE
+        assert UserRepository.borrowed_count(db_session, user.id) == 0
+
+    def test_transfer_to_deactivated_user_refused(self, db_session, enc_key, hmac_key):
+        """Transfer fails when the new holder is deactivated; the device stays put."""
+        holder, device, holder_session = self._setup(db_session, enc_key, hmac_key)
+        assert LockerService.borrow_device(db_session, holder_session, device.id) is True
+        bob = UserRepository.create(
+            db_session,
+            display_name="Bob",
+            uid_hmac=compute_uid_hmac("BBBBBBBB", hmac_key),
+            encrypted_card_uid=encrypt("BBBBBBBB", enc_key),
+        )
+        db_session.flush()
+        bob_session = SessionManager(timeout_seconds=60).start_session(bob)
+        UserRepository.deactivate(db_session, bob)
+        db_session.commit()
+
+        assert LockerService.transfer_device(db_session, bob_session, device.id) is False
+        assert device.status == DeviceStatus.BORROWED
+        assert device.current_borrower_id == holder.id
+
+    def test_transfer_from_deactivated_holder_succeeds(self, db_session, enc_key, hmac_key):
+        """A deactivated holder's device can still be handed to an active user."""
+        holder, device, holder_session = self._setup(db_session, enc_key, hmac_key)
+        assert LockerService.borrow_device(db_session, holder_session, device.id) is True
+        UserRepository.deactivate(db_session, holder)
+        bob = UserRepository.create(
+            db_session,
+            display_name="Bob",
+            uid_hmac=compute_uid_hmac("BBBBBBBB", hmac_key),
+            encrypted_card_uid=encrypt("BBBBBBBB", enc_key),
+        )
+        db_session.flush()
+        bob_session = SessionManager(timeout_seconds=60).start_session(bob)
+
+        assert LockerService.transfer_device(db_session, bob_session, device.id) is True
+        assert device.current_borrower_id == bob.id
+
+    def test_return_by_deactivated_holder_succeeds(self, db_session, enc_key, hmac_key):
+        """Returns stay open for deactivated holders — devices must come back."""
+        user, device, session = self._setup(db_session, enc_key, hmac_key)
+        assert LockerService.borrow_device(db_session, session, device.id) is True
+        UserRepository.deactivate(db_session, user)
+
+        assert LockerService.return_device(db_session, session, device.id) is True
+        assert device.status == DeviceStatus.AVAILABLE
+
+    def test_borrow_and_transfer_hold_user_admin_lock(
+        self, db_session, enc_key, hmac_key, monkeypatch
+    ):
+        """Borrow and transfer guard-plus-commit run under the shared lock."""
+        import smart_locker.services.locker_service as svc_module
+
+        entered = []
+
+        class FakeLock:
+            def __enter__(self):
+                entered.append(True)
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        monkeypatch.setattr(svc_module, "user_admin_lock", FakeLock())
+        holder, device, holder_session = self._setup(db_session, enc_key, hmac_key)
+        assert LockerService.borrow_device(db_session, holder_session, device.id) is True
+        bob = UserRepository.create(
+            db_session,
+            display_name="Bob",
+            uid_hmac=compute_uid_hmac("BBBBBBBB", hmac_key),
+            encrypted_card_uid=encrypt("BBBBBBBB", enc_key),
+        )
+        db_session.flush()
+        bob_session = SessionManager(timeout_seconds=60).start_session(bob)
+
+        assert LockerService.transfer_device(db_session, bob_session, device.id) is True
+        assert entered == [True, True]
+
     def test_admin_can_return_on_behalf_of_user(self, db_session, enc_key, hmac_key):
         """Verify an admin can return a device borrowed by another user."""
         user, device, user_session = self._setup(db_session, enc_key, hmac_key)

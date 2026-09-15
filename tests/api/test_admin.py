@@ -560,11 +560,99 @@ class TestAdminUsers:
             def __exit__(self, *args):
                 return False
 
-        monkeypatch.setattr(routes, "_user_admin_lock", FakeLock())
+        monkeypatch.setattr(routes, "user_admin_lock", FakeLock())
         mock_context.session_mgr.start_session(admin_user)
         resp = client.post(f"/api/admin/users/{test_user.id}/deactivate")
         assert resp.status_code == 200
         assert entered == [True]
+
+    def test_concurrent_deactivate_last_admin_pair(
+        self, _db_setup, mock_context, db_session
+    ):
+        """Racing deactivations of the last two admins: exactly one wins."""
+        import threading
+
+        import smart_locker.api.routes as routes
+
+        admins = [
+            UserRepository.create(
+                db_session,
+                display_name=f"Admin{i}",
+                uid_hmac=f"admin-hmac-{i}",
+                encrypted_card_uid=f"encrypted-{i}",
+                role="admin",
+            )
+            for i in range(2)
+        ]
+        db_session.commit()
+        user_session = mock_context.session_mgr.start_session(admins[0])
+        barrier = threading.Barrier(2)
+        outcomes = []
+        outcomes_lock = threading.Lock()
+
+        def deactivate(user_id):
+            session = _db_setup()
+            try:
+                barrier.wait()
+                try:
+                    routes.admin_deactivate_user(user_id, session, user_session)
+                except Exception as exc:  # noqa: BLE001 - record the HTTP status
+                    with outcomes_lock:
+                        outcomes.append(getattr(exc, "status_code", None))
+                else:
+                    with outcomes_lock:
+                        outcomes.append(200)
+            finally:
+                _db_setup.remove()
+
+        threads = [
+            threading.Thread(target=deactivate, args=(admins[i].id,))
+            for i in range(2)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert sorted(outcomes) == [200, 409]
+        db_session.expire_all()
+        assert UserRepository.count_active_admins(db_session) == 1
+
+    def test_concurrent_double_deactivate_one_user(
+        self, _db_setup, mock_context, admin_user, test_user
+    ):
+        """Racing deactivations of one user: one wins, the other sees 404."""
+        import threading
+
+        import smart_locker.api.routes as routes
+
+        user_session = mock_context.session_mgr.start_session(admin_user)
+        barrier = threading.Barrier(2)
+        outcomes = []
+        outcomes_lock = threading.Lock()
+
+        def deactivate():
+            session = _db_setup()
+            try:
+                barrier.wait()
+                try:
+                    routes.admin_deactivate_user(test_user.id, session, user_session)
+                except Exception as exc:  # noqa: BLE001 - record the HTTP status
+                    with outcomes_lock:
+                        outcomes.append(getattr(exc, "status_code", None))
+                else:
+                    with outcomes_lock:
+                        outcomes.append(200)
+            finally:
+                _db_setup.remove()
+
+        threads = [threading.Thread(target=deactivate) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert sorted(outcomes) == [200, 404]
 
     def test_deactivate_last_admin_refused(
         self, client, mock_context, admin_user

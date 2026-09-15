@@ -851,8 +851,9 @@ Pi on the LAN can use them — the lock is **physical access**, not a password.
      another user's card). An expired replace window only clears the window —
      the admin session and overlay stay open. **Deactivate** keeps history but
      the card stops working; refused for the last admin or a user still
-     holding devices. A deactivated name is also blocked from Register User
-     self-registration and the dashboard owner dropdown.
+     holding devices. A deactivated name is blocked from self-registration
+     and admin Register User (re-enrol under a new name), and from the
+     dashboard owner dropdown.
    - **Register Device** — add a locker unit: **PM + free slot + NFC tap** (catalog
      comes from Excel). Existing rows can bind / unbind / change slot. The list shows
      **name + PM** (and slot).

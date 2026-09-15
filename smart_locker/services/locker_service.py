@@ -20,6 +20,7 @@ from config.settings import MAX_BORROWS
 from smart_locker.auth.session_manager import UserSession
 from smart_locker.database.models import DeviceStatus, UserRole
 from smart_locker.database.repositories import DeviceRepository, TransactionRepository, UserRepository
+from smart_locker.services.user_admin_lock import user_admin_lock
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,11 @@ class LockerService:
     ) -> bool:
         """Borrow a device for the current user.
 
+        Guards and commit run under ``user_admin_lock`` so a concurrent
+        deactivation cannot interleave; the holder's active flag is
+        re-read from the database because the session user object may
+        predate deactivation.
+
         Args:
             db_session: Active database session.
             user_session: Current authenticated user session.
@@ -69,43 +75,50 @@ class LockerService:
             logger.warning("Borrow attempted with expired session.")
             return False
 
-        user = user_session.user
+        with user_admin_lock:
+            user = user_session.user
+            holder = UserRepository.find_by_id(db_session, user.id)
+            if holder is None or not holder.is_active:
+                logger.warning(
+                    "Borrow failed: %s is deactivated.", user.display_name
+                )
+                return False
 
-        device = DeviceRepository.find_by_id(db_session, device_id)
-        if device is None:
-            logger.warning("Borrow failed: device %d not found.", device_id)
-            return False
+            device = DeviceRepository.find_by_id(db_session, device_id)
+            if device is None:
+                logger.warning("Borrow failed: device %d not found.", device_id)
+                return False
 
-        borrowed_count = DeviceRepository.count_borrowed_by_user(db_session, user.id)
-        if borrowed_count >= MAX_BORROWS:
-            logger.warning(
-                "Borrow failed: %s has reached the borrow limit (%d/%d).",
+            borrowed_count = DeviceRepository.count_borrowed_by_user(db_session, user.id)
+            if borrowed_count >= MAX_BORROWS:
+                logger.warning(
+                    "Borrow failed: %s has reached the borrow limit (%d/%d).",
+                    user.display_name,
+                    borrowed_count,
+                    MAX_BORROWS,
+                )
+                return False
+
+            if device.status != DeviceStatus.AVAILABLE:
+                logger.warning(
+                    "Borrow failed: device %d (%s) is %s.",
+                    device_id,
+                    device.name,
+                    device.status.value,
+                )
+                return False
+            DeviceRepository.borrow(db_session, device, user.id)
+            TransactionRepository.log_borrow(db_session, user.id, device_id, notes)
+            user_session.touch()
+            _write_location(db_session)
+
+            logger.info(
+                "%s borrowed %s (device=%d)",
                 user.display_name,
-                borrowed_count,
-                MAX_BORROWS,
-            )
-            return False
-
-        if device.status != DeviceStatus.AVAILABLE:
-            logger.warning(
-                "Borrow failed: device %d (%s) is %s.",
-                device_id,
                 device.name,
-                device.status.value,
+                device_id,
             )
-            return False
-        DeviceRepository.borrow(db_session, device, user.id)
-        TransactionRepository.log_borrow(db_session, user.id, device_id, notes)
-        user_session.touch()
-        _write_location(db_session)
-
-        logger.info(
-            "%s borrowed %s (device=%d)",
-            user.display_name,
-            device.name,
-            device_id,
-        )
-        return True
+            return True
 
     @staticmethod
     def return_device(
@@ -199,6 +212,11 @@ class LockerService:
         Records a return for the original borrower and a borrow for the new
         user, so the audit trail is preserved. The device stays borrowed;
         only current_borrower_id changes. Enforces the new user's borrow limit.
+        Guards and commit run under ``user_admin_lock`` so a concurrent
+        deactivation cannot interleave; the new holder's active flag is
+        re-read from the database because the session user object may
+        predate deactivation. The original holder may be inactive —
+        handover is a recovery path for their devices.
 
         Args:
             db_session: Active database session.
@@ -213,76 +231,84 @@ class LockerService:
             logger.warning("Transfer attempted with expired session.")
             return False
 
-        device = DeviceRepository.find_by_id(db_session, device_id)
-        if device is None:
-            logger.warning("Transfer failed: device %d not found.", device_id)
-            return False
+        with user_admin_lock:
+            device = DeviceRepository.find_by_id(db_session, device_id)
+            if device is None:
+                logger.warning("Transfer failed: device %d not found.", device_id)
+                return False
 
-        if device.status != DeviceStatus.BORROWED:
-            logger.warning(
-                "Transfer failed: device %d (%s) is not borrowed.",
+            if device.status != DeviceStatus.BORROWED:
+                logger.warning(
+                    "Transfer failed: device %d (%s) is not borrowed.",
+                    device_id,
+                    device.name,
+                )
+                return False
+
+            user = user_session.user
+            holder = UserRepository.find_by_id(db_session, user.id)
+            if holder is None or not holder.is_active:
+                logger.warning(
+                    "Transfer failed: %s is deactivated.", user.display_name
+                )
+                return False
+
+            if device.current_borrower_id == user.id:
+                logger.warning(
+                    "Transfer failed: device %d is already held by %s.",
+                    device_id,
+                    user.display_name,
+                )
+                return False
+
+            original_borrower_id = device.current_borrower_id
+            if original_borrower_id is None:
+                logger.warning(
+                    "Transfer failed: device %d has no recorded borrower.",
+                    device_id,
+                )
+                return False
+
+            new_borrowed_count = DeviceRepository.count_borrowed_by_user(
+                db_session, user.id
+            )
+            if new_borrowed_count >= MAX_BORROWS:
+                logger.warning(
+                    "Transfer failed: %s has reached the borrow limit (%d/%d).",
+                    user.display_name,
+                    new_borrowed_count,
+                    MAX_BORROWS,
+                )
+                return False
+
+            original_borrower = UserRepository.find_by_id(db_session, original_borrower_id)
+            original_name = original_borrower.display_name if original_borrower else "unknown"
+
+            DeviceRepository.return_device(db_session, device)
+            TransactionRepository.log_return(
+                db_session,
+                user_id=original_borrower_id,
+                device_id=device_id,
+                notes=f"transferred to {user.display_name}",
+            )
+            DeviceRepository.borrow(db_session, device, user.id)
+            TransactionRepository.log_borrow(
+                db_session,
+                user.id,
                 device_id,
+                notes=f"transferred from {original_name}",
+            )
+            user_session.touch()
+            _write_location(db_session)
+
+            logger.info(
+                "%s transferred %s (device=%d) from user %d",
+                user.display_name,
                 device.name,
-            )
-            return False
-
-        user = user_session.user
-        if device.current_borrower_id == user.id:
-            logger.warning(
-                "Transfer failed: device %d is already held by %s.",
                 device_id,
-                user.display_name,
+                original_borrower_id,
             )
-            return False
-
-        original_borrower_id = device.current_borrower_id
-        if original_borrower_id is None:
-            logger.warning(
-                "Transfer failed: device %d has no recorded borrower.",
-                device_id,
-            )
-            return False
-
-        new_borrowed_count = DeviceRepository.count_borrowed_by_user(
-            db_session, user.id
-        )
-        if new_borrowed_count >= MAX_BORROWS:
-            logger.warning(
-                "Transfer failed: %s has reached the borrow limit (%d/%d).",
-                user.display_name,
-                new_borrowed_count,
-                MAX_BORROWS,
-            )
-            return False
-
-        original_borrower = UserRepository.find_by_id(db_session, original_borrower_id)
-        original_name = original_borrower.display_name if original_borrower else "unknown"
-
-        DeviceRepository.return_device(db_session, device)
-        TransactionRepository.log_return(
-            db_session,
-            user_id=original_borrower_id,
-            device_id=device_id,
-            notes=f"transferred to {user.display_name}",
-        )
-        DeviceRepository.borrow(db_session, device, user.id)
-        TransactionRepository.log_borrow(
-            db_session,
-            user.id,
-            device_id,
-            notes=f"transferred from {original_name}",
-        )
-        user_session.touch()
-        _write_location(db_session)
-
-        logger.info(
-            "%s transferred %s (device=%d) from user %d",
-            user.display_name,
-            device.name,
-            device_id,
-            original_borrower_id,
-        )
-        return True
+            return True
 
     @staticmethod
     def return_unattended(db_session: Session, device_id: int) -> bool:

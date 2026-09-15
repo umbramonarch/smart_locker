@@ -2998,18 +2998,23 @@ async function usersReplaceCard(id) {
     setTimeout(() => { showUsersStep('users-step-list'); }, 2500);
     return;
   }
+  // Mark pending BEFORE the POST: the backend arms its window the moment the
+  // request arrives, so a fast tap's SSE result can land before this fetch
+  // resolves. Cleared on every HTTP failure below.
+  S.usersReplacePending = true;
   try {
     const res = await fetch(`/api/admin/users/${id}/replace-card`, { method: 'POST' });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
+      S.usersReplacePending = false;
       errEl.textContent = data.detail || 'Could not replace card.';
       return;
     }
   } catch (_) {
+    S.usersReplacePending = false;
     errEl.textContent = 'Could not replace card.';
     return;
   }
-  S.usersReplacePending = true;
   showUsersStep('users-step-tap');
   startUsersCountdown();
 }
@@ -3416,6 +3421,9 @@ function connectSSE() {
   source.addEventListener('registration_success', e => {
     if (S.updating) return;
     const data = JSON.parse(e.data);
+    // Payload-first routing: a replace result belongs to the Users overlay
+    // even if it lands before the POST resolves and the pending flag is set.
+    if (data.replaced === true) { handleUsersReplaceResult(data, true); return; }
     if (S.usersReplacePending) { handleUsersReplaceResult(data, true); return; }
     handleRegistrationSuccess(data);
   });
@@ -3423,6 +3431,8 @@ function connectSSE() {
   source.addEventListener('registration_failed', e => {
     if (S.updating) return;
     const data = JSON.parse(e.data);
+    // Payload-first routing: see registration_success above.
+    if (data.replaced === true) { handleUsersReplaceResult(data, false); return; }
     if (S.usersReplacePending) { handleUsersReplaceResult(data, false); return; }
     handleRegistrationFailed(data);
   });

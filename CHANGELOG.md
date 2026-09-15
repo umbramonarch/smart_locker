@@ -13,7 +13,8 @@ Work on `main` after the `v0.2.0` tag. Merging to `main` is not a release; the n
 ### Fixed
 
 - Expired card-replace window no longer ends the admin session.
-- Deactivated names are blocked from self-registration and the owner dropdown.
+- Deactivated names are blocked from self-registration, admin Register User, and the owner dropdown.
+- Pressing Replace card and tapping immediately no longer leaves the Users overlay stuck on a 60 s timeout.
 
 ### Changed
 

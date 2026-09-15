@@ -294,7 +294,8 @@ class AppContext:
         classified instead of consumed as a failed enroll/bind. A leftover
         overlay session is ended when an enrol window expires so the
         same tap can log in rather than log out; an expired card-replace
-        window keeps the admin session (the admin is still at the panel).
+        window keeps the admin session (the admin is still at the panel)
+        and consumes the tap after reporting its timeout.
         A live registration is claimed atomically under
         ``pending_state_lock`` so a concurrent HTTP arm/cancel cannot
         retarget the tap.
@@ -304,9 +305,12 @@ class AppContext:
             pending_bind = self.pending_tag_bind
             expired_reg = bool(pending_reg is not None and pending_reg.is_expired)
             expired_bind = bool(pending_bind is not None and pending_bind.is_expired)
-            expired_was_replace = bool(
-                expired_reg and pending_reg.replace_user_id is not None
+            expired_replace_user_id = (
+                pending_reg.replace_user_id
+                if expired_reg and pending_reg is not None
+                else None
             )
+            expired_was_replace = expired_replace_user_id is not None
             if expired_reg:
                 assign_pending_registration(self, None)
                 pending_reg = None
@@ -325,7 +329,10 @@ class AppContext:
             self.broadcast_sse({
                 "event": "registration_failed",
                 "reason": "Card replace timed out. Please try again.",
+                "replaced": True,
+                "replace_user_id": expired_replace_user_id,
             })
+            return
 
         if expired_bind:
             logger.info("Device tag bind window expired.")
@@ -393,7 +400,9 @@ class AppContext:
         success or failure SSE event to the frontend. The enrol path always
         ends a leftover overlay session so the next work-card tap is login,
         not logout; the replace path keeps the admin session on the Users
-        overlay.
+        overlay. Replace-path results (success and failure) carry ``replaced``
+        and ``replace_user_id`` so the frontend can route them to the Users
+        overlay without depending on request timing.
 
         Args:
             pending: The claimed registration window (``_dispatch_insert``
@@ -416,10 +425,14 @@ class AppContext:
 
             if pending.is_expired:
                 logger.info("Registration expired for '%s'.", pending.display_name)
-                self.broadcast_sse({
+                payload = {
                     "event": "registration_failed",
                     "reason": "Registration timed out. Please try again.",
-                })
+                }
+                if is_replace:
+                    payload["replaced"] = True
+                    payload["replace_user_id"] = pending.replace_user_id
+                self.broadcast_sse(payload)
                 return
 
             user_svc = UserService(
@@ -436,6 +449,8 @@ class AppContext:
                             self.broadcast_sse({
                                 "event": "registration_failed",
                                 "reason": "User not found.",
+                                "replaced": True,
+                                "replace_user_id": pending.replace_user_id,
                             })
                             return
                         user_svc.replace_card(db_session, target, uid)
@@ -455,6 +470,8 @@ class AppContext:
                     self.broadcast_sse({
                         "event": "registration_failed",
                         "reason": str(e),
+                        "replaced": True,
+                        "replace_user_id": pending.replace_user_id,
                     })
                 except Exception:
                     logger.exception(
@@ -463,6 +480,8 @@ class AppContext:
                     self.broadcast_sse({
                         "event": "registration_failed",
                         "reason": "Registration failed. Please try again.",
+                        "replaced": True,
+                        "replace_user_id": pending.replace_user_id,
                     })
                 return
 

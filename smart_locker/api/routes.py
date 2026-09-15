@@ -29,7 +29,6 @@ import logging
 import secrets
 import shutil
 import subprocess
-import threading
 import time
 from typing import Literal
 
@@ -83,6 +82,7 @@ from smart_locker.services.owner_edit import (
     owner_choices,
     set_owner,
 )
+from smart_locker.services.user_admin_lock import user_admin_lock
 from smart_locker.sync import sync_status
 from smart_locker.sync.inventory_reader import InventoryReadError, read_inventory
 
@@ -436,10 +436,6 @@ def _pending_nfc_conflict() -> str | None:
     return None
 
 
-# Serializes admin deactivate guards + commit (uvicorn runs one worker).
-_user_admin_lock = threading.Lock()
-
-
 def _arm_registration(pending: PendingRegistration) -> None:
     """Atomically claim the NFC reader for a registration window.
 
@@ -460,6 +456,29 @@ def _arm_registration(pending: PendingRegistration) -> None:
             raise HTTPException(status_code=409, detail=conflict)
         assign_pending_tag_bind(ctx_module.context, None)
         assign_pending_registration(ctx_module.context, pending)
+
+
+def _reject_deactivated_name(db: Session, name: str) -> None:
+    """Reject enrollment when the name belongs to a deactivated user.
+
+    Deactivation keeps the ``User`` row with ``is_active=False``; the name
+    disappearing from ``GET /api/registrants`` only hides it from the kiosk
+    list. Both enrollment arms call this so a fresh card cannot re-enrol
+    the name. Uses the duplicate-tolerant ``display_names_lower`` set —
+    ``find_by_display_name`` would raise on duplicate display names.
+
+    Args:
+        db: Active database session.
+        name: Display name as submitted (compared case-insensitively).
+
+    Raises:
+        HTTPException: 403 if an inactive user holds this name.
+    """
+    if name.strip().lower() in UserRepository.display_names_lower(db, False):
+        raise HTTPException(
+            status_code=403,
+            detail="This name is deactivated. Ask an admin to re-enrol under a new name.",
+        )
 
 
 # --- SSE Event Stream -------------------------------------------------------
@@ -926,7 +945,9 @@ def start_registration(
     The submitted name must exist in the ``registrants`` table (populated from
     the "Location" column during source Excel import). If the name
     is not found, the request is rejected with 403 — the user must contact an
-    admin for manual registration. Creates a ``PendingRegistration`` that the
+    admin for manual registration. Names belonging to deactivated users are
+    rejected with 403 even though they remain in the registrants table.
+    Creates a ``PendingRegistration`` that the
     NFC bridge loop will detect on the next card tap.
 
     Args:
@@ -938,7 +959,8 @@ def start_registration(
 
     Raises:
         HTTPException: 503 if system not ready, 409 if session active,
-                       403 if name not in approved registrants list.
+                       403 if name not in approved registrants list or
+                       belongs to a deactivated user.
     """
     if ctx_module.context is None:
         raise HTTPException(status_code=503, detail="System not ready.")
@@ -954,6 +976,7 @@ def start_registration(
             detail="Name not found in approved list. Contact an admin for manual registration.",
         )
 
+    _reject_deactivated_name(db, body.name)
     _arm_registration(PendingRegistration(display_name=body.name.strip()))
     logger.info("Registration started for '%s'. Awaiting card tap.", body.name.strip())
     return {"success": True, "message": "Tap your NFC card to complete registration."}
@@ -1117,16 +1140,18 @@ def start_admin_session(
 @router.post("/api/admin/register")
 def start_admin_registration(
     body: AdminRegisterRequest,
+    db: Session = Depends(get_db),
     user_session: UserSession = Depends(require_session),
 ):
     """Begin admin-initiated manual registration for a user.
 
     Unlike the self-service ``POST /api/register``, this endpoint does NOT
     validate the name against the registrants table — the admin can register
-    anyone with any name. It also does NOT reject the request when a session
-    is active (the admin is already logged in). The NFC bridge loop will
-    enroll the next card tap as a new user with the provided name and role
-    (``user`` or ``admin``).
+    anyone with any name, except names belonging to deactivated users
+    (re-enrol those under a new name). It also does NOT reject the request
+    when a session is active (the admin is already logged in). The NFC bridge
+    loop will enroll the next card tap as a new user with the provided name
+    and role (``user`` or ``admin``).
 
     Use case: when someone's name is not in the source Excel and they
     cannot self-register, an admin uses the "Register User" button in the
@@ -1134,13 +1159,15 @@ def start_admin_registration(
 
     Args:
         body: Request body with the user's display name and role.
+        db: Active database session (injected by ``get_db``).
         user_session: The active admin session (injected by ``require_session``).
 
     Returns:
         dict: ``{"success": True, "message": str}``.
 
     Raises:
-        HTTPException: 503 if system not ready, 403 if caller is not admin,
+        HTTPException: 503 if system not ready, 403 if caller is not admin
+                       or the name belongs to a deactivated user,
                        409 if a bind/registration window is already armed.
     """
     if ctx_module.context is None:
@@ -1149,6 +1176,7 @@ def start_admin_registration(
     if user_session.user.role != UserRole.ADMIN:
         raise HTTPException(status_code=403, detail="Admin access required.")
 
+    _reject_deactivated_name(db, body.name)
     _arm_registration(
         PendingRegistration(display_name=body.name.strip(), role=body.role)
     )
@@ -1209,8 +1237,9 @@ def admin_deactivate_user(
     History is kept; the row is not deleted. Refused when the target is the
     last active admin or still holds borrowed devices. Deactivating the user
     whose session runs the panel ends that session (kiosk returns to idle).
-    Guards and commit run under a process-level lock; uvicorn runs one
-    worker.
+    Guards and commit run under the shared ``user_admin_lock`` with
+    borrow/transfer; uvicorn runs one worker, so serialization never
+    relies on SQLite lock upgrades.
 
     Args:
         user_id: Primary key of the user to deactivate.
@@ -1231,7 +1260,7 @@ def admin_deactivate_user(
     if user_session.user.role != UserRole.ADMIN:
         raise HTTPException(status_code=403, detail="Admin access required.")
 
-    with _user_admin_lock:
+    with user_admin_lock:
         target = UserRepository.find_by_id(db, user_id)
         if target is None or not target.is_active:
             raise HTTPException(status_code=404, detail="User not found.")

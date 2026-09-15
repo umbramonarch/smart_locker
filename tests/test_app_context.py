@@ -598,6 +598,8 @@ class TestReplaceCardTap:
         events = _events(ctx)
         assert events[0]["event"] == "registration_failed"
         assert events[0]["reason"] == "This card is already registered."
+        assert events[0]["replaced"] is True
+        assert events[0]["replace_user_id"] == target.id
         assert ctx.session_mgr.has_active_session
         # Target still on old card.
         assert ctx.authenticator.authenticate(db_session, "A1B2C3D4").id == target.id
@@ -605,7 +607,8 @@ class TestReplaceCardTap:
     def test_expired_replace_keeps_admin_session(
         self, db_session, enc_key, hmac_key, monkeypatch
     ):
-        """An expired card-replace window does not end the admin session."""
+        """An expired card-replace window consumes the next tap: timeout only,
+        no logout — even when the tap is an enrolled work card."""
         admin = self._user(db_session, "ADADADAD", enc_key, hmac_key, "Admin")
         admin.role = UserRole.ADMIN
         target = self._user(db_session, "A1B2C3D4", enc_key, hmac_key)
@@ -618,14 +621,16 @@ class TestReplaceCardTap:
             replace_user_id=target.id,
             created_at=time.monotonic() - 61,
         )
-        _run(ctx, "E5E5E5E5")
+        _run(ctx, "ADADADAD")
         events = _events(ctx)
         assert ctx.pending_registration is None
+        assert len(events) == 1
         assert events[0]["event"] == "registration_failed"
         assert events[0]["reason"] == "Card replace timed out. Please try again."
+        assert events[0]["replaced"] is True
+        assert events[0]["replace_user_id"] == target.id
         assert ctx.session_mgr.has_active_session
         assert ctx.admin_overlay_open is True
-        assert all(e["event"] != "session_ended" for e in events)
 
     def test_dispatch_passes_claimed_pending_object(
         self, db_session, monkeypatch
