@@ -9,7 +9,7 @@ Work on `main` after the `v0.2.0` tag. Merging to `main` is not a release; the n
 ### Added
 
 - Register Device → Add from Excel now offers a tap-to-pick list of unregistered units whose Excel Location is in-locker (`GET /api/admin/devices/catalog-locker`); typing the PM number still works as fallback.
-- Kiosk Locker / Return grids show only devices with a bound NFC sticker (`GET /api/devices` filters on `tag_hmac`); untagged rows stay admin-only in Register Device and on the dashboard.
+- Kiosk Locker / Return grids show only devices with a bound NFC sticker (`GET /api/devices` filters on `tag_hmac`); untagged rows stay admin-only in Register Device and on the dashboard. The hidden-admin panel reads `GET /api/admin/devices`, which lists every row so Bind can be retried and slots stay accurate.
 
 ### Fixed
 

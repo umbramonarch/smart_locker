@@ -4,8 +4,9 @@
  *               interaction flow across idle, auth, menu, locker availability,
  *               return, detail, registration, admin, Register Device (pick from
  *               the Excel locker list or PM + slot + NFC; grids show tagged
- *               units only), return-slot, software-update, and appliance
- *               shutdown overlays.
+ *               units only — the admin panel reads /api/admin/devices which
+ *               includes untagged rows), return-slot, software-update, and
+ *               appliance shutdown overlays.
  * @project smart_locker/frontend
  * @description Demo mode (?demo), circle-reveal transitions, split text,
  *              inactivity countdown, and self-registration.
@@ -92,6 +93,7 @@ const S = {
   screen:     'idle',   // current screen id
   user:       null,     // { id, name, role }
   devices:    [],
+  adminDevices: [],     // admin panel list — includes untagged rows
   selected:   null,     // device object open in detail overlay
   mode:       null,     // 'borrow' | 'return'
   prevScreen: null,     // screen that was active before an overlay opened
@@ -165,6 +167,19 @@ async function apiAuthTap(uid_hmac) {
 async function apiGetDevices() {
   if (USE_DEMO) { await sleep(280); return DEMO_DEVICES; } // simulate fetch latency
   const res = await fetch('/api/devices');
+  if (!res.ok) return [];
+  return await res.json();
+}
+
+/**
+ * Fetch every locker row for the hidden-admin panel (tagged and untagged).
+ * Untagged rows must stay visible so Bind can be retried and slots stay
+ * accurate. Returns demo data when in demo mode.
+ * @returns {Promise<Array<Object>>} Array of device objects, or empty array on error.
+ */
+async function apiGetAdminDevices() {
+  if (USE_DEMO) { await sleep(280); return DEMO_DEVICES; }
+  const res = await fetch('/api/admin/devices');
   if (!res.ok) return [];
   return await res.json();
 }
@@ -670,6 +685,7 @@ async function endSession(fromTimeout = false, fromSSE = false) {
   if (!fromSSE) await apiEndSession();
   S.user     = null;
   S.devices  = [];
+  S.adminDevices = [];
   S.selected = null;
   adminSessionActive = false;
   closeAdminPanel();
@@ -2373,17 +2389,17 @@ let bindSearchTimer = 0;
  * Duplicate names stay as distinct rows (PM identifies the unit).
  * Search filters the cached list; pass refresh=true after a bind/register.
  *
- * @param {boolean} [refresh=true] - When false, filter ``S.devices`` without a GET.
+ * @param {boolean} [refresh=true] - When false, filter ``S.adminDevices`` without a GET.
  * @returns {Promise<void>}
  */
 async function populateBindList(refresh) {
   const list = document.getElementById('bind-device-list');
   if (!list) return;
-  if (refresh !== false || !Array.isArray(S.devices)) {
-    const devices = await apiGetDevices();
-    S.devices = devices;
+  if (refresh !== false || !Array.isArray(S.adminDevices)) {
+    const devices = await apiGetAdminDevices();
+    S.adminDevices = devices;
   }
-  const devices = S.devices || [];
+  const devices = S.adminDevices || [];
   const query = (document.getElementById('bind-search').value || '').toLowerCase().trim();
   const filtered = devices.filter(d => {
     if (!query) return true;
@@ -2508,7 +2524,7 @@ let selectedChangeSlot = null;
  */
 function occupiedSlots(exceptId) {
   const used = new Set();
-  (S.devices || []).forEach(d => {
+  (S.adminDevices || []).forEach(d => {
     if (d.locker_slot == null) return;
     if (exceptId != null && d.id === exceptId) return;
     used.add(d.locker_slot);

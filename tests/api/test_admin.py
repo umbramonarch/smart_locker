@@ -545,3 +545,43 @@ class TestCatalogLockerList:
         resp = client.get("/api/admin/devices/catalog-locker")
         assert resp.status_code == 200
         assert resp.json() == {"rows": []}
+
+
+class TestAdminDevicesList:
+    """GET /api/admin/devices — every locker row for the Register Device panel."""
+
+    def test_requires_session(self, client, mock_context):
+        """No session → 401."""
+        assert client.get("/api/admin/devices").status_code == 401
+
+    def test_requires_admin(self, client, mock_context, test_user, test_devices):
+        """A normal user session is 403."""
+        mock_context.session_mgr.start_session(test_user)
+        assert client.get("/api/admin/devices").status_code == 403
+
+    def test_lists_tagged_and_untagged(
+        self, client, mock_context, admin_user, test_devices, db_session
+    ):
+        """Admin list includes untagged rows; the kiosk list omits them."""
+        ghost = DeviceRepository.create(
+            db_session,
+            name="Ghost",
+            device_type="general",
+            pm_number="PM-999",
+            locker_slot=9,
+        )
+        db_session.commit()
+        mock_context.session_mgr.start_session(admin_user)
+
+        resp = client.get("/api/admin/devices")
+        assert resp.status_code == 200
+        rows = resp.json()
+        assert len(rows) == 4
+        ghost_row = next(r for r in rows if r["name"] == "Ghost")
+        assert ghost_row["has_tag"] is False
+        assert "tag_hmac" not in ghost_row
+
+        kiosk = client.get("/api/devices").json()
+        assert "Ghost" not in {d["name"] for d in kiosk}
+        kiosk_row = kiosk[0]
+        assert set(ghost_row) == set(kiosk_row)

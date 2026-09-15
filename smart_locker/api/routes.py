@@ -4,7 +4,9 @@ Description: REST API endpoints and SSE event stream for the Smart Locker kiosk.
              Provides session management, device listing, borrow/return operations,
              user self-registration (with registrant name validation), admin-only
              manual registration, Register Device (pick from the Excel locker
-             list or PM + slot + NFC; kiosk lists tagged units only), device-tag
+             list or PM + slot + NFC; kiosk lists tagged units only — the
+             admin panel reads /api/admin/devices which includes untagged
+             rows), device-tag
              bind/unbind, registrant list retrieval, source sync, dashboard
              (public Inventory from Excel and Locker from SQLite, Display
              snapshot without person names, admin-secret owner edit and 5-tap
@@ -638,6 +640,42 @@ def touch_session(user_session: UserSession = Depends(require_session)):
 
 # --- Device Endpoints -------------------------------------------------------
 
+
+def _device_payload(d: Device, current_user_id: int) -> dict:
+    """Serialise one locker device for the kiosk/admin JSON feeds.
+
+    Args:
+        d: Device row.
+        current_user_id: Session user id — their borrows read ``"You"``.
+
+    Returns:
+        dict: Device fields; ``tag_hmac`` itself is never exposed.
+    """
+    borrower_name = None
+    if d.status == DeviceStatus.BORROWED and d.current_borrower_id is not None:
+        if d.current_borrower_id == current_user_id:
+            borrower_name = "You"
+        elif d.current_borrower is not None:
+            borrower_name = d.current_borrower.display_name
+
+    return {
+        "id": d.id,
+        "pm_number": d.pm_number,
+        "name": d.name,
+        "device_type": d.device_type,
+        "serial_number": d.serial_number,
+        "manufacturer": d.manufacturer,
+        "model": d.model,
+        "locker_slot": d.locker_slot,
+        "description": d.description,
+        "image_path": d.image_path,
+        "calibration_due": d.calibration_due.isoformat() if d.calibration_due else None,
+        "status": d.status.value,
+        "borrower_name": borrower_name,
+        "has_tag": d.tag_hmac is not None,
+    }
+
+
 @router.get("/api/devices")
 def list_devices(
     db: Session = Depends(get_db),
@@ -648,7 +686,8 @@ def list_devices(
     Returns a flat list of device dicts with status and borrower name.
     The current user's own borrowed devices show ``"You"`` as the borrower.
     Only tagged locker devices are returned — untagged rows are admin-only
-    until the sticker is bound.
+    until the sticker is bound; the hidden-admin panel uses
+    ``GET /api/admin/devices`` which lists every row.
 
     Args:
         db: Database session (injected by ``get_db``).
@@ -657,38 +696,41 @@ def list_devices(
     Returns:
         list[dict]: One dict per device with id, name, status, borrower_name, etc.
     """
-    devices = DeviceRepository.list_all(db)
     current_user_id = user_session.user.id
-    result = []
+    return [
+        _device_payload(d, current_user_id)
+        for d in DeviceRepository.list_all(db)
+        if d.tag_hmac is not None
+    ]
 
-    for d in devices:
-        if d.tag_hmac is None:
-            continue
-        borrower_name = None
-        if d.status == DeviceStatus.BORROWED and d.current_borrower_id is not None:
-            if d.current_borrower_id == current_user_id:
-                borrower_name = "You"
-            elif d.current_borrower is not None:
-                borrower_name = d.current_borrower.display_name
 
-        result.append({
-            "id": d.id,
-            "pm_number": d.pm_number,
-            "name": d.name,
-            "device_type": d.device_type,
-            "serial_number": d.serial_number,
-            "manufacturer": d.manufacturer,
-            "model": d.model,
-            "locker_slot": d.locker_slot,
-            "description": d.description,
-            "image_path": d.image_path,
-            "calibration_due": d.calibration_due.isoformat() if d.calibration_due else None,
-            "status": d.status.value,
-            "borrower_name": borrower_name,
-            "has_tag": d.tag_hmac is not None,
-        })
+@router.get("/api/admin/devices")
+def admin_list_devices(
+    db: Session = Depends(get_db),
+    user_session: UserSession = Depends(require_session),
+):
+    """Complete locker list for the hidden-admin Register Device panel.
 
-    return result
+    Untagged rows are included so Bind can be retried and slots stay
+    accurate. Same payload shape as ``GET /api/devices``.
+
+    Args:
+        db: Database session (injected by ``get_db``).
+        user_session: The active session (injected by ``require_session``).
+
+    Returns:
+        list[dict]: Every locker row, tagged or not.
+
+    Raises:
+        HTTPException: 403 if the caller is not an admin.
+    """
+    if user_session.user.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Admin access required.")
+    current_user_id = user_session.user.id
+    return [
+        _device_payload(d, current_user_id)
+        for d in DeviceRepository.list_all(db)
+    ]
 
 
 @router.post("/api/devices/{device_id}/borrow")

@@ -282,7 +282,7 @@ Cheap NFC stickers on locker devices use the same ACR1252U as work cards (no USB
 
 - **Storage:** `devices.tag_hmac` (HMAC-SHA256 of the sticker UID, same key as work cards). The raw UID is never stored or logged.
 - **Flow:** tap work card → tap sticker (or pick on screen). Auto-intent from device status: borrow if available, return if you hold it. Session stays open for several devices. A work-card tap still logs out.
-- **Register Device** (hidden admin panel): pick from the Excel `Locker` list or type the **PM**, then **free slot + NFC**. Catalog comes from Excel. Sync never inserts locker rows. The list shows **name + PM**; only tagged units appear on the kiosk grids. CLI bind: `python -m scripts.enroll_device_tag --pm PM-001` (or `--uid HEX`).
+- **Register Device** (hidden admin panel): pick from the Excel `Locker` list or type the **PM**, then **free slot + NFC**. Catalog comes from Excel. Sync never inserts locker rows. The list shows **name + PM**; only tagged units appear on the kiosk grids (panel uses `/api/admin/devices`, which includes untagged rows). CLI bind: `python -m scripts.enroll_device_tag --pm PM-001` (or `--uid HEX`).
 - Excel barcode is unused leftover; re-import does **not** overwrite `tag_hmac`, locker status, or the current borrower.
 - After borrow/return (and after Register Device / Sync), the Pi writes **only** Location in the catalog workbook (`SMART_LOCKER_IN_LOCKER_TOKEN` in the locker, borrower name when out). Catalog columns stay. A locked workbook is skipped, not a kiosk crash. Extra Excel header names: `SMART_LOCKER_ID_HEADERS` / `SMART_LOCKER_LOCATION_HEADERS`. On-screen noun: `SMART_LOCKER_ASSET_LABEL`.
 

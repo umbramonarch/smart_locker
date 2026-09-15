@@ -107,3 +107,32 @@ class TestCatalogLockerPickList:
         js = _js()
         assert "/api/admin/devices/catalog-locker" in js
         assert "populateCatalogList" in js
+
+
+class TestAdminDevicesFeed:
+    """Admin panel reads /api/admin/devices (untagged rows included)."""
+
+    def test_bind_list_uses_admin_feed(self):
+        """populateBindList fetches and filters the admin device list."""
+        js = _js()
+        body = js.split("function populateBindList", 1)[1].split(
+            "function startDeviceTagBind", 1
+        )[0]
+        assert "apiGetAdminDevices" in body
+        assert "S.adminDevices" in body
+        assert "apiGetDevices" not in body
+
+    def test_occupied_slots_use_admin_feed(self):
+        """occupiedSlots counts slots from S.adminDevices, not the grid list."""
+        js = _js()
+        body = js.split("function occupiedSlots", 1)[1].split(
+            "function renderSlotGrid", 1
+        )[0]
+        assert "S.adminDevices" in body
+        assert "S.devices" not in body
+
+    def test_admin_devices_endpoint_referenced(self):
+        """app.js fetches /api/admin/devices for the admin list."""
+        js = _js()
+        assert "/api/admin/devices" in js
+        assert "apiGetAdminDevices" in js

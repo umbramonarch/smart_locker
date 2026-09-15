@@ -1275,7 +1275,8 @@ that bridges card taps to the browser.
 | `GET` | `/api/session` | Current session state (kiosk loopback; LAN 403) |
 | `POST` | `/api/session/end` | End the session |
 | `POST` | `/api/session/touch` | Reset the inactivity timer |
-| `GET` | `/api/devices` | All devices with status, borrower, metadata |
+| `GET` | `/api/devices` | Tagged locker devices for the kiosk grids (session) |
+| `GET` | `/api/admin/devices` | Every locker row incl. untagged, for Register Device (admin session) |
 | `POST` | `/api/devices/{id}/borrow` | Borrow a device |
 | `POST` | `/api/devices/{id}/return` | Return a device (admins on behalf) |
 | `POST` | `/api/register` | Start self-registration (validates the name; kiosk loopback) |
