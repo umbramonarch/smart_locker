@@ -934,6 +934,37 @@ class TestListInLockerCatalog:
         finally:
             path.unlink(missing_ok=True)
 
+    def test_other_cabinets_excluded(self):
+        """Only the exact in-locker token matches — not other cabinets."""
+        path = _create_test_excel([
+            ["Equipment", "Name", "Location"],
+            ["PM-001", "Scope", "Locker"],
+            ["PM-002", "Meter", "Cabinet A"],
+            ["PM-003", "Probe", "locker 2"],
+            ["PM-004", "PSU", "  Locker  "],
+        ])
+        try:
+            rows = list_in_locker_catalog(path)
+            assert [r.pm_number for r in rows] == ["PM-001", "PM-004"]
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_custom_token_replaces_locker_word(self, monkeypatch):
+        """SMART_LOCKER_IN_LOCKER_TOKEN is the only pick-list match."""
+        monkeypatch.setenv("SMART_LOCKER_IN_LOCKER_TOKEN", "At base")
+        path = _create_test_excel([
+            ["Equipment", "Name", "Location"],
+            ["PM-001", "Scope", "At base"],
+            ["PM-002", "Meter", "Locker"],
+            ["PM-003", "Probe", "Cabinet A"],
+            ["PM-004", "PSU", "at BASE"],
+        ])
+        try:
+            rows = list_in_locker_catalog(path)
+            assert [r.pm_number for r in rows] == ["PM-001", "PM-004"]
+        finally:
+            path.unlink(missing_ok=True)
+
     def test_missing_file_raises(self):
         """Share down raises CatalogReadError, not an empty list."""
         with pytest.raises(CatalogReadError):

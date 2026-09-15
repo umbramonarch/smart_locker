@@ -1181,11 +1181,11 @@ def list_catalog_locker(
     db: Session = Depends(get_db),
     user_session: UserSession = Depends(require_session),
 ):
-    """List Excel rows marked in-locker that are not registered yet.
+    """List this locker's Excel rows that are not registered yet.
 
     Feeds the Register Device "Add from Excel" pick list: every source row
-    whose Location cell is in-locker and whose PM is not a SQLite locker
-    device, sorted by name then PM.
+    whose Location cell is exactly the in-locker token and whose PM is not
+    a SQLite locker device, sorted by name then PM.
 
     Args:
         db: Database session (injected by ``get_db``).
@@ -1433,7 +1433,8 @@ def unbind_device_tag(
         dict: ``{"success": True}``.
 
     Raises:
-        HTTPException: 403 if not admin, 404 if the device does not exist.
+        HTTPException: 403 if not admin, 404 if the device does not exist,
+            409 if the device is currently borrowed.
     """
     if user_session.user.role != UserRole.ADMIN:
         raise HTTPException(status_code=403, detail="Admin access required.")
@@ -1441,6 +1442,10 @@ def unbind_device_tag(
     device = DeviceRepository.find_by_id(db, device_id)
     if device is None:
         raise HTTPException(status_code=404, detail="Device not found.")
+    if device.status == DeviceStatus.BORROWED:
+        raise HTTPException(
+            409, "Return the device first — a borrowed sticker cannot be unbound."
+        )
 
     DeviceRepository.unbind_tag(db, device)
     if ctx_module.context is not None:
@@ -2054,12 +2059,17 @@ def dashboard_unbind_tag(
         dict: ``ok``, ``pm_number``.
 
     Raises:
-        HTTPException: 401 without secret; 404 if the PM is not a locker device.
+        HTTPException: 401 without secret; 404 if the PM is not a locker
+            device; 409 if the device is currently borrowed.
     """
     pm = body.pm_number.strip()
     device = DeviceRepository.find_by_pm(db, pm)
     if device is None:
         raise HTTPException(status_code=404, detail="Device not found.")
+    if device.status == DeviceStatus.BORROWED:
+        raise HTTPException(
+            409, "Return the device first — a borrowed sticker cannot be unbound."
+        )
 
     DeviceRepository.unbind_tag(db, device)
     if ctx_module.context is not None:

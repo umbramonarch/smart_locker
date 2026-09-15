@@ -125,6 +125,21 @@ class TestDeviceTagBindApi:
         resp = client.post("/api/admin/devices/99999/unbind-tag")
         assert resp.status_code == 404
 
+    def test_unbind_tag_rejects_borrowed_device(
+        self, client, mock_context, admin_user, test_user, test_devices, db_session
+    ):
+        """Unbind on a borrowed device is 409; the tag and kiosk row survive."""
+        mock_context.session_mgr.start_session(test_user)
+        borrowed = client.post(f"/api/devices/{test_devices[0].id}/borrow")
+        assert borrowed.json()["success"] is True
+        mock_context.session_mgr.start_session(admin_user)
+        resp = client.post(f"/api/admin/devices/{test_devices[0].id}/unbind-tag")
+        assert resp.status_code == 409
+        db_session.expire_all()
+        assert test_devices[0].tag_hmac is not None
+        listed = client.get("/api/devices").json()
+        assert "Camera" in {d["name"] for d in listed}
+
 
 class TestAdminOverlaySession:
     """Admin overlay session flag and device-list payload used by Register Device."""
@@ -531,6 +546,21 @@ class TestCatalogLockerList:
         rows = resp.json()["rows"]
         assert [r["pm_number"] for r in rows] == ["PM-101", "PM-100"]
         assert set(rows[0]) == {"pm_number", "name", "manufacturer", "model"}
+
+    def test_other_cabinets_excluded(
+        self, client, mock_context, admin_user, test_devices, monkeypatch, tmp_path
+    ):
+        """Cabinet rows are not offered — only this locker's token matches."""
+        path = self._workbook(tmp_path / "device-list.xlsx", [
+            ["Equipment", "Name", "Manufacturer", "Model", "Location"],
+            ["PM-100", "Zeta Scope", "Keysight", "DSOX", "Locker"],
+            ["PM-101", "Alpha Meter", "BK", "880", "Cabinet A"],
+        ])
+        monkeypatch.setattr("config.settings.SOURCE_EXCEL_PATH", str(path))
+        mock_context.session_mgr.start_session(admin_user)
+        resp = client.get("/api/admin/devices/catalog-locker")
+        assert resp.status_code == 200
+        assert [r["pm_number"] for r in resp.json()["rows"]] == ["PM-100"]
 
     def test_no_location_column_returns_empty(
         self, client, mock_context, admin_user, monkeypatch, tmp_path

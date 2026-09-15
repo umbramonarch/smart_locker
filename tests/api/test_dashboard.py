@@ -412,6 +412,23 @@ class TestDashboardTagApi:
         assert cam["has_tag"] is False
         assert "tag_hmac" not in cam
 
+    def test_unbind_tag_rejects_borrowed_device(
+        self, client, mock_context, test_user, test_devices, db_session,
+        dashboard_secret,
+    ):
+        """Dashboard unbind on a borrowed PM is 409; the tag survives."""
+        mock_context.session_mgr.start_session(test_user)
+        borrowed = client.post(f"/api/devices/{test_devices[0].id}/borrow")
+        assert borrowed.json()["success"] is True
+        resp = client.post(
+            "/api/dashboard/unbind-tag",
+            json={"pm_number": "PM-001"},
+            headers=dashboard_admin_headers(dashboard_secret),
+        )
+        assert resp.status_code == 409
+        db_session.expire_all()
+        assert test_devices[0].tag_hmac is not None
+
     def test_unbind_clears_pending_tag_bind(
         self, client, mock_context, test_devices, db_session, hmac_key, dashboard_secret
     ):

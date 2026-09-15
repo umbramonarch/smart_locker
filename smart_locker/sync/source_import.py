@@ -200,11 +200,34 @@ def pm_match_key(value) -> str:
     return normalize_pm(value).casefold()
 
 
-def is_in_locker_location(value: str) -> bool:
-    """Return True when a Location cell means the device is in the locker.
+def is_own_locker_location(value: str) -> bool:
+    """Return True when a Location cell is exactly this kiosk's locker.
 
-    Exact ``in_locker_token()`` match, or a whole-word locker/cabinet marker.
-    ``"Blocker"`` is not in-locker.
+    Case-insensitive exact match on ``in_locker_token()``; surrounding
+    whitespace is ignored. Other cabinets are not this locker, so they do
+    not match. Used for the Register Device pick list.
+
+    Args:
+        value: Location cell text.
+
+    Returns:
+        True if the text is exactly the in-locker token.
+    """
+    text = (value or "").strip().lower()
+    if not text:
+        return False
+    token = (in_locker_token() or "").strip().lower()
+    return bool(token) and text == token
+
+
+def is_in_locker_location(value: str) -> bool:
+    """Return True when a Location cell means the device is in a locker.
+
+    Broad place-vs-person check for registrant extraction: exact
+    ``in_locker_token()`` match, or a whole-word locker/cabinet marker.
+    ``"Blocker"`` is not in-locker. A "Cabinet A" cell is a place, not a
+    person — but only ``is_own_locker_location`` decides what belongs in
+    this kiosk's Register Device pick list.
 
     Args:
         value: Location cell text.
@@ -212,12 +235,11 @@ def is_in_locker_location(value: str) -> bool:
     Returns:
         True if the text is a locker location, not a person name.
     """
+    if is_own_locker_location(value):
+        return True
     text = (value or "").strip().lower()
     if not text:
         return False
-    token = (in_locker_token() or "").strip().lower()
-    if token and text == token:
-        return True
     return any(
         re.search(rf"(?<![a-z]){re.escape(marker)}(?![a-z])", text)
         for marker in _IN_LOCKER_MARKERS
@@ -524,7 +546,7 @@ def list_in_locker_catalog(
     default_type: str = "general",
     column_overrides: dict[str, str] | None = None,
 ) -> list[CatalogRow]:
-    """Return catalog rows whose Location cell means "in the locker".
+    """Return catalog rows whose Location cell is this kiosk's locker.
 
     Args:
         source_path: Path to ``device-list.xlsx``.
@@ -534,8 +556,8 @@ def list_in_locker_catalog(
 
     Returns:
         ``CatalogRow`` for every data row whose Location passes
-        ``is_in_locker_location``; empty list when the sheet has no
-        Location column.
+        ``is_own_locker_location`` (exact in-locker token — other cabinets
+        are excluded); empty list when the sheet has no Location column.
 
     Raises:
         CatalogReadError: File missing, locked, empty, or no PM column.
@@ -547,7 +569,7 @@ def list_in_locker_catalog(
     out: list[CatalogRow] = []
     compose_name = cols["name"] is None
     for row in rows[1:]:
-        if not is_in_locker_location(_cell_str(row, cols["location"]) or ""):
+        if not is_own_locker_location(_cell_str(row, cols["location"]) or ""):
             continue
         catalog = _catalog_from_row(row, cols, compose_name, default_type)
         if catalog is not None:

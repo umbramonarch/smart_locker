@@ -805,9 +805,9 @@ it still asks for a work card first.
 - **Main menu** — welcome + name; **Tap the device** to borrow or return; **Locker**
   (what's in · what's out) and **Return** (*or pick on screen*); **End Session**.
 - **Locker** — availability overlay: every locker device by slot, tagged **IN** / **OUT**
-  / **YOURS** / **MAINT**, with **PM number** on the card. Screen-pick borrow still
-  works for units without a sticker. A sticker tap still auto-intents and refreshes
-  this grid.
+  / **YOURS** / **MAINT**, with **PM number** on the card. Only units with a bound
+  sticker appear here — screen-pick borrow needs the sticker (bind it in Register
+  Device). A sticker tap still auto-intents and refreshes this grid.
 - **Return** — the same grid (PM on each card), with your own borrowed items highlighted.
   Confirming a return shows the slot overlay.
 - **Device detail** (overlay) — photo, PM, type, serial, and a confirm button.
@@ -1286,7 +1286,7 @@ that bridges card taps to the browser.
 | `POST` | `/api/admin/register` | Admin manual enrolment (skips name check) |
 | `GET` | `/api/admin/devices/catalog-locker` | Unregistered Excel rows with Location = locker (admin session) |
 | `POST` | `/api/admin/devices/{id}/bind-tag` | 60s window to bind the next sticker to that device |
-| `POST` | `/api/admin/devices/{id}/unbind-tag` | Clear the sticker HMAC on that device |
+| `POST` | `/api/admin/devices/{id}/unbind-tag` | Clear the sticker HMAC on that device (409 while borrowed — return first) |
 | `POST` | `/api/admin/sync-source` | Trigger the source Excel import now |
 | `GET` | `/api/admin/export-excel` | Download the full database as `.xlsx` |
 | `GET` | `/api/dashboard/devices` | Public locker inventory (SQLite, no auth) |
@@ -1295,7 +1295,7 @@ that bridges card taps to the browser.
 | `GET` | `/api/dashboard/owners` | Owner dropdown names (users + registrants + in-locker token); admin secret |
 | `POST` | `/api/dashboard/owner` | Change owner of a non-locker PM (Excel only; 409 if in locker); admin secret |
 | `POST` | `/api/dashboard/bind-tag` | Arm 60s NFC bind for a locker PM (admin secret; tap at the reader) |
-| `POST` | `/api/dashboard/unbind-tag` | Clear sticker HMAC on a locker PM (admin secret) |
+| `POST` | `/api/dashboard/unbind-tag` | Clear sticker HMAC on a locker PM (admin secret; 409 while borrowed) |
 | `POST` | `/api/kiosk/display` | Kiosk heartbeat of the current screen |
 | `GET` | `/api/dashboard/transactions` | Transaction history, last 500 (gated; 5-tap overlay is not auth) |
 | `GET` | `/api/dashboard/users` | Registered-users list (gated; 5-tap overlay is not auth) |
@@ -1327,11 +1327,14 @@ admin return-on-behalf; maintenance → fail. The session stays open. A **work-c
 still logs out; a device tag does not. An unknown UID while logged in stays logged in.
 
 **Register Device** (hidden admin panel): pick a unit from the Excel `Locker`
-list (`GET /api/admin/devices/catalog-locker` — in-locker rows not yet
-registered) or type the **PM**, pick a **free slot**, tap the
+list (`GET /api/admin/devices/catalog-locker` — rows whose Location is exactly
+the in-locker token, not yet registered) or type the **PM**, pick a **free slot**,
+tap the
 sticker. Catalog (name, type, manufacturer, model, serial, cal) is copied from Excel.
 Unknown PM or share down fails with no ghost row. Existing rows can bind / unbind /
-change slot. The list shows **name + PM**; the kiosk grids show only devices
+change slot. Unbind refuses a borrowed row (409) — record the return first, then
+unbind; to recover a loan whose sticker was damaged, bind the replacement sticker
+and return normally. The list shows **name + PM**; the kiosk grids show only devices
 with a bound sticker. CLI bind-only:
 `python -m scripts.enroll_device_tag --pm PM-001` (or `--uid HEX`, `--force` to replace).
 There is no USB barcode scanner and no `GET /api/devices/barcode/{barcode}`.

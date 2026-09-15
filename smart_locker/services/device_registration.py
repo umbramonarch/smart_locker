@@ -70,7 +70,10 @@ def _require_free_slot(session: Session, locker_slot: int, ignore_id: int | None
 
 
 def unregistered_locker_rows(session: Session, source_path: str) -> list[CatalogRow]:
-    """List Excel rows marked in-locker that are not registered yet.
+    """List this locker's Excel rows that are not registered yet.
+
+    Only rows whose Location cell is exactly the in-locker token; other
+    cabinets are excluded.
 
     Args:
         session: Active database session.
