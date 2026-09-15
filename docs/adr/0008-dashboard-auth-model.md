@@ -29,4 +29,4 @@ We pick **option 2** because catalog visibility is the LAN job, and fail-closed 
 
 ## Amendment 2026-09-14
 
-Owner change on Inventory (`POST /api/dashboard/owner`, `GET /api/dashboard/owners`) is public — anyone who can open the dashboard can change Location for non-locker PMs. Locker PMs are still refused. Bind/unbind and the users/transactions GETs remain behind `SMART_LOCKER_DASHBOARD_ADMIN_SECRET`. Reason: changing the holder of a non-locker device is an everyday task, and the Location column is already public on the same page.
+Owner change on Inventory (`POST /api/dashboard/owner`, `GET /api/dashboard/owners`) is public — anyone who can open the dashboard can change Location for non-locker PMs. Locker PMs are still refused. Bind/unbind and the users/transactions GETs remain behind `SMART_LOCKER_DASHBOARD_ADMIN_SECRET`. Reason: changing the holder of a non-locker device is an everyday task, and the Location column is already public on the same page. The public owners list returns only the in-locker token and Excel-derived registrant names (already public via Inventory and `/api/registrants`), never the kiosk user table.

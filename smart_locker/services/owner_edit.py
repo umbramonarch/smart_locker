@@ -6,7 +6,9 @@ Description: Public dashboard owner change on Inventory. Writes
              refused — borrow and return stay on the kiosk.
 Project: smart_locker/services
 Notes: POST /api/dashboard/owner is public (no secret). Inventory/Locker
-       GETs stay public. This module is the Excel write.
+       GETs stay public. This module is the Excel write. Registered kiosk
+       users are not listed — the dropdown only offers names already
+       visible in Inventory (Excel Location).
 """
 
 from __future__ import annotations
@@ -21,7 +23,6 @@ from config.settings import in_locker_token
 from smart_locker.database.repositories import (
     DeviceRepository,
     RegistrantRepository,
-    UserRepository,
 )
 from smart_locker.sync.location_writeback import write_location_value
 
@@ -60,8 +61,10 @@ class OwnerEditResult:
 def owner_choices(session: Session) -> list[str]:
     """Names for the dashboard owner dropdown.
 
-    In-locker token, then registered users, then registrant names.
-    Case-insensitive duplicates keep the first spelling.
+    In-locker token, then registrant names. Case-insensitive
+    duplicates keep the first spelling. Registered kiosk users are
+    not listed — the dropdown only offers names already visible in
+    Inventory (Excel Location).
 
     Args:
         session: Active database session.
@@ -83,8 +86,6 @@ def owner_choices(session: Session) -> list[str]:
         names.append(text)
 
     _add(in_locker_token())
-    for user in UserRepository.list_all(session):
-        _add(user.display_name)
     for registrant in RegistrantRepository.get_all(session):
         _add(registrant.display_name)
     return names

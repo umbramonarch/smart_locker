@@ -10,7 +10,7 @@ Work on `main` after the `v0.2.0` tag. Merging to `main` is not a release; the n
 
 ### Fixed
 
-- Dashboard Inventory owner change no longer asks for the dashboard admin secret; anyone who can open the dashboard can change Location for non-locker PMs. Bind/unbind and users/transactions still need the secret.
+- Dashboard Inventory owner change no longer asks for the dashboard admin secret; anyone who can open the dashboard can change Location for non-locker PMs. Bind/unbind and users/transactions still need the secret. The owners dropdown lists only the in-locker token and Excel-derived registrant names, never the kiosk user table.
 
 ### Changed
 

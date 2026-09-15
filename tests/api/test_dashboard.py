@@ -268,13 +268,14 @@ class TestDashboardOwnerEditApi:
     def test_owners_list_is_public(
         self, client, test_user, db_session
     ):
-        """GET /api/dashboard/owners needs no secret."""
+        """GET /api/dashboard/owners needs no secret; users are not listed."""
         RegistrantRepository.add_names(db_session, {"Bob Field"})
         db_session.commit()
         resp = client.get("/api/dashboard/owners")
         assert resp.status_code == 200
         names = resp.json()["names"]
-        assert "Test User" in names
+        # "Test User" is a registered kiosk user, not an Excel registrant.
+        assert "Test User" not in names
         assert "Bob Field" in names
         assert "in_locker_token" in resp.json()
 
