@@ -136,7 +136,7 @@ smart_locker/
 | Frontend UI | ✅ Done | 6-screen kiosk UI + overlays |
 | Unit tests | ✅ Done | ~371 tests, hardware-free |
 | NFC device tags | ✅ Done | Same ACR1252U; `devices.tag_hmac`; auto borrow/return after login |
-| Calibration alerts | ✅ Done | Warn-only CAL DUE / OVERDUE badges, dashboard highlight + filter, idle banner (`SMART_LOCKER_CALIBRATION_WARN_DAYS`) |
+| Calibration alerts | ✅ Done | Warn-only CAL DUE / OVERDUE badges, dashboard highlight + filter, idle banner (`SMART_LOCKER_CALIBRATION_WARN_DAYS`). Blank Excel cell clears the date; unreadable text keeps it (warning logged) |
 | Kiosk deployment | ✅ Done | Raspberry Pi appliance: systemd service, CIFS mount, Chromium kiosk, offline install (`deploy/`) |
 
 ## Quick Start

@@ -9,6 +9,8 @@ Notes: Called by the scheduler, ``python -m scripts.sync_source``, or
        POST /api/admin/sync-source. Status, borrower, slot, image,
        description, and tag_hmac are never overwritten. A Slot/cabinet
        column is unused. lookup_catalog_by_pm is the Register Device lookup.
+       Calibration cells: blank clears the stored date, unparsable text keeps
+       it (warning logged), no Calibration column leaves it alone.
 """
 
 import logging
@@ -145,6 +147,10 @@ class CatalogRow:
 
     ``present`` names the catalog fields whose Excel columns exist on this
     sheet so import can skip missing columns instead of wiping SQLite.
+    Calibration contract: a blank cell in an existing Calibration column
+    clears ``calibration_due`` on the next Sync; a non-blank cell that does
+    not parse keeps the previous value (and logs a warning); a sheet without
+    a Calibration column never touches the field.
     """
 
     pm_number: str
@@ -444,9 +450,19 @@ def _catalog_from_row(
 
     calibration_due = None
     if cols["calibration"] is not None:
-        calibration_due = parse_date(row[cols["calibration"]])
-        if calibration_due is not None:
+        raw = row[cols["calibration"]]
+        if raw is None or str(raw).strip() == "":
+            # Blank cell in an existing column clears the date on next Sync.
             present.add("calibration_due")
+        else:
+            calibration_due = parse_date(raw)
+            if calibration_due is not None:
+                present.add("calibration_due")
+            else:
+                logger.warning(
+                    "Unparsable calibration date for %s; keeping previous value.",
+                    pm_number,
+                )
 
     return CatalogRow(
         pm_number=pm_number,
@@ -613,7 +629,7 @@ def import_from_source_excel(
                     updates["manufacturer"] = catalog.manufacturer
                 if "model" in catalog.present and catalog.model:
                     updates["model"] = catalog.model
-                if "calibration_due" in catalog.present and catalog.calibration_due is not None:
+                if "calibration_due" in catalog.present:
                     updates["calibration_due"] = catalog.calibration_due
                 changed = DeviceRepository.update_metadata(
                     session,

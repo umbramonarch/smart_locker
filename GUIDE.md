@@ -745,6 +745,8 @@ If auto-detection picks the wrong column, override it, e.g.
 PM number. A re-import **never** inserts a locker row and **never** overwrites `locker_slot`,
 `image_path`, `description`, `status`, or the current borrower. Catalog fields (name, type,
 serial, manufacturer, model, calibration) still update. Barcode is not imported.
+Calibration cells: a blank cell in an existing Calibration column clears the stored
+date; unreadable text keeps it and logs a warning; no Calibration column leaves it alone.
 
 Once running as a service, this same catalog refresh also happens **automatically**: once on
 startup, every 6 hours (configurable), and on demand from the hidden admin panel. (See

@@ -453,3 +453,11 @@ class TestCalibrationAlertsKiosk:
         assert "OVERDUE" in js
         assert "CAL DUE" in js
         assert "calState" in js
+
+    def test_idle_banner_failed_poll_keeps_previous_state(self):
+        """A non-OK poll returns early so an existing banner stays visible."""
+        js = _js()
+        body = js.split("function refreshIdleCalBanner", 1)[1].split(
+            "function buildDeviceCardEl", 1
+        )[0]
+        assert "if (!res.ok) return;" in body

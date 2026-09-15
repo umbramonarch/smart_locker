@@ -888,7 +888,8 @@ function calState(dev) {
 /**
  * Refresh the idle-screen overdue-calibration banner. Live mode counts
  * /api/calibration/alerts (loopback, read-only); demo mode counts
- * DEMO_DEVICES. Hidden when nothing is overdue.
+ * DEMO_DEVICES. Hidden when nothing is overdue. A failed poll keeps the
+ * last banner state.
  * @returns {Promise<void>}
  */
 async function refreshIdleCalBanner() {
@@ -900,11 +901,12 @@ async function refreshIdleCalBanner() {
   } else {
     try {
       const res = await fetch('/api/calibration/alerts');
-      if (res.ok) {
-        const data = await res.json();
-        n = data.overdue || 0;
-      }
-    } catch (_) { /* keep previous banner state */ }
+      if (!res.ok) return;
+      const data = await res.json();
+      n = data.overdue || 0;
+    } catch (_) {
+      return; // keep previous banner state
+    }
   }
   el.hidden = n === 0;
   if (n > 0) {
