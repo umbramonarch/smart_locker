@@ -12,6 +12,9 @@ Work on `main` after the `v0.2.0` tag. Merging to `main` is not a release; the n
 
 ### Fixed
 
+- Expired card-replace window no longer ends the admin session.
+- Deactivated names are blocked from self-registration and the owner dropdown.
+
 ### Changed
 
 - Dashboard share launcher now writes only `dashboard.url`; the generated `dashboard.html` redirect is removed because the Windows shortcut is enough to open the live page.

@@ -848,8 +848,11 @@ Pi on the LAN can use them — the lock is **physical access**, not a password.
    - **Users** — list active users (name, role, devices held). **Replace card**
      arms a 60-second tap window: the next card becomes that user's card
      (the old card stops working; refused if the tap is a device sticker or
-     another user's card). **Deactivate** keeps history but the card stops
-     working; refused for the last admin or a user still holding devices.
+     another user's card). An expired replace window only clears the window —
+     the admin session and overlay stay open. **Deactivate** keeps history but
+     the card stops working; refused for the last admin or a user still
+     holding devices. A deactivated name is also blocked from Register User
+     self-registration and the dashboard owner dropdown.
    - **Register Device** — add a locker unit: **PM + free slot + NFC tap** (catalog
      comes from Excel). Existing rows can bind / unbind / change slot. The list shows
      **name + PM** (and slot).

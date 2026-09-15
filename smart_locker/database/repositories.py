@@ -135,6 +135,49 @@ class UserRepository:
         return list(session.execute(stmt).scalars().all())
 
     @staticmethod
+    def display_names_lower(session: Session, active: bool) -> set[str]:
+        """Lowercased display names of users with the given active flag.
+
+        Args:
+            session: Active database session.
+            active: ``True`` for active users, ``False`` for deactivated.
+
+        Returns:
+            Set of stripped, lowercased display names.
+        """
+        stmt = select(User.display_name).where(User.is_active.is_(active))
+        return {
+            name.strip().lower()
+            for name in session.execute(stmt).scalars().all()
+            if name
+        }
+
+    @staticmethod
+    def borrowed_counts(session: Session) -> dict[int, int]:
+        """Count borrowed devices per user in one grouped query.
+
+        Args:
+            session: Active database session.
+
+        Returns:
+            Mapping of user id to number of borrowed Device rows.
+        """
+        from smart_locker.database.models import Device, DeviceStatus
+
+        stmt = (
+            select(Device.current_borrower_id, func.count(Device.id))
+            .where(
+                Device.status == DeviceStatus.BORROWED,
+                Device.current_borrower_id.is_not(None),
+            )
+            .group_by(Device.current_borrower_id)
+        )
+        return {
+            borrower_id: count
+            for borrower_id, count in session.execute(stmt).all()
+        }
+
+    @staticmethod
     def count_active_admins(session: Session) -> int:
         """Count users with the admin role that are still active.
 

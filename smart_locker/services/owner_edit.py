@@ -62,7 +62,9 @@ def owner_choices(session: Session) -> list[str]:
     """Names for the dashboard owner dropdown.
 
     In-locker token, then active registered users, then registrant names.
-    Case-insensitive duplicates keep the first spelling.
+    Case-insensitive duplicates keep the first spelling. Registrant names
+    matching a deactivated user are skipped — a deactivated name must not
+    be re-usable as a free-text owner.
 
     Args:
         session: Active database session.
@@ -86,7 +88,10 @@ def owner_choices(session: Session) -> list[str]:
     _add(in_locker_token())
     for user in UserRepository.list_active(session):
         _add(user.display_name)
+    inactive_lower = UserRepository.display_names_lower(session, False)
     for registrant in RegistrantRepository.get_all(session):
+        if registrant.display_name.strip().lower() in inactive_lower:
+            continue
         _add(registrant.display_name)
     return names
 

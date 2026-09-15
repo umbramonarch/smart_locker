@@ -96,6 +96,21 @@ class TestOwnerChoices:
         assert "Alice" in names
         assert "Gone" not in names
 
+    def test_owner_choices_exclude_deactivated_name(
+        self, db_session, enc_key, hmac_key
+    ):
+        """A registrant name matching a deactivated user is not offered."""
+        RegistrantRepository.add_names(db_session, {"Alice"})
+        alice = _add_user(db_session, enc_key, hmac_key, "Alice")
+        alice.is_active = False
+        _add_user(db_session, enc_key, hmac_key, "Bob")
+        db_session.flush()
+
+        names = owner_choices(db_session)
+
+        assert "Alice" not in names
+        assert "Bob" in names
+
 
 class TestSetOwnerExcelOnly:
     """Inventory owner edit on a non-locker PM writes Excel, not SQLite."""

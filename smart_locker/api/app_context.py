@@ -292,32 +292,46 @@ class AppContext:
 
         Expired registration and bind windows are dropped so the tap is
         classified instead of consumed as a failed enroll/bind. A leftover
-        overlay session is ended when a registration window expires so the
-        same tap can log in rather than log out. Bind + registration are
-        snapshotted under ``pending_state_lock`` so HTTP cancel/arm cannot
-        interleave with this branch.
+        overlay session is ended when an enrol window expires so the
+        same tap can log in rather than log out; an expired card-replace
+        window keeps the admin session (the admin is still at the panel).
+        A live registration is claimed atomically under
+        ``pending_state_lock`` so a concurrent HTTP arm/cancel cannot
+        retarget the tap.
         """
         with pending_state_lock:
             pending_reg = self.pending_registration
             pending_bind = self.pending_tag_bind
             expired_reg = bool(pending_reg is not None and pending_reg.is_expired)
             expired_bind = bool(pending_bind is not None and pending_bind.is_expired)
+            expired_was_replace = bool(
+                expired_reg and pending_reg.replace_user_id is not None
+            )
             if expired_reg:
                 assign_pending_registration(self, None)
                 pending_reg = None
+            elif pending_reg is not None:
+                # Claim the window: the tap below acts on this object only.
+                assign_pending_registration(self, None)
             if expired_bind:
                 assign_pending_tag_bind(self, None)
                 pending_bind = None
 
-        if expired_reg:
+        if expired_reg and not expired_was_replace:
             logger.info("Registration window expired.")
             self._end_leftover_session()
+        elif expired_reg:
+            logger.info("Card replace window expired.")
+            self.broadcast_sse({
+                "event": "registration_failed",
+                "reason": "Card replace timed out. Please try again.",
+            })
 
         if expired_bind:
             logger.info("Device tag bind window expired.")
 
         if pending_reg is not None:
-            await self._handle_registration_tap(uid, get_session)
+            await self._handle_registration_tap(pending_reg, uid, get_session)
             return
 
         if pending_bind is not None:
@@ -368,7 +382,9 @@ class AppContext:
         if sse is not None:
             self.broadcast_sse(sse)
 
-    async def _handle_registration_tap(self, uid: str, get_session) -> None:
+    async def _handle_registration_tap(
+        self, pending: PendingRegistration | None, uid: str, get_session
+    ) -> None:
         """Enroll or re-card a user when a card is tapped during pending registration.
 
         Validates that the registration has not expired and the card is not
@@ -380,6 +396,8 @@ class AppContext:
         overlay.
 
         Args:
+            pending: The claimed registration window (``_dispatch_insert``
+                already cleared it from ``self.pending_registration``).
             uid: Hex-encoded card UID from the NFC reader.
             get_session: Callable returning a SQLAlchemy session context manager.
 
@@ -391,10 +409,6 @@ class AppContext:
         from smart_locker.security.key_manager import key_manager
         from smart_locker.services.user_service import UserService
 
-        pending = None
-        with pending_state_lock:
-            pending = self.pending_registration
-            assign_pending_registration(self, None)
         is_replace = pending is not None and pending.replace_user_id is not None
         try:
             if pending is None:

@@ -544,6 +544,28 @@ class TestAdminUsers:
         assert "Test User" not in {u["name"] for u in users}
         assert mock_context.session_mgr.has_active_session
 
+    def test_deactivate_holds_user_admin_lock(
+        self, client, mock_context, admin_user, test_user, monkeypatch
+    ):
+        """Guards and commit run under the process-level user-admin lock."""
+        import smart_locker.api.routes as routes
+
+        entered = []
+
+        class FakeLock:
+            def __enter__(self):
+                entered.append(True)
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        monkeypatch.setattr(routes, "_user_admin_lock", FakeLock())
+        mock_context.session_mgr.start_session(admin_user)
+        resp = client.post(f"/api/admin/users/{test_user.id}/deactivate")
+        assert resp.status_code == 200
+        assert entered == [True]
+
     def test_deactivate_last_admin_refused(
         self, client, mock_context, admin_user
     ):

@@ -29,6 +29,7 @@ import logging
 import secrets
 import shutil
 import subprocess
+import threading
 import time
 from typing import Literal
 
@@ -433,6 +434,32 @@ def _pending_nfc_conflict() -> str | None:
     if ctx.pending_tag_bind is not None:
         return "A device-tag bind is already waiting for a sticker tap."
     return None
+
+
+# Serializes admin deactivate guards + commit (uvicorn runs one worker).
+_user_admin_lock = threading.Lock()
+
+
+def _arm_registration(pending: PendingRegistration) -> None:
+    """Atomically claim the NFC reader for a registration window.
+
+    Under ``pending_state_lock`` (RLock — callers may already hold it):
+    raises on a live bind/registration conflict, clears any pending tag
+    bind, then assigns the registration. Concurrent callers cannot both
+    pass the conflict check.
+
+    Args:
+        pending: The registration window to arm.
+
+    Raises:
+        HTTPException: 409 if another NFC window is armed.
+    """
+    with pending_state_lock:
+        conflict = _pending_nfc_conflict()
+        if conflict:
+            raise HTTPException(status_code=409, detail=conflict)
+        assign_pending_tag_bind(ctx_module.context, None)
+        assign_pending_registration(ctx_module.context, pending)
 
 
 # --- SSE Event Stream -------------------------------------------------------
@@ -919,10 +946,6 @@ def start_registration(
     if ctx_module.context.session_mgr.has_active_session:
         raise HTTPException(status_code=409, detail="A session is active. End it first.")
 
-    conflict = _pending_nfc_conflict()
-    if conflict:
-        raise HTTPException(status_code=409, detail=conflict)
-
     # Validate name against the approved registrants list
     registrant = RegistrantRepository.find_by_name(db, body.name.strip())
     if registrant is None:
@@ -931,11 +954,7 @@ def start_registration(
             detail="Name not found in approved list. Contact an admin for manual registration.",
         )
 
-    assign_pending_tag_bind(ctx_module.context, None)
-    assign_pending_registration(
-        ctx_module.context,
-        PendingRegistration(display_name=body.name.strip()),
-    )
+    _arm_registration(PendingRegistration(display_name=body.name.strip()))
     logger.info("Registration started for '%s'. Awaiting card tap.", body.name.strip())
     return {"success": True, "message": "Tap your NFC card to complete registration."}
 
@@ -979,9 +998,11 @@ def get_registrants(db: Session = Depends(get_db)):
 
     Reads the ``registrants`` table (populated from the "Location"
     column during source Excel import) and filters out names that already have
-    an active User record — those people are already registered and do not need
-    to appear in the selection list. No session required; this is a public
-    endpoint called from the idle/registration screen.
+    a User record, active or inactive — those people are already registered
+    (or were deactivated) and do not need to appear in the selection list.
+    Inactive (deactivated) names are blocked from self-registration; an
+    admin re-enrols them under a new name. No session required; this is a
+    public endpoint called from the idle/registration screen.
 
     Args:
         db: Active database session (injected by ``get_db``).
@@ -992,14 +1013,12 @@ def get_registrants(db: Session = Depends(get_db)):
     """
     registrants = RegistrantRepository.get_all(db)
 
-    # Build a set of names already registered (case-insensitive) so they can
-    # be excluded from the list shown to new users.
-    registered_lower = {
-        name.lower()
-        for name in db.execute(
-            select(User.display_name).where(User.is_active.is_(True))
-        ).scalars()
-    }
+    # Build a set of names that have a user row (case-insensitive) so they
+    # can be excluded from the list shown to new users.
+    registered_lower = (
+        UserRepository.display_names_lower(db, True)
+        | UserRepository.display_names_lower(db, False)
+    )
 
     # Filter out already-registered names and return the rest sorted
     names = [
@@ -1130,14 +1149,8 @@ def start_admin_registration(
     if user_session.user.role != UserRole.ADMIN:
         raise HTTPException(status_code=403, detail="Admin access required.")
 
-    conflict = _pending_nfc_conflict()
-    if conflict:
-        raise HTTPException(status_code=409, detail=conflict)
-
-    assign_pending_tag_bind(ctx_module.context, None)
-    assign_pending_registration(
-        ctx_module.context,
-        PendingRegistration(display_name=body.name.strip(), role=body.role),
+    _arm_registration(
+        PendingRegistration(display_name=body.name.strip(), role=body.role)
     )
     logger.info(
         "Admin-initiated registration for '%s' (role=%s) by admin %s. Awaiting card tap.",
@@ -1172,12 +1185,13 @@ def admin_list_users(
     if user_session.user.role != UserRole.ADMIN:
         raise HTTPException(status_code=403, detail="Admin access required.")
 
+    counts = UserRepository.borrowed_counts(db)
     users = [
         {
             "id": u.id,
             "name": u.display_name,
             "role": u.role.value,
-            "borrowed_count": UserRepository.borrowed_count(db, u.id),
+            "borrowed_count": counts.get(u.id, 0),
         }
         for u in UserRepository.list_active(db)
     ]
@@ -1195,6 +1209,8 @@ def admin_deactivate_user(
     History is kept; the row is not deleted. Refused when the target is the
     last active admin or still holds borrowed devices. Deactivating the user
     whose session runs the panel ends that session (kiosk returns to idle).
+    Guards and commit run under a process-level lock; uvicorn runs one
+    worker.
 
     Args:
         user_id: Primary key of the user to deactivate.
@@ -1215,29 +1231,30 @@ def admin_deactivate_user(
     if user_session.user.role != UserRole.ADMIN:
         raise HTTPException(status_code=403, detail="Admin access required.")
 
-    target = UserRepository.find_by_id(db, user_id)
-    if target is None or not target.is_active:
-        raise HTTPException(status_code=404, detail="User not found.")
+    with _user_admin_lock:
+        target = UserRepository.find_by_id(db, user_id)
+        if target is None or not target.is_active:
+            raise HTTPException(status_code=404, detail="User not found.")
 
-    if (
-        target.role == UserRole.ADMIN
-        and UserRepository.count_active_admins(db) == 1
-    ):
-        raise HTTPException(
-            status_code=409, detail="Register another admin first."
-        )
-    if UserRepository.borrowed_count(db, target.id) > 0:
-        raise HTTPException(
-            status_code=409,
-            detail="Return or hand over this user's devices first.",
-        )
+        if (
+            target.role == UserRole.ADMIN
+            and UserRepository.count_active_admins(db) == 1
+        ):
+            raise HTTPException(
+                status_code=409, detail="Register another admin first."
+            )
+        if UserRepository.borrowed_count(db, target.id) > 0:
+            raise HTTPException(
+                status_code=409,
+                detail="Return or hand over this user's devices first.",
+            )
 
-    UserRepository.deactivate(db, target)
-    try:
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
+        UserRepository.deactivate(db, target)
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
 
     session_ended = False
     if target.id == user_session.user.id:
@@ -1289,18 +1306,12 @@ def admin_replace_card(
     if target is None or not target.is_active:
         raise HTTPException(status_code=404, detail="User not found.")
 
-    conflict = _pending_nfc_conflict()
-    if conflict:
-        raise HTTPException(status_code=409, detail=conflict)
-
-    assign_pending_tag_bind(ctx_module.context, None)
-    assign_pending_registration(
-        ctx_module.context,
+    _arm_registration(
         PendingRegistration(
             display_name=target.display_name,
             role=target.role.value,
             replace_user_id=target.id,
-        ),
+        )
     )
     logger.info(
         "Card replace armed for user id=%d by admin %s. Awaiting card tap.",

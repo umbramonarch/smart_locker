@@ -602,6 +602,50 @@ class TestReplaceCardTap:
         # Target still on old card.
         assert ctx.authenticator.authenticate(db_session, "A1B2C3D4").id == target.id
 
+    def test_expired_replace_keeps_admin_session(
+        self, db_session, enc_key, hmac_key, monkeypatch
+    ):
+        """An expired card-replace window does not end the admin session."""
+        admin = self._user(db_session, "ADADADAD", enc_key, hmac_key, "Admin")
+        admin.role = UserRole.ADMIN
+        target = self._user(db_session, "A1B2C3D4", enc_key, hmac_key)
+        db_session.commit()
+        ctx = _make_ctx(monkeypatch)
+        ctx.session_mgr.start_session(admin)
+        ctx.admin_overlay_open = True
+        ctx.pending_registration = PendingRegistration(
+            "Alice",
+            replace_user_id=target.id,
+            created_at=time.monotonic() - 61,
+        )
+        _run(ctx, "E5E5E5E5")
+        events = _events(ctx)
+        assert ctx.pending_registration is None
+        assert events[0]["event"] == "registration_failed"
+        assert events[0]["reason"] == "Card replace timed out. Please try again."
+        assert ctx.session_mgr.has_active_session
+        assert ctx.admin_overlay_open is True
+        assert all(e["event"] != "session_ended" for e in events)
+
+    def test_dispatch_passes_claimed_pending_object(
+        self, db_session, monkeypatch
+    ):
+        """The tap handler receives the exact pending object that was claimed."""
+        ctx = _make_ctx(monkeypatch)
+        pending = PendingRegistration("Bob")
+        ctx.pending_registration = pending
+        seen = {}
+
+        async def fake_handle(p, uid, get_session):
+            seen["pending"] = p
+            seen["cleared"] = ctx.pending_registration is None
+
+        monkeypatch.setattr(ctx, "_handle_registration_tap", fake_handle)
+        _run(ctx, "E5E5E5E5")
+        assert seen["pending"] is pending
+        assert seen["cleared"] is True
+        assert ctx.pending_registration is None
+
     def test_enrol_admin_role_in_payload(
         self, db_session, enc_key, hmac_key, monkeypatch
     ):
