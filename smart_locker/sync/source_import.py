@@ -8,7 +8,8 @@ Project: smart_locker/sync
 Notes: Called by the scheduler, ``python -m scripts.sync_source``, or
        POST /api/admin/sync-source. Status, borrower, slot, image,
        description, and tag_hmac are never overwritten. A Slot/cabinet
-       column is unused. lookup_catalog_by_pm is the Register Device lookup.
+       column is unused. lookup_catalog_by_pm is the Register Device lookup;
+       list_in_locker_catalog is its "pick from the Excel locker list" feed.
 """
 
 import logging
@@ -451,6 +452,39 @@ def _catalog_from_row(
     )
 
 
+def _load_catalog(
+    source_path: str | Path,
+    sheet_name: str | None,
+    column_overrides: dict[str, str] | None,
+) -> tuple[list, dict]:
+    """Load source rows and detect columns, or raise ``CatalogReadError``.
+
+    Args:
+        source_path: Path to ``device-list.xlsx``.
+        sheet_name: Sheet to read (default: active sheet).
+        column_overrides: Optional header-name overrides.
+
+    Returns:
+        ``(rows, cols)`` — raw rows including the header row and the
+        detected column map.
+
+    Raises:
+        CatalogReadError: File missing, locked, empty, or no PM column.
+    """
+    path = Path(source_path)
+    rows, err = _load_rows(path, sheet_name)
+    if err:
+        raise CatalogReadError(err)
+    if not rows or len(rows) < 2:
+        raise CatalogReadError("Source Excel has no data rows.")
+
+    headers = [str(h).strip() if h else "" for h in rows[0]]
+    cols = _detect_columns(headers, column_overrides)
+    if cols["pm"] is None:
+        raise CatalogReadError(f"Could not find PM/equipment column. Headers: {headers}")
+    return rows, cols
+
+
 def lookup_catalog_by_pm(
     source_path: str | Path,
     pm_number: str,
@@ -473,17 +507,7 @@ def lookup_catalog_by_pm(
     Raises:
         CatalogReadError: File missing, locked, empty, or no PM column.
     """
-    path = Path(source_path)
-    rows, err = _load_rows(path, sheet_name)
-    if err:
-        raise CatalogReadError(err)
-    if not rows or len(rows) < 2:
-        raise CatalogReadError("Source Excel has no data rows.")
-
-    headers = [str(h).strip() if h else "" for h in rows[0]]
-    cols = _detect_columns(headers, column_overrides)
-    if cols["pm"] is None:
-        raise CatalogReadError(f"Could not find PM/equipment column. Headers: {headers}")
+    rows, cols = _load_catalog(source_path, sheet_name, column_overrides)
 
     want = pm_match_key(pm_number)
     compose_name = cols["name"] is None
@@ -492,6 +516,43 @@ def lookup_catalog_by_pm(
         if catalog is not None and pm_match_key(catalog.pm_number) == want:
             return catalog
     return None
+
+
+def list_in_locker_catalog(
+    source_path: str | Path,
+    sheet_name: str | None = None,
+    default_type: str = "general",
+    column_overrides: dict[str, str] | None = None,
+) -> list[CatalogRow]:
+    """Return catalog rows whose Location cell means "in the locker".
+
+    Args:
+        source_path: Path to ``device-list.xlsx``.
+        sheet_name: Sheet to read (default: active sheet).
+        default_type: Device type when the sheet has no category column.
+        column_overrides: Optional header-name overrides.
+
+    Returns:
+        ``CatalogRow`` for every data row whose Location passes
+        ``is_in_locker_location``; empty list when the sheet has no
+        Location column.
+
+    Raises:
+        CatalogReadError: File missing, locked, empty, or no PM column.
+    """
+    rows, cols = _load_catalog(source_path, sheet_name, column_overrides)
+    if cols["location"] is None:
+        return []
+
+    out: list[CatalogRow] = []
+    compose_name = cols["name"] is None
+    for row in rows[1:]:
+        if not is_in_locker_location(_cell_str(row, cols["location"]) or ""):
+            continue
+        catalog = _catalog_from_row(row, cols, compose_name, default_type)
+        if catalog is not None:
+            out.append(catalog)
+    return out
 
 
 # ---------------------------------------------------------------------------

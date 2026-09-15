@@ -91,3 +91,19 @@ class TestReplaceTagCopy:
         js = _js()
         assert "Replace tag" in js
         assert "bindBtn.textContent" in js
+
+
+class TestCatalogLockerPickList:
+    """Add from Excel offers a tap-to-pick list of unregistered locker rows."""
+
+    def test_catalog_list_markup_present(self):
+        """The add step carries the pick list and its note line."""
+        html = _html()
+        assert 'id="bind-catalog-list"' in html
+        assert 'id="bind-catalog-note"' in html
+
+    def test_js_fetches_catalog_locker(self):
+        """app.js fetches the catalog pick list on the add step."""
+        js = _js()
+        assert "/api/admin/devices/catalog-locker" in js
+        assert "populateCatalogList" in js

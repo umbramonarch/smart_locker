@@ -2127,6 +2127,18 @@ body::after {
 }
 .bind-row-actions button.bind-unbind { color: var(--text-muted); }
 
+/* Add-from-Excel locker pick list: compact, tappable rows. */
+.bind-catalog-list {
+  max-height: 200px;
+  margin-bottom: 0.6rem;
+}
+.bind-catalog-list .bind-row { cursor: pointer; }
+.bind-row.selected {
+  border-color: var(--border-accent);
+  background: var(--accent-dim);
+}
+.bind-catalog-note { margin: 0 0 0.4rem; }
+
 .bind-add-open {
   font-family: var(--font-display);
   font-size: 0.85rem;

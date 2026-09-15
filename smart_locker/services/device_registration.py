@@ -19,7 +19,13 @@ from sqlalchemy.orm import Session
 from config.settings import MAX_LOCKER_SLOT, asset_label
 from smart_locker.database.models import Device, DeviceStatus
 from smart_locker.database.repositories import DeviceRepository
-from smart_locker.sync.source_import import CatalogReadError, lookup_catalog_by_pm
+from smart_locker.sync.source_import import (
+    CatalogReadError,
+    CatalogRow,
+    list_in_locker_catalog,
+    lookup_catalog_by_pm,
+    pm_match_key,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +67,33 @@ def _require_free_slot(session: Session, locker_slot: int, ignore_id: int | None
     occupant = DeviceRepository.find_by_slot(session, locker_slot)
     if occupant is not None and occupant.id != ignore_id:
         raise SlotTaken(f"Slot {locker_slot} is already used by {occupant.pm_number}.")
+
+
+def unregistered_locker_rows(session: Session, source_path: str) -> list[CatalogRow]:
+    """List Excel rows marked in-locker that are not registered yet.
+
+    Args:
+        session: Active database session.
+        source_path: Path to ``device-list.xlsx``.
+
+    Returns:
+        ``CatalogRow`` list sorted by name then PM, with every PM that is
+        already a SQLite locker device dropped.
+
+    Raises:
+        CatalogUnavailable: Workbook missing, locked, or unreadable.
+    """
+    try:
+        rows = list_in_locker_catalog(source_path)
+    except CatalogReadError as e:
+        raise CatalogUnavailable(str(e)) from e
+
+    registered = {
+        pm_match_key(d.pm_number) for d in DeviceRepository.list_all(session)
+    }
+    out = [r for r in rows if pm_match_key(r.pm_number) not in registered]
+    out.sort(key=lambda r: (r.name.lower(), r.pm_number))
+    return out
 
 
 def register_locker_device(

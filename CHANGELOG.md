@@ -8,9 +8,14 @@ Work on `main` after the `v0.2.0` tag. Merging to `main` is not a release; the n
 
 ### Added
 
+- Register Device → Add from Excel now offers a tap-to-pick list of unregistered units whose Excel Location is in-locker (`GET /api/admin/devices/catalog-locker`); typing the PM number still works as fallback.
+- Kiosk Locker / Return grids show only devices with a bound NFC sticker (`GET /api/devices` filters on `tag_hmac`); untagged rows stay admin-only in Register Device and on the dashboard.
+
 ### Fixed
 
 ### Changed
+
+- HTTP borrow of an untagged device returns 409 ("Tap the sticker to bind it first.").
 
 - Dashboard share launcher now writes only `dashboard.url`; the generated `dashboard.html` redirect is removed because the Windows shortcut is enough to open the live page.
 - Pi **Software Update** is only `python -m scripts.copy_update` → gitignored `locker-updates/` on a USB stick (or already at `$APP_DIR/locker-updates`). `update.sh` copies USB `locker-updates` into `$APP_DIR/locker-updates`, then stop / backup / rsync-preserve / pip / migrate / health / rollback. Missing wheels are warned at copy time; pip failure on the Pi rolls back. The signed `pack_release` tarball + HMAC sidecar and CIFS `SMART_LOCKER_UPDATE_DIR` drop are removed.

@@ -3,7 +3,8 @@ File: routes.py
 Description: REST API endpoints and SSE event stream for the Smart Locker kiosk.
              Provides session management, device listing, borrow/return operations,
              user self-registration (with registrant name validation), admin-only
-             manual registration, Register Device (PM + slot + NFC), device-tag
+             manual registration, Register Device (pick from the Excel locker
+             list or PM + slot + NFC; kiosk lists tagged units only), device-tag
              bind/unbind, registrant list retrieval, source sync, dashboard
              (public Inventory from Excel and Locker from SQLite, Display
              snapshot without person names, admin-secret owner edit and 5-tap
@@ -642,10 +643,12 @@ def list_devices(
     db: Session = Depends(get_db),
     user_session: UserSession = Depends(require_session),
 ):
-    """List all devices with borrower info for the kiosk UI.
+    """List tagged locker devices with borrower info for the kiosk UI.
 
     Returns a flat list of device dicts with status and borrower name.
     The current user's own borrowed devices show ``"You"`` as the borrower.
+    Only tagged locker devices are returned — untagged rows are admin-only
+    until the sticker is bound.
 
     Args:
         db: Database session (injected by ``get_db``).
@@ -659,6 +662,8 @@ def list_devices(
     result = []
 
     for d in devices:
+        if d.tag_hmac is None:
+            continue
         borrower_name = None
         if d.status == DeviceStatus.BORROWED and d.current_borrower_id is not None:
             if d.current_borrower_id == current_user_id:
@@ -706,6 +711,8 @@ def borrow_device(
         dict: ``{"success": bool, "message": str}``.
     """
     device = DeviceRepository.find_by_id(db, device_id)
+    if device is not None and device.tag_hmac is None:
+        raise HTTPException(409, "Tap the sticker to bind it first.")
     device_name = device.name if device else f"Device {device_id}"
 
     success = LockerService.borrow_device(db, user_session, device_id)
@@ -1125,6 +1132,58 @@ def start_admin_registration(
         body.name.strip(), user_session.user.display_name,
     )
     return {"success": True, "message": "Tap the new user's NFC card to complete registration."}
+
+
+@router.get("/api/admin/devices/catalog-locker")
+def list_catalog_locker(
+    db: Session = Depends(get_db),
+    user_session: UserSession = Depends(require_session),
+):
+    """List Excel rows marked in-locker that are not registered yet.
+
+    Feeds the Register Device "Add from Excel" pick list: every source row
+    whose Location cell is in-locker and whose PM is not a SQLite locker
+    device, sorted by name then PM.
+
+    Args:
+        db: Database session (injected by ``get_db``).
+        user_session: The active admin session (injected by ``require_session``).
+
+    Returns:
+        dict: ``{"rows": [{"pm_number", "name", "manufacturer", "model"}]}``.
+
+    Raises:
+        HTTPException: 403 if not admin, 400 if the source path is unset,
+            503 when the workbook is missing or unreadable.
+    """
+    if user_session.user.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Admin access required.")
+
+    from config.settings import SOURCE_EXCEL_PATH
+    if not SOURCE_EXCEL_PATH:
+        raise HTTPException(status_code=400, detail="Source Excel path not configured.")
+
+    from smart_locker.services.device_registration import (
+        CatalogUnavailable,
+        unregistered_locker_rows,
+    )
+
+    try:
+        rows = unregistered_locker_rows(db, SOURCE_EXCEL_PATH)
+    except CatalogUnavailable as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+
+    return {
+        "rows": [
+            {
+                "pm_number": r.pm_number,
+                "name": r.name,
+                "manufacturer": r.manufacturer,
+                "model": r.model,
+            }
+            for r in rows
+        ]
+    }
 
 
 @router.post("/api/admin/devices/register")

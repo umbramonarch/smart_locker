@@ -2,8 +2,10 @@
  * @fileoverview Client-side state machine for the kiosk touch UI. Manages screen
  *               transitions, API communication, SSE event handling, and user
  *               interaction flow across idle, auth, menu, locker availability,
- *               return, detail, registration, admin, Register Device (PM + slot
- *               + NFC), return-slot, software-update, and appliance shutdown overlays.
+ *               return, detail, registration, admin, Register Device (pick from
+ *               the Excel locker list or PM + slot + NFC; grids show tagged
+ *               units only), return-slot, software-update, and appliance
+ *               shutdown overlays.
  * @project smart_locker/frontend
  * @description Demo mode (?demo), circle-reveal transitions, split text,
  *              inactivity countdown, and self-registration.
@@ -49,8 +51,10 @@ function applyAssetLabels(label) {
   const addHint = document.getElementById('bind-add-hint');
   if (addHint) {
     addHint.textContent =
-      `Enter the ${text} from the catalog spreadsheet, pick a free slot, then continue to tap the sticker.`;
+      `Pick a unit from the Excel locker list or type its ${text}, pick a free slot, then continue to tap the sticker.`;
   }
+  const catalogNote = document.getElementById('bind-catalog-note');
+  if (catalogNote) catalogNote.textContent = '';
   const search = document.getElementById('bind-search');
   if (search) search.placeholder = `Search name or ${text}…`;
   const pmInput = document.getElementById('bind-pm-input');
@@ -118,14 +122,14 @@ const DEMO_USERS = [
 let demoUserIdx = 0;
 
 const DEMO_DEVICES = [
-  { id:1, pm_number:'PM-001', name:'Keysight DSOX3054T',  device_type:'Oscilloscope',   serial_number:'MY12345678',  manufacturer:'Keysight',       model:'DSOX3054T',   barcode:'490001', locker_slot:1,  description:null, image_path:null, calibration_due:'2026-09-15', status:'available',   borrower_name:null, has_tag:false },
-  { id:2, pm_number:'PM-002', name:'Rohde & Schwarz HMC8043', device_type:'Power Supply', serial_number:'RS-HMC-042', manufacturer:'Rohde & Schwarz', model:'HMC8043',    barcode:'490002', locker_slot:2,  description:null, image_path:null, calibration_due:'2026-11-01', status:'borrowed',    borrower_name:'Sarah K.' },
-  { id:3, pm_number:'PM-003', name:'Fluke 87V',           device_type:'Multimeter',     serial_number:'FL-87V-007',  manufacturer:'Fluke',          model:'87V',         barcode:'490003', locker_slot:3,  description:null, image_path:null, calibration_due:'2026-06-30', status:'available',   borrower_name:null       },
-  { id:4, pm_number:'PM-004', name:'Keysight 34465A',     device_type:'Multimeter',     serial_number:'MY98765432',  manufacturer:'Keysight',       model:'34465A',      barcode:'490004', locker_slot:4,  description:null, image_path:null, calibration_due:null,         status:'available',   borrower_name:null       },
-  { id:5, pm_number:'PM-005', name:'Fluke i400s',         device_type:'Current Probe',  serial_number:null,          manufacturer:'Fluke',          model:'i400s',       barcode:'490005', locker_slot:5,  description:null, image_path:null, calibration_due:'2027-01-15', status:'borrowed',    borrower_name:'You'      },
-  { id:6, pm_number:'PM-006', name:'Tektronix TBS2104X',  device_type:'Oscilloscope',   serial_number:'TEK-TBS-099', manufacturer:'Tektronix',      model:'TBS2104X',    barcode:'490006', locker_slot:6,  description:null, image_path:null, calibration_due:'2026-08-20', status:'available',   borrower_name:null       },
-  { id:7, pm_number:'PM-007', name:'Hioki DT4282',        device_type:'Multimeter',     serial_number:null,          manufacturer:'Hioki',          model:'DT4282',      barcode:'490007', locker_slot:7,  description:null, image_path:null, calibration_due:null,         status:'available',   borrower_name:null       },
-  { id:8, pm_number:'PM-008', name:'Megger MIT485/2',     device_type:'Insulation Tester', serial_number:'MEG-485-002', manufacturer:'Megger',      model:'MIT485/2',    barcode:'490008', locker_slot:8,  description:null, image_path:null, calibration_due:'2026-12-01', status:'maintenance', borrower_name:null       },
+  { id:1, pm_number:'PM-001', name:'Keysight DSOX3054T',  device_type:'Oscilloscope',   serial_number:'MY12345678',  manufacturer:'Keysight',       model:'DSOX3054T',   barcode:'490001', locker_slot:1,  description:null, image_path:null, calibration_due:'2026-09-15', status:'available',   borrower_name:null, has_tag:true },
+  { id:2, pm_number:'PM-002', name:'Rohde & Schwarz HMC8043', device_type:'Power Supply', serial_number:'RS-HMC-042', manufacturer:'Rohde & Schwarz', model:'HMC8043',    barcode:'490002', locker_slot:2,  description:null, image_path:null, calibration_due:'2026-11-01', status:'borrowed',    borrower_name:'Sarah K.', has_tag:true },
+  { id:3, pm_number:'PM-003', name:'Fluke 87V',           device_type:'Multimeter',     serial_number:'FL-87V-007',  manufacturer:'Fluke',          model:'87V',         barcode:'490003', locker_slot:3,  description:null, image_path:null, calibration_due:'2026-06-30', status:'available',   borrower_name:null, has_tag:true },
+  { id:4, pm_number:'PM-004', name:'Keysight 34465A',     device_type:'Multimeter',     serial_number:'MY98765432',  manufacturer:'Keysight',       model:'34465A',      barcode:'490004', locker_slot:4,  description:null, image_path:null, calibration_due:null,         status:'available',   borrower_name:null, has_tag:true },
+  { id:5, pm_number:'PM-005', name:'Fluke i400s',         device_type:'Current Probe',  serial_number:null,          manufacturer:'Fluke',          model:'i400s',       barcode:'490005', locker_slot:5,  description:null, image_path:null, calibration_due:'2027-01-15', status:'borrowed',    borrower_name:'You', has_tag:true },
+  { id:6, pm_number:'PM-006', name:'Tektronix TBS2104X',  device_type:'Oscilloscope',   serial_number:'TEK-TBS-099', manufacturer:'Tektronix',      model:'TBS2104X',    barcode:'490006', locker_slot:6,  description:null, image_path:null, calibration_due:'2026-08-20', status:'available',   borrower_name:null, has_tag:true },
+  { id:7, pm_number:'PM-007', name:'Hioki DT4282',        device_type:'Multimeter',     serial_number:null,          manufacturer:'Hioki',          model:'DT4282',      barcode:'490007', locker_slot:7,  description:null, image_path:null, calibration_due:null,         status:'available',   borrower_name:null, has_tag:true },
+  { id:8, pm_number:'PM-008', name:'Megger MIT485/2',     device_type:'Insulation Tester', serial_number:'MEG-485-002', manufacturer:'Megger',      model:'MIT485/2',    barcode:'490008', locker_slot:8,  description:null, image_path:null, calibration_due:'2026-12-01', status:'maintenance', borrower_name:null, has_tag:true },
 ];
 
 /** @type {string[]} Demo registrant names for testing the name list without backend */
@@ -2567,7 +2571,61 @@ function startBindCountdown() {
 }
 
 /**
- * Open the Add from Excel step (PM + free slot).
+ * Fill the Excel locker pick list on the Add step: rows whose Location is
+ * in-locker and not registered yet. Tap a row to fill the PM input; typing
+ * clears the highlight. Failure/empty shows a note — typed PM still works.
+ * @returns {Promise<void>}
+ */
+async function populateCatalogList() {
+  const list = document.getElementById('bind-catalog-list');
+  const note = document.getElementById('bind-catalog-note');
+  const pmInput = document.getElementById('bind-pm-input');
+  if (!list || !pmInput) return;
+  list.innerHTML = '';
+  note.textContent = '';
+  let rows;
+  try {
+    const res = await fetch('/api/admin/devices/catalog-locker');
+    if (!res.ok) throw new Error(String(res.status));
+    rows = (await res.json()).rows || [];
+  } catch (_) {
+    list.innerHTML = '';
+    note.textContent = `Excel list unavailable — type the ${ASSET_LABEL}.`;
+    return;
+  }
+  if (!rows.length) {
+    note.textContent =
+      `No unregistered units with Location = Locker in Excel — type the ${ASSET_LABEL}.`;
+    return;
+  }
+  for (const r of rows) {
+    const row = document.createElement('div');
+    row.className = 'bind-row';
+    const info = document.createElement('div');
+    info.className = 'bind-row-info';
+    const nameEl = document.createElement('div');
+    nameEl.className = 'bind-row-name';
+    nameEl.textContent = r.name || '';
+    const metaEl = document.createElement('div');
+    metaEl.className = 'bind-row-meta';
+    const make = [r.manufacturer, r.model].filter(Boolean).join(' ');
+    metaEl.textContent = `${r.pm_number || '—'}${make ? ' · ' + make : ''}`;
+    info.appendChild(nameEl);
+    info.appendChild(metaEl);
+    row.appendChild(info);
+    row.addEventListener('click', () => {
+      clickSound();
+      pmInput.value = r.pm_number || '';
+      list.querySelectorAll('.bind-row.selected')
+        .forEach(el => el.classList.remove('selected'));
+      row.classList.add('selected');
+    });
+    list.appendChild(row);
+  }
+}
+
+/**
+ * Open the Add from Excel step (pick from the locker list or type PM + free slot).
  */
 function openAddFromExcel() {
   if (USE_DEMO) {
@@ -2577,6 +2635,7 @@ function openAddFromExcel() {
   document.getElementById('bind-pm-input').value = '';
   document.getElementById('bind-add-error').textContent = '';
   selectedAddSlot = null;
+  populateCatalogList();
   const paint = () => {
     renderSlotGrid('bind-slot-grid', occupiedSlots(), selectedAddSlot, n => {
       selectedAddSlot = n;
@@ -2942,6 +3001,11 @@ document.getElementById('bind-search').addEventListener('input', () => {
 document.getElementById('bind-add-open').addEventListener('click', () => { clickSound(); openAddFromExcel(); });
 document.getElementById('bind-add-back').addEventListener('click', () => { clickSound(); showBindStep('bind-step-list'); populateBindList(); });
 document.getElementById('bind-add-submit').addEventListener('click', () => { clickSound(); submitRegisterDevice(); });
+document.getElementById('bind-pm-input').addEventListener('input', () => {
+  // Manual typing replaces a catalog pick — clear the selection highlight.
+  document.querySelectorAll('#bind-catalog-list .bind-row.selected')
+    .forEach(el => el.classList.remove('selected'));
+});
 document.getElementById('bind-slot-back').addEventListener('click', () => { clickSound(); showBindStep('bind-step-list'); });
 document.getElementById('bind-slot-submit').addEventListener('click', () => { clickSound(); submitChangeSlot(); });
 document.getElementById('admin-export-excel').addEventListener('click', () => { clickSound(); adminExportExcel(); });

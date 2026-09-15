@@ -1,7 +1,7 @@
 """
 File: test_admin.py
-Description: Tests for kiosk admin overlay, device-tag bind/unbind, sync,
-             update, Exit kiosk, and Shut down.
+Description: Tests for kiosk admin overlay, device-tag bind/unbind, Register
+             Device catalog pick list, sync, update, Exit kiosk, and Shut down.
 Project: smart_locker/tests/api
 Notes: Run with: python -m pytest tests/api/test_admin.py -v
 """
@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
+from openpyxl import Workbook
 
 from smart_locker.api.app_context import PendingRegistration, PendingTagBind
 from smart_locker.api.routes import router
@@ -98,9 +99,8 @@ class TestDeviceTagBindApi:
         db_session.expire_all()
         assert test_devices[0].tag_hmac is None
         listed = client.get("/api/devices").json()
-        cam = next(d for d in listed if d["name"] == "Camera")
-        assert cam["has_tag"] is False
-        assert "tag_hmac" not in cam
+        # Untagged devices are admin-only: Camera drops off the kiosk list.
+        assert "Camera" not in {d["name"] for d in listed}
         assert mock_context.pending_tag_bind is None
 
     def test_unbind_tag_clears_pending_bind(
@@ -207,23 +207,25 @@ class TestAdminOverlaySession:
         assert mock_context.pending_tag_bind.from_dashboard is True
 
     def test_list_devices_duplicate_name_distinct_pm(
-        self, client, mock_context, test_user, db_session
+        self, client, mock_context, test_user, db_session, hmac_key
     ):
         """Same name, different PM — both rows in the bind-list payload."""
-        DeviceRepository.create(
+        d1 = DeviceRepository.create(
             db_session,
             name="Fluke 87V",
             device_type="Multimeter",
             pm_number="PM-101",
             locker_slot=1,
         )
-        DeviceRepository.create(
+        d2 = DeviceRepository.create(
             db_session,
             name="Fluke 87V",
             device_type="Multimeter",
             pm_number="PM-102",
             locker_slot=2,
         )
+        d1.tag_hmac = compute_uid_hmac("TAG-101", hmac_key)
+        d2.tag_hmac = compute_uid_hmac("TAG-102", hmac_key)
         db_session.commit()
         mock_context.session_mgr.start_session(test_user)
         resp = client.get("/api/devices")
@@ -466,3 +468,80 @@ class TestAdminSyncAndUpdateEndpoints:
         resp = lan_client.post("/api/admin/shutdown")
         assert resp.status_code == 403
 
+
+
+class TestCatalogLockerList:
+    """GET /api/admin/devices/catalog-locker — Register Device pick list."""
+
+    @staticmethod
+    def _workbook(path, rows):
+        """Write a catalog workbook (first row = headers)."""
+        wb = Workbook()
+        ws = wb.active
+        for row in rows:
+            ws.append(row)
+        wb.save(path)
+        return path
+
+    def test_requires_session(self, client, mock_context):
+        """No session → 401."""
+        assert client.get("/api/admin/devices/catalog-locker").status_code == 401
+
+    def test_requires_admin(self, client, mock_context, test_user):
+        """A normal user session is 403."""
+        mock_context.session_mgr.start_session(test_user)
+        assert client.get("/api/admin/devices/catalog-locker").status_code == 403
+
+    def test_no_source_path_is_400(
+        self, client, mock_context, admin_user, monkeypatch
+    ):
+        """SOURCE_EXCEL_PATH unset → 400."""
+        monkeypatch.setattr("config.settings.SOURCE_EXCEL_PATH", "")
+        mock_context.session_mgr.start_session(admin_user)
+        resp = client.get("/api/admin/devices/catalog-locker")
+        assert resp.status_code == 400
+
+    def test_missing_workbook_is_503(
+        self, client, mock_context, admin_user, monkeypatch, tmp_path
+    ):
+        """Share down → 503."""
+        monkeypatch.setattr(
+            "config.settings.SOURCE_EXCEL_PATH",
+            str(tmp_path / "missing.xlsx"),
+        )
+        mock_context.session_mgr.start_session(admin_user)
+        resp = client.get("/api/admin/devices/catalog-locker")
+        assert resp.status_code == 503
+
+    def test_returns_unregistered_locker_rows(
+        self, client, mock_context, admin_user, test_devices, monkeypatch, tmp_path
+    ):
+        """In-locker Excel rows minus registered PMs, sorted by name."""
+        path = self._workbook(tmp_path / "device-list.xlsx", [
+            ["Equipment", "Name", "Manufacturer", "Model", "Location"],
+            ["PM-001", "Camera", "Fluke", "87V", "Locker"],   # registered
+            ["PM-100", "Zeta Scope", "Keysight", "DSOX", "Locker"],
+            ["PM-101", "Alpha Meter", "BK", "880", "locker"],
+            ["PM-102", "Bench PSU", "R&S", "HMC", "Jack B."],  # not in locker
+        ])
+        monkeypatch.setattr("config.settings.SOURCE_EXCEL_PATH", str(path))
+        mock_context.session_mgr.start_session(admin_user)
+        resp = client.get("/api/admin/devices/catalog-locker")
+        assert resp.status_code == 200
+        rows = resp.json()["rows"]
+        assert [r["pm_number"] for r in rows] == ["PM-101", "PM-100"]
+        assert set(rows[0]) == {"pm_number", "name", "manufacturer", "model"}
+
+    def test_no_location_column_returns_empty(
+        self, client, mock_context, admin_user, monkeypatch, tmp_path
+    ):
+        """Sheet without a Location column → empty rows list."""
+        path = self._workbook(tmp_path / "device-list.xlsx", [
+            ["Equipment", "Name"],
+            ["PM-100", "Scope"],
+        ])
+        monkeypatch.setattr("config.settings.SOURCE_EXCEL_PATH", str(path))
+        mock_context.session_mgr.start_session(admin_user)
+        resp = client.get("/api/admin/devices/catalog-locker")
+        assert resp.status_code == 200
+        assert resp.json() == {"rows": []}

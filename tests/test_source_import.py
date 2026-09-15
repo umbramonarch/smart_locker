@@ -19,9 +19,11 @@ from smart_locker.database.models import DeviceStatus
 from smart_locker.database.repositories import DeviceRepository, RegistrantRepository, UserRepository
 from smart_locker.security.hashing import compute_uid_hmac
 from smart_locker.sync.source_import import (
+    CatalogReadError,
     ImportResult,
     find_column,
     import_from_source_excel,
+    list_in_locker_catalog,
     parse_date,
 )
 
@@ -899,3 +901,40 @@ class TestImportEngineAndSavepoints:
         second = DeviceRepository.find_by_pm(db_session, "PM-002")
         assert first.serial_number == "SN-A"
         assert second.manufacturer == "NewMfr"
+
+
+class TestListInLockerCatalog:
+    """Register Device pick list: Excel rows whose Location is in-locker."""
+
+    def test_only_in_locker_rows_returned(self):
+        """Person names, blank cells, and other locations are excluded."""
+        path = _create_test_excel([
+            ["Equipment", "Name", "Location"],
+            ["PM-001", "Scope", "Locker"],
+            ["PM-002", "Meter", "Jack B."],
+            ["PM-003", "Probe", ""],
+            ["PM-004", "PSU", "locker"],
+            ["PM-005", "Calibrator", None],
+        ])
+        try:
+            rows = list_in_locker_catalog(path)
+            assert [r.pm_number for r in rows] == ["PM-001", "PM-004"]
+            assert rows[0].name == "Scope"
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_no_location_column_returns_empty(self):
+        """A sheet without a Location column yields an empty list."""
+        path = _create_test_excel([
+            ["Equipment", "Name"],
+            ["PM-001", "Scope"],
+        ])
+        try:
+            assert list_in_locker_catalog(path) == []
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_missing_file_raises(self):
+        """Share down raises CatalogReadError, not an empty list."""
+        with pytest.raises(CatalogReadError):
+            list_in_locker_catalog("/nonexistent/device-list.xlsx")

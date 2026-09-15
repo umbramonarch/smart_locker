@@ -717,8 +717,9 @@ The company device master list lives on the share. **Sync does not put devices i
 locker.** It only refreshes catalog fields (name, type, serial, manufacturer, model,
 calibration) for PMs that are **already** locker rows. Platz/Schrank is unused.
 
-A device enters the locker when an admin uses **Register Device**: enter the **PM**
-number, pick a **free slot**, tap the NFC sticker. The Pi looks up that PM in
+A device enters the locker when an admin uses **Register Device**: pick it from the
+Excel `Locker` list or enter the **PM** number, pick a **free slot**, tap the NFC
+sticker. The Pi looks up that PM in
 `device-list.xlsx` and copies name / type / manufacturer / model / serial / cal.
 Unknown PM or share down → error, no ghost row.
 
@@ -844,7 +845,8 @@ Pi on the LAN can use them — the lock is **physical access**, not a password.
      After success, timeout, or cancel the kiosk returns to idle; the next
      work-card tap logs that user in (a leftover admin session must not
      treat the tap as logout).
-   - **Register Device** — add a locker unit: **PM + free slot + NFC tap** (catalog
+   - **Register Device** — add a locker unit: pick from the Excel `Locker` list
+     or type the **PM**, then **free slot + NFC tap** (catalog
      comes from Excel). Existing rows can bind / unbind / change slot. The list shows
      **name + PM** (and slot).
    - **Export to Excel** — download a snapshot of devices / transactions / users.
@@ -1281,6 +1283,7 @@ that bridges card taps to the browser.
 | `GET` | `/api/registrants` | Approved names for self-registration |
 | `POST` | `/api/admin/session` | Start the hidden admin-panel session |
 | `POST` | `/api/admin/register` | Admin manual enrolment (skips name check) |
+| `GET` | `/api/admin/devices/catalog-locker` | Unregistered Excel rows with Location = locker (admin session) |
 | `POST` | `/api/admin/devices/{id}/bind-tag` | 60s window to bind the next sticker to that device |
 | `POST` | `/api/admin/devices/{id}/unbind-tag` | Clear the sticker HMAC on that device |
 | `POST` | `/api/admin/sync-source` | Trigger the source Excel import now |
@@ -1322,10 +1325,13 @@ borrow; borrowed by you → return; borrowed by someone else → fail for a norm
 admin return-on-behalf; maintenance → fail. The session stays open. A **work-card** tap
 still logs out; a device tag does not. An unknown UID while logged in stays logged in.
 
-**Register Device** (hidden admin panel): enter **PM**, pick a **free slot**, tap the
+**Register Device** (hidden admin panel): pick a unit from the Excel `Locker`
+list (`GET /api/admin/devices/catalog-locker` — in-locker rows not yet
+registered) or type the **PM**, pick a **free slot**, tap the
 sticker. Catalog (name, type, manufacturer, model, serial, cal) is copied from Excel.
 Unknown PM or share down fails with no ghost row. Existing rows can bind / unbind /
-change slot. The list shows **name + PM**. CLI bind-only:
+change slot. The list shows **name + PM**; the kiosk grids show only devices
+with a bound sticker. CLI bind-only:
 `python -m scripts.enroll_device_tag --pm PM-001` (or `--uid HEX`, `--force` to replace).
 There is no USB barcode scanner and no `GET /api/devices/barcode/{barcode}`.
 
