@@ -4,7 +4,10 @@ Description: REST API endpoints and SSE event stream for the Smart Locker kiosk.
              Provides session management, device listing, borrow/return operations,
              user self-registration (with registrant name validation), admin-only
              manual registration (with role switch), admin Users (list,
-             deactivate, replace card), Register Device (PM + slot + NFC), device-tag
+             deactivate, replace card), Register Device (pick from the Excel locker
+             list or PM + slot + NFC; kiosk lists tagged units only — the
+             admin panel reads /api/admin/devices which includes untagged
+             rows), device-tag
              bind/unbind, admin maintenance toggle, registrant list
              retrieval, source sync, dashboard
              (public Inventory from Excel and Locker from SQLite, Display
@@ -696,6 +699,46 @@ def touch_session(user_session: UserSession = Depends(require_session)):
 
 # --- Device Endpoints -------------------------------------------------------
 
+
+def _device_payload(d: Device, current_user_id: int) -> dict:
+    """Serialise one locker device for the kiosk/admin JSON feeds.
+
+    Args:
+        d: Device row.
+        current_user_id: Session user id — their borrows read ``"You"``.
+
+    Returns:
+        dict: Device fields, including calibration state; ``tag_hmac``
+            itself is never exposed.
+    """
+    from config.settings import CALIBRATION_WARN_DAYS
+
+    borrower_name = None
+    if d.status == DeviceStatus.BORROWED and d.current_borrower_id is not None:
+        if d.current_borrower_id == current_user_id:
+            borrower_name = "You"
+        elif d.current_borrower is not None:
+            borrower_name = d.current_borrower.display_name
+
+    return {
+        "id": d.id,
+        "pm_number": d.pm_number,
+        "name": d.name,
+        "device_type": d.device_type,
+        "serial_number": d.serial_number,
+        "manufacturer": d.manufacturer,
+        "model": d.model,
+        "locker_slot": d.locker_slot,
+        "description": d.description,
+        "image_path": d.image_path,
+        "calibration_due": d.calibration_due.isoformat() if d.calibration_due else None,
+        **calibration_fields(d.calibration_due, CALIBRATION_WARN_DAYS),
+        "status": d.status.value,
+        "borrower_name": borrower_name,
+        "has_tag": d.tag_hmac is not None,
+    }
+
+
 @router.get("/api/calibration/alerts")
 def calibration_alerts(
     db: Session = Depends(get_db),
@@ -746,10 +789,15 @@ def list_devices(
     db: Session = Depends(get_db),
     user_session: UserSession = Depends(require_session),
 ):
-    """List all devices with borrower info for the kiosk UI.
+    """List tagged locker devices with borrower info for the kiosk UI.
 
     Returns a flat list of device dicts with status and borrower name.
     The current user's own borrowed devices show ``"You"`` as the borrower.
+    Only tagged locker devices are returned — untagged rows are admin-only
+    until the sticker is bound — except a loan the session user holds
+    themselves: a BORROWED row whose borrower is the caller stays visible
+    (tagged or not) so it can still be returned. The hidden-admin panel
+    uses ``GET /api/admin/devices`` which lists every row.
 
     Args:
         db: Database session (injected by ``get_db``).
@@ -759,39 +807,45 @@ def list_devices(
         list[dict]: One dict per device with id, name, status, borrower_name,
             calibration_state, calibration_days_left, etc.
     """
-    from config.settings import CALIBRATION_WARN_DAYS
-
-    devices = DeviceRepository.list_all(db)
     current_user_id = user_session.user.id
-    result = []
+    return [
+        _device_payload(d, current_user_id)
+        for d in DeviceRepository.list_all(db)
+        if d.tag_hmac is not None
+        or (
+            d.status == DeviceStatus.BORROWED
+            and d.current_borrower_id == current_user_id
+        )
+    ]
 
-    for d in devices:
-        borrower_name = None
-        if d.status == DeviceStatus.BORROWED and d.current_borrower_id is not None:
-            if d.current_borrower_id == current_user_id:
-                borrower_name = "You"
-            elif d.current_borrower is not None:
-                borrower_name = d.current_borrower.display_name
 
-        result.append({
-            "id": d.id,
-            "pm_number": d.pm_number,
-            "name": d.name,
-            "device_type": d.device_type,
-            "serial_number": d.serial_number,
-            "manufacturer": d.manufacturer,
-            "model": d.model,
-            "locker_slot": d.locker_slot,
-            "description": d.description,
-            "image_path": d.image_path,
-            "calibration_due": d.calibration_due.isoformat() if d.calibration_due else None,
-            **calibration_fields(d.calibration_due, CALIBRATION_WARN_DAYS),
-            "status": d.status.value,
-            "borrower_name": borrower_name,
-            "has_tag": d.tag_hmac is not None,
-        })
+@router.get("/api/admin/devices")
+def admin_list_devices(
+    db: Session = Depends(get_db),
+    user_session: UserSession = Depends(require_session),
+):
+    """Complete locker list for the hidden-admin Register Device panel.
 
-    return result
+    Untagged rows are included so Bind can be retried and slots stay
+    accurate. Same payload shape as ``GET /api/devices``.
+
+    Args:
+        db: Database session (injected by ``get_db``).
+        user_session: The active session (injected by ``require_session``).
+
+    Returns:
+        list[dict]: Every locker row, tagged or not.
+
+    Raises:
+        HTTPException: 403 if the caller is not an admin.
+    """
+    if user_session.user.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Admin access required.")
+    current_user_id = user_session.user.id
+    return [
+        _device_payload(d, current_user_id)
+        for d in DeviceRepository.list_all(db)
+    ]
 
 
 @router.post("/api/devices/{device_id}/borrow")
@@ -814,6 +868,8 @@ def borrow_device(
         dict: ``{"success": bool, "message": str}``.
     """
     device = DeviceRepository.find_by_id(db, device_id)
+    if device is not None and device.tag_hmac is None:
+        raise HTTPException(409, "Tap the sticker to bind it first.")
     device_name = device.name if device else f"Device {device_id}"
 
     success = LockerService.borrow_device(db, user_session, device_id)
@@ -1419,6 +1475,58 @@ def admin_replace_card(
     }
 
 
+@router.get("/api/admin/devices/catalog-locker")
+def list_catalog_locker(
+    db: Session = Depends(get_db),
+    user_session: UserSession = Depends(require_session),
+):
+    """List this locker's Excel rows that are not registered yet.
+
+    Feeds the Register Device "Add from Excel" pick list: every source row
+    whose Location cell is exactly the in-locker token and whose PM is not
+    a SQLite locker device, sorted by name then PM.
+
+    Args:
+        db: Database session (injected by ``get_db``).
+        user_session: The active admin session (injected by ``require_session``).
+
+    Returns:
+        dict: ``{"rows": [{"pm_number", "name", "manufacturer", "model"}]}``.
+
+    Raises:
+        HTTPException: 403 if not admin, 400 if the source path is unset,
+            503 when the workbook is missing or unreadable.
+    """
+    if user_session.user.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Admin access required.")
+
+    from config.settings import SOURCE_EXCEL_PATH
+    if not SOURCE_EXCEL_PATH:
+        raise HTTPException(status_code=400, detail="Source Excel path not configured.")
+
+    from smart_locker.services.device_registration import (
+        CatalogUnavailable,
+        unregistered_locker_rows,
+    )
+
+    try:
+        rows = unregistered_locker_rows(db, SOURCE_EXCEL_PATH)
+    except CatalogUnavailable as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+
+    return {
+        "rows": [
+            {
+                "pm_number": r.pm_number,
+                "name": r.name,
+                "manufacturer": r.manufacturer,
+                "model": r.model,
+            }
+            for r in rows
+        ]
+    }
+
+
 @router.post("/api/admin/devices/register")
 def register_locker_device(
     body: RegisterDeviceRequest,
@@ -1678,6 +1786,29 @@ def start_device_tag_bind(
     return {"success": True, "message": "Tap the sticker to bind it."}
 
 
+def _refresh_borrow_guard(db: Session, device: Device) -> None:
+    """Re-read the row and refuse the unbind if it is borrowed now.
+
+    Best-effort narrowing of the unbind check-then-act window: SQLite
+    offers no row locks, so the 409 re-check runs on a freshly read row
+    immediately before the mutation. A borrow committing between this
+    refresh and the unbind commit can still strand a borrowed+untagged
+    loan; that residual race needs a serialising store to close fully.
+
+    Args:
+        db: Active database session.
+        device: Locker device about to be unbound.
+
+    Raises:
+        HTTPException: 409 if the device is currently borrowed.
+    """
+    db.refresh(device)
+    if device.status == DeviceStatus.BORROWED:
+        raise HTTPException(
+            409, "Return the device first — a borrowed sticker cannot be unbound."
+        )
+
+
 @router.post("/api/admin/devices/{device_id}/unbind-tag")
 def unbind_device_tag(
     device_id: int,
@@ -1695,7 +1826,8 @@ def unbind_device_tag(
         dict: ``{"success": True}``.
 
     Raises:
-        HTTPException: 403 if not admin, 404 if the device does not exist.
+        HTTPException: 403 if not admin, 404 if the device does not exist,
+            409 if the device is currently borrowed.
     """
     if user_session.user.role != UserRole.ADMIN:
         raise HTTPException(status_code=403, detail="Admin access required.")
@@ -1703,6 +1835,7 @@ def unbind_device_tag(
     device = DeviceRepository.find_by_id(db, device_id)
     if device is None:
         raise HTTPException(status_code=404, detail="Device not found.")
+    _refresh_borrow_guard(db, device)
 
     DeviceRepository.unbind_tag(db, device)
     if ctx_module.context is not None:
@@ -2318,12 +2451,14 @@ def dashboard_unbind_tag(
         dict: ``ok``, ``pm_number``.
 
     Raises:
-        HTTPException: 401 without secret; 404 if the PM is not a locker device.
+        HTTPException: 401 without secret; 404 if the PM is not a locker
+            device; 409 if the device is currently borrowed.
     """
     pm = body.pm_number.strip()
     device = DeviceRepository.find_by_pm(db, pm)
     if device is None:
         raise HTTPException(status_code=404, detail="Device not found.")
+    _refresh_borrow_guard(db, device)
 
     DeviceRepository.unbind_tag(db, device)
     if ctx_module.context is not None:

@@ -3,9 +3,10 @@
   Description: Kiosk touch-display UI with six screens (Idle, Auth Failed,
     Main Menu, Locker availability, Return Grid, Device Detail) plus overlays
     for inactivity warning, return slot, self-registration, admin panel,
-    Register Device, Users (deactivate / replace card), software update,
-    and appliance shut down. Calibration due-soon / overdue alerts show
-    as card badges, a detail line, and an idle banner (warn only).
+    Register Device (Excel locker pick list + PM + slot), Users
+    (deactivate / replace card), software update, and appliance shut down.
+    Calibration due-soon / overdue alerts show as card badges, a detail line,
+    and an idle banner (warn only).
   Project: smart_locker/frontend
   Notes: Served as a static file by FastAPI. Requires app.js and style.css.
     All interactivity is in app.js. Offline: system fonts only.
@@ -591,10 +592,13 @@
           <div class="register-input-glow"></div>
         </div>
         <div class="bind-device-list" id="bind-device-list"></div>
+        <p class="bind-hint bind-list-note" id="bind-list-note"></p>
       </div>
 
       <div class="bind-step hidden" id="bind-step-add">
-        <p class="bind-hint" id="bind-add-hint">Enter the PM number from the catalog spreadsheet, pick a free slot, then continue to tap the sticker.</p>
+        <p class="bind-hint" id="bind-add-hint">Pick a unit from the Excel locker list or type its PM number, pick a free slot, then continue to tap the sticker.</p>
+        <div class="bind-device-list bind-catalog-list" id="bind-catalog-list"></div>
+        <p class="bind-hint bind-catalog-note" id="bind-catalog-note"></p>
         <div class="register-input-group bind-pm-group">
           <input type="text" id="bind-pm-input" class="register-input" placeholder="PM number" maxlength="50" autocomplete="off" spellcheck="false">
           <div class="register-input-glow"></div>

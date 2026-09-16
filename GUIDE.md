@@ -717,8 +717,9 @@ The company device master list lives on the share. **Sync does not put devices i
 locker.** It only refreshes catalog fields (name, type, serial, manufacturer, model,
 calibration) for PMs that are **already** locker rows. Platz/Schrank is unused.
 
-A device enters the locker when an admin uses **Register Device**: enter the **PM**
-number, pick a **free slot**, tap the NFC sticker. The Pi looks up that PM in
+A device enters the locker when an admin uses **Register Device**: pick it from the
+Excel `Locker` list or enter the **PM** number, pick a **free slot**, tap the NFC
+sticker. The Pi looks up that PM in
 `device-list.xlsx` and copies name / type / manufacturer / model / serial / cal.
 Unknown PM or share down → error, no ghost row.
 
@@ -806,9 +807,9 @@ it still asks for a work card first.
 - **Main menu** — welcome + name; **Tap the device** to borrow or return; **Locker**
   (what's in · what's out) and **Return** (*or pick on screen*); **End Session**.
 - **Locker** — availability overlay: every locker device by slot, tagged **IN** / **OUT**
-  / **YOURS** / **MAINT**, with **PM number** on the card. Screen-pick borrow still
-  works for units without a sticker. A sticker tap still auto-intents and refreshes
-  this grid.
+  / **YOURS** / **MAINT**, with **PM number** on the card. Only units with a bound
+  sticker appear here — screen-pick borrow needs the sticker (bind it in Register
+  Device). A sticker tap still auto-intents and refreshes this grid.
 - **Return** — the same grid (PM on each card), with your own borrowed items highlighted.
   Confirming a return shows the slot overlay.
 - **Device detail** (overlay) — photo, PM, type, serial, and a confirm button.
@@ -858,7 +859,8 @@ Pi on the LAN can use them — the lock is **physical access**, not a password.
      the old card stays bound to the deactivated row, so re-enrolment needs
      both a new name and a fresh card. Deactivated names are also hidden
      from the dashboard owner dropdown.
-   - **Register Device** — add a locker unit: **PM + free slot + NFC tap** (catalog
+   - **Register Device** — add a locker unit: pick from the Excel `Locker` list
+     or type the **PM**, then **free slot + NFC tap** (catalog
      comes from Excel). Existing rows can bind / unbind / change slot. The list shows
      **name + PM** (and slot).
    - **Export to Excel** — download a snapshot of devices / transactions / users.
@@ -1291,7 +1293,8 @@ that bridges card taps to the browser.
 | `GET` | `/api/session` | Current session state (kiosk loopback; LAN 403) |
 | `POST` | `/api/session/end` | End the session |
 | `POST` | `/api/session/touch` | Reset the inactivity timer |
-| `GET` | `/api/devices` | All devices with status, borrower, metadata |
+| `GET` | `/api/devices` | Tagged locker devices for the kiosk grids (session) |
+| `GET` | `/api/admin/devices` | Every locker row incl. untagged, for Register Device (admin session) |
 | `POST` | `/api/devices/{id}/borrow` | Borrow a device |
 | `POST` | `/api/devices/{id}/return` | Return a device (admins on behalf) |
 | `POST` | `/api/register` | Start self-registration (validates the name; kiosk loopback) |
@@ -1302,8 +1305,9 @@ that bridges card taps to the browser.
 | `GET` | `/api/admin/users` | List active users with held-device counts (admin session) |
 | `POST` | `/api/admin/users/{id}/deactivate` | Deactivate a user (409 last admin / devices held) |
 | `POST` | `/api/admin/users/{id}/replace-card` | Arm a 60s window; next tap becomes that user's card |
+| `GET` | `/api/admin/devices/catalog-locker` | Unregistered Excel rows whose Location is exactly the in-locker token (admin session) |
 | `POST` | `/api/admin/devices/{id}/bind-tag` | 60s window to bind the next sticker to that device |
-| `POST` | `/api/admin/devices/{id}/unbind-tag` | Clear the sticker HMAC on that device |
+| `POST` | `/api/admin/devices/{id}/unbind-tag` | Clear the sticker HMAC on that device (409 while borrowed — return first) |
 | `POST` | `/api/admin/devices/{id}/maintenance` | Flag a locker device in/out of maintenance (admin; refused while borrowed) |
 | `GET` | `/api/calibration/alerts` | Due-soon/overdue locker devices, counts sorted overdue first (kiosk loopback, no session) |
 | `POST` | `/api/admin/sync-source` | Trigger the source Excel import now |
@@ -1314,7 +1318,7 @@ that bridges card taps to the browser.
 | `GET` | `/api/dashboard/owners` | Owner dropdown names (users + registrants + in-locker token); public |
 | `POST` | `/api/dashboard/owner` | Change owner of a non-locker PM (Excel only; 409 if in locker); public |
 | `POST` | `/api/dashboard/bind-tag` | Arm 60s NFC bind for a locker PM (admin secret; tap at the reader) |
-| `POST` | `/api/dashboard/unbind-tag` | Clear sticker HMAC on a locker PM (admin secret) |
+| `POST` | `/api/dashboard/unbind-tag` | Clear sticker HMAC on a locker PM (admin secret; 409 while borrowed) |
 | `POST` | `/api/kiosk/display` | Kiosk heartbeat of the current screen |
 | `GET` | `/api/dashboard/transactions` | Transaction history, last 500 (gated; 5-tap overlay is not auth) |
 | `GET` | `/api/dashboard/users` | Registered-users list (gated; 5-tap overlay is not auth) |
@@ -1345,11 +1349,17 @@ borrow; borrowed by you → return; borrowed by someone else → fail for a norm
 admin return-on-behalf; maintenance → fail. The session stays open. A **work-card** tap
 still logs out; a device tag does not. An unknown UID while logged in stays logged in.
 
-**Register Device** (hidden admin panel): enter **PM**, pick a **free slot**, tap the
+**Register Device** (hidden admin panel): pick a unit from the Excel `Locker`
+list (`GET /api/admin/devices/catalog-locker` — rows whose Location is exactly
+the in-locker token, not yet registered) or type the **PM**, pick a **free slot**,
+tap the
 sticker. Catalog (name, type, manufacturer, model, serial, cal) is copied from Excel.
 Unknown PM or share down fails with no ghost row. Existing rows can bind / unbind /
 change slot, and **To maintenance** / **Back in service** flags a device out for
-calibration (refused while borrowed). The list shows **name + PM**. CLI bind-only:
+calibration (refused while borrowed). Unbind refuses a borrowed row (409) — record the return first, then
+unbind; to recover a loan whose sticker was damaged, bind the replacement sticker
+and return normally. The list shows **name + PM**; the kiosk grids show only devices
+with a bound sticker. CLI bind-only:
 `python -m scripts.enroll_device_tag --pm PM-001` (or `--uid HEX`, `--force` to replace).
 There is no USB barcode scanner and no `GET /api/devices/barcode/{barcode}`.
 

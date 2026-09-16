@@ -17,6 +17,7 @@ from smart_locker.api.routes import router
 from smart_locker.auth.session_manager import SessionManager
 from smart_locker.database.models import DeviceStatus
 from smart_locker.database.repositories import DeviceRepository, UserRepository
+from smart_locker.security.hashing import compute_uid_hmac
 
 import smart_locker.api.app_context as ctx_module
 
@@ -100,8 +101,8 @@ def admin_user(db_session):
 
 
 @pytest.fixture()
-def test_devices(db_session):
-    """Create a set of test devices."""
+def test_devices(db_session, hmac_key):
+    """Create a set of test devices, each with a bound NFC sticker tag."""
     devices = []
     for i, (name, dtype, status) in enumerate([
         ("Camera", "Camera", DeviceStatus.AVAILABLE),
@@ -117,9 +118,10 @@ def test_devices(db_session):
             locker_slot=i,
             description=f"Test {name}",
         )
+        d.tag_hmac = compute_uid_hmac(f"TAG-{i:03d}", hmac_key)
         if status == DeviceStatus.MAINTENANCE:
             d.status = DeviceStatus.MAINTENANCE
-            db_session.flush()
+        db_session.flush()
         devices.append(d)
     return devices
 

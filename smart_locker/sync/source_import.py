@@ -8,7 +8,8 @@ Project: smart_locker/sync
 Notes: Called by the scheduler, ``python -m scripts.sync_source``, or
        POST /api/admin/sync-source. Status, borrower, slot, image,
        description, and tag_hmac are never overwritten. A Slot/cabinet
-       column is unused. lookup_catalog_by_pm is the Register Device lookup.
+       column is unused. lookup_catalog_by_pm is the Register Device lookup;
+       list_in_locker_catalog is its "pick from the Excel locker list" feed.
        Calibration cells: blank clears the stored date, unparsable text keeps
        it (warning logged), no Calibration column leaves it alone.
 """
@@ -210,12 +211,35 @@ def pm_match_key(value) -> str:
     return normalize_pm(value).casefold()
 
 
+def is_own_locker_location(value: str) -> bool:
+    """Return True when a Location cell is exactly this kiosk's locker.
+
+    Case-insensitive exact match on ``in_locker_token()``; surrounding
+    whitespace is ignored. Other cabinets are not this locker, so they do
+    not match. Used for the Register Device pick list.
+
+    Args:
+        value: Location cell text.
+
+    Returns:
+        True if the text is exactly the in-locker token.
+    """
+    text = (value or "").strip().lower()
+    if not text:
+        return False
+    token = (in_locker_token() or "").strip().lower()
+    return bool(token) and text == token
+
+
 def is_in_locker_location(value: str) -> bool:
     """Return True when a Location cell is a non-person marker.
 
-    Exact ``in_locker_token()`` match, an exact ``maintenance_token()``
-    match (device out for calibration — written by Location write-back),
-    or a whole-word locker/cabinet marker. ``"Blocker"`` is not in-locker.
+    Exact ``in_locker_token()`` match (via ``is_own_locker_location``),
+    an exact ``maintenance_token()`` match (device out for calibration —
+    written by Location write-back), or a whole-word locker/cabinet
+    marker. ``"Blocker"`` is not in-locker. A "Cabinet A" cell is a
+    place, not a person — but only ``is_own_locker_location`` decides
+    what belongs in this kiosk's Register Device pick list.
 
     Args:
         value: Location cell text.
@@ -223,12 +247,11 @@ def is_in_locker_location(value: str) -> bool:
     Returns:
         True if the text is a locker/maintenance marker, not a person name.
     """
+    if is_own_locker_location(value):
+        return True
     text = (value or "").strip().lower()
     if not text:
         return False
-    token = (in_locker_token() or "").strip().lower()
-    if token and text == token:
-        return True
     maint = (maintenance_token() or "").strip().lower()
     if maint and text == maint:
         return True
@@ -476,6 +499,39 @@ def _catalog_from_row(
     )
 
 
+def _load_catalog(
+    source_path: str | Path,
+    sheet_name: str | None,
+    column_overrides: dict[str, str] | None,
+) -> tuple[list, dict]:
+    """Load source rows and detect columns, or raise ``CatalogReadError``.
+
+    Args:
+        source_path: Path to ``device-list.xlsx``.
+        sheet_name: Sheet to read (default: active sheet).
+        column_overrides: Optional header-name overrides.
+
+    Returns:
+        ``(rows, cols)`` — raw rows including the header row and the
+        detected column map.
+
+    Raises:
+        CatalogReadError: File missing, locked, empty, or no PM column.
+    """
+    path = Path(source_path)
+    rows, err = _load_rows(path, sheet_name)
+    if err:
+        raise CatalogReadError(err)
+    if not rows or len(rows) < 2:
+        raise CatalogReadError("Source Excel has no data rows.")
+
+    headers = [str(h).strip() if h else "" for h in rows[0]]
+    cols = _detect_columns(headers, column_overrides)
+    if cols["pm"] is None:
+        raise CatalogReadError(f"Could not find PM/equipment column. Headers: {headers}")
+    return rows, cols
+
+
 def lookup_catalog_by_pm(
     source_path: str | Path,
     pm_number: str,
@@ -498,17 +554,7 @@ def lookup_catalog_by_pm(
     Raises:
         CatalogReadError: File missing, locked, empty, or no PM column.
     """
-    path = Path(source_path)
-    rows, err = _load_rows(path, sheet_name)
-    if err:
-        raise CatalogReadError(err)
-    if not rows or len(rows) < 2:
-        raise CatalogReadError("Source Excel has no data rows.")
-
-    headers = [str(h).strip() if h else "" for h in rows[0]]
-    cols = _detect_columns(headers, column_overrides)
-    if cols["pm"] is None:
-        raise CatalogReadError(f"Could not find PM/equipment column. Headers: {headers}")
+    rows, cols = _load_catalog(source_path, sheet_name, column_overrides)
 
     want = pm_match_key(pm_number)
     compose_name = cols["name"] is None
@@ -517,6 +563,53 @@ def lookup_catalog_by_pm(
         if catalog is not None and pm_match_key(catalog.pm_number) == want:
             return catalog
     return None
+
+
+def list_in_locker_catalog(
+    source_path: str | Path,
+    sheet_name: str | None = None,
+    default_type: str = "general",
+    column_overrides: dict[str, str] | None = None,
+) -> list[CatalogRow]:
+    """Return catalog rows whose Location cell is this kiosk's locker.
+
+    Args:
+        source_path: Path to ``device-list.xlsx``.
+        sheet_name: Sheet to read (default: active sheet).
+        default_type: Device type when the sheet has no category column.
+        column_overrides: Optional header-name overrides.
+
+    Returns:
+        ``CatalogRow`` for every data row whose Location passes
+        ``is_own_locker_location`` (exact in-locker token — other cabinets
+        are excluded); empty list when the sheet has no Location column.
+
+    Raises:
+        CatalogReadError: File missing, locked, empty, or no PM column.
+    """
+    rows, cols = _load_catalog(source_path, sheet_name, column_overrides)
+    if cols["location"] is None:
+        return []
+
+    out: list[CatalogRow] = []
+    seen: set[str] = set()
+    compose_name = cols["name"] is None
+    for row in rows[1:]:
+        if not is_own_locker_location(_cell_str(row, cols["location"]) or ""):
+            continue
+        catalog = _catalog_from_row(row, cols, compose_name, default_type)
+        if catalog is None:
+            continue
+        key = pm_match_key(catalog.pm_number)
+        if key in seen:
+            logger.warning(
+                "Duplicate PM %s in locker catalog — keeping first row.",
+                catalog.pm_number,
+            )
+            continue
+        seen.add(key)
+        out.append(catalog)
+    return out
 
 
 # ---------------------------------------------------------------------------

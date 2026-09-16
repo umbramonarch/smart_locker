@@ -2139,6 +2139,7 @@ body::after {
   width: 92%;
   max-width: 640px;
   max-height: 90vh;
+  overflow-y: auto;
   display: flex;
   flex-direction: column;
   gap: 1.25rem;
@@ -2220,6 +2221,18 @@ body::after {
 }
 .bind-row-actions button.bind-unbind { color: var(--text-muted); }
 
+/* Add-from-Excel locker pick list: compact, tappable rows. */
+.bind-catalog-list {
+  max-height: 200px;
+  margin-bottom: 0.6rem;
+}
+.bind-catalog-list .bind-row { cursor: pointer; }
+.bind-row.selected {
+  border-color: var(--border-accent);
+  background: var(--accent-dim);
+}
+.bind-catalog-note { margin: 0 0 0.4rem; }
+
 .bind-add-open {
   font-family: var(--font-display);
   font-size: 0.85rem;
@@ -2237,9 +2250,27 @@ body::after {
 .bind-pm-group { width: 100%; max-width: 100%; }
 .bind-slot-grid {
   width: 100%;
+  max-height: 240px;
+  overflow-y: auto;
   display: grid;
   grid-template-columns: repeat(6, 1fr);
   gap: 0.4rem;
+}
+/* Bind-list fetch failure note (hidden while empty) + inline retry. */
+.bind-list-note:empty { display: none; }
+.bind-note-retry {
+  font-family: var(--font-display);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 0.3rem 0.7rem;
+  margin-left: 0.5rem;
+  border-radius: 8px;
+  border: 1px solid var(--border-accent);
+  background: var(--accent-dim);
+  color: var(--accent);
+  cursor: pointer;
 }
 .bind-slot-btn {
   font-family: var(--font-display);

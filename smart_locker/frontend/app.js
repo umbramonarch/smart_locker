@@ -3,11 +3,13 @@
  *               transitions, API communication, SSE event handling, and user
  *               interaction flow across idle, auth, menu, locker availability,
  *               return, detail, registration (incl. Register as admin), admin,
- *               Register Device (PM + slot + NFC, maintenance toggle), Users
- *               (deactivate / replace card), return-slot, software-update, and
- *               appliance shutdown overlays. Calibration due-soon/overdue
- *               shows card badges, a detail line, and an idle banner (warn
- *               only).
+ *               Register Device (pick from the Excel locker list or PM + slot
+ *               + NFC, maintenance toggle; grids show tagged units only — the
+ *               admin panel reads /api/admin/devices which includes untagged
+ *               rows), Users (deactivate / replace card), return-slot,
+ *               software-update, and appliance shutdown overlays. Calibration
+ *               due-soon/overdue shows card badges, a detail line, and an idle
+ *               banner (warn only).
  * @project smart_locker/frontend
  * @description Demo mode (?demo), circle-reveal transitions, split text,
  *              inactivity countdown, and self-registration.
@@ -53,8 +55,10 @@ function applyAssetLabels(label) {
   const addHint = document.getElementById('bind-add-hint');
   if (addHint) {
     addHint.textContent =
-      `Enter the ${text} from the catalog spreadsheet, pick a free slot, then continue to tap the sticker.`;
+      `Pick a unit from the Excel locker list or type its ${text}, pick a free slot, then continue to tap the sticker.`;
   }
+  const catalogNote = document.getElementById('bind-catalog-note');
+  if (catalogNote) catalogNote.textContent = '';
   const search = document.getElementById('bind-search');
   if (search) search.placeholder = `Search name or ${text}…`;
   const pmInput = document.getElementById('bind-pm-input');
@@ -95,6 +99,7 @@ const S = {
   screen:     'idle',   // current screen id
   user:       null,     // { id, name, role }
   devices:    [],
+  adminDevices: [],     // admin panel list — includes untagged rows
   selected:   null,     // device object open in detail overlay
   mode:       null,     // 'borrow' | 'return'
   prevScreen: null,     // screen that was active before an overlay opened
@@ -129,14 +134,26 @@ let demoUserIdx = 0;
 const DEMO_WARN_DAYS = 14;
 
 const DEMO_DEVICES = [
-  { id:1, pm_number:'PM-001', name:'Keysight DSOX3054T',  device_type:'Oscilloscope',   serial_number:'MY12345678',  manufacturer:'Keysight',       model:'DSOX3054T',   barcode:'490001', locker_slot:1,  description:null, image_path:null, calibration_due:'2026-09-15', status:'available',   borrower_name:null, has_tag:false },
-  { id:2, pm_number:'PM-002', name:'Rohde & Schwarz HMC8043', device_type:'Power Supply', serial_number:'RS-HMC-042', manufacturer:'Rohde & Schwarz', model:'HMC8043',    barcode:'490002', locker_slot:2,  description:null, image_path:null, calibration_due:'2026-11-01', status:'borrowed',    borrower_name:'Sarah K.' },
-  { id:3, pm_number:'PM-003', name:'Fluke 87V',           device_type:'Multimeter',     serial_number:'FL-87V-007',  manufacturer:'Fluke',          model:'87V',         barcode:'490003', locker_slot:3,  description:null, image_path:null, calibration_due:'2026-06-30', status:'available',   borrower_name:null       },
-  { id:4, pm_number:'PM-004', name:'Keysight 34465A',     device_type:'Multimeter',     serial_number:'MY98765432',  manufacturer:'Keysight',       model:'34465A',      barcode:'490004', locker_slot:4,  description:null, image_path:null, calibration_due:null,         status:'available',   borrower_name:null       },
-  { id:5, pm_number:'PM-005', name:'Fluke i400s',         device_type:'Current Probe',  serial_number:null,          manufacturer:'Fluke',          model:'i400s',       barcode:'490005', locker_slot:5,  description:null, image_path:null, calibration_due:'2027-01-15', status:'borrowed',    borrower_name:'You'      },
-  { id:6, pm_number:'PM-006', name:'Tektronix TBS2104X',  device_type:'Oscilloscope',   serial_number:'TEK-TBS-099', manufacturer:'Tektronix',      model:'TBS2104X',    barcode:'490006', locker_slot:6,  description:null, image_path:null, calibration_due:'2026-08-20', status:'available',   borrower_name:null       },
-  { id:7, pm_number:'PM-007', name:'Hioki DT4282',        device_type:'Multimeter',     serial_number:null,          manufacturer:'Hioki',          model:'DT4282',      barcode:'490007', locker_slot:7,  description:null, image_path:null, calibration_due:null,         status:'available',   borrower_name:null       },
-  { id:8, pm_number:'PM-008', name:'Megger MIT485/2',     device_type:'Insulation Tester', serial_number:'MEG-485-002', manufacturer:'Megger',      model:'MIT485/2',    barcode:'490008', locker_slot:8,  description:null, image_path:null, calibration_due:'2026-12-01', status:'maintenance', borrower_name:null       },
+  { id:1, pm_number:'PM-001', name:'Keysight DSOX3054T',  device_type:'Oscilloscope',   serial_number:'MY12345678',  manufacturer:'Keysight',       model:'DSOX3054T',   barcode:'490001', locker_slot:1,  description:null, image_path:null, calibration_due:'2026-09-15', status:'available',   borrower_name:null, has_tag:true },
+  { id:2, pm_number:'PM-002', name:'Rohde & Schwarz HMC8043', device_type:'Power Supply', serial_number:'RS-HMC-042', manufacturer:'Rohde & Schwarz', model:'HMC8043',    barcode:'490002', locker_slot:2,  description:null, image_path:null, calibration_due:'2026-11-01', status:'borrowed',    borrower_name:'Sarah K.', has_tag:true },
+  { id:3, pm_number:'PM-003', name:'Fluke 87V',           device_type:'Multimeter',     serial_number:'FL-87V-007',  manufacturer:'Fluke',          model:'87V',         barcode:'490003', locker_slot:3,  description:null, image_path:null, calibration_due:'2026-06-30', status:'available',   borrower_name:null, has_tag:true },
+  { id:4, pm_number:'PM-004', name:'Keysight 34465A',     device_type:'Multimeter',     serial_number:'MY98765432',  manufacturer:'Keysight',       model:'34465A',      barcode:'490004', locker_slot:4,  description:null, image_path:null, calibration_due:null,         status:'available',   borrower_name:null, has_tag:true },
+  { id:5, pm_number:'PM-005', name:'Fluke i400s',         device_type:'Current Probe',  serial_number:null,          manufacturer:'Fluke',          model:'i400s',       barcode:'490005', locker_slot:5,  description:null, image_path:null, calibration_due:'2027-01-15', status:'borrowed',    borrower_name:'You', has_tag:true },
+  { id:6, pm_number:'PM-006', name:'Tektronix TBS2104X',  device_type:'Oscilloscope',   serial_number:'TEK-TBS-099', manufacturer:'Tektronix',      model:'TBS2104X',    barcode:'490006', locker_slot:6,  description:null, image_path:null, calibration_due:'2026-08-20', status:'available',   borrower_name:null, has_tag:true },
+  { id:7, pm_number:'PM-007', name:'Hioki DT4282',        device_type:'Multimeter',     serial_number:null,          manufacturer:'Hioki',          model:'DT4282',      barcode:'490007', locker_slot:7,  description:null, image_path:null, calibration_due:null,         status:'available',   borrower_name:null, has_tag:true },
+  { id:8, pm_number:'PM-008', name:'Megger MIT485/2',     device_type:'Insulation Tester', serial_number:'MEG-485-002', manufacturer:'Megger',      model:'MIT485/2',    barcode:'490008', locker_slot:8,  description:null, image_path:null, calibration_due:'2026-12-01', status:'maintenance', borrower_name:null, has_tag:true },
+  { id:9, pm_number:'PM-009', name:'Gossen SECUTEST ST',  device_type:'Safety Tester',  serial_number:'GM-SEC-011',  manufacturer:'Gossen Metrawatt', model:'SECUTEST ST', barcode:'490009', locker_slot:9,  description:null, image_path:null, calibration_due:null,         status:'available',   borrower_name:null, has_tag:false },
+];
+
+/**
+ * Demo stub rows for GET /api/admin/devices/catalog-locker. Lets ?demo render
+ * the Excel pick list and slot picker; the actual submit stays Pi-only because
+ * it would POST a real locker row and arm the NFC bind window.
+ * @type {Array<Object>}
+ */
+const DEMO_CATALOG = [
+  { pm_number:'PM-101', name:'Fluke 179',         manufacturer:'Fluke',    model:'179' },
+  { pm_number:'PM-102', name:'Keysight E36313A',  manufacturer:'Keysight', model:'E36313A' },
 ];
 
 /** @type {string[]} Demo registrant names for testing the name list without backend */
@@ -166,13 +183,34 @@ async function apiAuthTap(uid_hmac) {
 }
 
 /**
- * Fetch all devices from the API. Returns demo data when in demo mode.
+ * Fetch tagged devices for the kiosk grids. Demo mirrors the server
+ * tagged-only filter (untagged rows are admin-only until the sticker binds).
  * @returns {Promise<Array<Object>>} Array of device objects, or empty array on error.
  */
 async function apiGetDevices() {
-  if (USE_DEMO) { await sleep(280); return DEMO_DEVICES; } // simulate fetch latency
+  if (USE_DEMO) { await sleep(280); return DEMO_DEVICES.filter(d => d.has_tag); } // simulate fetch latency
   const res = await fetch('/api/devices');
   if (!res.ok) return [];
+  return await res.json();
+}
+
+/**
+ * Fetch every locker row for the hidden-admin panel (tagged and untagged).
+ * Untagged rows must stay visible so Bind can be retried and slots stay
+ * accurate. Returns demo data when in demo mode.
+ * @returns {Promise<Array<Object>>} Array of device objects.
+ * @throws {Error} Typed failure carrying a numeric ``status`` property (0 when
+ *                 the request never reached the server). Callers must not treat
+ *                 a rejection as an empty locker.
+ */
+async function apiGetAdminDevices() {
+  if (USE_DEMO) { await sleep(280); return DEMO_DEVICES; }
+  const res = await fetch('/api/admin/devices');
+  if (!res.ok) {
+    const err = new Error(`Admin device list request failed (${res.status})`);
+    err.status = res.status;
+    throw err;
+  }
   return await res.json();
 }
 
@@ -681,6 +719,7 @@ async function endSession(fromTimeout = false, fromSSE = false) {
   if (!fromSSE) await apiEndSession();
   S.user     = null;
   S.devices  = [];
+  S.adminDevices = [];
   S.selected = null;
   S.adminRegistration = false;
   adminSessionActive = false;
@@ -738,6 +777,19 @@ function setMenuBorrowCount(devices) {
   if (!el) return;
   const n = devices.filter(d => d.borrower_name === 'You').length;
   el.textContent = `${n} / 5 borrowed`;
+}
+
+/**
+ * Re-read the kiosk grid feed after an admin bind/unbind/register mutation so
+ * open grids stop showing the pre-mutation roster. Failures keep the last feed.
+ * The wall dashboard polls on its own (setInterval in dashboard.js) and needs
+ * no push from here.
+ * @returns {Promise<void>}
+ */
+async function refreshKioskDevices() {
+  try {
+    S.devices = await apiGetDevices();
+  } catch (_) { /* keep the last grid feed */ }
 }
 
 /**
@@ -2501,21 +2553,45 @@ async function adminRegisterDevice() {
 let bindSearchTimer = 0;
 
 /**
+ * True when ``S.adminDevices`` came from a successful GET. A failed fetch must
+ * not clear the cache (the list would lie empty and every slot would read
+ * free), and the Add/change-slot steps must not paint a picker from it.
+ * @type {boolean}
+ */
+let adminDevicesOk = false;
+
+/**
  * Fetch devices and render the bind list: name + PM (+ slot), unbound first.
  * Duplicate names stay as distinct rows (PM identifies the unit).
  * Search filters the cached list; pass refresh=true after a bind/register.
+ * A failed fetch keeps the prior rows and shows an inline retry note.
  *
- * @param {boolean} [refresh=true] - When false, filter ``S.devices`` without a GET.
+ * @param {boolean} [refresh=true] - When false, filter ``S.adminDevices`` without a GET.
  * @returns {Promise<void>}
  */
 async function populateBindList(refresh) {
   const list = document.getElementById('bind-device-list');
+  const note = document.getElementById('bind-list-note');
   if (!list) return;
-  if (refresh !== false || !Array.isArray(S.devices)) {
-    const devices = await apiGetDevices();
-    S.devices = devices;
+  if (refresh !== false || !Array.isArray(S.adminDevices)) {
+    try {
+      S.adminDevices = await apiGetAdminDevices();
+      adminDevicesOk = true;
+      if (note) note.textContent = '';
+    } catch (_) {
+      adminDevicesOk = false;
+      if (note) {
+        note.textContent = 'Device list unavailable — showing last known rows. ';
+        const retry = document.createElement('button');
+        retry.type = 'button';
+        retry.className = 'bind-note-retry';
+        retry.textContent = 'Retry';
+        retry.addEventListener('click', () => { clickSound(); populateBindList(); });
+        note.appendChild(retry);
+      }
+    }
   }
-  const devices = S.devices || [];
+  const devices = S.adminDevices || [];
   const query = (document.getElementById('bind-search').value || '').toLowerCase().trim();
   const filtered = devices.filter(d => {
     if (!query) return true;
@@ -2653,7 +2729,7 @@ let selectedChangeSlot = null;
  */
 function occupiedSlots(exceptId) {
   const used = new Set();
-  (S.devices || []).forEach(d => {
+  (S.adminDevices || []).forEach(d => {
     if (d.locker_slot == null) return;
     if (exceptId != null && d.id === exceptId) return;
     used.add(d.locker_slot);
@@ -2716,17 +2792,96 @@ function startBindCountdown() {
 }
 
 /**
- * Open the Add from Excel step (PM + free slot).
+ * Fill the Excel locker pick list on the Add step: rows whose Location is
+ * in-locker and not registered yet. Tap a row to fill the PM input; typing
+ * clears the highlight. Failure/empty shows a note — typed PM still works,
+ * except after a 401/403 where the register POST needs the same session.
+ * Demo renders stub rows so the pick UI can be exercised on any machine.
+ * @returns {Promise<void>}
  */
-function openAddFromExcel() {
+async function populateCatalogList() {
+  const list = document.getElementById('bind-catalog-list');
+  const note = document.getElementById('bind-catalog-note');
+  const pmInput = document.getElementById('bind-pm-input');
+  if (!list || !note || !pmInput) return;
+  list.innerHTML = '';
+  note.textContent = '';
+  let rows;
   if (USE_DEMO) {
-    showToast('Add from Excel is Pi only', 'error');
+    await sleep(200); // simulate fetch latency
+    rows = DEMO_CATALOG;
+  } else {
+    let status = 0;
+    try {
+      const res = await fetch('/api/admin/devices/catalog-locker');
+      status = res.status;
+      if (!res.ok) throw new Error(`Catalog locker request failed (${res.status})`);
+      const data = await res.json();
+      rows = data && data.rows;
+    } catch (_) {
+      list.innerHTML = '';
+      if (status === 401 || status === 403) {
+        note.textContent = 'Session expired or not admin — sign in again as admin.';
+      } else {
+        note.textContent = `Excel list unavailable — type the ${ASSET_LABEL}.`;
+      }
+      return;
+    }
+  }
+  if (!Array.isArray(rows)) {
+    note.textContent = `Excel list unavailable — type the ${ASSET_LABEL}.`;
     return;
   }
+  const valid = rows.filter(r => r && typeof r === 'object' && typeof r.pm_number === 'string');
+  if (!valid.length) {
+    note.textContent = rows.length === 0
+      ? `No unregistered units with this locker's Location in Excel — type the ${ASSET_LABEL}.`
+      : `Excel list unavailable — type the ${ASSET_LABEL}.`;
+    return;
+  }
+  for (const r of valid) {
+    const row = document.createElement('div');
+    row.className = 'bind-row';
+    const info = document.createElement('div');
+    info.className = 'bind-row-info';
+    const nameEl = document.createElement('div');
+    nameEl.className = 'bind-row-name';
+    nameEl.textContent = r.name || '';
+    const metaEl = document.createElement('div');
+    metaEl.className = 'bind-row-meta';
+    const make = [r.manufacturer, r.model].filter(Boolean).join(' ');
+    metaEl.textContent = `${r.pm_number || '—'}${make ? ' · ' + make : ''}`;
+    info.appendChild(nameEl);
+    info.appendChild(metaEl);
+    row.appendChild(info);
+    row.addEventListener('click', () => {
+      clickSound();
+      pmInput.value = r.pm_number || '';
+      list.querySelectorAll('.bind-row.selected')
+        .forEach(el => el.classList.remove('selected'));
+      row.classList.add('selected');
+    });
+    list.appendChild(row);
+  }
+}
+
+/**
+ * Open the Add from Excel step (pick from the locker list or type PM + free slot).
+ * Demo opens the step with stub catalog rows; only the submit stays Pi-only.
+ * The slot picker is not painted when the device list failed to load.
+ */
+function openAddFromExcel() {
   document.getElementById('bind-pm-input').value = '';
   document.getElementById('bind-add-error').textContent = '';
   selectedAddSlot = null;
+  populateCatalogList();
   const paint = () => {
+    if (!adminDevicesOk) {
+      // Slot occupancy is unknown — a picker painted now would offer taken slots.
+      document.getElementById('bind-add-error').textContent =
+        'Device list unavailable — back out and retry the list before picking a slot.';
+      return;
+    }
     renderSlotGrid('bind-slot-grid', occupiedSlots(), selectedAddSlot, n => {
       selectedAddSlot = n;
       paint();
@@ -2738,6 +2893,7 @@ function openAddFromExcel() {
 
 /**
  * POST PM + slot, then wait for the sticker tap (bind window already armed).
+ * Demo never POSTs: the Add step is explorable but submit stays Pi-only.
  * @returns {Promise<void>}
  */
 async function submitRegisterDevice() {
@@ -2788,6 +2944,12 @@ function openChangeSlot(dev) {
     `${dev.name} (${dev.pm_number})`;
   document.getElementById('bind-slot-error').textContent = '';
   const paint = () => {
+    if (!adminDevicesOk) {
+      // Slot occupancy is unknown — a picker painted now would offer taken slots.
+      document.getElementById('bind-slot-error').textContent =
+        'Device list unavailable — back out and retry the list before picking a slot.';
+      return;
+    }
     renderSlotGrid(
       'bind-change-slot-grid',
       occupiedSlots(dev.id),
@@ -2837,7 +2999,7 @@ async function submitChangeSlot() {
 }
 
 /**
- * Clear tag_hmac on a device and refresh the bind list.
+ * Clear tag_hmac on a device and refresh the bind list plus the kiosk grids.
  * @param {Object} dev - Device row.
  * @returns {Promise<void>}
  */
@@ -2848,6 +3010,7 @@ async function unbindDeviceTag(dev) {
     if (res.ok) {
       showToast(`Unbound ${dev.name} (${dev.pm_number})`, 'success');
       await populateBindList();
+      await refreshKioskDevices();
     } else {
       showToast(data.detail || 'Unbind failed', 'error');
     }
@@ -2897,7 +3060,8 @@ async function adminSetMaintenance(dev) {
 }
 
 /**
- * Handle tag_bind_success SSE: show success, then return to the list.
+ * Handle tag_bind_success SSE: show success, then return to the list and
+ * refresh the kiosk grids (a fresh bind/register changes the tagged set).
  * @param {Object} data - SSE payload with device_name / pm_number.
  */
 function handleTagBindSuccess(data) {
@@ -2911,6 +3075,7 @@ function handleTagBindSuccess(data) {
   setTimeout(() => {
     showBindStep('bind-step-list');
     populateBindList();
+    refreshKioskDevices();
   }, 2500);
 }
 
@@ -3510,6 +3675,11 @@ document.getElementById('bind-search').addEventListener('input', () => {
 document.getElementById('bind-add-open').addEventListener('click', () => { clickSound(); openAddFromExcel(); });
 document.getElementById('bind-add-back').addEventListener('click', () => { clickSound(); showBindStep('bind-step-list'); populateBindList(); });
 document.getElementById('bind-add-submit').addEventListener('click', () => { clickSound(); submitRegisterDevice(); });
+document.getElementById('bind-pm-input').addEventListener('input', () => {
+  // Manual typing replaces a catalog pick — clear the selection highlight.
+  document.querySelectorAll('#bind-catalog-list .bind-row.selected')
+    .forEach(el => el.classList.remove('selected'));
+});
 document.getElementById('bind-slot-back').addEventListener('click', () => { clickSound(); showBindStep('bind-step-list'); });
 document.getElementById('bind-slot-submit').addEventListener('click', () => { clickSound(); submitChangeSlot(); });
 document.getElementById('admin-export-excel').addEventListener('click', () => { clickSound(); adminExportExcel(); });

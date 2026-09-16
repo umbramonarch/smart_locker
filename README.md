@@ -221,7 +221,7 @@ The system runs as a kiosk: FastAPI serves the frontend as static files in a ful
 2. **Register** — self-service: search/select your approved name → tap card → success/error
 3. **Auth failed** — red flash, "Card not recognized", auto-dismisses
 4. **Main menu** — welcome + **Tap the device**; **Locker** (what's in · what's out) and **Return** (*or pick on screen*); End Session
-5. **Locker** — availability overlay; IN / OUT / YOURS / MAINT; PM number on each card; screen-pick borrow still works
+5. **Locker** — availability overlay; IN / OUT / YOURS / MAINT; PM number on each card; tagged units only — screen-pick borrow needs the sticker
 6. **Return** — device grid with PM on each card; the user's borrowed items highlighted
 
 Overlays: **device detail** (photo, PM, type, serial, confirm), **return slot** (put in slot N), **inactivity** countdown, and a **hidden admin panel** (5× tap on the clock) with Locker/Return/Sync/Register User/**Register Device**/**Users**/Export/**Exit kiosk**/**Shut down**/End-Session shortcuts. Register Device uses **Replace tag** when a sticker is already bound; **Users** deactivates users or replaces a lost card (60 s tap window).
@@ -282,7 +282,7 @@ Cheap NFC stickers on locker devices use the same ACR1252U as work cards (no USB
 
 - **Storage:** `devices.tag_hmac` (HMAC-SHA256 of the sticker UID, same key as work cards). The raw UID is never stored or logged.
 - **Flow:** tap work card → tap sticker (or pick on screen). Auto-intent from device status: borrow if available, return if you hold it. Session stays open for several devices. A work-card tap still logs out.
-- **Register Device** (hidden admin panel): **PM + free slot + NFC**. Catalog comes from Excel. Sync never inserts locker rows. The list shows **name + PM**; rows offer **To maintenance** / **Back in service** to flag a device out for calibration (refused while borrowed). CLI bind: `python -m scripts.enroll_device_tag --pm PM-001` (or `--uid HEX`).
+- **Register Device** (hidden admin panel): pick from the Excel `Locker` list or type the **PM**, then **free slot + NFC**. Catalog comes from Excel. Sync never inserts locker rows. The list shows **name + PM**; rows offer **To maintenance** / **Back in service** to flag a device out for calibration (refused while borrowed); only tagged units appear on the kiosk grids (panel uses `/api/admin/devices`, which includes untagged rows). CLI bind: `python -m scripts.enroll_device_tag --pm PM-001` (or `--uid HEX`).
 - Excel barcode is unused leftover; re-import does **not** overwrite `tag_hmac`, locker status, or the current borrower.
 - After borrow/return (and after Register Device / Sync / maintenance toggle), the Pi writes **only** Location in the catalog workbook (`SMART_LOCKER_IN_LOCKER_TOKEN` in the locker, borrower name when out, `SMART_LOCKER_MAINTENANCE_TOKEN` while in maintenance). Catalog columns stay. A locked workbook is skipped, not a kiosk crash. Extra Excel header names: `SMART_LOCKER_ID_HEADERS` / `SMART_LOCKER_LOCATION_HEADERS`. On-screen noun: `SMART_LOCKER_ASSET_LABEL`. Calibration warn window: `SMART_LOCKER_CALIBRATION_WARN_DAYS` (default 14, 0 = only today).
 
