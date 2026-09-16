@@ -132,6 +132,18 @@ const DEMO_DEVICES = [
   { id:6, pm_number:'PM-006', name:'Tektronix TBS2104X',  device_type:'Oscilloscope',   serial_number:'TEK-TBS-099', manufacturer:'Tektronix',      model:'TBS2104X',    barcode:'490006', locker_slot:6,  description:null, image_path:null, calibration_due:'2026-08-20', status:'available',   borrower_name:null, has_tag:true },
   { id:7, pm_number:'PM-007', name:'Hioki DT4282',        device_type:'Multimeter',     serial_number:null,          manufacturer:'Hioki',          model:'DT4282',      barcode:'490007', locker_slot:7,  description:null, image_path:null, calibration_due:null,         status:'available',   borrower_name:null, has_tag:true },
   { id:8, pm_number:'PM-008', name:'Megger MIT485/2',     device_type:'Insulation Tester', serial_number:'MEG-485-002', manufacturer:'Megger',      model:'MIT485/2',    barcode:'490008', locker_slot:8,  description:null, image_path:null, calibration_due:'2026-12-01', status:'maintenance', borrower_name:null, has_tag:true },
+  { id:9, pm_number:'PM-009', name:'Gossen SECUTEST ST',  device_type:'Safety Tester',  serial_number:'GM-SEC-011',  manufacturer:'Gossen Metrawatt', model:'SECUTEST ST', barcode:'490009', locker_slot:9,  description:null, image_path:null, calibration_due:null,         status:'available',   borrower_name:null, has_tag:false },
+];
+
+/**
+ * Demo stub rows for GET /api/admin/devices/catalog-locker. Lets ?demo render
+ * the Excel pick list and slot picker; the actual submit stays Pi-only because
+ * it would POST a real locker row and arm the NFC bind window.
+ * @type {Array<Object>}
+ */
+const DEMO_CATALOG = [
+  { pm_number:'PM-101', name:'Fluke 179',         manufacturer:'Fluke',    model:'179' },
+  { pm_number:'PM-102', name:'Keysight E36313A',  manufacturer:'Keysight', model:'E36313A' },
 ];
 
 /** @type {string[]} Demo registrant names for testing the name list without backend */
@@ -161,11 +173,12 @@ async function apiAuthTap(uid_hmac) {
 }
 
 /**
- * Fetch all devices from the API. Returns demo data when in demo mode.
+ * Fetch tagged devices for the kiosk grids. Demo mirrors the server
+ * tagged-only filter (untagged rows are admin-only until the sticker binds).
  * @returns {Promise<Array<Object>>} Array of device objects, or empty array on error.
  */
 async function apiGetDevices() {
-  if (USE_DEMO) { await sleep(280); return DEMO_DEVICES; } // simulate fetch latency
+  if (USE_DEMO) { await sleep(280); return DEMO_DEVICES.filter(d => d.has_tag); } // simulate fetch latency
   const res = await fetch('/api/devices');
   if (!res.ok) return [];
   return await res.json();
@@ -175,12 +188,19 @@ async function apiGetDevices() {
  * Fetch every locker row for the hidden-admin panel (tagged and untagged).
  * Untagged rows must stay visible so Bind can be retried and slots stay
  * accurate. Returns demo data when in demo mode.
- * @returns {Promise<Array<Object>>} Array of device objects, or empty array on error.
+ * @returns {Promise<Array<Object>>} Array of device objects.
+ * @throws {Error} Typed failure carrying a numeric ``status`` property (0 when
+ *                 the request never reached the server). Callers must not treat
+ *                 a rejection as an empty locker.
  */
 async function apiGetAdminDevices() {
   if (USE_DEMO) { await sleep(280); return DEMO_DEVICES; }
   const res = await fetch('/api/admin/devices');
-  if (!res.ok) return [];
+  if (!res.ok) {
+    const err = new Error(`Admin device list request failed (${res.status})`);
+    err.status = res.status;
+    throw err;
+  }
   return await res.json();
 }
 
@@ -741,6 +761,19 @@ function setMenuBorrowCount(devices) {
   if (!el) return;
   const n = devices.filter(d => d.borrower_name === 'You').length;
   el.textContent = `${n} / 5 borrowed`;
+}
+
+/**
+ * Re-read the kiosk grid feed after an admin bind/unbind/register mutation so
+ * open grids stop showing the pre-mutation roster. Failures keep the last feed.
+ * The wall dashboard polls on its own (setInterval in dashboard.js) and needs
+ * no push from here.
+ * @returns {Promise<void>}
+ */
+async function refreshKioskDevices() {
+  try {
+    S.devices = await apiGetDevices();
+  } catch (_) { /* keep the last grid feed */ }
 }
 
 /**
@@ -2385,19 +2418,43 @@ async function adminRegisterDevice() {
 let bindSearchTimer = 0;
 
 /**
+ * True when ``S.adminDevices`` came from a successful GET. A failed fetch must
+ * not clear the cache (the list would lie empty and every slot would read
+ * free), and the Add/change-slot steps must not paint a picker from it.
+ * @type {boolean}
+ */
+let adminDevicesOk = false;
+
+/**
  * Fetch devices and render the bind list: name + PM (+ slot), unbound first.
  * Duplicate names stay as distinct rows (PM identifies the unit).
  * Search filters the cached list; pass refresh=true after a bind/register.
+ * A failed fetch keeps the prior rows and shows an inline retry note.
  *
  * @param {boolean} [refresh=true] - When false, filter ``S.adminDevices`` without a GET.
  * @returns {Promise<void>}
  */
 async function populateBindList(refresh) {
   const list = document.getElementById('bind-device-list');
+  const note = document.getElementById('bind-list-note');
   if (!list) return;
   if (refresh !== false || !Array.isArray(S.adminDevices)) {
-    const devices = await apiGetAdminDevices();
-    S.adminDevices = devices;
+    try {
+      S.adminDevices = await apiGetAdminDevices();
+      adminDevicesOk = true;
+      if (note) note.textContent = '';
+    } catch (_) {
+      adminDevicesOk = false;
+      if (note) {
+        note.textContent = 'Device list unavailable — showing last known rows. ';
+        const retry = document.createElement('button');
+        retry.type = 'button';
+        retry.className = 'bind-note-retry';
+        retry.textContent = 'Retry';
+        retry.addEventListener('click', () => { clickSound(); populateBindList(); });
+        note.appendChild(retry);
+      }
+    }
   }
   const devices = S.adminDevices || [];
   const query = (document.getElementById('bind-search').value || '').toLowerCase().trim();
@@ -2589,32 +2646,52 @@ function startBindCountdown() {
 /**
  * Fill the Excel locker pick list on the Add step: rows whose Location is
  * in-locker and not registered yet. Tap a row to fill the PM input; typing
- * clears the highlight. Failure/empty shows a note — typed PM still works.
+ * clears the highlight. Failure/empty shows a note — typed PM still works,
+ * except after a 401/403 where the register POST needs the same session.
+ * Demo renders stub rows so the pick UI can be exercised on any machine.
  * @returns {Promise<void>}
  */
 async function populateCatalogList() {
   const list = document.getElementById('bind-catalog-list');
   const note = document.getElementById('bind-catalog-note');
   const pmInput = document.getElementById('bind-pm-input');
-  if (!list || !pmInput) return;
+  if (!list || !note || !pmInput) return;
   list.innerHTML = '';
   note.textContent = '';
   let rows;
-  try {
-    const res = await fetch('/api/admin/devices/catalog-locker');
-    if (!res.ok) throw new Error(String(res.status));
-    rows = (await res.json()).rows || [];
-  } catch (_) {
-    list.innerHTML = '';
+  if (USE_DEMO) {
+    await sleep(200); // simulate fetch latency
+    rows = DEMO_CATALOG;
+  } else {
+    let status = 0;
+    try {
+      const res = await fetch('/api/admin/devices/catalog-locker');
+      status = res.status;
+      if (!res.ok) throw new Error(`Catalog locker request failed (${res.status})`);
+      const data = await res.json();
+      rows = data && data.rows;
+    } catch (_) {
+      list.innerHTML = '';
+      if (status === 401 || status === 403) {
+        note.textContent = 'Session expired or not admin — sign in again as admin.';
+      } else {
+        note.textContent = `Excel list unavailable — type the ${ASSET_LABEL}.`;
+      }
+      return;
+    }
+  }
+  if (!Array.isArray(rows)) {
     note.textContent = `Excel list unavailable — type the ${ASSET_LABEL}.`;
     return;
   }
-  if (!rows.length) {
-    note.textContent =
-      `No unregistered units with Location = Locker in Excel — type the ${ASSET_LABEL}.`;
+  const valid = rows.filter(r => r && typeof r === 'object' && typeof r.pm_number === 'string');
+  if (!valid.length) {
+    note.textContent = rows.length === 0
+      ? `No unregistered units with this locker's Location in Excel — type the ${ASSET_LABEL}.`
+      : `Excel list unavailable — type the ${ASSET_LABEL}.`;
     return;
   }
-  for (const r of rows) {
+  for (const r of valid) {
     const row = document.createElement('div');
     row.className = 'bind-row';
     const info = document.createElement('div');
@@ -2642,17 +2719,21 @@ async function populateCatalogList() {
 
 /**
  * Open the Add from Excel step (pick from the locker list or type PM + free slot).
+ * Demo opens the step with stub catalog rows; only the submit stays Pi-only.
+ * The slot picker is not painted when the device list failed to load.
  */
 function openAddFromExcel() {
-  if (USE_DEMO) {
-    showToast('Add from Excel is Pi only', 'error');
-    return;
-  }
   document.getElementById('bind-pm-input').value = '';
   document.getElementById('bind-add-error').textContent = '';
   selectedAddSlot = null;
   populateCatalogList();
   const paint = () => {
+    if (!adminDevicesOk) {
+      // Slot occupancy is unknown — a picker painted now would offer taken slots.
+      document.getElementById('bind-add-error').textContent =
+        'Device list unavailable — back out and retry the list before picking a slot.';
+      return;
+    }
     renderSlotGrid('bind-slot-grid', occupiedSlots(), selectedAddSlot, n => {
       selectedAddSlot = n;
       paint();
@@ -2664,6 +2745,7 @@ function openAddFromExcel() {
 
 /**
  * POST PM + slot, then wait for the sticker tap (bind window already armed).
+ * Demo never POSTs: the Add step is explorable but submit stays Pi-only.
  * @returns {Promise<void>}
  */
 async function submitRegisterDevice() {
@@ -2714,6 +2796,12 @@ function openChangeSlot(dev) {
     `${dev.name} (${dev.pm_number})`;
   document.getElementById('bind-slot-error').textContent = '';
   const paint = () => {
+    if (!adminDevicesOk) {
+      // Slot occupancy is unknown — a picker painted now would offer taken slots.
+      document.getElementById('bind-slot-error').textContent =
+        'Device list unavailable — back out and retry the list before picking a slot.';
+      return;
+    }
     renderSlotGrid(
       'bind-change-slot-grid',
       occupiedSlots(dev.id),
@@ -2763,7 +2851,7 @@ async function submitChangeSlot() {
 }
 
 /**
- * Clear tag_hmac on a device and refresh the bind list.
+ * Clear tag_hmac on a device and refresh the bind list plus the kiosk grids.
  * @param {Object} dev - Device row.
  * @returns {Promise<void>}
  */
@@ -2774,6 +2862,7 @@ async function unbindDeviceTag(dev) {
     if (res.ok) {
       showToast(`Unbound ${dev.name} (${dev.pm_number})`, 'success');
       await populateBindList();
+      await refreshKioskDevices();
     } else {
       showToast(data.detail || 'Unbind failed', 'error');
     }
@@ -2783,7 +2872,8 @@ async function unbindDeviceTag(dev) {
 }
 
 /**
- * Handle tag_bind_success SSE: show success, then return to the list.
+ * Handle tag_bind_success SSE: show success, then return to the list and
+ * refresh the kiosk grids (a fresh bind/register changes the tagged set).
  * @param {Object} data - SSE payload with device_name / pm_number.
  */
 function handleTagBindSuccess(data) {
@@ -2797,6 +2887,7 @@ function handleTagBindSuccess(data) {
   setTimeout(() => {
     showBindStep('bind-step-list');
     populateBindList();
+    refreshKioskDevices();
   }, 2500);
 }
 

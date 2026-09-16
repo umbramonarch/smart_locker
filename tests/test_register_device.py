@@ -5,10 +5,16 @@ Description: Contract tests for admin Register Device: add by PM from Excel,
              / Replace tag / Unbind / change-slot.
 Project: smart_locker/tests
 Notes: Run with: python -m pytest tests/test_register_device.py -v
-       Frontend is vanilla HTML/JS; asserted as text.
+       Frontend is vanilla HTML/JS; asserted as text, plus a node --check
+       syntax gate (skipped when node is absent). Static text cannot prove
+       runtime behavior (see the MR report for missing coverage).
 """
 
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 FRONTEND = ROOT / "smart_locker" / "frontend"
@@ -20,6 +26,31 @@ def _html() -> str:
 
 def _js() -> str:
     return (FRONTEND / "app.js").read_text(encoding="utf-8")
+
+
+def _css() -> str:
+    return (FRONTEND / "style.css").read_text(encoding="utf-8")
+
+
+def _fn_body(js: str, start: str, end: str) -> str:
+    """Slice one JS function body out of app.js source text."""
+    return js.split(start, 1)[1].split(end, 1)[0]
+
+
+class TestFrontendSyntaxGate:
+    """app.js must at least parse; without a JS runner this is the ceiling."""
+
+    def test_app_js_parses_with_node(self):
+        """node --check passes on app.js (skipped when node is absent)."""
+        node = shutil.which("node")
+        if node is None:
+            pytest.skip("node not installed")
+        proc = subprocess.run(
+            [node, "--check", str(FRONTEND / "app.js")],
+            capture_output=True,
+            text=True,
+        )
+        assert proc.returncode == 0, proc.stderr
 
 
 class TestRegisterDeviceAddFromExcel:
@@ -136,3 +167,145 @@ class TestAdminDevicesFeed:
         js = _js()
         assert "/api/admin/devices" in js
         assert "apiGetAdminDevices" in js
+
+
+class TestAdminFeedFailureBranches:
+    """H1/M1: a failed admin fetch must not read as an empty locker."""
+
+    def test_admin_fetch_throws_typed_failure(self):
+        """apiGetAdminDevices throws an Error carrying .status, not []."""
+        js = _js()
+        body = _fn_body(js, "async function apiGetAdminDevices", "async function apiBorrow")
+        assert "throw err" in body
+        assert "err.status" in body
+        assert "return []" not in body
+
+    def test_bind_list_catches_and_keeps_prior_rows(self):
+        """populateBindList try/catches, tracks freshness, shows a retry note."""
+        js = _js()
+        body = _fn_body(js, "async function populateBindList", "async function startDeviceTagBind")
+        assert "try {" in body
+        assert "catch" in body
+        assert "adminDevicesOk" in body
+        assert "bind-list-note" in body
+        assert "Retry" in body
+
+    def test_bind_list_note_markup_present(self):
+        """The list step carries the failure-note line the JS targets."""
+        html = _html()
+        assert 'id="bind-list-note"' in html
+
+    def test_slot_grid_not_painted_from_failed_fetch(self):
+        """Add and change-slot steps bail before renderSlotGrid when stale."""
+        js = _js()
+        add = _fn_body(js, "function openAddFromExcel", "async function submitRegisterDevice")
+        assert "adminDevicesOk" in add
+        assert add.index("adminDevicesOk") < add.index("renderSlotGrid")
+        slot = _fn_body(js, "function openChangeSlot", "async function submitChangeSlot")
+        assert "adminDevicesOk" in slot
+        assert slot.index("adminDevicesOk") < slot.index("renderSlotGrid")
+
+
+class TestCatalogFailureBranches:
+    """M2/L1: catalog errors branch by status; payload shape is validated."""
+
+    def test_auth_failures_get_session_note(self):
+        """401/403 show a sign-in note, not the type-the-PM Excel note."""
+        js = _js()
+        body = _fn_body(js, "async function populateCatalogList", "function openAddFromExcel")
+        assert "status === 401" in body
+        assert "status === 403" in body
+        assert "sign in again as admin" in body
+        assert "Excel list unavailable" in body
+
+    def test_catalog_guards_note_and_validates_rows(self):
+        """populateCatalogList guards note and rejects non-array payloads."""
+        js = _js()
+        body = _fn_body(js, "async function populateCatalogList", "function openAddFromExcel")
+        assert "!note" in body
+        assert "Array.isArray(rows)" in body
+        assert "for (const r of valid)" in body
+
+    def test_empty_note_names_no_location_value(self):
+        """L7: the empty note stays value-agnostic (token is configurable)."""
+        js = _js()
+        assert "Location = Locker" not in js
+        assert "this locker's Location" in js
+
+
+class TestDemoExercisesNewBehavior:
+    """M3: ?demo mirrors the tagged-only filter and renders stub catalog rows."""
+
+    def test_demo_devices_mirror_tagged_only_filter(self):
+        """Demo apiGetDevices filters has_tag like GET /api/devices."""
+        js = _js()
+        body = _fn_body(js, "async function apiGetDevices", "async function apiGetAdminDevices")
+        assert "DEMO_DEVICES.filter" in body
+        assert "has_tag" in body
+
+    def test_demo_has_untagged_row(self):
+        """At least one demo device is untagged so bind/No-tag renders."""
+        js = _js()
+        assert "has_tag:false" in js
+        assert "has_tag:true" in js
+
+    def test_demo_renders_stub_catalog_rows(self):
+        """populateCatalogList serves DEMO_CATALOG stubs under USE_DEMO."""
+        js = _js()
+        assert "DEMO_CATALOG" in js
+        body = _fn_body(js, "async function populateCatalogList", "function openAddFromExcel")
+        assert "DEMO_CATALOG" in body
+
+    def test_demo_opens_add_step_but_submit_stays_pi_only(self):
+        """Add step is explorable in demo; only the POST keeps the Pi gate."""
+        js = _js()
+        add = _fn_body(js, "function openAddFromExcel", "async function submitRegisterDevice")
+        assert "Pi only" not in add
+        submit = _fn_body(js, "async function submitRegisterDevice", "function openChangeSlot")
+        assert "Add from Excel is Pi only" in submit
+
+
+class TestAddStepFitsViewport:
+    """M4: the panel scrolls and the slot grid is capped."""
+
+    def test_bind_panel_scrolls(self):
+        """bind-panel keeps its 90vh cap and scrolls past it."""
+        css = _css()
+        panel = css.split(".bind-panel", 1)[1].split(".bind-step", 1)[0]
+        assert "max-height: 90vh" in panel
+        assert "overflow-y: auto" in panel
+
+    def test_slot_grid_capped_and_scrollable(self):
+        """Slot picker cannot grow the Add step past the viewport."""
+        css = _css()
+        grid = css.split(".bind-slot-grid", 1)[1].split(".bind-slot-btn", 1)[0]
+        assert "max-height" in grid
+        assert "overflow-y: auto" in grid
+
+
+class TestKioskGridRefreshAfterAdminMutation:
+    """L9: bind/unbind/register refresh S.devices; dashboard polls itself."""
+
+    def test_unbind_refreshes_kiosk_feed(self):
+        """unbindDeviceTag refetches the kiosk grid list on success."""
+        js = _js()
+        body = _fn_body(js, "async function unbindDeviceTag", "function handleTagBindSuccess")
+        assert "refreshKioskDevices" in body
+
+    def test_bind_success_refreshes_kiosk_feed(self):
+        """tag_bind_success (bind + register flows) refetches the grid list."""
+        js = _js()
+        body = _fn_body(js, "function handleTagBindSuccess", "function handleTagBindFailed")
+        assert "refreshKioskDevices" in body
+
+    def test_refresh_helper_refetches_devices(self):
+        """The helper re-reads apiGetDevices into S.devices, tolerating failure."""
+        js = _js()
+        body = _fn_body(js, "async function refreshKioskDevices", "async function refreshAfterDeviceAction")
+        assert "apiGetDevices" in body
+        assert "S.devices" in body
+
+    def test_dashboard_polls_without_push(self):
+        """Dashboard refetches on a timer, so no kiosk-to-dashboard push exists."""
+        dashboard = (FRONTEND / "dashboard.js").read_text(encoding="utf-8")
+        assert "setInterval(fetchTables" in dashboard
