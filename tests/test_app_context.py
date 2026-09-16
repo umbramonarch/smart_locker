@@ -3,7 +3,8 @@ File: test_app_context.py
 Description: Tests for NFC insert intercepts on AppContext — pending
              registration vs pending tag-bind, bind success/fail, expired
              bind/registration fall-through, leftover admin session after
-             enroll, SSE fan-out, and unattended-return write-back.
+             enroll, replace-card pending taps, SSE fan-out, and
+             unattended-return write-back.
 Project: smart_locker/tests
 Notes: Run with: python -m pytest tests/test_app_context.py -v
 """
@@ -20,7 +21,7 @@ from smart_locker.api.app_context import (
     assign_pending_tag_bind,
 )
 from smart_locker.database.engine import get_session
-from smart_locker.database.models import DeviceStatus
+from smart_locker.database.models import DeviceStatus, UserRole
 from smart_locker.database.repositories import DeviceRepository, UserRepository
 from smart_locker.security.encryption import encrypt
 from smart_locker.security.hashing import compute_uid_hmac
@@ -536,3 +537,178 @@ class TestPendingStateLock:
         assert ctx.pending_registration is None
         assert ctx.pending_tag_bind is None
 
+
+class TestReplaceCardTap:
+    """Replace-card pending taps move the user to a new card."""
+
+    def _user(self, db_session, uid, enc_key, hmac_key, name="Alice"):
+        """Persist a user on the given card UID."""
+        u = UserRepository.create(
+            db_session,
+            display_name=name,
+            uid_hmac=compute_uid_hmac(uid, hmac_key),
+            encrypted_card_uid=encrypt(uid, enc_key),
+        )
+        db_session.commit()
+        return u
+
+    def test_replace_success_keeps_admin_session(
+        self, db_session, enc_key, hmac_key, monkeypatch
+    ):
+        """Replace tap broadcasts registration_success replaced=True and the
+        admin session is NOT ended (overlay stays open)."""
+        admin = self._user(db_session, "ADADADAD", enc_key, hmac_key, "Admin")
+        admin.role = UserRole.ADMIN
+        target = self._user(db_session, "A1B2C3D4", enc_key, hmac_key)
+        db_session.commit()
+        ctx = _make_ctx(monkeypatch)
+        ctx.session_mgr.start_session(admin)
+        ctx.admin_overlay_open = True
+        ctx.pending_registration = PendingRegistration(
+            "Alice", replace_user_id=target.id
+        )
+        _run(ctx, "E5E5E5E5")
+        events = _events(ctx)
+        assert events[0]["event"] == "registration_success"
+        assert events[0]["replaced"] is True
+        assert events[0]["user"]["name"] == "Alice"
+        assert all(e["event"] != "session_ended" for e in events)
+        assert ctx.session_mgr.has_active_session
+        assert ctx.pending_registration is None
+        # Old card no longer authenticates; new card does.
+        assert ctx.authenticator.authenticate(db_session, "A1B2C3D4") is None
+        assert ctx.authenticator.authenticate(db_session, "E5E5E5E5").id == target.id
+
+    def test_replace_other_users_card_fails(
+        self, db_session, enc_key, hmac_key, monkeypatch
+    ):
+        """Tapping another user's card broadcasts registration_failed."""
+        admin = self._user(db_session, "ADADADAD", enc_key, hmac_key, "Admin")
+        admin.role = UserRole.ADMIN
+        target = self._user(db_session, "A1B2C3D4", enc_key, hmac_key)
+        self._user(db_session, "BBBB2222", enc_key, hmac_key, "Bob")
+        db_session.commit()
+        ctx = _make_ctx(monkeypatch)
+        ctx.session_mgr.start_session(admin)
+        ctx.admin_overlay_open = True
+        ctx.pending_registration = PendingRegistration(
+            "Alice", replace_user_id=target.id
+        )
+        _run(ctx, "BBBB2222")
+        events = _events(ctx)
+        assert events[0]["event"] == "registration_failed"
+        assert events[0]["reason"] == "This card is already registered."
+        assert events[0]["replaced"] is True
+        assert events[0]["replace_user_id"] == target.id
+        assert ctx.session_mgr.has_active_session
+        # Target still on old card.
+        assert ctx.authenticator.authenticate(db_session, "A1B2C3D4").id == target.id
+
+    def test_expired_replace_keeps_admin_session(
+        self, db_session, enc_key, hmac_key, monkeypatch
+    ):
+        """An expired card-replace window consumes the next tap: timeout only,
+        no logout — even when the tap is an enrolled work card."""
+        admin = self._user(db_session, "ADADADAD", enc_key, hmac_key, "Admin")
+        admin.role = UserRole.ADMIN
+        target = self._user(db_session, "A1B2C3D4", enc_key, hmac_key)
+        db_session.commit()
+        ctx = _make_ctx(monkeypatch)
+        ctx.session_mgr.start_session(admin)
+        ctx.admin_overlay_open = True
+        ctx.pending_registration = PendingRegistration(
+            "Alice",
+            replace_user_id=target.id,
+            created_at=time.monotonic() - 61,
+        )
+        _run(ctx, "ADADADAD")
+        events = _events(ctx)
+        assert ctx.pending_registration is None
+        assert len(events) == 1
+        assert events[0]["event"] == "registration_failed"
+        assert events[0]["reason"] == "Card replace timed out. Please try again."
+        assert events[0]["replaced"] is True
+        assert events[0]["replace_user_id"] == target.id
+        assert ctx.session_mgr.has_active_session
+        assert ctx.admin_overlay_open is True
+
+    def test_dispatch_passes_claimed_pending_object(
+        self, db_session, monkeypatch
+    ):
+        """The tap handler receives the exact pending object that was claimed."""
+        ctx = _make_ctx(monkeypatch)
+        pending = PendingRegistration("Bob")
+        ctx.pending_registration = pending
+        seen = {}
+
+        async def fake_handle(p, uid, get_session):
+            seen["pending"] = p
+            seen["cleared"] = ctx.pending_registration is None
+
+        monkeypatch.setattr(ctx, "_handle_registration_tap", fake_handle)
+        _run(ctx, "E5E5E5E5")
+        assert seen["pending"] is pending
+        assert seen["cleared"] is True
+        assert ctx.pending_registration is None
+
+    def test_enrol_admin_role_in_payload(
+        self, db_session, enc_key, hmac_key, monkeypatch
+    ):
+        """Admin-initiated enrol with role=admin creates an admin and reports
+        replaced=False."""
+        admin = self._user(db_session, "ADADADAD", enc_key, hmac_key, "Admin")
+        admin.role = UserRole.ADMIN
+        db_session.commit()
+        ctx = _make_ctx(monkeypatch)
+        ctx.session_mgr.start_session(admin)
+        ctx.admin_overlay_open = True
+        ctx.pending_registration = PendingRegistration("New Admin", role="admin")
+        _run(ctx, "B0B0B0B0")
+        events = _events(ctx)
+        assert events[0]["event"] == "registration_success"
+        assert events[0]["replaced"] is False
+        assert events[0]["user"]["role"] == "admin"
+        user = ctx.authenticator.authenticate(db_session, "B0B0B0B0")
+        assert user.role == UserRole.ADMIN
+
+
+class TestReplaceWindowBoundary:
+    """A card-replace window armed 59s ago is still live."""
+
+    def test_replace_window_live_just_before_timeout(
+        self, db_session, enc_key, hmac_key, monkeypatch
+    ):
+        """Complement to the -61s-expired replace test: the next tap still
+        completes the replace instead of timing out."""
+        from smart_locker.api.app_context import REGISTRATION_TIMEOUT_SECONDS
+
+        assert REGISTRATION_TIMEOUT_SECONDS == 60
+        admin = UserRepository.create(
+            db_session,
+            display_name="Admin",
+            uid_hmac=compute_uid_hmac("ADADADAD", hmac_key),
+            encrypted_card_uid=encrypt("ADADADAD", enc_key),
+            role="admin",
+        )
+        target = UserRepository.create(
+            db_session,
+            display_name="Alice",
+            uid_hmac=compute_uid_hmac("A1B2C3D4", hmac_key),
+            encrypted_card_uid=encrypt("A1B2C3D4", enc_key),
+        )
+        db_session.commit()
+        ctx = _make_ctx(monkeypatch)
+        ctx.session_mgr.start_session(admin)
+        ctx.admin_overlay_open = True
+        pending = PendingRegistration(
+            "Alice",
+            replace_user_id=target.id,
+            created_at=time.monotonic() - 59,
+        )
+        assert pending.is_expired is False
+        ctx.pending_registration = pending
+        _run(ctx, "E5E5E5E5")
+        events = _events(ctx)
+        assert events[0]["event"] == "registration_success"
+        assert events[0]["replaced"] is True
+        assert events[0]["user"]["name"] == "Alice"

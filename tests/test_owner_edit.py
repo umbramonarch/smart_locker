@@ -68,21 +68,61 @@ def _add_user(db_session, enc_key, hmac_key, name: str = "Alice"):
 
 
 class TestOwnerChoices:
-    """Dropdown is registered users + registrant names (+ in-locker token)."""
+    """Dropdown is Excel registrant names + the in-locker token only."""
 
-    def test_includes_users_registrants_and_in_locker_token(
+    def test_includes_registrants_and_in_locker_token(
         self, db_session, enc_key, hmac_key
     ):
-        """Choices list enrolled names, Excel registrant names, and Locker."""
+        """Choices list Excel registrant names and Locker, token first."""
+        RegistrantRepository.add_names(db_session, {"Bob Field"})
+        db_session.flush()
+
+        names = owner_choices(db_session)
+
+        assert names[0] == IN_LOCKER_TOKEN
+        assert "Bob Field" in names
+
+    def test_owner_choices_excludes_registered_users_not_in_excel(
+        self, db_session, enc_key, hmac_key
+    ):
+        """A registered user who is not an Excel registrant is not listed."""
         _add_user(db_session, enc_key, hmac_key, "Alice")
         RegistrantRepository.add_names(db_session, {"Bob Field"})
         db_session.flush()
 
         names = owner_choices(db_session)
 
-        assert IN_LOCKER_TOKEN in names
-        assert "Alice" in names
+        assert "Alice" not in names
         assert "Bob Field" in names
+        assert names[0] == IN_LOCKER_TOKEN
+
+    def test_owner_choices_exclude_deactivated_name(
+        self, db_session, enc_key, hmac_key
+    ):
+        """A registrant name matching a deactivated user is not offered."""
+        RegistrantRepository.add_names(db_session, {"Alice"})
+        alice = _add_user(db_session, enc_key, hmac_key, "Alice")
+        alice.is_active = False
+        _add_user(db_session, enc_key, hmac_key, "Bob")
+        db_session.flush()
+
+        names = owner_choices(db_session)
+
+        assert "Alice" not in names
+        # Bob is an active kiosk user but not an Excel registrant.
+        assert "Bob" not in names
+
+    def test_owner_choices_lists_registrant_matching_active_user(
+        self, db_session, enc_key, hmac_key
+    ):
+        """A registrant name matching an active user is still offered."""
+        RegistrantRepository.add_names(db_session, {"Carol"})
+        _add_user(db_session, enc_key, hmac_key, "Carol")
+        db_session.flush()
+
+        names = owner_choices(db_session)
+
+        assert "Carol" in names
 
 
 class TestSetOwnerExcelOnly:

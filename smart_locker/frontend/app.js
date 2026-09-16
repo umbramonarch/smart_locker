@@ -2,11 +2,14 @@
  * @fileoverview Client-side state machine for the kiosk touch UI. Manages screen
  *               transitions, API communication, SSE event handling, and user
  *               interaction flow across idle, auth, menu, locker availability,
- *               return, detail, registration, admin, Register Device (pick from
- *               the Excel locker list or PM + slot + NFC; grids show tagged
- *               units only — the admin panel reads /api/admin/devices which
- *               includes untagged rows), return-slot, software-update, and
- *               appliance shutdown overlays.
+ *               return, detail, registration (incl. Register as admin), admin,
+ *               Register Device (pick from the Excel locker list or PM + slot
+ *               + NFC, maintenance toggle; grids show tagged units only — the
+ *               admin panel reads /api/admin/devices which includes untagged
+ *               rows), Users (deactivate / replace card), return-slot,
+ *               software-update, and appliance shutdown overlays. Calibration
+ *               due-soon/overdue shows card badges, a detail line, and an idle
+ *               banner (warn only).
  * @project smart_locker/frontend
  * @description Demo mode (?demo), circle-reveal transitions, split text,
  *              inactivity countdown, and self-registration.
@@ -73,6 +76,9 @@ async function loadSiteConfig() {
     if (!res.ok) return;
     const data = await res.json();
     if (data && typeof data.asset_label === 'string') applyAssetLabels(data.asset_label);
+    if (data && Number.isInteger(data.calibration_warn_days)) {
+      S.calibrationWarnDays = data.calibration_warn_days;
+    }
   } catch (_) { /* keep built-in label */ }
 }
 
@@ -104,6 +110,8 @@ const S = {
   lastClickX: null,     // track click origin for circle reveal
   lastClickY: null,
   adminRegistration: false, // true when admin-initiated manual registration is in progress
+  calibrationWarnDays: 14,  // SMART_LOCKER_CALIBRATION_WARN_DAYS via /api/config
+  usersReplacePending: false, // a replace-card window is armed on the Users overlay
   updating:   false,    // software-update overlay is up; SSE must not navigate
   handoverDeviceId: null, // device awaiting handover confirmation
   handoverFromScreen: null, // screen/overlay active when the handover opened
@@ -122,6 +130,8 @@ const DEMO_USERS = [
 ];
 /** @type {number} Index into DEMO_USERS, cycles on each simulated card tap */
 let demoUserIdx = 0;
+/** @type {number} Demo-mode calibration warn window (matches backend default). */
+const DEMO_WARN_DAYS = 14;
 
 const DEMO_DEVICES = [
   { id:1, pm_number:'PM-001', name:'Keysight DSOX3054T',  device_type:'Oscilloscope',   serial_number:'MY12345678',  manufacturer:'Keysight',       model:'DSOX3054T',   barcode:'490001', locker_slot:1,  description:null, image_path:null, calibration_due:'2026-09-15', status:'available',   borrower_name:null, has_tag:true },
@@ -314,9 +324,10 @@ async function apiGetRegistrants() {
  * endpoint, this bypasses the registrant name validation and works while
  * an admin session is active.
  * @param {string} name - The display name for the new user.
+ * @param {string} role - 'user' or 'admin' (from the Register as admin switch).
  * @returns {Promise<Object>} Result with success boolean and optional detail.
  */
-async function apiStartAdminRegistration(name) {
+async function apiStartAdminRegistration(name, role) {
   if (USE_DEMO) {
     await sleep(400); // simulate API round-trip
     return { success: true };
@@ -325,7 +336,7 @@ async function apiStartAdminRegistration(name) {
     const res = await fetch('/api/admin/register', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name }),
+      body: JSON.stringify({ name, role }),
     });
     return await res.json();
   } catch (_) { return { success: false, detail: 'Request failed' }; }
@@ -435,6 +446,7 @@ function navigate(toId) {
   }
 
   S.screen = toId;
+  if (toId === 'idle') refreshIdleCalBanner();
   reportKioskDisplay(toId);
 }
 
@@ -699,6 +711,8 @@ function showAuthFailed() {
  */
 async function endSession(fromTimeout = false, fromSSE = false) {
   clearTimeout(S.idleTimer);
+  clearTimeout(sessionEndedFallbackTimer);
+  sessionEndedFallbackTimer = null;
   clearInterval(S.cdTimer);
   dismissInactivity();
   dismissSlotOverlay();
@@ -707,9 +721,11 @@ async function endSession(fromTimeout = false, fromSSE = false) {
   S.devices  = [];
   S.adminDevices = [];
   S.selected = null;
+  S.adminRegistration = false;
   adminSessionActive = false;
   closeAdminPanel();
   hideRegisterDeviceOverlay();
+  hideUsersOverlay();
   navigate('idle');
 }
 
@@ -891,6 +907,75 @@ function safeKioskImagePath(raw) {
 }
 
 /**
+ * Days until a device's calibration date (negative when overdue), or null
+ * when there is no usable date. Live mode prefers the API-provided
+ * calibration_days_left; demo mode (and a missing field) computes from the
+ * ISO calibration_due string.
+ * @param {Object} dev - Device row.
+ * @returns {number|null} Days left, or null.
+ */
+function calDaysLeft(dev) {
+  if (!USE_DEMO && typeof dev.calibration_days_left === 'number') {
+    return dev.calibration_days_left;
+  }
+  if (!dev.calibration_due) return null;
+  const due = new Date(`${dev.calibration_due}T00:00:00`);
+  if (Number.isNaN(due.getTime())) return null;
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  return Math.round((due - today) / 86400000);
+}
+
+/**
+ * Calibration alert state for a device: 'overdue' | 'due_soon' | 'ok' | null.
+ * Live mode trusts the API's calibration_state when present.
+ * @param {Object} dev - Device row.
+ * @returns {string|null}
+ */
+function calState(dev) {
+  if (!USE_DEMO && typeof dev.calibration_state === 'string') {
+    return dev.calibration_state;
+  }
+  const n = calDaysLeft(dev);
+  if (n === null) return null;
+  const warnDays = USE_DEMO ? DEMO_WARN_DAYS : S.calibrationWarnDays;
+  if (n < 0) return 'overdue';
+  if (n <= warnDays) return 'due_soon';
+  return 'ok';
+}
+
+/**
+ * Refresh the idle-screen overdue-calibration banner. Live mode counts
+ * /api/calibration/alerts (loopback, read-only); demo mode counts
+ * DEMO_DEVICES. Hidden when nothing is overdue. A failed poll keeps the
+ * last banner state.
+ * @returns {Promise<void>}
+ */
+async function refreshIdleCalBanner() {
+  const el = document.getElementById('idle-cal-banner');
+  if (!el) return;
+  let n = 0;
+  if (USE_DEMO) {
+    n = DEMO_DEVICES.filter(d => calState(d) === 'overdue').length;
+  } else {
+    try {
+      const res = await fetch('/api/calibration/alerts');
+      if (!res.ok) return;
+      const data = await res.json();
+      n = data.overdue || 0;
+    } catch (_) {
+      return; // keep previous banner state
+    }
+  }
+  el.hidden = n === 0;
+  if (n > 0) {
+    el.textContent = n === 1
+      ? '1 device overdue for calibration'
+      : `${n} devices overdue for calibration`;
+  }
+}
+
+/**
  * Build one locker card with textContent / setAttribute (no catalog HTML).
  * @param {Object} dev
  * @param {string} cls
@@ -945,6 +1030,15 @@ function buildDeviceCardEl(dev, cls, statusCls, statusTxt, slotLabel) {
   statusEl.textContent = statusTxt;
   cardImage.appendChild(slotEl);
   cardImage.appendChild(statusEl);
+
+  // Calibration alert badge next to the status badge (warn only).
+  const cal = calState(dev);
+  if (cal === 'due_soon' || cal === 'overdue') {
+    const calEl = document.createElement('div');
+    calEl.className = `card-cal-badge ${cal === 'overdue' ? 'cal-overdue' : 'cal-due-soon'}`;
+    calEl.textContent = cal === 'overdue' ? 'OVERDUE' : 'CAL DUE';
+    cardImage.appendChild(calEl);
+  }
 
   const body = document.createElement('div');
   body.className = 'card-body';
@@ -1126,6 +1220,25 @@ function openDetail(dev, mode) {
     mine ? 'var(--info)' : avail ? 'var(--success)' : maint ? 'var(--warning)' : 'var(--text-muted)';
   document.getElementById('detail-desc').textContent    =
     dev.description || 'No description available.';
+
+  // Calibration due line — warn only; borrow is never blocked.
+  const calRow = document.getElementById('detail-cal-row');
+  const calEl  = document.getElementById('detail-cal');
+  const calN   = calDaysLeft(dev);
+  if (calN === null) {
+    calRow.classList.add('hidden');
+  } else {
+    calRow.classList.remove('hidden');
+    const suffix = calN < 0 ? `${-calN} days overdue`
+                 : calN === 0 ? 'today'
+                 : `in ${calN} days`;
+    calEl.textContent = `Calibration due ${dev.calibration_due} (${suffix})`;
+    const cal = calState(dev);
+    calEl.style.color =
+      cal === 'overdue' ? 'var(--danger)'
+      : cal === 'due_soon' ? 'var(--warning)'
+      : 'var(--text-muted)';
+  }
 
   const imgPath     = safeKioskImagePath(dev.image_path);
   const imgPane     = document.getElementById('detail-img-pane');
@@ -1523,6 +1636,8 @@ function initMarquee() {
 let registerCountdownTimer = null;
 /** @type {number|null} Timeout that returns to idle after register success/fail. */
 let afterRegisterTimer = null;
+/** @type {number|null} Timeout that simulates the NFC tap in ?demo registration. */
+let demoRegisterTapTimer = null;
 
 /**
  * Cancel the delayed return-to-idle after registration.
@@ -1573,12 +1688,15 @@ function showRegisterStep(stepId) {
 async function openRegister() {
   selectedRegistrantName = null;
   clearInterval(registerCountdownTimer);
+  clearTimeout(demoRegisterTapTimer);
+  demoRegisterTapTimer = null;
   clearAfterRegisterTimer();
 
   if (S.adminRegistration) {
     // Admin manual registration — show free-text input
     const input = document.getElementById('register-name-admin');
     input.value = '';
+    document.getElementById('register-admin-role').checked = false;
     document.getElementById('register-next-btn-admin').disabled = true;
     showRegisterStep('register-step-name-admin');
     navigate('register');
@@ -1653,11 +1771,13 @@ function selectRegistrantName(name, btn) {
 async function submitRegistrationName() {
   let name;
   let endpoint;
+  let role;
 
   if (S.adminRegistration) {
     // Admin manual registration — get name from text input
     name = document.getElementById('register-name-admin').value.trim();
     if (!name) return;
+    role = document.getElementById('register-admin-role').checked ? 'admin' : 'user';
     endpoint = apiStartAdminRegistration;
   } else {
     // Self-service — get the name selected from the list
@@ -1690,13 +1810,23 @@ async function submitRegistrationName() {
   }, 1000);
 
   // Tell backend to await the next NFC tap for registration
-  const result = await endpoint(name);
+  const result = S.adminRegistration ? await endpoint(name, role) : await endpoint(name);
   if (!result.success) {
     clearInterval(registerCountdownTimer);
     showRegisterStep('register-step-error');
     document.getElementById('register-error-msg').textContent =
       result.detail || result.message || 'Could not start registration.';
     scheduleAfterRegistration(3500);
+  } else if (USE_DEMO) {
+    // Demo mode has no NFC hardware — simulate the card tap after 1.5 s.
+    clearTimeout(demoRegisterTapTimer);
+    demoRegisterTapTimer = setTimeout(() => {
+      demoRegisterTapTimer = null;
+      handleRegistrationSuccess({
+        user: { id: 0, name, role: role || 'user' },
+        replaced: false,
+      });
+    }, 1500);
   }
 }
 
@@ -1736,6 +1866,8 @@ async function navigateAfterRegistration() {
  */
 function cancelRegistration() {
   clearInterval(registerCountdownTimer);
+  clearTimeout(demoRegisterTapTimer);
+  demoRegisterTapTimer = null;
   clearAfterRegisterTimer();
   apiCancelRegistration();
   if (S.adminRegistration) {
@@ -1759,7 +1891,9 @@ function handleRegistrationSuccess(data) {
   if (S.screen !== 'register') return;
   showRegisterStep('register-step-success');
   document.getElementById('register-success-msg').textContent =
-    `Welcome, ${data.user.name}! You can now tap your card to log in.`;
+    data.user.role === 'admin'
+      ? `Registered ${data.user.name} as admin. They can now tap their card to log in.`
+      : `Welcome, ${data.user.name}! You can now tap your card to log in.`;
   scheduleAfterRegistration(4000);
 }
 
@@ -1858,6 +1992,7 @@ function closeAdminPanel() {
 function dismissAdminToIdle() {
   closeAdminPanel();
   hideRegisterDeviceOverlay();
+  hideUsersOverlay();
   apiCancelRegistration();
   adminSessionActive = false;
   endSession();
@@ -2516,6 +2651,19 @@ async function populateBindList(refresh) {
       unbindBtn.addEventListener('click', () => { clickSound(); unbindDeviceTag(dev); });
       actions.appendChild(unbindBtn);
     }
+    // Maintenance toggle: To maintenance when available, Back in service
+    // when maintenance; hidden while borrowed (return it first).
+    if (dev.status === 'available' || dev.status === 'maintenance') {
+      const maint = dev.status === 'maintenance';
+      const maintBtn = document.createElement('button');
+      maintBtn.type = 'button';
+      maintBtn.className = maint ? 'bind-go' : 'bind-unbind';
+      maintBtn.dataset.maintId = dev.id;
+      maintBtn.dataset.maintOn = maint ? '0' : '1';
+      maintBtn.textContent = maint ? 'Back in service' : 'To maintenance';
+      maintBtn.addEventListener('click', () => { clickSound(); adminSetMaintenance(dev); });
+      actions.appendChild(maintBtn);
+    }
 
     row.appendChild(info);
     row.appendChild(pill);
@@ -2872,6 +3020,46 @@ async function unbindDeviceTag(dev) {
 }
 
 /**
+ * Toggle a locker device in/out of maintenance from the Register Device
+ * list (out for calibration). Refusals (borrowed, already set) toast the
+ * API detail. Demo mode flips the row's status locally.
+ * @param {Object} dev - Device row.
+ * @returns {Promise<void>}
+ */
+async function adminSetMaintenance(dev) {
+  const on = dev.status !== 'maintenance';
+  if (USE_DEMO) {
+    await sleep(300); // simulate API latency
+    dev.status = on ? 'maintenance' : 'available';
+    showToast(
+      on ? `${dev.name} flagged for maintenance` : `${dev.name} back in service`,
+      'success'
+    );
+    await populateBindList();
+    return;
+  }
+  try {
+    const res = await fetch(`/api/admin/devices/${dev.id}/maintenance`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ maintenance: on }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok) {
+      showToast(
+        on ? `${dev.name} flagged for maintenance` : `${dev.name} back in service`,
+        'success'
+      );
+      await populateBindList();
+    } else {
+      showToast(data.detail || 'Could not change maintenance.', 'error');
+    }
+  } catch (_) {
+    showToast('Could not change maintenance.', 'error');
+  }
+}
+
+/**
  * Handle tag_bind_success SSE: show success, then return to the list and
  * refresh the kiosk grids (a fresh bind/register changes the tagged set).
  * @param {Object} data - SSE payload with device_name / pm_number.
@@ -2905,6 +3093,375 @@ function handleTagBindFailed(data) {
   setTimeout(() => {
     showBindStep('bind-step-list');
     populateBindList();
+  }, 2500);
+}
+
+/* ============================================================
+   ADMIN — USERS OVERLAY (list, deactivate, replace card)
+============================================================ */
+/** @type {number|null} Replace-card countdown interval. */
+let usersCountdownTimer = null;
+/** @type {Array<Object>} Cached rows from GET /api/admin/users. */
+let usersList = [];
+/** @type {number|null} User id pending deactivate confirm or replace tap. */
+let usersTargetId = null;
+/** @type {boolean} Replace-card POST in flight; extra clicks are ignored. */
+let usersReplaceArming = false;
+/** @type {number|null} Users overlay auto-return timer (success/error steps). */
+let usersStepTimer = null;
+/** @type {number|null} Fallback idle timer after self-deactivate (SSE loss). */
+let sessionEndedFallbackTimer = null;
+
+/**
+ * Show a Users overlay step and hide the others.
+ * @param {string} stepId - Element id of the step to show.
+ */
+function showUsersStep(stepId) {
+  document.querySelectorAll('#overlay-users .users-step').forEach(el => {
+    el.classList.toggle('hidden', el.id !== stepId);
+  });
+}
+
+/**
+ * Fetch active users for the Users overlay. Demo mode builds a static list
+ * from DEMO_USERS with borrowed counts derived from DEMO_DEVICES.
+ * @returns {Promise<Array<Object>|null>} User rows, or null on failure.
+ */
+async function apiAdminListUsers() {
+  if (USE_DEMO) {
+    await sleep(300); // simulate API latency
+    const counts = {};
+    DEMO_DEVICES.forEach(d => {
+      if (d.status === 'borrowed' && d.borrower_name) {
+        counts[d.borrower_name] = (counts[d.borrower_name] || 0) + 1;
+      }
+    });
+    return DEMO_USERS.map(u => ({
+      id: u.id, name: u.name, role: u.role,
+      borrowed_count: counts[u.name] || 0,
+    }));
+  }
+  try {
+    const res = await fetch('/api/admin/users');
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.users || [];
+  } catch (_) { return null; }
+}
+
+/**
+ * Render the cached usersList into #users-list rows (name, role badge,
+ * borrowed count, Replace card / Deactivate buttons).
+ */
+function renderUsersList() {
+  const list = document.getElementById('users-list');
+  list.innerHTML = '';
+  if (!usersList.length) {
+    const empty = document.createElement('p');
+    empty.className = 'bind-hint';
+    empty.textContent = 'No active users.';
+    list.appendChild(empty);
+    return;
+  }
+  usersList.forEach(u => {
+    const row = document.createElement('div');
+    row.className = 'bind-row';
+
+    const info = document.createElement('div');
+    info.className = 'bind-row-info';
+    const nameEl = document.createElement('div');
+    nameEl.className = 'bind-row-name';
+    nameEl.textContent = u.name || '';
+    const metaEl = document.createElement('div');
+    metaEl.className = 'bind-row-meta';
+    metaEl.textContent = `${u.borrowed_count || 0} borrowed`;
+    info.appendChild(nameEl);
+    info.appendChild(metaEl);
+
+    const pill = document.createElement('span');
+    pill.className = 'bind-tag-pill' + (u.role === 'admin' ? '' : ' unbound');
+    pill.textContent = u.role === 'admin' ? 'admin' : 'user';
+
+    const actions = document.createElement('div');
+    actions.className = 'bind-row-actions';
+    const replaceBtn = document.createElement('button');
+    replaceBtn.type = 'button';
+    replaceBtn.className = 'bind-go';
+    replaceBtn.textContent = 'Replace card';
+    replaceBtn.dataset.replaceId = u.id;
+    const deactBtn = document.createElement('button');
+    deactBtn.type = 'button';
+    deactBtn.className = 'bind-unbind';
+    deactBtn.textContent = 'Deactivate';
+    deactBtn.dataset.deactivateId = u.id;
+    actions.appendChild(replaceBtn);
+    actions.appendChild(deactBtn);
+
+    row.appendChild(info);
+    row.appendChild(pill);
+    row.appendChild(actions);
+    list.appendChild(row);
+  });
+}
+
+/**
+ * Reload GET /api/admin/users and re-render the list step.
+ * @returns {Promise<void>}
+ */
+async function loadUsersList() {
+  const users = await apiAdminListUsers();
+  if (users === null) {
+    document.getElementById('users-error').textContent = 'Could not load users.';
+    if (!usersList.length) renderUsersList();
+  } else {
+    usersList = users;
+    document.getElementById('users-error').textContent = '';
+    renderUsersList();
+  }
+}
+
+/**
+ * Admin shortcut: close the admin panel and open the Users overlay.
+ * @returns {Promise<void>}
+ */
+async function adminOpenUsers() {
+  closeAdminPanel();
+  await sleep(300); // wait for panel close animation
+  const overlay = document.getElementById('overlay-users');
+  overlay.style.display = '';
+  showUsersStep('users-step-list');
+  document.getElementById('users-error').textContent = '';
+  S.screen = 'admin';
+  armIdle();
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    overlay.classList.add('visible');
+  }));
+  await loadUsersList();
+}
+
+/**
+ * Hide the Users overlay without reopening the admin panel (used when the
+ * session ends underneath — e.g. the admin deactivated themselves).
+ */
+function hideUsersOverlay() {
+  clearInterval(usersCountdownTimer);
+  clearTimeout(usersStepTimer);
+  usersStepTimer = null;
+  S.usersReplacePending = false;
+  const overlay = document.getElementById('overlay-users');
+  if (!overlay || overlay.style.display === 'none') return;
+  overlay.classList.remove('visible');
+  overlay.style.display = 'none';
+}
+
+/**
+ * Whether the Users overlay tap-the-new-card step is currently visible.
+ * @returns {boolean} True if the tap step is showing.
+ */
+function isUsersTapStepShowing() {
+  const step = document.getElementById('users-step-tap');
+  return !!step && !step.classList.contains('hidden');
+}
+
+/**
+ * Enable or disable the Users list Replace buttons (arming feedback).
+ * @param {boolean} disabled - True to disable while the arm POST is in flight.
+ */
+function setUsersReplaceButtonsDisabled(disabled) {
+  document.querySelectorAll('#users-list [data-replace-id]').forEach(b => {
+    b.disabled = disabled;
+  });
+}
+
+/**
+ * Close the Users overlay, cancel an armed replace window, reopen the panel.
+ */
+function closeUsersOverlay() {
+  clearInterval(usersCountdownTimer);
+  // Closing from the tap step must always release the server window, even if
+  // a late response already cleared the pending flag (double-click race).
+  if (S.usersReplacePending || isUsersTapStepShowing()) {
+    S.usersReplacePending = false;
+    apiCancelRegistration();
+  }
+  hideUsersOverlay();
+  openAdminPanel();
+}
+
+/**
+ * Open the deactivate confirm step for one user row.
+ * @param {number} id - User primary key.
+ */
+function usersAskDeactivate(id) {
+  const u = usersList.find(x => x.id === id);
+  if (!u) return;
+  usersTargetId = id;
+  document.getElementById('users-confirm-name').textContent = u.name;
+  document.getElementById('users-confirm-error').textContent = '';
+  showUsersStep('users-step-confirm');
+}
+
+/**
+ * POST the deactivate for the confirmed user. 409 details (last admin,
+ * devices still held) show inline. When the response ends the panel's own
+ * session, the overlay hides and the session_ended SSE drives idle.
+ * @returns {Promise<void>}
+ */
+async function usersDeactivate() {
+  const id = usersTargetId;
+  const errEl = document.getElementById('users-confirm-error');
+  errEl.textContent = '';
+  if (USE_DEMO) {
+    await sleep(300);
+    usersList = usersList.filter(u => u.id !== id);
+    showUsersStep('users-step-list');
+    renderUsersList();
+    return;
+  }
+  try {
+    const res = await fetch(`/api/admin/users/${id}/deactivate`, { method: 'POST' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      errEl.textContent = data.detail || 'Could not deactivate.';
+      return;
+    }
+    if (data.session_ended) {
+      hideUsersOverlay();
+      // The backend session is authoritatively dead; drop the local user now
+      // so the fallback can tell a re-login apart from SSE loss.
+      S.user = null;
+      scheduleSessionEndedFallback();
+      return; // session_ended SSE navigates to idle
+    }
+    showUsersStep('users-step-list');
+    await loadUsersList();
+  } catch (_) {
+    errEl.textContent = 'Could not deactivate.';
+  }
+}
+
+/**
+ * Idle locally if the session_ended SSE never arrives after self-deactivate.
+ * Conservative: only fires when no (re-)login happened since — a live
+ * session always has S.user set and leaves the admin screen.
+ */
+function scheduleSessionEndedFallback() {
+  clearTimeout(sessionEndedFallbackTimer);
+  sessionEndedFallbackTimer = setTimeout(() => {
+    sessionEndedFallbackTimer = null;
+    if (S.user === null && S.screen === 'admin') endSession(false, true);
+  }, 2500);
+}
+
+/**
+ * Arm the 60s replace-card window for one user, then show the tap step.
+ * @param {number} id - User primary key.
+ * @returns {Promise<void>}
+ */
+async function usersReplaceCard(id) {
+  const u = usersList.find(x => x.id === id);
+  if (!u) return;
+  usersTargetId = id;
+  document.getElementById('users-tap-name').textContent = u.name;
+  const errEl = document.getElementById('users-error');
+  errEl.textContent = '';
+  if (USE_DEMO) {
+    await sleep(300);
+    showUsersStep('users-step-success');
+    document.getElementById('users-success-msg').textContent =
+      `Card replaced for ${u.name}.`;
+    clearTimeout(usersStepTimer);
+    usersStepTimer = setTimeout(() => { showUsersStep('users-step-list'); }, 2500);
+    return;
+  }
+  // In-flight guard: a double-click's second POST would 409 against the
+  // window the first POST just armed, then clear the pending flag and hide
+  // its error on the now-hidden list step. Separate from
+  // S.usersReplacePending, which tracks the armed window for close/cancel.
+  if (usersReplaceArming) return;
+  usersReplaceArming = true;
+  setUsersReplaceButtonsDisabled(true);
+  // Mark pending BEFORE the POST: the backend arms its window the moment the
+  // request arrives, so a fast tap's SSE result can land before this fetch
+  // resolves. Cleared on every HTTP failure below.
+  S.usersReplacePending = true;
+  try {
+    const res = await fetch(`/api/admin/users/${id}/replace-card`, { method: 'POST' });
+    const data = await res.json().catch(() => ({}));
+    usersReplaceArming = false;
+    setUsersReplaceButtonsDisabled(false);
+    if (!res.ok) {
+      // Late loser of a double-arm race: the tap step is already up from the
+      // winning POST, so leave the armed window alone and stay silent.
+      if (res.status === 409 && isUsersTapStepShowing()) return;
+      S.usersReplacePending = false;
+      errEl.textContent = data.detail || 'Could not replace card.';
+      return;
+    }
+  } catch (_) {
+    usersReplaceArming = false;
+    setUsersReplaceButtonsDisabled(false);
+    S.usersReplacePending = false;
+    errEl.textContent = 'Could not replace card.';
+    return;
+  }
+  showUsersStep('users-step-tap');
+  startUsersCountdown();
+}
+
+/**
+ * 60s countdown on the tap-the-new-card step. On timeout the window is
+ * cancelled via POST /api/register/cancel and the error step shows.
+ */
+function startUsersCountdown() {
+  clearInterval(usersCountdownTimer);
+  let secs = 60;
+  const cdEl = document.getElementById('users-countdown');
+  cdEl.textContent = secs + 's';
+  usersCountdownTimer = setInterval(() => {
+    secs--;
+    cdEl.textContent = secs + 's';
+    if (secs <= 0) {
+      clearInterval(usersCountdownTimer);
+      S.usersReplacePending = false;
+      apiCancelRegistration();
+      showUsersStep('users-step-error');
+      document.getElementById('users-error-msg').textContent =
+        'Card replace timed out. Please try again.';
+      clearTimeout(usersStepTimer);
+      usersStepTimer = setTimeout(() => {
+        showUsersStep('users-step-list');
+        loadUsersList();
+      }, 2500);
+    }
+  }, 1000);
+}
+
+/**
+ * Route registration_success / registration_failed SSE to the Users overlay
+ * while a replace-card window is armed.
+ * @param {Object} data - SSE payload (user or reason).
+ * @param {boolean} ok - True on registration_success.
+ */
+function handleUsersReplaceResult(data, ok) {
+  S.usersReplacePending = false;
+  const overlay = document.getElementById('overlay-users');
+  if (!overlay || overlay.style.display === 'none') return;
+  clearInterval(usersCountdownTimer);
+  if (ok) {
+    showUsersStep('users-step-success');
+    const name = data.user && data.user.name ? data.user.name : 'user';
+    document.getElementById('users-success-msg').textContent =
+      `Card replaced for ${name}.`;
+  } else {
+    showUsersStep('users-step-error');
+    document.getElementById('users-error-msg').textContent =
+      data.reason || 'Card replace failed. Please try again.';
+  }
+  clearTimeout(usersStepTimer);
+  usersStepTimer = setTimeout(() => {
+    showUsersStep('users-step-list');
+    loadUsersList();
   }, 2500);
 }
 
@@ -3100,6 +3657,16 @@ document.getElementById('admin-goto-return').addEventListener('click', () => { c
 document.getElementById('admin-sync-source').addEventListener('click', () => { clickSound(); adminSyncSource(); });
 document.getElementById('admin-register-user').addEventListener('click', () => { clickSound(); adminRegisterUser(); });
 document.getElementById('admin-register-device').addEventListener('click', () => { clickSound(); adminRegisterDevice(); });
+document.getElementById('admin-users').addEventListener('click', () => { clickSound(); adminOpenUsers(); });
+document.getElementById('users-close').addEventListener('click', () => { clickSound(); closeUsersOverlay(); });
+document.getElementById('users-confirm-back').addEventListener('click', () => { clickSound(); showUsersStep('users-step-list'); });
+document.getElementById('users-confirm-submit').addEventListener('click', () => { clickSound(); usersDeactivate(); });
+document.getElementById('users-list').addEventListener('click', e => {
+  const replaceBtn = e.target.closest('[data-replace-id]');
+  if (replaceBtn) { clickSound(); usersReplaceCard(Number(replaceBtn.dataset.replaceId)); return; }
+  const deactBtn = e.target.closest('[data-deactivate-id]');
+  if (deactBtn) { clickSound(); usersAskDeactivate(Number(deactBtn.dataset.deactivateId)); }
+});
 document.getElementById('bind-device-close').addEventListener('click', () => { clickSound(); closeRegisterDevice(); });
 document.getElementById('bind-search').addEventListener('input', () => {
   clearTimeout(bindSearchTimer);
@@ -3139,6 +3706,7 @@ document.getElementById('overlay-inactivity').style.display    = 'none';
 document.getElementById('overlay-device-detail').style.display = 'none';
 document.getElementById('overlay-admin').style.display         = 'none';
 document.getElementById('overlay-register-device').style.display = 'none';
+document.getElementById('overlay-users').style.display        = 'none';
 document.getElementById('overlay-update').style.display        = 'none';
 document.getElementById('overlay-power').style.display         = 'none';
 document.getElementById('overlay-slot').style.display          = 'none';
@@ -3250,12 +3818,18 @@ function connectSSE() {
   source.addEventListener('registration_success', e => {
     if (S.updating) return;
     const data = JSON.parse(e.data);
+    // Payload-first routing: every replace-path result carries replaced:true
+    // (app_context.py), so no pending-flag fallback is needed — and it would
+    // misroute an enrol result landing mid-flight to the Users overlay.
+    if (data.replaced === true) { handleUsersReplaceResult(data, true); return; }
     handleRegistrationSuccess(data);
   });
 
   source.addEventListener('registration_failed', e => {
     if (S.updating) return;
     const data = JSON.parse(e.data);
+    // Payload-first routing: see registration_success above.
+    if (data.replaced === true) { handleUsersReplaceResult(data, false); return; }
     handleRegistrationFailed(data);
   });
 
@@ -3344,6 +3918,10 @@ if (USE_DEMO) {
   checkExistingSession();
   reportKioskDisplay('idle');
 }
+
+// Calibration alerts: refresh the idle overdue banner now and every 60 s.
+refreshIdleCalBanner();
+setInterval(refreshIdleCalBanner, 60000);
 
 /* ============================================================
    DEV / SIMULATION — no-hardware tap injection

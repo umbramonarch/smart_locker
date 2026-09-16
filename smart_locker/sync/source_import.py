@@ -10,6 +10,8 @@ Notes: Called by the scheduler, ``python -m scripts.sync_source``, or
        description, and tag_hmac are never overwritten. A Slot/cabinet
        column is unused. lookup_catalog_by_pm is the Register Device lookup;
        list_in_locker_catalog is its "pick from the Excel locker list" feed.
+       Calibration cells: blank clears the stored date, unparsable text keeps
+       it (warning logged), no Calibration column leaves it alone.
 """
 
 import logging
@@ -25,7 +27,12 @@ from zipfile import BadZipFile
 from openpyxl import load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
 
-from config.settings import id_header_extras, in_locker_token, location_header_extras
+from config.settings import (
+    id_header_extras,
+    in_locker_token,
+    location_header_extras,
+    maintenance_token,
+)
 from smart_locker.database.repositories import DeviceRepository
 
 logger = logging.getLogger(__name__)
@@ -141,6 +148,10 @@ class CatalogRow:
 
     ``present`` names the catalog fields whose Excel columns exist on this
     sheet so import can skip missing columns instead of wiping SQLite.
+    Calibration contract: a blank cell in an existing Calibration column
+    clears ``calibration_due`` on the next Sync; a non-blank cell that does
+    not parse keeps the previous value (and logs a warning); a sheet without
+    a Calibration column never touches the field.
     """
 
     pm_number: str
@@ -221,25 +232,29 @@ def is_own_locker_location(value: str) -> bool:
 
 
 def is_in_locker_location(value: str) -> bool:
-    """Return True when a Location cell means the device is in a locker.
+    """Return True when a Location cell is a non-person marker.
 
-    Broad place-vs-person check for registrant extraction: exact
-    ``in_locker_token()`` match, or a whole-word locker/cabinet marker.
-    ``"Blocker"`` is not in-locker. A "Cabinet A" cell is a place, not a
-    person — but only ``is_own_locker_location`` decides what belongs in
-    this kiosk's Register Device pick list.
+    Exact ``in_locker_token()`` match (via ``is_own_locker_location``),
+    an exact ``maintenance_token()`` match (device out for calibration —
+    written by Location write-back), or a whole-word locker/cabinet
+    marker. ``"Blocker"`` is not in-locker. A "Cabinet A" cell is a
+    place, not a person — but only ``is_own_locker_location`` decides
+    what belongs in this kiosk's Register Device pick list.
 
     Args:
         value: Location cell text.
 
     Returns:
-        True if the text is a locker location, not a person name.
+        True if the text is a locker/maintenance marker, not a person name.
     """
     if is_own_locker_location(value):
         return True
     text = (value or "").strip().lower()
     if not text:
         return False
+    maint = (maintenance_token() or "").strip().lower()
+    if maint and text == maint:
+        return True
     return any(
         re.search(rf"(?<![a-z]){re.escape(marker)}(?![a-z])", text)
         for marker in _IN_LOCKER_MARKERS
@@ -458,9 +473,19 @@ def _catalog_from_row(
 
     calibration_due = None
     if cols["calibration"] is not None:
-        calibration_due = parse_date(row[cols["calibration"]])
-        if calibration_due is not None:
+        raw = row[cols["calibration"]]
+        if raw is None or str(raw).strip() == "":
+            # Blank cell in an existing column clears the date on next Sync.
             present.add("calibration_due")
+        else:
+            calibration_due = parse_date(raw)
+            if calibration_due is not None:
+                present.add("calibration_due")
+            else:
+                logger.warning(
+                    "Unparsable calibration date for %s; keeping previous value.",
+                    pm_number,
+                )
 
     return CatalogRow(
         pm_number=pm_number,
@@ -697,7 +722,7 @@ def import_from_source_excel(
                     updates["manufacturer"] = catalog.manufacturer
                 if "model" in catalog.present and catalog.model:
                     updates["model"] = catalog.model
-                if "calibration_due" in catalog.present and catalog.calibration_due is not None:
+                if "calibration_due" in catalog.present:
                     updates["calibration_due"] = catalog.calibration_due
                 changed = DeviceRepository.update_metadata(
                     session,

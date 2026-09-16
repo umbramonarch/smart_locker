@@ -117,6 +117,130 @@ class UserRepository:
         stmt = select(User).order_by(User.display_name)
         return list(session.execute(stmt).scalars().all())
 
+    @staticmethod
+    def list_active(session: Session) -> list[User]:
+        """Return active users ordered by display name.
+
+        Args:
+            session: Active database session.
+
+        Returns:
+            List of User objects where ``is_active`` is True.
+        """
+        stmt = (
+            select(User)
+            .where(User.is_active.is_(True))
+            .order_by(User.display_name)
+        )
+        return list(session.execute(stmt).scalars().all())
+
+    @staticmethod
+    def display_names_lower(session: Session, active: bool) -> set[str]:
+        """Lowercased display names of users with the given active flag.
+
+        Args:
+            session: Active database session.
+            active: ``True`` for active users, ``False`` for deactivated.
+
+        Returns:
+            Set of stripped, lowercased display names.
+        """
+        stmt = select(User.display_name).where(User.is_active.is_(active))
+        return {
+            name.strip().lower()
+            for name in session.execute(stmt).scalars().all()
+            if name
+        }
+
+    @staticmethod
+    def borrowed_counts(session: Session) -> dict[int, int]:
+        """Count borrowed devices per user in one grouped query.
+
+        Args:
+            session: Active database session.
+
+        Returns:
+            Mapping of user id to number of borrowed Device rows.
+        """
+        from smart_locker.database.models import Device, DeviceStatus
+
+        stmt = (
+            select(Device.current_borrower_id, func.count(Device.id))
+            .where(
+                Device.status == DeviceStatus.BORROWED,
+                Device.current_borrower_id.is_not(None),
+            )
+            .group_by(Device.current_borrower_id)
+        )
+        return {
+            borrower_id: count
+            for borrower_id, count in session.execute(stmt).all()
+        }
+
+    @staticmethod
+    def count_active_admins(session: Session) -> int:
+        """Count users with the admin role that are still active.
+
+        Args:
+            session: Active database session.
+
+        Returns:
+            Number of active admin users.
+        """
+        from smart_locker.database.models import UserRole
+
+        stmt = select(func.count()).select_from(User).where(
+            User.role == UserRole.ADMIN,
+            User.is_active.is_(True),
+        )
+        return session.execute(stmt).scalar_one()
+
+    @staticmethod
+    def borrowed_count(session: Session, user_id: int) -> int:
+        """Count devices the user currently holds (borrowed, not returned).
+
+        Args:
+            session: Active database session.
+            user_id: ID of the user.
+
+        Returns:
+            Number of borrowed Device rows for the user.
+        """
+        return DeviceRepository.count_borrowed_by_user(session, user_id)
+
+    @staticmethod
+    def deactivate(session: Session, user: User) -> None:
+        """Mark a user inactive — their card no longer logs in.
+
+        History is kept; the row is not deleted.
+
+        Args:
+            session: Active database session.
+            user: User object to deactivate.
+        """
+        user.is_active = False
+        session.flush()
+        logger.info("Deactivated user: %s (id=%d)", user.display_name, user.id)
+
+    @staticmethod
+    def replace_card(
+        session: Session,
+        user: User,
+        uid_hmac: str,
+        encrypted_card_uid: str,
+    ) -> None:
+        """Store a replacement card's HMAC and ciphertext on the user row.
+
+        Args:
+            session: Active database session.
+            user: User object being re-carded.
+            uid_hmac: HMAC-SHA256 digest of the new card UID.
+            encrypted_card_uid: AES-256-GCM encrypted new card UID.
+        """
+        user.uid_hmac = uid_hmac
+        user.encrypted_card_uid = encrypted_card_uid
+        session.flush()
+
 
 class DeviceRepository:
     """Data access layer for Device entities.

@@ -1,13 +1,15 @@
 """
 File: owner_edit.py
-Description: Admin-secret-gated dashboard owner change on Inventory. Writes
+Description: Public dashboard owner change on Inventory. Writes
              the Location cell in the catalog Excel for PMs that are not
              locker devices. Never inserts a locker row. Locker PMs are
              refused — borrow and return stay on the kiosk.
 Project: smart_locker/services
-Notes: POST /api/dashboard/owner uses require_dashboard_admin
-       (X-Smart-Locker-Admin). Inventory/Locker GETs stay public.
-       This module is the Excel write.
+Notes: POST /api/dashboard/owner is public (no secret). Inventory/Locker
+       GETs stay public. This module is the Excel write. Registered kiosk
+       users are not listed — the dropdown only offers names already
+       visible in Inventory (Excel Location), skipping names that match
+       a deactivated user.
 """
 
 from __future__ import annotations
@@ -51,7 +53,7 @@ class LockerOwned(OwnerEditError):
 
 @dataclass(frozen=True)
 class OwnerEditResult:
-    """Outcome of one admin-secret-gated owner change."""
+    """Outcome of one public dashboard owner change."""
 
     pm_number: str
     owner: str
@@ -61,8 +63,11 @@ class OwnerEditResult:
 def owner_choices(session: Session) -> list[str]:
     """Names for the dashboard owner dropdown.
 
-    In-locker token, then registered users, then registrant names.
-    Case-insensitive duplicates keep the first spelling.
+    In-locker token, then registrant names. Case-insensitive
+    duplicates keep the first spelling. Registered kiosk users are
+    not listed — the dropdown only offers names already visible in
+    Inventory (Excel Location). Registrant names matching a
+    deactivated user are skipped.
 
     Args:
         session: Active database session.
@@ -84,9 +89,10 @@ def owner_choices(session: Session) -> list[str]:
         names.append(text)
 
     _add(in_locker_token())
-    for user in UserRepository.list_all(session):
-        _add(user.display_name)
+    inactive_lower = UserRepository.display_names_lower(session, False)
     for registrant in RegistrantRepository.get_all(session):
+        if registrant.display_name.strip().lower() in inactive_lower:
+            continue
         _add(registrant.display_name)
     return names
 

@@ -10,12 +10,19 @@ Work on `main` after the `v0.2.0` tag. Merging to `main` is not a release; the n
 
 - Register Device → Add from Excel now offers a tap-to-pick list of unregistered units whose Excel Location is exactly the in-locker token (`GET /api/admin/devices/catalog-locker`); typing the PM number still works as fallback.
 - Kiosk Locker / Return grids show only devices with a bound NFC sticker (`GET /api/devices` filters on `tag_hmac`); untagged rows stay admin-only in Register Device and on the dashboard. The hidden-admin panel reads `GET /api/admin/devices`, which lists every row so Bind can be retried and slots stay accurate.
+- Calibration alerts: devices due within `SMART_LOCKER_CALIBRATION_WARN_DAYS` (default 14) or overdue are flagged on the kiosk (CAL DUE / OVERDUE badges, detail line, idle banner for overdue) and on the dashboard (amber/red Calibration cells, header count, Locker **Calibration** filter). Warn only — borrowing still works. Excel Calibration cells: blank clears the stored date on Sync; unreadable text keeps it and logs a warning.
+- Admin **Register Device** rows: **To maintenance** / **Back in service**; the Excel Location cell reads `SMART_LOCKER_MAINTENANCE_TOKEN` (default `Maintenance`) while a device is out for calibration.
+- Kiosk admin panel: **Register as admin** switch on Register User; **Users** overlay to **Replace card** (lost card, 60 s tap window) and **Deactivate** a user (refused for the last admin or while they still hold devices).
 
 ### Fixed
 
 - Kiosk grids keep showing a loan the signed-in user holds themselves even when its sticker is unbound (`GET /api/devices`); other users still see tagged rows only, and both unbind endpoints re-check the borrowed state on a freshly read row so a late borrow is still refused with 409.
 - Unbinding a borrowed device's sticker is rejected with 409 on the kiosk (`POST /api/admin/devices/{id}/unbind-tag`) and the dashboard (`POST /api/dashboard/unbind-tag`), so a loan can no longer vanish from the Return grids. Record the return first, then unbind.
 - Register Device pick list offers only Excel rows whose Location is exactly the in-locker token; other cabinets (e.g. `Cabinet A`) no longer appear. Registrant-name extraction still treats any locker/cabinet wording as a place, not a person.
+- Expired card-replace window no longer ends the admin session.
+- Deactivated names are blocked from self-registration, admin Register User, and the owner dropdown.
+- Pressing Replace card and tapping immediately no longer leaves the Users overlay stuck on a 60 s timeout.
+- Dashboard Inventory owner change no longer asks for the dashboard admin secret; anyone who can open the dashboard can change Location for non-locker PMs. Bind/unbind and users/transactions still need the secret. The owners dropdown lists only the in-locker token and Excel-derived registrant names, never the kiosk user table.
 
 ### Changed
 

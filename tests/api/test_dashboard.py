@@ -1,6 +1,6 @@
 """
 File: test_dashboard.py
-Description: Tests for public Inventory/Locker/Display GETs, admin-secret
+Description: Tests for public Inventory/Locker/Display GETs, public
              owner edit, and dashboard NFC bind/unbind.
 Project: smart_locker/tests/api
 Notes: Run with: python -m pytest tests/api/test_dashboard.py -v
@@ -179,12 +179,14 @@ class TestDashboardInventoryAndDisplay:
 
 
 class TestDashboardOwnerEditApi:
-    """POST /api/dashboard/owner requires the dashboard admin secret."""
+    """POST /api/dashboard/owner is public; no secret needed."""
 
-    def test_owner_change_without_secret_is_401(
+    def test_owner_change_without_secret_is_200(
         self, client, tmp_path, monkeypatch
     ):
-        """Unauthenticated owner write is 401, not 200."""
+        """Unauthenticated owner write is 200 and updates the Excel cell."""
+        from openpyxl import load_workbook
+
         path = catalog_workbook(tmp_path, [
             ["Equipment", "Name", "Location"],
             ["PM-VAN", "Van kit", "Workshop"],
@@ -194,7 +196,32 @@ class TestDashboardOwnerEditApi:
             "/api/dashboard/owner",
             json={"pm_number": "PM-VAN", "owner": "Alex"},
         )
-        assert resp.status_code == 401
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["ok"] is True
+        assert body["locker"] is False
+        ws = load_workbook(path).active
+        location_col = next(
+            c.column for c in ws[1] if c.value == "Location"
+        )
+        assert ws.cell(row=2, column=location_col).value == "Alex"
+
+    def test_owner_change_works_when_secret_unset(
+        self, client, tmp_path, monkeypatch
+    ):
+        """Owner write succeeds with the admin secret unset (public route)."""
+        monkeypatch.delenv("SMART_LOCKER_DASHBOARD_ADMIN_SECRET", raising=False)
+        path = catalog_workbook(tmp_path, [
+            ["Equipment", "Name", "Location"],
+            ["PM-VAN", "Van kit", "Workshop"],
+        ])
+        monkeypatch.setattr("config.settings.SOURCE_EXCEL_PATH", str(path))
+        resp = client.post(
+            "/api/dashboard/owner",
+            json={"pm_number": "PM-VAN", "owner": "Alex"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
 
     def test_owner_change_with_secret(
         self, client, tmp_path, monkeypatch, dashboard_secret
@@ -258,35 +285,30 @@ class TestDashboardOwnerEditApi:
         logs = db_session.execute(select(TransactionLog)).scalars().all()
         assert logs == []
 
-    def test_owners_list_requires_secret(
+    def test_owners_list_is_public(
         self, client, test_user, db_session
     ):
-        """GET /api/dashboard/owners is not public."""
+        """GET /api/dashboard/owners needs no secret; users are not listed."""
         RegistrantRepository.add_names(db_session, {"Bob Field"})
         db_session.commit()
         resp = client.get("/api/dashboard/owners")
-        assert resp.status_code == 401
-
-    def test_owners_list_with_secret(
-        self, client, test_user, db_session, dashboard_secret
-    ):
-        """Dropdown names: registered users + registrants."""
-        RegistrantRepository.add_names(db_session, {"Bob Field"})
-        db_session.commit()
-        resp = client.get(
-            "/api/dashboard/owners",
-            headers=dashboard_admin_headers(dashboard_secret),
-        )
         assert resp.status_code == 200
         names = resp.json()["names"]
-        assert "Test User" in names
+        # "Test User" is a registered kiosk user, not an Excel registrant.
+        assert "Test User" not in names
         assert "Bob Field" in names
         assert "in_locker_token" in resp.json()
 
-    def test_users_and_transactions_require_secret(self, client):
-        """Users and last-500 transactions are not public GETs."""
+    def test_users_and_transactions_require_secret(self, client, test_devices):
+        """Users, transactions, and bind/unbind are not public."""
         assert client.get("/api/dashboard/users").status_code == 401
         assert client.get("/api/dashboard/transactions").status_code == 401
+        assert client.post(
+            "/api/dashboard/bind-tag", json={"pm_number": "PM-001"}
+        ).status_code == 401
+        assert client.post(
+            "/api/dashboard/unbind-tag", json={"pm_number": "PM-001"}
+        ).status_code == 401
 
     def test_users_and_transactions_with_secret(
         self, client, test_user, dashboard_secret
@@ -529,3 +551,57 @@ class TestDashboardTagApi:
         assert resp.status_code == 404
         assert mock_context.pending_tag_bind is None
 
+
+
+class TestDashboardCalibration:
+    """Calibration state rides on dashboard Locker and Inventory payloads."""
+
+    def test_dashboard_devices_calibration_state(
+        self, client, db_session, test_devices, monkeypatch
+    ):
+        """Locker rows carry calibration_state and calibration_days_left."""
+        from datetime import date, timedelta
+
+        monkeypatch.setattr("config.settings.CALIBRATION_WARN_DAYS", 14)
+        today = date.today()
+        DeviceRepository.create(
+            db_session, name="Cal Old", device_type="Meter",
+            pm_number="PM-CO", locker_slot=40,
+            calibration_due=today - timedelta(days=3),
+        )
+        DeviceRepository.create(
+            db_session, name="Cal Soon", device_type="Meter",
+            pm_number="PM-CS", locker_slot=41,
+            calibration_due=today + timedelta(days=5),
+        )
+        db_session.commit()
+        rows = client.get("/api/dashboard/devices").json()
+        over = next(r for r in rows if r["pm_number"] == "PM-CO")
+        assert over["calibration_state"] == "overdue"
+        assert over["calibration_days_left"] == -3
+        soon = next(r for r in rows if r["pm_number"] == "PM-CS")
+        assert soon["calibration_state"] == "due_soon"
+        assert soon["calibration_days_left"] == 5
+        plain = next(r for r in rows if r["pm_number"] == "PM-001")
+        assert plain["calibration_state"] is None
+        assert plain["calibration_days_left"] is None
+
+    def test_dashboard_inventory_calibration_state(
+        self, client, tmp_path, monkeypatch
+    ):
+        """Inventory rows (Excel ISO dates) carry the same fields."""
+        from datetime import date, timedelta
+
+        path = catalog_workbook(tmp_path, [
+            ["PM", "Name", "Calibration Due"],
+            ["PM-A", "Dev A", date.today() - timedelta(days=1)],
+            ["PM-B", "Dev B", None],
+        ])
+        monkeypatch.setattr("config.settings.SOURCE_EXCEL_PATH", str(path))
+        rows = client.get("/api/dashboard/inventory").json()
+        a = next(r for r in rows if r["pm_number"] == "PM-A")
+        assert a["calibration_state"] == "overdue"
+        assert a["calibration_days_left"] == -1
+        b = next(r for r in rows if r["pm_number"] == "PM-B")
+        assert b["calibration_state"] is None
+        assert b["calibration_days_left"] is None

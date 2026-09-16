@@ -1,7 +1,10 @@
 /**
  * @fileoverview Public dashboard: Inventory (Excel), Locker (SQLite), and
  *               Display (kiosk snapshot). Sort, search, status filter, and
- *               polling. Owner change is Inventory only (not locker PMs).
+ *               polling. Owner change is Inventory only, public (not
+ *               locker PMs). Calibration due-soon/overdue rows are
+ *               highlighted and counted in the header badge; Locker has a
+ *               Calibration filter.
  *               5-tap the header clock for users, logs, and NFC unbind /
  *               arm-bind. No login. No remote control of the kiosk.
  * @project smart_locker/frontend
@@ -324,13 +327,11 @@ async function _fetchTablesWork() {
 
 /**
  * Load dropdown names (registered users + registrants + in-locker token).
- * Requires the dashboard admin secret header.
+ * Public; no secret header.
  */
 async function fetchOwners() {
   try {
-    const res = await fetch('/api/dashboard/owners', {
-      headers: dashboardAdminHeaders(),
-    });
+    const res = await fetch('/api/dashboard/owners');
     if (!res.ok) return;
     const data = await res.json();
     ownerNames = Array.isArray(data.names) ? data.names : [];
@@ -441,6 +442,36 @@ function handleSort(table, key) {
 /* ── Rendering ────────────────────────────────────────────────────────────── */
 
 /**
+ * CSS class for a row's calibration state ('cal-due-soon' | 'cal-overdue' | '').
+ * @param {Object} d - Row with optional calibration_state from the API.
+ * @returns {string} Row class name or empty string.
+ */
+function calRowClass(d) {
+  if (d.calibration_state === 'due_soon') return 'cal-due-soon';
+  if (d.calibration_state === 'overdue') return 'cal-overdue';
+  return '';
+}
+
+/**
+ * Update the header calibration badge. Counts Inventory rows when the
+ * catalog loaded, otherwise Locker rows; shows "N calibration" and turns
+ * red when any row is overdue.
+ */
+function updateCalBadge() {
+  const el = document.getElementById('cal-badge');
+  if (!el) return;
+  const rows = (!inventoryError && inventoryData.length)
+    ? inventoryData
+    : devicesData;
+  const flagged = rows.filter(d =>
+    d.calibration_state === 'due_soon' || d.calibration_state === 'overdue');
+  el.hidden = flagged.length === 0;
+  el.textContent = `${flagged.length} calibration`;
+  el.classList.toggle('overdue',
+    flagged.some(d => d.calibration_state === 'overdue'));
+}
+
+/**
  * Render Inventory from cached Excel rows, applying search and sort.
  */
 function renderInventory() {
@@ -456,6 +487,7 @@ function renderInventory() {
     empty.style.display = 'none';
     count.textContent = '';
     lastInventoryStamp = '';
+    updateCalBadge();
     return;
   }
   errorEl.style.display = 'none';
@@ -477,6 +509,8 @@ function renderInventory() {
   if (stamp === lastInventoryStamp) return;
   lastInventoryStamp = stamp;
 
+  updateCalBadge();
+
   if (data.length === 0) {
     tbody.innerHTML = '';
     empty.style.display = '';
@@ -485,14 +519,14 @@ function renderInventory() {
   empty.style.display = 'none';
 
   tbody.innerHTML = data.map(d => `
-    <tr>
+    <tr class="${calRowClass(d)}">
       <td>${esc(d.pm_number)}</td>
       <td>${esc(d.name)}</td>
       <td>${esc(d.manufacturer)}</td>
       <td>${esc(d.model)}</td>
       <td>${esc(d.serial_number)}</td>
       <td>${d.in_locker ? esc(d.location) : ownerCell(d.pm_number, d.location)}</td>
-      <td>${esc(d.calibration_due)}</td>
+      <td class="cal-cell">${esc(d.calibration_due)}</td>
     </tr>
   `).join('');
 }
@@ -504,7 +538,10 @@ function renderInventory() {
 function renderDevices() {
   let data = devicesData;
 
-  if (activeFilter !== 'all') {
+  if (activeFilter === 'calibration') {
+    data = data.filter(d =>
+      d.calibration_state === 'due_soon' || d.calibration_state === 'overdue');
+  } else if (activeFilter !== 'all') {
     data = data.filter(d => d.status === activeFilter);
   }
 
@@ -522,6 +559,8 @@ function renderDevices() {
   if (stamp === lastDevicesStamp) return;
   lastDevicesStamp = stamp;
 
+  updateCalBadge();
+
   if (data.length === 0) {
     tbody.innerHTML = '';
     empty.style.display = '';
@@ -530,7 +569,7 @@ function renderDevices() {
   empty.style.display = 'none';
 
   tbody.innerHTML = data.map(d => `
-    <tr>
+    <tr class="${calRowClass(d)}">
       <td>${d.locker_slot ?? '—'}</td>
       <td>${esc(d.pm_number)}</td>
       <td>${esc(d.name)}</td>
@@ -538,7 +577,7 @@ function renderDevices() {
       <td><span class="status-badge ${d.status}">${d.status}</span></td>
       <td>${esc(d.borrower_name ?? '')}</td>
       <td>${d.has_tag ? 'Tagged' : 'No tag'}</td>
-      <td>${esc(d.calibration_due ?? '')}</td>
+      <td class="cal-cell">${esc(d.calibration_due ?? '')}</td>
     </tr>
   `).join('');
 }
@@ -630,20 +669,15 @@ async function confirmOwnerEdit() {
   try {
     const res = await fetch('/api/dashboard/owner', {
       method: 'POST',
-      headers: dashboardAdminHeaders(),
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ pm_number: pm, owner }),
     });
     if (!res.ok) {
       let detail = 'Could not change owner.';
-      if (res.status === 401) {
-        sessionStorage.removeItem(ADMIN_SECRET_KEY);
-        detail = 'Admin authorization failed. Tap the clock 5 times to enter the secret.';
-      } else {
-        try {
-          const body = await res.json();
-          if (body && body.detail) detail = String(body.detail);
-        } catch (_) { /* keep default */ }
-      }
+      try {
+        const body = await res.json();
+        if (body && body.detail) detail = String(body.detail);
+      } catch (_) { /* keep default */ }
       if (err) {
         err.textContent = detail;
         err.style.display = '';

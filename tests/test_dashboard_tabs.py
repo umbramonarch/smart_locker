@@ -294,3 +294,23 @@ class TestDashboardEsc:
         assert "&gt;" in fn
         assert "data-pm=\"${esc(pm)}\"" in js or 'data-pm="${esc(pm)}"' in js
         assert "data-owner=\"${esc(owner" in js or 'data-owner="${esc(owner' in js
+
+
+class TestCalibrationAlertsDashboard:
+    """Calibration due-soon/overdue: header badge, row classes, Locker filter."""
+
+    def test_cal_badge_and_filter_markup(self):
+        """dashboard.html has the header badge and the Calibration filter."""
+        html = _html()
+        assert 'id="cal-badge"' in html
+        assert 'data-filter="calibration"' in html
+
+    def test_cal_styles_and_js(self):
+        """dashboard.css/js carry cal-due-soon / cal-overdue handling."""
+        css = _css()
+        js = _js()
+        assert "cal-due-soon" in css
+        assert "cal-overdue" in css
+        assert "cal-overdue" in js
+        assert "calibration_state" in js
+        assert "updateCalBadge" in js

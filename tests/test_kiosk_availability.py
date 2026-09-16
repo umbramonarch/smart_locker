@@ -435,3 +435,29 @@ class TestSlotOverlay:
         assert "data.action === 'return'" in action
         assert "data.locker_slot" in action
         assert "data.device_name" in action
+
+
+class TestCalibrationAlertsKiosk:
+    """Kiosk calibration warn-only alerts: banner, detail line, card badges."""
+
+    def test_idle_banner_and_detail_markup(self):
+        """index.html has the idle banner and the detail calibration row."""
+        html = _html()
+        assert 'id="idle-cal-banner"' in html
+        assert 'id="detail-cal"' in html
+
+    def test_js_uses_alerts_endpoint_and_badges(self):
+        """app.js fetches /api/calibration/alerts and renders OVERDUE badges."""
+        js = _js()
+        assert "/api/calibration/alerts" in js
+        assert "OVERDUE" in js
+        assert "CAL DUE" in js
+        assert "calState" in js
+
+    def test_idle_banner_failed_poll_keeps_previous_state(self):
+        """A non-OK poll returns early so an existing banner stays visible."""
+        js = _js()
+        body = js.split("function refreshIdleCalBanner", 1)[1].split(
+            "function buildDeviceCardEl", 1
+        )[0]
+        assert "if (!res.ok) return;" in body

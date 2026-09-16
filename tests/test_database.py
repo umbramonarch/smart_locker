@@ -68,6 +68,34 @@ class TestUserRepository:
         users = UserRepository.list_all(db_session)
         assert len(users) == 2
 
+    def test_borrowed_counts(self, db_session, enc_key, hmac_key):
+        """Grouped query maps user id → held-device count (zero omitted)."""
+        u1 = UserRepository.create(
+            db_session,
+            display_name="Alice",
+            uid_hmac=compute_uid_hmac("AAAA", hmac_key),
+            encrypted_card_uid=encrypt("AAAA", enc_key),
+        )
+        u2 = UserRepository.create(
+            db_session,
+            display_name="Bob",
+            uid_hmac=compute_uid_hmac("BBBB", hmac_key),
+            encrypted_card_uid=encrypt("BBBB", enc_key),
+        )
+        for i in range(2):
+            device = DeviceRepository.create(
+                db_session,
+                name=f"Scope {i}",
+                device_type="measurement",
+                pm_number=f"PM-10{i}",
+            )
+            DeviceRepository.borrow(db_session, device, u1.id)
+        db_session.flush()
+
+        counts = UserRepository.borrowed_counts(db_session)
+        assert counts == {u1.id: 2}
+        assert u2.id not in counts
+
 
 class TestDeviceRepository:
     """Tests for DeviceRepository CRUD — creation, borrow/return state, and extended fields."""
