@@ -8,8 +8,13 @@ Work on `main` after the `v0.2.0` tag. Merging to `main` is not a release; the n
 
 ### Added
 
+- Kiosk admin panel: **Register as admin** switch on Register User; **Users** overlay to **Replace card** (lost card, 60 s tap window) and **Deactivate** a user (refused for the last admin or while they still hold devices).
+
 ### Fixed
 
+- Expired card-replace window no longer ends the admin session.
+- Deactivated names are blocked from self-registration, admin Register User, and the owner dropdown.
+- Pressing Replace card and tapping immediately no longer leaves the Users overlay stuck on a 60 s timeout.
 - Dashboard Inventory owner change no longer asks for the dashboard admin secret; anyone who can open the dashboard can change Location for non-locker PMs. Bind/unbind and users/transactions still need the secret. The owners dropdown lists only the in-locker token and Excel-derived registrant names, never the kiosk user table.
 
 ### Changed

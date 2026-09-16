@@ -841,9 +841,21 @@ Pi on the LAN can use them — the lock is **physical access**, not a password.
    - **Locker / Return Screen** — jump into the availability overlay or return grid as that admin.
    - **Sync Source** — first tap *previews* Excel changes from the share; second tap *applies* them.
    - **Register User** — type any name, then tap a card (skips the approved-name list).
-     After success, timeout, or cancel the kiosk returns to idle; the next
+     The **Register as admin** switch (off by default) enrols the tap as an
+     admin. After success, timeout, or cancel the kiosk returns to idle; the next
      work-card tap logs that user in (a leftover admin session must not
      treat the tap as logout).
+   - **Users** — list active users (name, role, devices held). **Replace card**
+     arms a 60-second tap window: the next card becomes that user's card
+     (the old card stops working; refused if the tap is a device sticker or
+     another user's card). An expired replace window only clears the window —
+     the admin session and overlay stay open. **Deactivate** keeps history but
+     the card stops working; refused for the last admin or a user still
+     holding devices. A deactivated name is blocked from self-registration
+     and admin Register User: deactivation permanently retires the name, and
+     the old card stays bound to the deactivated row, so re-enrolment needs
+     both a new name and a fresh card. Deactivated names are also hidden
+     from the dashboard owner dropdown.
    - **Register Device** — add a locker unit: **PM + free slot + NFC tap** (catalog
      comes from Excel). Existing rows can bind / unbind / change slot. The list shows
      **name + PM** (and slot).
@@ -1279,7 +1291,10 @@ that bridges card taps to the browser.
 | `POST` | `/api/register/cancel` | Cancel a pending self-registration (kiosk loopback) |
 | `GET` | `/api/registrants` | Approved names for self-registration |
 | `POST` | `/api/admin/session` | Start the hidden admin-panel session |
-| `POST` | `/api/admin/register` | Admin manual enrolment (skips name check) |
+| `POST` | `/api/admin/register` | Admin manual enrolment (skips name check; `role` `user`/`admin`) |
+| `GET` | `/api/admin/users` | List active users with held-device counts (admin session) |
+| `POST` | `/api/admin/users/{id}/deactivate` | Deactivate a user (409 last admin / devices held) |
+| `POST` | `/api/admin/users/{id}/replace-card` | Arm a 60s window; next tap becomes that user's card |
 | `POST` | `/api/admin/devices/{id}/bind-tag` | 60s window to bind the next sticker to that device |
 | `POST` | `/api/admin/devices/{id}/unbind-tag` | Clear the sticker HMAC on that device |
 | `POST` | `/api/admin/sync-source` | Trigger the source Excel import now |

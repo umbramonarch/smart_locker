@@ -3,7 +3,8 @@ File: routes.py
 Description: REST API endpoints and SSE event stream for the Smart Locker kiosk.
              Provides session management, device listing, borrow/return operations,
              user self-registration (with registrant name validation), admin-only
-             manual registration, Register Device (PM + slot + NFC), device-tag
+             manual registration (with role switch), admin Users (list,
+             deactivate, replace card), Register Device (PM + slot + NFC), device-tag
              bind/unbind, registrant list retrieval, source sync, dashboard
              (public Inventory from Excel and Locker from SQLite, Display
              snapshot without person names, public owner edit and 5-tap
@@ -30,6 +31,7 @@ import secrets
 import shutil
 import subprocess
 import time
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse, StreamingResponse
@@ -60,7 +62,11 @@ from smart_locker.database.models import (
     User,
     UserRole,
 )
-from smart_locker.database.repositories import DeviceRepository, RegistrantRepository
+from smart_locker.database.repositories import (
+    DeviceRepository,
+    RegistrantRepository,
+    UserRepository,
+)
 from smart_locker.nfc.factory import fake_reader_enabled
 from smart_locker.services.appliance import (
     ApplianceError,
@@ -77,6 +83,7 @@ from smart_locker.services.owner_edit import (
     owner_choices,
     set_owner,
 )
+from smart_locker.services.user_admin_lock import user_admin_lock
 from smart_locker.sync import sync_status
 from smart_locker.sync.inventory_reader import InventoryReadError, read_inventory
 
@@ -360,7 +367,7 @@ def _push_sse(payload: dict) -> None:
 
 
 def _end_kiosk_session(*, sse_reason: str = "explicit") -> None:
-    """Drop the process-global kiosk session and overlay bind state.
+    """Drop the process-global kiosk session and overlay bind/register state.
 
     Args:
         sse_reason: ``reason`` field on the ``session_ended`` SSE event.
@@ -371,6 +378,7 @@ def _end_kiosk_session(*, sse_reason: str = "explicit") -> None:
     ctx.session_mgr.end_session()
     ctx.admin_overlay_open = False
     assign_pending_tag_bind(ctx, None)
+    assign_pending_registration(ctx, None)
     _push_sse({"event": "session_ended", "reason": sse_reason})
 
 
@@ -429,6 +437,49 @@ def _pending_nfc_conflict() -> str | None:
     if ctx.pending_tag_bind is not None:
         return "A device-tag bind is already waiting for a sticker tap."
     return None
+
+
+def _arm_registration(pending: PendingRegistration) -> None:
+    """Atomically claim the NFC reader for a registration window.
+
+    Under ``pending_state_lock`` (RLock — callers may already hold it):
+    raises on a live bind/registration conflict, then assigns the
+    registration. Concurrent callers cannot both pass the conflict check.
+
+    Args:
+        pending: The registration window to arm.
+
+    Raises:
+        HTTPException: 409 if another NFC window is armed.
+    """
+    with pending_state_lock:
+        conflict = _pending_nfc_conflict()
+        if conflict:
+            raise HTTPException(status_code=409, detail=conflict)
+        assign_pending_registration(ctx_module.context, pending)
+
+
+def _reject_deactivated_name(db: Session, name: str) -> None:
+    """Reject enrollment when the name belongs to a deactivated user.
+
+    Deactivation keeps the ``User`` row with ``is_active=False``; the name
+    disappearing from ``GET /api/registrants`` only hides it from the kiosk
+    list. Both enrollment arms call this so a fresh card cannot re-enrol
+    the name. Uses the duplicate-tolerant ``display_names_lower`` set —
+    ``find_by_display_name`` would raise on duplicate display names.
+
+    Args:
+        db: Active database session.
+        name: Display name as submitted (compared case-insensitively).
+
+    Raises:
+        HTTPException: 403 if an inactive user holds this name.
+    """
+    if name.strip().lower() in UserRepository.display_names_lower(db, False):
+        raise HTTPException(
+            status_code=403,
+            detail="This name is deactivated. Ask an admin to re-enrol under a new name.",
+        )
 
 
 # --- SSE Event Stream -------------------------------------------------------
@@ -788,6 +839,17 @@ class RegisterRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
 
 
+class AdminRegisterRequest(BaseModel):
+    """Request body for admin manual registration (Register User).
+
+    ``role`` lets the admin enrol a card as another admin; anything other
+    than ``user``/``admin`` is a 422.
+    """
+
+    name: str = Field(..., min_length=1, max_length=100)
+    role: Literal["user", "admin"] = "user"
+
+
 class RegisterDeviceRequest(BaseModel):
     """Admin Register Device: PM from Excel plus a free locker slot."""
 
@@ -884,7 +946,9 @@ def start_registration(
     The submitted name must exist in the ``registrants`` table (populated from
     the "Location" column during source Excel import). If the name
     is not found, the request is rejected with 403 — the user must contact an
-    admin for manual registration. Creates a ``PendingRegistration`` that the
+    admin for manual registration. Names belonging to deactivated users are
+    rejected with 403 even though they remain in the registrants table.
+    Creates a ``PendingRegistration`` that the
     NFC bridge loop will detect on the next card tap.
 
     Args:
@@ -896,17 +960,14 @@ def start_registration(
 
     Raises:
         HTTPException: 503 if system not ready, 409 if session active,
-                       403 if name not in approved registrants list.
+                       403 if name not in approved registrants list or
+                       belongs to a deactivated user.
     """
     if ctx_module.context is None:
         raise HTTPException(status_code=503, detail="System not ready.")
 
     if ctx_module.context.session_mgr.has_active_session:
         raise HTTPException(status_code=409, detail="A session is active. End it first.")
-
-    conflict = _pending_nfc_conflict()
-    if conflict:
-        raise HTTPException(status_code=409, detail=conflict)
 
     # Validate name against the approved registrants list
     registrant = RegistrantRepository.find_by_name(db, body.name.strip())
@@ -916,11 +977,8 @@ def start_registration(
             detail="Name not found in approved list. Contact an admin for manual registration.",
         )
 
-    assign_pending_tag_bind(ctx_module.context, None)
-    assign_pending_registration(
-        ctx_module.context,
-        PendingRegistration(display_name=body.name.strip()),
-    )
+    _reject_deactivated_name(db, body.name)
+    _arm_registration(PendingRegistration(display_name=body.name.strip()))
     logger.info("Registration started for '%s'. Awaiting card tap.", body.name.strip())
     return {"success": True, "message": "Tap your NFC card to complete registration."}
 
@@ -964,9 +1022,11 @@ def get_registrants(db: Session = Depends(get_db)):
 
     Reads the ``registrants`` table (populated from the "Location"
     column during source Excel import) and filters out names that already have
-    an active User record — those people are already registered and do not need
-    to appear in the selection list. No session required; this is a public
-    endpoint called from the idle/registration screen.
+    a User record, active or inactive — those people are already registered
+    (or were deactivated) and do not need to appear in the selection list.
+    Inactive (deactivated) names are blocked from self-registration; an
+    admin re-enrols them under a new name. No session required; this is a
+    public endpoint called from the idle/registration screen.
 
     Args:
         db: Active database session (injected by ``get_db``).
@@ -977,20 +1037,18 @@ def get_registrants(db: Session = Depends(get_db)):
     """
     registrants = RegistrantRepository.get_all(db)
 
-    # Build a set of names already registered (case-insensitive) so they can
-    # be excluded from the list shown to new users.
-    registered_lower = {
-        name.lower()
-        for name in db.execute(
-            select(User.display_name).where(User.is_active.is_(True))
-        ).scalars()
-    }
+    # Build a set of names that have a user row (case-insensitive) so they
+    # can be excluded from the list shown to new users.
+    registered_lower = (
+        UserRepository.display_names_lower(db, True)
+        | UserRepository.display_names_lower(db, False)
+    )
 
     # Filter out already-registered names and return the rest sorted
     names = [
         r.display_name
         for r in registrants
-        if r.display_name.lower() not in registered_lower
+        if r.display_name.strip().lower() not in registered_lower
     ]
     return {"names": names}
 
@@ -1082,27 +1140,74 @@ def start_admin_session(
 
 @router.post("/api/admin/register")
 def start_admin_registration(
-    body: RegisterRequest,
+    body: AdminRegisterRequest,
+    db: Session = Depends(get_db),
     user_session: UserSession = Depends(require_session),
 ):
     """Begin admin-initiated manual registration for a user.
 
     Unlike the self-service ``POST /api/register``, this endpoint does NOT
     validate the name against the registrants table — the admin can register
-    anyone with any name. It also does NOT reject the request when a session
-    is active (the admin is already logged in). The NFC bridge loop will
-    enroll the next card tap as a new user with the provided name.
+    anyone with any name, except names belonging to deactivated users
+    (re-enrol those under a new name). It also does NOT reject the request
+    when a session is active (the admin is already logged in). The NFC bridge
+    loop will enroll the next card tap as a new user with the provided name
+    and role (``user`` or ``admin``).
 
     Use case: when someone's name is not in the source Excel and they
     cannot self-register, an admin uses the "Register User" button in the
     admin panel to manually enroll them.
 
     Args:
-        body: Request body with the user's display name.
+        body: Request body with the user's display name and role.
+        db: Active database session (injected by ``get_db``).
         user_session: The active admin session (injected by ``require_session``).
 
     Returns:
         dict: ``{"success": True, "message": str}``.
+
+    Raises:
+        HTTPException: 503 if system not ready, 403 if caller is not admin
+                       or the name belongs to a deactivated user, 422 if
+                       the name is blank, 409 if a bind/registration
+                       window is already armed.
+    """
+    if ctx_module.context is None:
+        raise HTTPException(status_code=503, detail="System not ready.")
+
+    if user_session.user.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Admin access required.")
+
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="Name must not be blank.")
+    _reject_deactivated_name(db, body.name)
+    _arm_registration(
+        PendingRegistration(display_name=name, role=body.role)
+    )
+    logger.info(
+        "Admin-initiated registration for '%s' (role=%s) by admin %s. Awaiting card tap.",
+        name, body.role, user_session.user.display_name,
+    )
+    return {"success": True, "message": "Tap the new user's NFC card to complete registration."}
+
+
+@router.get("/api/admin/users")
+def admin_list_users(
+    db: Session = Depends(get_db),
+    user_session: UserSession = Depends(require_session),
+):
+    """List active users for the admin Users overlay (admin only).
+
+    Each row carries the display name, role, and how many locker devices the
+    user currently holds — the data the Deactivate guard needs.
+
+    Args:
+        db: Active database session (injected by ``get_db``).
+        user_session: The active admin session (injected by ``require_session``).
+
+    Returns:
+        dict: ``{"users": [{"id", "name", "role", "borrowed_count"}]}``.
 
     Raises:
         HTTPException: 503 if system not ready, 403 if caller is not admin.
@@ -1113,20 +1218,144 @@ def start_admin_registration(
     if user_session.user.role != UserRole.ADMIN:
         raise HTTPException(status_code=403, detail="Admin access required.")
 
-    conflict = _pending_nfc_conflict()
-    if conflict:
-        raise HTTPException(status_code=409, detail=conflict)
+    counts = UserRepository.borrowed_counts(db)
+    users = [
+        {
+            "id": u.id,
+            "name": u.display_name,
+            "role": u.role.value,
+            "borrowed_count": counts.get(u.id, 0),
+        }
+        for u in UserRepository.list_active(db)
+    ]
+    return {"users": users}
 
-    assign_pending_tag_bind(ctx_module.context, None)
-    assign_pending_registration(
-        ctx_module.context,
-        PendingRegistration(display_name=body.name.strip()),
+
+@router.post("/api/admin/users/{user_id}/deactivate")
+def admin_deactivate_user(
+    user_id: int,
+    db: Session = Depends(get_db),
+    user_session: UserSession = Depends(require_session),
+):
+    """Deactivate a user so their card no longer logs in (admin only).
+
+    History is kept; the row is not deleted. Refused when the target is the
+    last active admin or still holds borrowed devices. Deactivating the user
+    whose session runs the panel ends that session (kiosk returns to idle).
+    Guards and commit run under the shared ``user_admin_lock`` with
+    borrow/transfer; uvicorn runs one worker, so serialization never
+    relies on SQLite lock upgrades.
+
+    Args:
+        user_id: Primary key of the user to deactivate.
+        db: Active database session (injected by ``get_db``).
+        user_session: The active admin session (injected by ``require_session``).
+
+    Returns:
+        dict: ``{"success": True, "session_ended": bool}``.
+
+    Raises:
+        HTTPException: 503 if not ready, 403 if not admin, 404 if the user
+            is missing or already inactive, 409 if the user is the last
+            active admin or still holds devices.
+    """
+    if ctx_module.context is None:
+        raise HTTPException(status_code=503, detail="System not ready.")
+
+    if user_session.user.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Admin access required.")
+
+    with user_admin_lock:
+        target = UserRepository.find_by_id(db, user_id)
+        if target is None or not target.is_active:
+            raise HTTPException(status_code=404, detail="User not found.")
+
+        if (
+            target.role == UserRole.ADMIN
+            and UserRepository.count_active_admins(db) == 1
+        ):
+            raise HTTPException(
+                status_code=409, detail="Register another admin first."
+            )
+        if UserRepository.borrowed_count(db, target.id) > 0:
+            raise HTTPException(
+                status_code=409,
+                detail="Return or hand over this user's devices first.",
+            )
+
+        UserRepository.deactivate(db, target)
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+
+    session_ended = False
+    if target.id == user_session.user.id:
+        _end_kiosk_session(sse_reason="deactivated")
+        session_ended = True
+
+    logger.info(
+        "Deactivated user id=%d by admin %s.",
+        target.id,
+        user_session.user.display_name,
+    )
+    return {"success": True, "session_ended": session_ended}
+
+
+@router.post("/api/admin/users/{user_id}/replace-card")
+def admin_replace_card(
+    user_id: int,
+    db: Session = Depends(get_db),
+    user_session: UserSession = Depends(require_session),
+):
+    """Arm a 60s window to move a user onto a new work card (admin only).
+
+    The next card tap replaces the user's card HMAC/ciphertext — the lost
+    card stops working and the new one logs in. Tapping a device sticker or
+    another user's card fails the replace; the user keeps the old card.
+    Shares the pending-registration window, so it cannot overlap with
+    Register User or a device-tag bind.
+
+    Args:
+        user_id: Primary key of the user whose card is replaced.
+        db: Active database session (injected by ``get_db``).
+        user_session: The active admin session (injected by ``require_session``).
+
+    Returns:
+        dict: ``{"success": True, "message": str}``.
+
+    Raises:
+        HTTPException: 503 if not ready, 403 if not admin, 404 if the user
+            is missing or inactive, 409 if a bind/registration window is
+            already armed.
+    """
+    if ctx_module.context is None:
+        raise HTTPException(status_code=503, detail="System not ready.")
+
+    if user_session.user.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Admin access required.")
+
+    target = UserRepository.find_by_id(db, user_id)
+    if target is None or not target.is_active:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    _arm_registration(
+        PendingRegistration(
+            display_name=target.display_name,
+            role=target.role.value,
+            replace_user_id=target.id,
+        )
     )
     logger.info(
-        "Admin-initiated registration for '%s' by admin %s. Awaiting card tap.",
-        body.name.strip(), user_session.user.display_name,
+        "Card replace armed for user id=%d by admin %s. Awaiting card tap.",
+        target.id,
+        user_session.user.display_name,
     )
-    return {"success": True, "message": "Tap the new user's NFC card to complete registration."}
+    return {
+        "success": True,
+        "message": "Tap the new card to replace this user's card.",
+    }
 
 
 @router.post("/api/admin/devices/register")

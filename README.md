@@ -134,7 +134,7 @@ smart_locker/
 | Photo import | ✅ Done | By PM number (`update_device`) or by model (photo watcher) |
 | Web dashboard | ✅ Done | `/dashboard` — public Inventory/Locker GET; owner edit public; bind/unbind + users/tx need admin secret; 5-tap is UI reveal |
 | Frontend UI | ✅ Done | 6-screen kiosk UI + overlays |
-| Unit tests | ✅ Done | ~371 tests, hardware-free |
+| Unit tests | ✅ Done | ~594 tests, hardware-free |
 | NFC device tags | ✅ Done | Same ACR1252U; `devices.tag_hmac`; auto borrow/return after login |
 | Calibration alerts | 🔲 Future | Calibration dates stored; notification system not yet built |
 | Kiosk deployment | ✅ Done | Raspberry Pi appliance: systemd service, CIFS mount, Chromium kiosk, offline install (`deploy/`) |
@@ -224,7 +224,7 @@ The system runs as a kiosk: FastAPI serves the frontend as static files in a ful
 5. **Locker** — availability overlay; IN / OUT / YOURS / MAINT; PM number on each card; screen-pick borrow still works
 6. **Return** — device grid with PM on each card; the user's borrowed items highlighted
 
-Overlays: **device detail** (photo, PM, type, serial, confirm), **return slot** (put in slot N), **inactivity** countdown, and a **hidden admin panel** (5× tap on the clock) with Locker/Return/Sync/Register User/**Register Device**/Export/**Exit kiosk**/**Shut down**/End-Session shortcuts. Register Device uses **Replace tag** when a sticker is already bound.
+Overlays: **device detail** (photo, PM, type, serial, confirm), **return slot** (put in slot N), **inactivity** countdown, and a **hidden admin panel** (5× tap on the clock) with Locker/Return/Sync/Register User/**Register Device**/**Users**/Export/**Exit kiosk**/**Shut down**/End-Session shortcuts. Register Device uses **Replace tag** when a sticker is already bound; **Users** deactivates users or replaces a lost card (60 s tap window).
 
 **Theme:** green (`#009641`) on dark charcoal (`#181d24`).
 
@@ -252,7 +252,7 @@ New users can enroll their own card without an admin at the kiosk:
 3. Submit (`POST /api/register`). If your name isn't on the list, registration is refused ("Contact an admin").
 4. Tap your NFC card within the registration window (default 60s) — the card is enrolled under your approved name.
 
-Admins can also register anyone manually from the hidden admin panel (`POST /api/admin/register`), bypassing the approved-name check. After enroll the kiosk returns to idle; the next work-card tap logs that user in.
+Admins can also register anyone manually from the hidden admin panel (`POST /api/admin/register`), bypassing the approved-name check — the **Register as admin** switch enrols the tap as an admin. After enroll the kiosk returns to idle; the next work-card tap logs that user in.
 
 ## Security Design
 

@@ -8,7 +8,8 @@ Project: smart_locker/services
 Notes: POST /api/dashboard/owner is public (no secret). Inventory/Locker
        GETs stay public. This module is the Excel write. Registered kiosk
        users are not listed — the dropdown only offers names already
-       visible in Inventory (Excel Location).
+       visible in Inventory (Excel Location), skipping names that match
+       a deactivated user.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from config.settings import in_locker_token
 from smart_locker.database.repositories import (
     DeviceRepository,
     RegistrantRepository,
+    UserRepository,
 )
 from smart_locker.sync.location_writeback import write_location_value
 
@@ -64,7 +66,8 @@ def owner_choices(session: Session) -> list[str]:
     In-locker token, then registrant names. Case-insensitive
     duplicates keep the first spelling. Registered kiosk users are
     not listed — the dropdown only offers names already visible in
-    Inventory (Excel Location).
+    Inventory (Excel Location). Registrant names matching a
+    deactivated user are skipped.
 
     Args:
         session: Active database session.
@@ -86,7 +89,10 @@ def owner_choices(session: Session) -> list[str]:
         names.append(text)
 
     _add(in_locker_token())
+    inactive_lower = UserRepository.display_names_lower(session, False)
     for registrant in RegistrantRepository.get_all(session):
+        if registrant.display_name.strip().lower() in inactive_lower:
+            continue
         _add(registrant.display_name)
     return names
 

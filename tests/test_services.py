@@ -131,6 +131,99 @@ class TestLockerService:
         result = LockerService.return_device(db_session, session2, device.id)
         assert result is False
 
+    def test_borrow_refuses_deactivated_user(self, db_session, enc_key, hmac_key):
+        """Borrow fails when the session user was deactivated, even if the
+        session still holds a stale active copy from login time."""
+        user, device, session = self._setup(db_session, enc_key, hmac_key)
+        # Simulate login-time staleness: the session keeps a detached copy
+        # while the database row is deactivated underneath it.
+        db_session.expunge(user)
+        assert session.user.is_active is True
+        UserRepository.deactivate(
+            db_session, UserRepository.find_by_id(db_session, user.id)
+        )
+        db_session.commit()
+
+        assert LockerService.borrow_device(db_session, session, device.id) is False
+        assert device.status == DeviceStatus.AVAILABLE
+        assert UserRepository.borrowed_count(db_session, user.id) == 0
+
+    def test_transfer_to_deactivated_user_refused(self, db_session, enc_key, hmac_key):
+        """Transfer fails when the new holder is deactivated; the device stays put."""
+        holder, device, holder_session = self._setup(db_session, enc_key, hmac_key)
+        assert LockerService.borrow_device(db_session, holder_session, device.id) is True
+        bob = UserRepository.create(
+            db_session,
+            display_name="Bob",
+            uid_hmac=compute_uid_hmac("BBBBBBBB", hmac_key),
+            encrypted_card_uid=encrypt("BBBBBBBB", enc_key),
+        )
+        db_session.flush()
+        bob_session = SessionManager(timeout_seconds=60).start_session(bob)
+        UserRepository.deactivate(db_session, bob)
+        db_session.commit()
+
+        assert LockerService.transfer_device(db_session, bob_session, device.id) is False
+        assert device.status == DeviceStatus.BORROWED
+        assert device.current_borrower_id == holder.id
+
+    def test_transfer_from_deactivated_holder_succeeds(self, db_session, enc_key, hmac_key):
+        """A deactivated holder's device can still be handed to an active user."""
+        holder, device, holder_session = self._setup(db_session, enc_key, hmac_key)
+        assert LockerService.borrow_device(db_session, holder_session, device.id) is True
+        UserRepository.deactivate(db_session, holder)
+        bob = UserRepository.create(
+            db_session,
+            display_name="Bob",
+            uid_hmac=compute_uid_hmac("BBBBBBBB", hmac_key),
+            encrypted_card_uid=encrypt("BBBBBBBB", enc_key),
+        )
+        db_session.flush()
+        bob_session = SessionManager(timeout_seconds=60).start_session(bob)
+
+        assert LockerService.transfer_device(db_session, bob_session, device.id) is True
+        assert device.current_borrower_id == bob.id
+
+    def test_return_by_deactivated_holder_succeeds(self, db_session, enc_key, hmac_key):
+        """Returns stay open for deactivated holders — devices must come back."""
+        user, device, session = self._setup(db_session, enc_key, hmac_key)
+        assert LockerService.borrow_device(db_session, session, device.id) is True
+        UserRepository.deactivate(db_session, user)
+
+        assert LockerService.return_device(db_session, session, device.id) is True
+        assert device.status == DeviceStatus.AVAILABLE
+
+    def test_borrow_and_transfer_hold_user_admin_lock(
+        self, db_session, enc_key, hmac_key, monkeypatch
+    ):
+        """Borrow and transfer guard-plus-commit run under the shared lock."""
+        import smart_locker.services.locker_service as svc_module
+
+        entered = []
+
+        class FakeLock:
+            def __enter__(self):
+                entered.append(True)
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        monkeypatch.setattr(svc_module, "user_admin_lock", FakeLock())
+        holder, device, holder_session = self._setup(db_session, enc_key, hmac_key)
+        assert LockerService.borrow_device(db_session, holder_session, device.id) is True
+        bob = UserRepository.create(
+            db_session,
+            display_name="Bob",
+            uid_hmac=compute_uid_hmac("BBBBBBBB", hmac_key),
+            encrypted_card_uid=encrypt("BBBBBBBB", enc_key),
+        )
+        db_session.flush()
+        bob_session = SessionManager(timeout_seconds=60).start_session(bob)
+
+        assert LockerService.transfer_device(db_session, bob_session, device.id) is True
+        assert entered == [True, True]
+
     def test_admin_can_return_on_behalf_of_user(self, db_session, enc_key, hmac_key):
         """Verify an admin can return a device borrowed by another user."""
         user, device, user_session = self._setup(db_session, enc_key, hmac_key)
@@ -312,3 +405,63 @@ class TestUserService:
 
         info = svc.get_admin_user_info(db_session, target.id, requesting_user=regular)
         assert info is None
+
+
+class TestReplaceCard:
+    """Tests for UserService.replace_card — lost-card replacement."""
+
+    def _svc_and_user(self, db_session, enc_key, hmac_key):
+        """Build a UserService and enroll Alice on card A1B2C3D4."""
+        svc = UserService(enc_key=enc_key, hmac_key=hmac_key)
+        user = svc.enroll_user(db_session, "Alice", "A1B2C3D4")
+        db_session.flush()
+        return svc, user
+
+    def test_replace_card_success(self, db_session, enc_key, hmac_key):
+        """Replacing moves the user to the new UID; name/role unchanged."""
+        from smart_locker.auth.authenticator import Authenticator
+
+        svc, user = self._svc_and_user(db_session, enc_key, hmac_key)
+        old_hmac = user.uid_hmac
+        old_role = user.role
+        svc.replace_card(db_session, user, "e5e5e5e5")  # lowercase canonicalises
+        db_session.flush()
+        assert user.uid_hmac != old_hmac
+        assert decrypt(user.encrypted_card_uid, enc_key) == "E5E5E5E5"
+        assert user.display_name == "Alice"
+        assert user.role == old_role
+        assert user.role == UserRole.USER
+        # New card logs in; old card does not.
+        auth = Authenticator(hmac_key)
+        assert auth.authenticate(db_session, "A1B2C3D4") is None
+        assert auth.authenticate(db_session, "E5E5E5E5").id == user.id
+
+    def test_replace_card_same_card_is_noop(self, db_session, enc_key, hmac_key):
+        """Tapping the user's current card is a harmless success."""
+        svc, user = self._svc_and_user(db_session, enc_key, hmac_key)
+        old_hmac = user.uid_hmac
+        result = svc.replace_card(db_session, user, "A1B2C3D4")
+        assert result is user
+        assert user.uid_hmac == old_hmac
+
+    def test_replace_card_other_users_card_refused(
+        self, db_session, enc_key, hmac_key
+    ):
+        """A card already belonging to another user is refused."""
+        svc, user = self._svc_and_user(db_session, enc_key, hmac_key)
+        svc.enroll_user(db_session, "Bob", "BBBB2222")
+        db_session.flush()
+        with pytest.raises(ValueError, match="already registered"):
+            svc.replace_card(db_session, user, "BBBB2222")
+
+    def test_replace_card_device_tag_refused(self, db_session, enc_key, hmac_key):
+        """A UID bound to a device sticker is refused."""
+        device = DeviceRepository.create(
+            db_session, name="Fluke 87V", device_type="Multimeter",
+            pm_number="PM-COLLIDE",
+        )
+        uid = "AABBCCDD"
+        DeviceRepository.bind_tag(db_session, device, compute_uid_hmac(uid, hmac_key))
+        svc, user = self._svc_and_user(db_session, enc_key, hmac_key)
+        with pytest.raises(ValueError, match="already bound"):
+            svc.replace_card(db_session, user, uid)

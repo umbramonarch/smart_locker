@@ -89,6 +89,30 @@ class TestIdleTaps:
         assert result.payload["user"]["name"] == "Alice"
         assert mgr.has_active_session
 
+    def test_idle_deactivated_card_fails_no_session(
+        self, db_session, enc_key, hmac_key
+    ):
+        """A deactivated card still classifies as WORK_CARD but the idle
+        handler answers auth_failed and starts no session."""
+        uid = "A1B2C3D4"
+        user = UserRepository.create(
+            db_session,
+            display_name="Alice",
+            uid_hmac=compute_uid_hmac(uid, hmac_key),
+            encrypted_card_uid=encrypt(uid, enc_key),
+        )
+        UserRepository.deactivate(db_session, user)
+        kind, found, device = classify_uid(db_session, uid, hmac_key)
+        assert kind is TapKind.WORK_CARD
+        assert found is not None
+        assert found.id == user.id
+        assert device is None
+        mgr = self._mgr()
+        result = handle_insert(db_session, uid, hmac_key, mgr)
+        assert result.event == "auth_failed"
+        assert not mgr.has_active_session
+        assert uid not in result.cli_message
+
     def test_idle_available_tag_does_not_borrow(self, db_session, hmac_key):
         uid = "AABBCCDD"
         device = DeviceRepository.create(

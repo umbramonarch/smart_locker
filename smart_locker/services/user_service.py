@@ -108,6 +108,51 @@ class UserService:
         logger.info("Enrolled user: %s (role=%s)", display_name, role)
         return user
 
+    def replace_card(
+        self,
+        db_session: Session,
+        user: User,
+        card_uid_hex: str,
+    ) -> User:
+        """Move an existing user to a new work card (lost-card replacement).
+
+        The UID is canonicalised like ``enroll_user``. Tapping the user's
+        current card is a harmless no-op. Name and role are unchanged; the
+        old card stops authenticating as soon as the new HMAC is stored.
+
+        Args:
+            db_session: Active database session.
+            user: User row to re-card.
+            card_uid_hex: Raw card UID hex string of the replacement card.
+
+        Returns:
+            The same User object.
+
+        Raises:
+            ValueError: If the UID is a device sticker or already another
+                user's card.
+        """
+        card_uid_hex = card_uid_hex.upper().strip()
+        uid_hmac = compute_uid_hmac(card_uid_hex, self._hmac_key)
+        if DeviceRepository.find_by_tag_hmac(db_session, uid_hmac) is not None:
+            logger.warning("Card replace rejected: UID is already a device tag.")
+            raise ValueError("This tag is already bound to a device.")
+        existing = UserRepository.find_by_uid_hmac(db_session, uid_hmac)
+        if existing is not None:
+            if existing.id == user.id:
+                return user
+            logger.warning(
+                "Card replace rejected: card belongs to %s (id=%d).",
+                existing.display_name,
+                existing.id,
+            )
+            raise ValueError("This card is already registered.")
+        UserRepository.replace_card(
+            db_session, user, uid_hmac, encrypt(card_uid_hex, self._enc_key)
+        )
+        logger.info("Replaced card for %s (id=%d)", user.display_name, user.id)
+        return user
+
     @staticmethod
     def get_public_user_info(db_session: Session, user_id: int) -> PublicUserInfo | None:
         """Get public user info (no card data).
