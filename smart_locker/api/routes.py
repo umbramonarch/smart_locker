@@ -7,7 +7,7 @@ Description: REST API endpoints and SSE event stream for the Smart Locker kiosk.
              deactivate, replace card), Register Device (PM + slot + NFC), device-tag
              bind/unbind, registrant list retrieval, source sync, dashboard
              (public Inventory from Excel and Locker from SQLite, Display
-             snapshot without person names, admin-secret owner edit and 5-tap
+             snapshot without person names, public owner edit and 5-tap
              unbind / arm-bind), an admin-only Excel export download, admin
              Exit kiosk / Shut down, and source sync that writes Location back.
 Project: smart_locker/api
@@ -17,7 +17,8 @@ Notes: Kiosk session mutations require an active session AND a loopback
        polls public GETs; it does not use EventSource). Self-registration
        validates against the approved registrants list; admin registration
        bypasses this check. Catalog GETs
-       under /api/dashboard/ stay public. Dashboard mutations require
+       and the owner change under /api/dashboard/ stay public. Dashboard
+       bind/unbind and the users/transactions GETs require
        SMART_LOCKER_DASHBOARD_ADMIN_SECRET (header X-Smart-Locker-Admin), not
        loopback. Appliance session/shutdown/exit/update are kiosk-loopback only.
 """
@@ -255,8 +256,9 @@ def require_session(request: Request) -> UserSession:
 
     A process-global session started from the Riverdi is not authorization
     for a LAN browser: bind, unbind, borrow, export, and session-end stay
-    kiosk-local. Dashboard catalog GETs stay public; dashboard mutations
-    use ``require_dashboard_admin``.
+    kiosk-local. Dashboard catalog GETs and the owner change stay public;
+    dashboard bind/unbind and the users/transactions GETs use
+    ``require_dashboard_admin``.
 
     Args:
         request: Incoming ASGI request (client address, not X-Forwarded-For).
@@ -868,10 +870,10 @@ class KioskDisplayBody(BaseModel):
 
 
 class OwnerEditBody(BaseModel):
-    """Admin-secret-gated dashboard owner change for one catalog PM.
+    """Public dashboard owner change for one catalog PM.
 
-    Inventory/Locker GETs stay public. This POST requires
-    ``X-Smart-Locker-Admin``; clock 5-tap is not authorization.
+    Like the Inventory/Locker GETs, this POST needs no secret; locker PMs
+    are refused (409).
     """
 
     pm_number: str = Field(..., min_length=1, max_length=50)
@@ -2040,9 +2042,8 @@ def dashboard_devices(db: Session = Depends(get_db)):
 @router.get("/api/dashboard/owners")
 def dashboard_owners(
     db: Session = Depends(get_db),
-    _: None = Depends(require_dashboard_admin),
 ):
-    """Names for the owner-edit dropdown (dashboard admin secret required).
+    """Names for the owner-edit dropdown (public; no secret).
 
     Combines the in-locker token, registered users, and registrant names
     so the Inventory owner dialog can offer the same list plus free text.
@@ -2065,9 +2066,8 @@ def dashboard_owners(
 def dashboard_set_owner(
     body: OwnerEditBody,
     db: Session = Depends(get_db),
-    _: None = Depends(require_dashboard_admin),
 ):
-    """Change owner for one non-locker PM (dashboard admin secret required).
+    """Change owner for one non-locker PM (public; no secret).
 
     Writes the catalog Excel Location cell. Locker devices are refused
     (owner stays with kiosk borrow/return). Does not insert locker rows.
@@ -2080,7 +2080,7 @@ def dashboard_set_owner(
         dict: ``ok``, ``pm_number``, ``owner``, ``locker``.
 
     Raises:
-        HTTPException: 401 without secret; 400 empty PM; 404 PM not in Excel;
+        HTTPException: 400 empty PM; 404 PM not in Excel;
                        409 locker PM; 503 share down.
     """
     from config.settings import SOURCE_EXCEL_PATH

@@ -5,7 +5,7 @@
 Copy to `docs/adr/NNNN-title.md` in the **project**. Number from `0001`.
 
 Date: 2026-08-28
-Status: accepted
+Status: accepted (amended 2026-09-14)
 
 ## Context
 
@@ -26,3 +26,7 @@ We pick **option 2** because catalog visibility is the LAN job, and fail-closed 
 - Good: unset secret cannot accidentally expose bind/unbind; public catalog still works; 5-tap stays a convenience overlay.
 - Cost / follow-up: operators must set `SMART_LOCKER_DASHBOARD_ADMIN_SECRET` on the Pi. Share launcher (`SMART_LOCKER_PUBLIC_URL` + `SMART_LOCKER_DASHBOARD_SHARE_PATH`) only writes shortcuts to the live page.
 - Hardware / recovery if this is firmware: N/A.
+
+## Amendment 2026-09-14
+
+Owner change on Inventory (`POST /api/dashboard/owner`, `GET /api/dashboard/owners`) is public — anyone who can open the dashboard can change Location for non-locker PMs. Locker PMs are still refused. Bind/unbind and the users/transactions GETs remain behind `SMART_LOCKER_DASHBOARD_ADMIN_SECRET`. Reason: changing the holder of a non-locker device is an everyday task, and the Location column is already public on the same page. The public owners list returns only the in-locker token and Excel-derived registrant names (already public via Inventory and `/api/registrants`), never the kiosk user table.
