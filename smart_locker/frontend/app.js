@@ -3,8 +3,11 @@
  *               transitions, API communication, SSE event handling, and user
  *               interaction flow across idle, auth, menu, locker availability,
  *               return, detail, registration (incl. Register as admin), admin,
- *               Register Device (PM + slot + NFC), Users (deactivate / replace
- *               card), return-slot, software-update, and appliance shutdown overlays.
+ *               Register Device (PM + slot + NFC, maintenance toggle), Users
+ *               (deactivate / replace card), return-slot, software-update, and
+ *               appliance shutdown overlays. Calibration due-soon/overdue
+ *               shows card badges, a detail line, and an idle banner (warn
+ *               only).
  * @project smart_locker/frontend
  * @description Demo mode (?demo), circle-reveal transitions, split text,
  *              inactivity countdown, and self-registration.
@@ -69,6 +72,9 @@ async function loadSiteConfig() {
     if (!res.ok) return;
     const data = await res.json();
     if (data && typeof data.asset_label === 'string') applyAssetLabels(data.asset_label);
+    if (data && Number.isInteger(data.calibration_warn_days)) {
+      S.calibrationWarnDays = data.calibration_warn_days;
+    }
   } catch (_) { /* keep built-in label */ }
 }
 
@@ -99,6 +105,7 @@ const S = {
   lastClickX: null,     // track click origin for circle reveal
   lastClickY: null,
   adminRegistration: false, // true when admin-initiated manual registration is in progress
+  calibrationWarnDays: 14,  // SMART_LOCKER_CALIBRATION_WARN_DAYS via /api/config
   usersReplacePending: false, // a replace-card window is armed on the Users overlay
   updating:   false,    // software-update overlay is up; SSE must not navigate
   handoverDeviceId: null, // device awaiting handover confirmation
@@ -118,6 +125,8 @@ const DEMO_USERS = [
 ];
 /** @type {number} Index into DEMO_USERS, cycles on each simulated card tap */
 let demoUserIdx = 0;
+/** @type {number} Demo-mode calibration warn window (matches backend default). */
+const DEMO_WARN_DAYS = 14;
 
 const DEMO_DEVICES = [
   { id:1, pm_number:'PM-001', name:'Keysight DSOX3054T',  device_type:'Oscilloscope',   serial_number:'MY12345678',  manufacturer:'Keysight',       model:'DSOX3054T',   barcode:'490001', locker_slot:1,  description:null, image_path:null, calibration_due:'2026-09-15', status:'available',   borrower_name:null, has_tag:false },
@@ -399,6 +408,7 @@ function navigate(toId) {
   }
 
   S.screen = toId;
+  if (toId === 'idle') refreshIdleCalBanner();
   reportKioskDisplay(toId);
 }
 
@@ -845,6 +855,75 @@ function safeKioskImagePath(raw) {
 }
 
 /**
+ * Days until a device's calibration date (negative when overdue), or null
+ * when there is no usable date. Live mode prefers the API-provided
+ * calibration_days_left; demo mode (and a missing field) computes from the
+ * ISO calibration_due string.
+ * @param {Object} dev - Device row.
+ * @returns {number|null} Days left, or null.
+ */
+function calDaysLeft(dev) {
+  if (!USE_DEMO && typeof dev.calibration_days_left === 'number') {
+    return dev.calibration_days_left;
+  }
+  if (!dev.calibration_due) return null;
+  const due = new Date(`${dev.calibration_due}T00:00:00`);
+  if (Number.isNaN(due.getTime())) return null;
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  return Math.round((due - today) / 86400000);
+}
+
+/**
+ * Calibration alert state for a device: 'overdue' | 'due_soon' | 'ok' | null.
+ * Live mode trusts the API's calibration_state when present.
+ * @param {Object} dev - Device row.
+ * @returns {string|null}
+ */
+function calState(dev) {
+  if (!USE_DEMO && typeof dev.calibration_state === 'string') {
+    return dev.calibration_state;
+  }
+  const n = calDaysLeft(dev);
+  if (n === null) return null;
+  const warnDays = USE_DEMO ? DEMO_WARN_DAYS : S.calibrationWarnDays;
+  if (n < 0) return 'overdue';
+  if (n <= warnDays) return 'due_soon';
+  return 'ok';
+}
+
+/**
+ * Refresh the idle-screen overdue-calibration banner. Live mode counts
+ * /api/calibration/alerts (loopback, read-only); demo mode counts
+ * DEMO_DEVICES. Hidden when nothing is overdue. A failed poll keeps the
+ * last banner state.
+ * @returns {Promise<void>}
+ */
+async function refreshIdleCalBanner() {
+  const el = document.getElementById('idle-cal-banner');
+  if (!el) return;
+  let n = 0;
+  if (USE_DEMO) {
+    n = DEMO_DEVICES.filter(d => calState(d) === 'overdue').length;
+  } else {
+    try {
+      const res = await fetch('/api/calibration/alerts');
+      if (!res.ok) return;
+      const data = await res.json();
+      n = data.overdue || 0;
+    } catch (_) {
+      return; // keep previous banner state
+    }
+  }
+  el.hidden = n === 0;
+  if (n > 0) {
+    el.textContent = n === 1
+      ? '1 device overdue for calibration'
+      : `${n} devices overdue for calibration`;
+  }
+}
+
+/**
  * Build one locker card with textContent / setAttribute (no catalog HTML).
  * @param {Object} dev
  * @param {string} cls
@@ -899,6 +978,15 @@ function buildDeviceCardEl(dev, cls, statusCls, statusTxt, slotLabel) {
   statusEl.textContent = statusTxt;
   cardImage.appendChild(slotEl);
   cardImage.appendChild(statusEl);
+
+  // Calibration alert badge next to the status badge (warn only).
+  const cal = calState(dev);
+  if (cal === 'due_soon' || cal === 'overdue') {
+    const calEl = document.createElement('div');
+    calEl.className = `card-cal-badge ${cal === 'overdue' ? 'cal-overdue' : 'cal-due-soon'}`;
+    calEl.textContent = cal === 'overdue' ? 'OVERDUE' : 'CAL DUE';
+    cardImage.appendChild(calEl);
+  }
 
   const body = document.createElement('div');
   body.className = 'card-body';
@@ -1080,6 +1168,25 @@ function openDetail(dev, mode) {
     mine ? 'var(--info)' : avail ? 'var(--success)' : maint ? 'var(--warning)' : 'var(--text-muted)';
   document.getElementById('detail-desc').textContent    =
     dev.description || 'No description available.';
+
+  // Calibration due line — warn only; borrow is never blocked.
+  const calRow = document.getElementById('detail-cal-row');
+  const calEl  = document.getElementById('detail-cal');
+  const calN   = calDaysLeft(dev);
+  if (calN === null) {
+    calRow.classList.add('hidden');
+  } else {
+    calRow.classList.remove('hidden');
+    const suffix = calN < 0 ? `${-calN} days overdue`
+                 : calN === 0 ? 'today'
+                 : `in ${calN} days`;
+    calEl.textContent = `Calibration due ${dev.calibration_due} (${suffix})`;
+    const cal = calState(dev);
+    calEl.style.color =
+      cal === 'overdue' ? 'var(--danger)'
+      : cal === 'due_soon' ? 'var(--warning)'
+      : 'var(--text-muted)';
+  }
 
   const imgPath     = safeKioskImagePath(dev.image_path);
   const imgPane     = document.getElementById('detail-img-pane');
@@ -2468,6 +2575,19 @@ async function populateBindList(refresh) {
       unbindBtn.addEventListener('click', () => { clickSound(); unbindDeviceTag(dev); });
       actions.appendChild(unbindBtn);
     }
+    // Maintenance toggle: To maintenance when available, Back in service
+    // when maintenance; hidden while borrowed (return it first).
+    if (dev.status === 'available' || dev.status === 'maintenance') {
+      const maint = dev.status === 'maintenance';
+      const maintBtn = document.createElement('button');
+      maintBtn.type = 'button';
+      maintBtn.className = maint ? 'bind-go' : 'bind-unbind';
+      maintBtn.dataset.maintId = dev.id;
+      maintBtn.dataset.maintOn = maint ? '0' : '1';
+      maintBtn.textContent = maint ? 'Back in service' : 'To maintenance';
+      maintBtn.addEventListener('click', () => { clickSound(); adminSetMaintenance(dev); });
+      actions.appendChild(maintBtn);
+    }
 
     row.appendChild(info);
     row.appendChild(pill);
@@ -2733,6 +2853,46 @@ async function unbindDeviceTag(dev) {
     }
   } catch (_) {
     showToast('Unbind failed', 'error');
+  }
+}
+
+/**
+ * Toggle a locker device in/out of maintenance from the Register Device
+ * list (out for calibration). Refusals (borrowed, already set) toast the
+ * API detail. Demo mode flips the row's status locally.
+ * @param {Object} dev - Device row.
+ * @returns {Promise<void>}
+ */
+async function adminSetMaintenance(dev) {
+  const on = dev.status !== 'maintenance';
+  if (USE_DEMO) {
+    await sleep(300); // simulate API latency
+    dev.status = on ? 'maintenance' : 'available';
+    showToast(
+      on ? `${dev.name} flagged for maintenance` : `${dev.name} back in service`,
+      'success'
+    );
+    await populateBindList();
+    return;
+  }
+  try {
+    const res = await fetch(`/api/admin/devices/${dev.id}/maintenance`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ maintenance: on }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok) {
+      showToast(
+        on ? `${dev.name} flagged for maintenance` : `${dev.name} back in service`,
+        'success'
+      );
+      await populateBindList();
+    } else {
+      showToast(data.detail || 'Could not change maintenance.', 'error');
+    }
+  } catch (_) {
+    showToast('Could not change maintenance.', 'error');
   }
 }
 
@@ -3588,6 +3748,10 @@ if (USE_DEMO) {
   checkExistingSession();
   reportKioskDisplay('idle');
 }
+
+// Calibration alerts: refresh the idle overdue banner now and every 60 s.
+refreshIdleCalBanner();
+setInterval(refreshIdleCalBanner, 60000);
 
 /* ============================================================
    DEV / SIMULATION — no-hardware tap injection

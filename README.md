@@ -136,7 +136,7 @@ smart_locker/
 | Frontend UI | ✅ Done | 6-screen kiosk UI + overlays |
 | Unit tests | ✅ Done | ~594 tests, hardware-free |
 | NFC device tags | ✅ Done | Same ACR1252U; `devices.tag_hmac`; auto borrow/return after login |
-| Calibration alerts | 🔲 Future | Calibration dates stored; notification system not yet built |
+| Calibration alerts | ✅ Done | Warn-only CAL DUE / OVERDUE badges, dashboard highlight + filter, idle banner (`SMART_LOCKER_CALIBRATION_WARN_DAYS`). Blank Excel cell clears the date; unreadable text keeps it (warning logged) |
 | Kiosk deployment | ✅ Done | Raspberry Pi appliance: systemd service, CIFS mount, Chromium kiosk, offline install (`deploy/`) |
 
 ## Quick Start
@@ -234,7 +234,7 @@ A dashboard is served at **`/dashboard`**. Public GET Inventory and Locker catal
 Three tabs:
 
 - **Inventory** — live `device-list.xlsx` (full catalog). Search and sort. Click owner to change it (confirm) for PMs that are **not** in the locker — public, no secret needed. Share down shows an error here only.
-- **Locker** — SQLite devices registered into a slot (status, borrower, slot, Tagged / No tag). Owner is set at the kiosk (borrow/return), not here.
+- **Locker** — SQLite devices registered into a slot (status, borrower, slot, Tagged / No tag). Owner is set at the kiosk (borrow/return), not here. A header badge counts calibration due-soon/overdue devices and a **Calibration** filter shows just those rows (amber/red Calibration cells on both tabs).
 - **Display** — what the kiosk is showing right now, plus the signed-in user. View only.
 
 Tap the header clock **5× within 3 s** (same gesture as the kiosk) to reveal registered users, the last 500 transactions, and NFC **Unbind** / **Bind** / **Replace tag**. Those GETs/POSTs still need the admin secret. Arm-bind waits for the sticker on the ACR1252U; the dashboard does not start a kiosk admin session.
@@ -282,9 +282,9 @@ Cheap NFC stickers on locker devices use the same ACR1252U as work cards (no USB
 
 - **Storage:** `devices.tag_hmac` (HMAC-SHA256 of the sticker UID, same key as work cards). The raw UID is never stored or logged.
 - **Flow:** tap work card → tap sticker (or pick on screen). Auto-intent from device status: borrow if available, return if you hold it. Session stays open for several devices. A work-card tap still logs out.
-- **Register Device** (hidden admin panel): **PM + free slot + NFC**. Catalog comes from Excel. Sync never inserts locker rows. The list shows **name + PM**. CLI bind: `python -m scripts.enroll_device_tag --pm PM-001` (or `--uid HEX`).
+- **Register Device** (hidden admin panel): **PM + free slot + NFC**. Catalog comes from Excel. Sync never inserts locker rows. The list shows **name + PM**; rows offer **To maintenance** / **Back in service** to flag a device out for calibration (refused while borrowed). CLI bind: `python -m scripts.enroll_device_tag --pm PM-001` (or `--uid HEX`).
 - Excel barcode is unused leftover; re-import does **not** overwrite `tag_hmac`, locker status, or the current borrower.
-- After borrow/return (and after Register Device / Sync), the Pi writes **only** Location in the catalog workbook (`SMART_LOCKER_IN_LOCKER_TOKEN` in the locker, borrower name when out). Catalog columns stay. A locked workbook is skipped, not a kiosk crash. Extra Excel header names: `SMART_LOCKER_ID_HEADERS` / `SMART_LOCKER_LOCATION_HEADERS`. On-screen noun: `SMART_LOCKER_ASSET_LABEL`.
+- After borrow/return (and after Register Device / Sync / maintenance toggle), the Pi writes **only** Location in the catalog workbook (`SMART_LOCKER_IN_LOCKER_TOKEN` in the locker, borrower name when out, `SMART_LOCKER_MAINTENANCE_TOKEN` while in maintenance). Catalog columns stay. A locked workbook is skipped, not a kiosk crash. Extra Excel header names: `SMART_LOCKER_ID_HEADERS` / `SMART_LOCKER_LOCATION_HEADERS`. On-screen noun: `SMART_LOCKER_ASSET_LABEL`. Calibration warn window: `SMART_LOCKER_CALIBRATION_WARN_DAYS` (default 14, 0 = only today).
 
 ## Running Tests
 

@@ -467,6 +467,127 @@ class TestAdminSyncAndUpdateEndpoints:
         assert resp.status_code == 403
 
 
+class TestMaintenanceApi:
+    """Admin maintenance toggle on locker devices (Register Device list)."""
+
+    def test_maintenance_requires_session(self, client, mock_context, test_devices):
+        """POST /api/admin/devices/{id}/maintenance returns 401 without a session."""
+        resp = client.post(
+            f"/api/admin/devices/{test_devices[0].id}/maintenance",
+            json={"maintenance": True},
+        )
+        assert resp.status_code == 401
+
+    def test_maintenance_rejects_non_admin(
+        self, client, mock_context, test_user, test_devices
+    ):
+        """A normal user session cannot toggle maintenance."""
+        mock_context.session_mgr.start_session(test_user)
+        resp = client.post(
+            f"/api/admin/devices/{test_devices[0].id}/maintenance",
+            json={"maintenance": True},
+        )
+        assert resp.status_code == 403
+
+    def test_maintenance_on_available(
+        self, client, mock_context, admin_user, test_devices, db_session, monkeypatch
+    ):
+        """Available device → maintenance, 200, write-back scheduled."""
+        calls = []
+        monkeypatch.setattr(
+            "smart_locker.sync.location_writeback.schedule_write_location",
+            lambda: calls.append(1),
+        )
+        mock_context.session_mgr.start_session(admin_user)
+        resp = client.post(
+            f"/api/admin/devices/{test_devices[0].id}/maintenance",
+            json={"maintenance": True},
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"success": True, "status": "maintenance"}
+        db_session.refresh(test_devices[0])
+        assert test_devices[0].status == DeviceStatus.MAINTENANCE
+        assert calls == [1]
+
+    def test_maintenance_on_borrowed_refused(
+        self, client, mock_context, admin_user, test_user, db_session
+    ):
+        """A borrowed device must be returned first."""
+        dev = DeviceRepository.create(
+            db_session,
+            name="Meter",
+            device_type="general",
+            pm_number="PM-900",
+            locker_slot=9,
+        )
+        dev.status = DeviceStatus.BORROWED
+        dev.current_borrower_id = test_user.id
+        db_session.commit()
+        mock_context.session_mgr.start_session(admin_user)
+        resp = client.post(
+            f"/api/admin/devices/{dev.id}/maintenance",
+            json={"maintenance": True},
+        )
+        assert resp.status_code == 409
+        assert resp.json()["detail"] == "Return the device first."
+
+    def test_maintenance_twice_refused(
+        self, client, mock_context, admin_user, test_devices
+    ):
+        """A device already in maintenance returns 409."""
+        mock_context.session_mgr.start_session(admin_user)
+        resp = client.post(
+            f"/api/admin/devices/{test_devices[2].id}/maintenance",
+            json={"maintenance": True},
+        )
+        assert resp.status_code == 409
+        assert resp.json()["detail"] == "Already in maintenance."
+
+    def test_back_in_service(
+        self, client, mock_context, admin_user, test_devices, db_session, monkeypatch
+    ):
+        """maintenance=false on a maintenance device → available, 200."""
+        calls = []
+        monkeypatch.setattr(
+            "smart_locker.sync.location_writeback.schedule_write_location",
+            lambda: calls.append(1),
+        )
+        mock_context.session_mgr.start_session(admin_user)
+        resp = client.post(
+            f"/api/admin/devices/{test_devices[2].id}/maintenance",
+            json={"maintenance": False},
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"success": True, "status": "available"}
+        db_session.refresh(test_devices[2])
+        assert test_devices[2].status == DeviceStatus.AVAILABLE
+        assert calls == [1]
+
+    def test_back_in_service_on_available_refused(
+        self, client, mock_context, admin_user, test_devices
+    ):
+        """maintenance=false on a non-maintenance device returns 409."""
+        mock_context.session_mgr.start_session(admin_user)
+        resp = client.post(
+            f"/api/admin/devices/{test_devices[0].id}/maintenance",
+            json={"maintenance": False},
+        )
+        assert resp.status_code == 409
+        assert resp.json()["detail"] == "Device is not in maintenance."
+
+    def test_maintenance_unknown_device(
+        self, client, mock_context, admin_user
+    ):
+        """Unknown device id returns 404."""
+        mock_context.session_mgr.start_session(admin_user)
+        resp = client.post(
+            "/api/admin/devices/99999/maintenance",
+            json={"maintenance": True},
+        )
+        assert resp.status_code == 404
+        assert resp.json()["detail"] == "Device not found."
+
+
 class TestAdminUsers:
     """Admin Users overlay API: list, deactivate, replace card."""
 
@@ -904,4 +1025,3 @@ class TestAdminUsers:
         assert kept is not None
         assert kept.display_name == "Test User"
         assert kept.is_active is False
-

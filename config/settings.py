@@ -70,6 +70,10 @@ SESSION_TIMEOUT_SECONDS = _env_int("SMART_LOCKER_SESSION_TIMEOUT", 120)
 # Maximum number of devices a single user may borrow concurrently
 MAX_BORROWS = _env_int("SMART_LOCKER_MAX_BORROWS", 5)
 
+# --- Calibration alerts ---
+# Days ahead of the Excel calibration date to flag a device as "due soon" (0 = only today)
+CALIBRATION_WARN_DAYS = _env_int("SMART_LOCKER_CALIBRATION_WARN_DAYS", 14, minimum=0)
+
 # Cabinet slot picker and Register Device / change-slot API upper bound.
 MAX_LOCKER_SLOT = 48
 
@@ -136,6 +140,17 @@ def in_locker_token() -> str:
         Token from ``SMART_LOCKER_IN_LOCKER_TOKEN``, or ``Locker``.
     """
     return (os.getenv("SMART_LOCKER_IN_LOCKER_TOKEN") or "Locker").strip() or "Locker"
+
+
+def maintenance_token() -> str:
+    """Excel Location cell written while a locker device is in maintenance.
+
+    Returns:
+        Token from ``SMART_LOCKER_MAINTENANCE_TOKEN``, or ``Maintenance``.
+    """
+    return (
+        os.getenv("SMART_LOCKER_MAINTENANCE_TOKEN") or "Maintenance"
+    ).strip() or "Maintenance"
 
 
 def id_header_extras() -> list[str]:

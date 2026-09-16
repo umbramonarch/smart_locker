@@ -8,6 +8,8 @@ Work on `main` after the `v0.2.0` tag. Merging to `main` is not a release; the n
 
 ### Added
 
+- Calibration alerts: devices due within `SMART_LOCKER_CALIBRATION_WARN_DAYS` (default 14) or overdue are flagged on the kiosk (CAL DUE / OVERDUE badges, detail line, idle banner for overdue) and on the dashboard (amber/red Calibration cells, header count, Locker **Calibration** filter). Warn only — borrowing still works. Excel Calibration cells: blank clears the stored date on Sync; unreadable text keeps it and logs a warning.
+- Admin **Register Device** rows: **To maintenance** / **Back in service**; the Excel Location cell reads `SMART_LOCKER_MAINTENANCE_TOKEN` (default `Maintenance`) while a device is out for calibration.
 - Kiosk admin panel: **Register as admin** switch on Register User; **Users** overlay to **Replace card** (lost card, 60 s tap window) and **Deactivate** a user (refused for the last admin or while they still hold devices).
 
 ### Fixed

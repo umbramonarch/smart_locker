@@ -290,7 +290,7 @@ class TestImportFromSourceExcel:
             path.unlink(missing_ok=True)
 
     def test_empty_catalog_cells_do_not_wipe_sqlite(self, db_session):
-        """A Serial/Type/Calibration column with a blank cell does not clear SQLite."""
+        """Blank Serial/Type cells keep SQLite; a blank Calibration cell clears it."""
         from datetime import date
 
         DeviceRepository.create(
@@ -318,7 +318,7 @@ class TestImportFromSourceExcel:
             assert device.model == "87-V MAX"
             assert device.serial_number == "FL-87V-007"
             assert device.device_type == "Multimeter"
-            assert device.calibration_due == date(2026, 6, 30)
+            assert device.calibration_due is None
         finally:
             path.unlink(missing_ok=True)
 
@@ -652,6 +652,24 @@ class TestRegistrantExtraction:
         finally:
             path.unlink(missing_ok=True)
 
+    def test_maintenance_location_excluded(self, db_session):
+        """The maintenance token is a status marker, not a person name."""
+        path = _create_test_excel([
+            ["Equipment", "Slot", "Location"],
+            ["PM-001", "Bay 1", "Maintenance"],
+            ["PM-002", "Bay 2", "maintenance"],
+            ["PM-003", "Bay 3", "Alice"],
+        ])
+        try:
+            from smart_locker.database.engine import get_engine
+            result = import_from_source_excel(get_engine(), path)
+
+            assert result.registrants_added == 1
+            assert RegistrantRepository.find_by_name(db_session, "Alice")
+            assert RegistrantRepository.find_by_name(db_session, "Maintenance") is None
+        finally:
+            path.unlink(missing_ok=True)
+
     def test_no_location_column_no_registrants(self, db_session):
         """Without a location column, no registrant names are extracted."""
         path = _create_test_excel([
@@ -899,3 +917,78 @@ class TestImportEngineAndSavepoints:
         second = DeviceRepository.find_by_pm(db_session, "PM-002")
         assert first.serial_number == "SN-A"
         assert second.manufacturer == "NewMfr"
+
+
+class TestCalibrationBlankCell:
+    """Blank Calibration cell clears; unparsable text keeps the old date."""
+
+    def _device_with_cal(self, db_session):
+        """Persist one locker device with a set calibration date."""
+        from datetime import date
+
+        DeviceRepository.create(
+            db_session,
+            name="Fluke 87V",
+            device_type="Multimeter",
+            pm_number="PM-001",
+            calibration_due=date(2026, 1, 1),
+            locker_slot=1,
+        )
+        db_session.commit()
+
+    def test_blank_cell_clears_calibration_due(self, db_session):
+        """Blank cell in an existing Calibration column writes None."""
+        self._device_with_cal(db_session)
+        path = _create_test_excel([
+            ["Equipment", "Calibration due"],
+            ["PM-001", None],
+        ])
+        try:
+            from smart_locker.database.engine import get_engine
+            import_from_source_excel(get_engine(), path)
+            device = DeviceRepository.find_by_pm(db_session, "PM-001")
+            assert device.calibration_due is None
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_unparsable_cell_keeps_previous_and_warns(
+        self, db_session, caplog
+    ):
+        """Non-blank text that is not a date keeps the stored date."""
+        import logging
+        from datetime import date
+
+        self._device_with_cal(db_session)
+        path = _create_test_excel([
+            ["Equipment", "Calibration due"],
+            ["PM-001", "tbd"],
+        ])
+        try:
+            from smart_locker.database.engine import get_engine
+            with caplog.at_level(logging.WARNING):
+                import_from_source_excel(get_engine(), path)
+            device = DeviceRepository.find_by_pm(db_session, "PM-001")
+            assert device.calibration_due == date(2026, 1, 1)
+            assert any(
+                "Unparsable calibration date" in r.message
+                for r in caplog.records
+            )
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_no_calibration_column_keeps_previous(self, db_session):
+        """A sheet without a Calibration column never touches the field."""
+        from datetime import date
+
+        self._device_with_cal(db_session)
+        path = _create_test_excel([
+            ["Equipment", "Manufacturer"],
+            ["PM-001", "Fluke"],
+        ])
+        try:
+            from smart_locker.database.engine import get_engine
+            import_from_source_excel(get_engine(), path)
+            device = DeviceRepository.find_by_pm(db_session, "PM-001")
+            assert device.calibration_due == date(2026, 1, 1)
+        finally:
+            path.unlink(missing_ok=True)

@@ -514,3 +514,57 @@ class TestDashboardTagApi:
         assert resp.status_code == 404
         assert mock_context.pending_tag_bind is None
 
+
+
+class TestDashboardCalibration:
+    """Calibration state rides on dashboard Locker and Inventory payloads."""
+
+    def test_dashboard_devices_calibration_state(
+        self, client, db_session, test_devices, monkeypatch
+    ):
+        """Locker rows carry calibration_state and calibration_days_left."""
+        from datetime import date, timedelta
+
+        monkeypatch.setattr("config.settings.CALIBRATION_WARN_DAYS", 14)
+        today = date.today()
+        DeviceRepository.create(
+            db_session, name="Cal Old", device_type="Meter",
+            pm_number="PM-CO", locker_slot=40,
+            calibration_due=today - timedelta(days=3),
+        )
+        DeviceRepository.create(
+            db_session, name="Cal Soon", device_type="Meter",
+            pm_number="PM-CS", locker_slot=41,
+            calibration_due=today + timedelta(days=5),
+        )
+        db_session.commit()
+        rows = client.get("/api/dashboard/devices").json()
+        over = next(r for r in rows if r["pm_number"] == "PM-CO")
+        assert over["calibration_state"] == "overdue"
+        assert over["calibration_days_left"] == -3
+        soon = next(r for r in rows if r["pm_number"] == "PM-CS")
+        assert soon["calibration_state"] == "due_soon"
+        assert soon["calibration_days_left"] == 5
+        plain = next(r for r in rows if r["pm_number"] == "PM-001")
+        assert plain["calibration_state"] is None
+        assert plain["calibration_days_left"] is None
+
+    def test_dashboard_inventory_calibration_state(
+        self, client, tmp_path, monkeypatch
+    ):
+        """Inventory rows (Excel ISO dates) carry the same fields."""
+        from datetime import date, timedelta
+
+        path = catalog_workbook(tmp_path, [
+            ["PM", "Name", "Calibration Due"],
+            ["PM-A", "Dev A", date.today() - timedelta(days=1)],
+            ["PM-B", "Dev B", None],
+        ])
+        monkeypatch.setattr("config.settings.SOURCE_EXCEL_PATH", str(path))
+        rows = client.get("/api/dashboard/inventory").json()
+        a = next(r for r in rows if r["pm_number"] == "PM-A")
+        assert a["calibration_state"] == "overdue"
+        assert a["calibration_days_left"] == -1
+        b = next(r for r in rows if r["pm_number"] == "PM-B")
+        assert b["calibration_state"] is None
+        assert b["calibration_days_left"] is None

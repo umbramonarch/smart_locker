@@ -385,6 +385,32 @@ body {
   color: var(--status-maintenance);
 }
 
+/* --- Calibration alerts (warn only) --------------------------------------- */
+.cal-badge {
+  display: inline-block;
+  padding: 0.2rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  background: var(--status-borrowed-bg);
+  color: var(--status-borrowed);
+}
+
+.cal-badge.overdue {
+  background: rgba(248, 113, 113, 0.16);
+  color: #f87171;
+}
+
+tr.cal-due-soon .cal-cell {
+  color: var(--status-borrowed);
+  font-weight: 600;
+}
+
+tr.cal-overdue .cal-cell {
+  color: #f87171;
+  font-weight: 600;
+}
+
 /* --- Display tab --------------------------------------------------------- */
 .display-card {
   padding: 2rem 1.5rem 2.25rem;

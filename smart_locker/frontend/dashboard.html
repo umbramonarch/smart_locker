@@ -6,7 +6,9 @@
                Inventory (confirm) is public; not for locker PMs. 5-tap the
                header clock reveals users, logs, and NFC unbind / arm-bind —
                it is not authorization.
-               Locker shows Tagged / No tag.
+               Locker shows Tagged / No tag. Calibration due-soon rows are
+               amber, overdue red, with a header count badge and a Locker
+               Calibration filter.
   Project: smart_locker/frontend
   Notes: Kiosk colours (#181d24 / #009641) with a normal desktop cursor,
          text selection, and scroll. dashboard.js polls Inventory/Locker
@@ -34,6 +36,7 @@
         Live
       </span>
       <span class="last-updated" id="last-updated"></span>
+      <span class="cal-badge" id="cal-badge" hidden></span>
       <span class="clock" id="dash-clock"></span>
     </div>
   </header>
@@ -88,6 +91,7 @@
               <button class="filter-btn" data-filter="available">Available</button>
               <button class="filter-btn" data-filter="borrowed">Borrowed</button>
               <button class="filter-btn" data-filter="maintenance">Maintenance</button>
+              <button class="filter-btn" data-filter="calibration">Calibration</button>
             </div>
             <span class="section-count" id="device-count"></span>
           </div>

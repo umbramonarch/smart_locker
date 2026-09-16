@@ -1,7 +1,8 @@
 """
 File: test_location_writeback.py
 Description: Tests for Pi → Excel write-back of Location only.
-             Locker available → in-locker token; borrowed → borrower name.
+             Locker available → in-locker token; borrowed → borrower name;
+             maintenance → maintenance token.
              A locked or missing workbook must not raise into the kiosk.
 Project: smart_locker/tests
 Notes: Run with: python -m pytest tests/test_location_writeback.py -v
@@ -609,7 +610,7 @@ class TestSiteWritebackAliases:
 
 
 class TestWritebackColumnAndStatus:
-    """I2 location-over-owner, I20/I21 join keys, I23 MAINTENANCE skip."""
+    """I2 location-over-owner, I20/I21 join keys, I23 MAINTENANCE token."""
 
     def test_owner_and_location_updates_location_only(self, db_session, tmp_path):
         """A sheet with Owner left of Location writes Location, not Owner."""
@@ -633,8 +634,8 @@ class TestWritebackColumnAndStatus:
         finally:
             wb.close()
 
-    def test_maintenance_does_not_write_in_locker_token(self, db_session, tmp_path):
-        """MAINTENANCE Location is left as-is, not rewritten as Locker."""
+    def test_maintenance_writes_maintenance_token(self, db_session, tmp_path):
+        """MAINTENANCE devices write the maintenance token, not Locker."""
         path = _workbook(tmp_path / "device-list.xlsx", [
             ["Equipment", "Location"],
             ["PM-001", "Workshop"],
@@ -649,7 +650,26 @@ class TestWritebackColumnAndStatus:
         )
         db_session.flush()
         write_location(db_session, path)
-        assert _location_by_pm(path)["PM-001"] == "Workshop"
+        assert _location_by_pm(path)["PM-001"] == "Maintenance"
+
+    def test_maintenance_writes_env_token(self, db_session, tmp_path, monkeypatch):
+        """SMART_LOCKER_MAINTENANCE_TOKEN overrides the default cell text."""
+        monkeypatch.setenv("SMART_LOCKER_MAINTENANCE_TOKEN", "Out for cal")
+        path = _workbook(tmp_path / "device-list.xlsx", [
+            ["Equipment", "Location"],
+            ["PM-001", "Workshop"],
+        ])
+        DeviceRepository.create(
+            db_session,
+            name="Meter",
+            device_type="general",
+            pm_number="PM-001",
+            locker_slot=1,
+            status=DeviceStatus.MAINTENANCE.value,
+        )
+        db_session.flush()
+        write_location(db_session, path)
+        assert _location_by_pm(path)["PM-001"] == "Out for cal"
 
     def test_pm_case_and_excel_float_join(self, db_session, tmp_path):
         """Write-back matches PM-001 vs pm-001 and Excel 1001.0 vs SQLite 1001."""
