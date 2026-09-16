@@ -199,6 +199,48 @@ class TestRegisterLockerDevice:
         finally:
             path.unlink(missing_ok=True)
 
+    def test_pm_unique_race_maps_to_already_registered(self, db_session, monkeypatch):
+        """A PM-unique IntegrityError (same-PM race) is AlreadyRegistered, not SlotTaken."""
+        from sqlalchemy.exc import IntegrityError
+
+        def _race(*_args, **_kwargs):
+            raise IntegrityError(
+                "INSERT INTO devices", {},
+                Exception("UNIQUE constraint failed: devices.pm_number"),
+            )
+
+        monkeypatch.setattr(DeviceRepository, "create", _race)
+        path = _create_excel([
+            ["Equipment", "Manufacturer"],
+            ["PM-001", "Fluke"],
+        ])
+        try:
+            with pytest.raises(AlreadyRegistered, match="already in the locker"):
+                register_locker_device(db_session, path, "PM-001", locker_slot=1)
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_slot_unique_race_maps_to_slot_taken(self, db_session, monkeypatch):
+        """A slot-unique IntegrityError (slot race) stays SlotTaken."""
+        from sqlalchemy.exc import IntegrityError
+
+        def _race(*_args, **_kwargs):
+            raise IntegrityError(
+                "INSERT INTO devices", {},
+                Exception("UNIQUE constraint failed: devices.locker_slot"),
+            )
+
+        monkeypatch.setattr(DeviceRepository, "create", _race)
+        path = _create_excel([
+            ["Equipment", "Manufacturer"],
+            ["PM-001", "Fluke"],
+        ])
+        try:
+            with pytest.raises(SlotTaken):
+                register_locker_device(db_session, path, "PM-001", locker_slot=1)
+        finally:
+            path.unlink(missing_ok=True)
+
     def test_invalid_slot_fails(self, db_session):
         """Slot numbers must be >= 1."""
         path = _create_excel([
@@ -309,3 +351,80 @@ class TestUnregisteredLockerRows:
         """Share down surfaces as CatalogUnavailable."""
         with pytest.raises(CatalogUnavailable):
             unregistered_locker_rows(db_session, "/nonexistent/device-list.xlsx")
+
+    def test_same_name_tie_break_orders_by_pm(self, db_session):
+        """Equal names (case-insensitive) break ties by PM string."""
+        path = _create_excel([
+            ["Equipment", "Name", "Location"],
+            ["PM-002", "Scope", "Locker"],
+            ["PM-001", "scope", "Locker"],
+        ])
+        try:
+            rows = unregistered_locker_rows(db_session, path)
+            assert [r.pm_number for r in rows] == ["PM-001", "PM-002"]
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_all_excluded_returns_empty(self, db_session):
+        """Every in-locker PM registered means an empty pick list."""
+        DeviceRepository.create(
+            db_session, name="Scope", device_type="general",
+            pm_number="PM-001", locker_slot=1,
+        )
+        DeviceRepository.create(
+            db_session, name="Meter", device_type="general",
+            pm_number="PM-002", locker_slot=2,
+        )
+        db_session.commit()
+        path = _create_excel([
+            ["Equipment", "Name", "Location"],
+            ["PM-001", "Scope", "Locker"],
+            ["PM-002", "Meter", "Locker"],
+        ])
+        try:
+            assert unregistered_locker_rows(db_session, path) == []
+        finally:
+            path.unlink(missing_ok=True)
+
+
+class TestSharedPmEquality:
+    """Register and the pick list share pm_match_key equality."""
+
+    def test_find_by_pm_and_pick_list_agree_on_case_and_whitespace(self, db_session):
+        """A case/whitespace PM variant matches both the register pre-check and the pick list."""
+        DeviceRepository.create(
+            db_session, name="Scope", device_type="general",
+            pm_number="PM-001", locker_slot=1,
+        )
+        db_session.commit()
+        assert DeviceRepository.find_by_pm(db_session, "  pm-001 ") is not None
+        path = _create_excel([
+            ["Equipment", "Name", "Location"],
+            ["  pm-001 ", "Scope", "Locker"],
+            ["PM-002", "Meter", "Locker"],
+        ])
+        try:
+            rows = unregistered_locker_rows(db_session, path)
+            assert [r.pm_number for r in rows] == ["PM-002"]
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_unicode_casefold_pair_matches_both_paths(self, db_session):
+        """ß/SS agree via casefold on both paths (SQLite lower() alone would miss)."""
+        assert pm_match_key("PM-ß") == pm_match_key("pm-ss")
+        DeviceRepository.create(
+            db_session, name="Scope", device_type="general",
+            pm_number="PM-ß", locker_slot=1,
+        )
+        db_session.commit()
+        assert DeviceRepository.find_by_pm(db_session, "pm-ss") is not None
+        path = _create_excel([
+            ["Equipment", "Name", "Location"],
+            ["pm-ss", "Scope", "Locker"],
+            ["PM-002", "Meter", "Locker"],
+        ])
+        try:
+            rows = unregistered_locker_rows(db_session, path)
+            assert [r.pm_number for r in rows] == ["PM-002"]
+        finally:
+            path.unlink(missing_ok=True)

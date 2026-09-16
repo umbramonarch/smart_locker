@@ -92,7 +92,7 @@ def unregistered_locker_rows(session: Session, source_path: str) -> list[Catalog
         raise CatalogUnavailable(str(e)) from e
 
     registered = {
-        pm_match_key(d.pm_number) for d in DeviceRepository.list_all(session)
+        pm_match_key(pm) for pm in DeviceRepository.pm_number_set(session)
     }
     out = [r for r in rows if pm_match_key(r.pm_number) not in registered]
     out.sort(key=lambda r: (r.name.lower(), r.pm_number))
@@ -161,6 +161,9 @@ def register_locker_device(
         )
     except IntegrityError as e:
         session.rollback()
+        detail = f"{e} {getattr(e, 'orig', '')}"
+        if "pm_number" in detail:
+            raise AlreadyRegistered(f"{pm} is already in the locker.") from e
         raise SlotTaken(f"Slot {locker_slot} is already used.") from e
 
     if catalog.model:

@@ -969,3 +969,20 @@ class TestListInLockerCatalog:
         """Share down raises CatalogReadError, not an empty list."""
         with pytest.raises(CatalogReadError):
             list_in_locker_catalog("/nonexistent/device-list.xlsx")
+
+    def test_duplicate_pm_rows_deduped_keep_first(self, caplog):
+        """Duplicate PM rows (incl. case variants) appear once; the first row wins."""
+        path = _create_test_excel([
+            ["Equipment", "Name", "Location"],
+            ["PM-001", "First Scope", "Locker"],
+            ["pm-001", "Second Scope", "Locker"],
+            ["PM-002", "Meter", "Locker"],
+        ])
+        try:
+            with caplog.at_level("WARNING", logger="smart_locker.sync.source_import"):
+                rows = list_in_locker_catalog(path)
+            assert [r.pm_number for r in rows] == ["PM-001", "PM-002"]
+            assert rows[0].name == "First Scope"
+            assert any("Duplicate PM" in message for message in caplog.messages)
+        finally:
+            path.unlink(missing_ok=True)

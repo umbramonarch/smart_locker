@@ -279,6 +279,11 @@ class DeviceRepository:
     def find_by_pm(session: Session, pm_number: str) -> Device | None:
         """Look up a device by its PM number (unique business key).
 
+        Equality is shared with the pick list / import join key
+        (:func:`pm_match_key`): surrounding whitespace is ignored and
+        comparison is case-insensitive. ASCII ``PM-NNN`` behavior is
+        unchanged.
+
         Args:
             session: Active database session.
             pm_number: Join-key string (unique business key).
@@ -286,6 +291,8 @@ class DeviceRepository:
         Returns:
             Device object or None if not found.
         """
+        from smart_locker.sync.source_import import pm_match_key
+
         want = (pm_number or "").strip()
         if not want:
             return None
@@ -294,12 +301,33 @@ class DeviceRepository:
         ).scalar_one_or_none()
         if found is not None:
             return found
-        from smart_locker.sync.source_import import pm_match_key
-
         key = pm_match_key(want)
-        return session.execute(
-            select(Device).where(func.lower(Device.pm_number) == key)
+        hit = session.execute(
+            select(Device).where(func.lower(Device.pm_number) == want.lower())
         ).scalar_one_or_none()
+        if hit is not None and pm_match_key(hit.pm_number) == key:
+            return hit
+        # func.lower() is ASCII-only in SQLite and differs from casefold()
+        # for some Unicode (e.g. "ß" vs "SS"): compare the shared
+        # pm_match_key in Python over a narrow id/PM select.
+        for dev_id, stored in session.execute(select(Device.id, Device.pm_number)):
+            if pm_match_key(stored) == key:
+                return session.get(Device, dev_id)
+        return None
+
+    @staticmethod
+    def pm_number_set(session: Session) -> set[str]:
+        """Return stored PM numbers without hydrating Device rows.
+
+        Lightweight membership set for the Register Device pick list.
+
+        Args:
+            session: Active database session.
+
+        Returns:
+            Set of stored ``pm_number`` strings.
+        """
+        return set(session.execute(select(Device.pm_number)).scalars().all())
 
     @staticmethod
     def find_by_slot(session: Session, locker_slot: int) -> Device | None:

@@ -567,13 +567,23 @@ def list_in_locker_catalog(
         return []
 
     out: list[CatalogRow] = []
+    seen: set[str] = set()
     compose_name = cols["name"] is None
     for row in rows[1:]:
         if not is_own_locker_location(_cell_str(row, cols["location"]) or ""):
             continue
         catalog = _catalog_from_row(row, cols, compose_name, default_type)
-        if catalog is not None:
-            out.append(catalog)
+        if catalog is None:
+            continue
+        key = pm_match_key(catalog.pm_number)
+        if key in seen:
+            logger.warning(
+                "Duplicate PM %s in locker catalog — keeping first row.",
+                catalog.pm_number,
+            )
+            continue
+        seen.add(key)
+        out.append(catalog)
     return out
 
 
