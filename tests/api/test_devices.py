@@ -361,21 +361,24 @@ class TestDeviceCalibrationFields:
     """GET /api/devices carries calibration_state / calibration_days_left."""
 
     def test_calibration_fields_present(
-        self, client, mock_context, test_user, db_session, monkeypatch
+        self, client, mock_context, test_user, db_session, monkeypatch, hmac_key
     ):
         """Overdue date → 'overdue'/negative; no date → None/None."""
         from datetime import date, timedelta
 
         monkeypatch.setattr("config.settings.CALIBRATION_WARN_DAYS", 14)
         yesterday = date.today() - timedelta(days=1)
-        DeviceRepository.create(
+        old_cal = DeviceRepository.create(
             db_session, name="Old Cal", device_type="Meter",
             pm_number="PM-CAL", locker_slot=40, calibration_due=yesterday,
         )
-        DeviceRepository.create(
+        no_cal = DeviceRepository.create(
             db_session, name="No Cal", device_type="Meter",
             pm_number="PM-NOCAL", locker_slot=41,
         )
+        # The kiosk feed lists tagged units only.
+        old_cal.tag_hmac = compute_uid_hmac("TAG-CAL", hmac_key)
+        no_cal.tag_hmac = compute_uid_hmac("TAG-NOCAL", hmac_key)
         db_session.commit()
         mock_context.session_mgr.start_session(test_user)
         data = client.get("/api/devices").json()
