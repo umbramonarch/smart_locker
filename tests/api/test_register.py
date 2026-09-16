@@ -59,6 +59,57 @@ class TestRegistrantEndpoints:
         assert "Alice" not in names
         assert "Bob" in names
 
+    def test_registrants_exclude_deactivated_user_name(self, client, db_session):
+        """A deactivated user's name is blocked from self-registration."""
+        RegistrantRepository.add_names(db_session, {"Alice", "Bob"})
+        alice = UserRepository.create(
+            db_session,
+            display_name="Alice",
+            uid_hmac="mmhash" * 10 + "mmmm",
+            encrypted_card_uid="encrypted_mm",
+        )
+        UserRepository.deactivate(db_session, alice)
+        db_session.commit()
+
+        resp = client.get("/api/registrants")
+        names = resp.json()["names"]
+        assert "Alice" not in names
+        assert "Bob" in names
+
+    def test_arm_registration_is_atomic(self, mock_context):
+        """16 concurrent arms: exactly one claims the NFC reader."""
+        import threading
+
+        import smart_locker.api.routes as routes
+
+        mock_context.pending_registration = None
+        mock_context.pending_tag_bind = None
+        barrier = threading.Barrier(16)
+        outcomes = []
+        outcomes_lock = threading.Lock()
+
+        def arm(i):
+            barrier.wait()
+            try:
+                routes._arm_registration(
+                    PendingRegistration(display_name=f"u{i}")
+                )
+            except Exception as exc:  # noqa: BLE001 - record the HTTP status
+                with outcomes_lock:
+                    outcomes.append(getattr(exc, "status_code", None))
+            else:
+                with outcomes_lock:
+                    outcomes.append(200)
+
+        threads = [threading.Thread(target=arm, args=(i,)) for i in range(16)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert outcomes.count(200) == 1
+        assert outcomes.count(409) == 15
+
     def test_register_validates_against_registrants(self, client, db_session, mock_context):
         """POST /api/register rejects names not in the registrants list."""
         # No registrants exist — any name should be rejected
@@ -77,6 +128,43 @@ class TestRegistrantEndpoints:
         assert resp.status_code == 200
         assert resp.json()["success"] is True
 
+    def test_register_rejects_deactivated_name(self, client, db_session, mock_context):
+        """POST /api/register rejects a deactivated name posted directly."""
+        RegistrantRepository.add_names(db_session, {"Alice"})
+        alice = UserRepository.create(
+            db_session,
+            display_name="Alice",
+            uid_hmac="deadbeef" * 8,
+            encrypted_card_uid="encrypted_alice",
+        )
+        UserRepository.deactivate(db_session, alice)
+        db_session.commit()
+        mock_context.pending_registration = None
+
+        resp = client.post("/api/register", json={"name": "Alice"})
+        assert resp.status_code == 403
+        assert "deactivat" in resp.json()["detail"].lower()
+        assert mock_context.pending_registration is None
+
+    def test_register_rejects_deactivated_name_case_insensitive(
+        self, client, db_session, mock_context
+    ):
+        """Deactivated-name rejection ignores case."""
+        RegistrantRepository.add_names(db_session, {"Alice"})
+        alice = UserRepository.create(
+            db_session,
+            display_name="Alice",
+            uid_hmac="deadbeef" * 8,
+            encrypted_card_uid="encrypted_alice",
+        )
+        UserRepository.deactivate(db_session, alice)
+        db_session.commit()
+        mock_context.pending_registration = None
+
+        resp = client.post("/api/register", json={"name": "aLiCe"})
+        assert resp.status_code == 403
+        assert mock_context.pending_registration is None
+
     def test_admin_register_accepts_any_name(
         self, client, db_session, mock_context, admin_user
     ):
@@ -89,6 +177,27 @@ class TestRegistrantEndpoints:
         assert resp.status_code == 200
         assert resp.json()["success"] is True
         assert mock_context.pending_registration is not None
+
+    def test_admin_register_rejects_deactivated_name(
+        self, client, db_session, mock_context, admin_user
+    ):
+        """POST /api/admin/register rejects a name held by an inactive user."""
+        alice = UserRepository.create(
+            db_session,
+            display_name="Alice",
+            uid_hmac="deadbeef" * 8,
+            encrypted_card_uid="encrypted_alice",
+        )
+        UserRepository.deactivate(db_session, alice)
+        db_session.commit()
+        mock_context.session_mgr.start_session(admin_user)
+        mock_context.pending_registration = None
+        mock_context.pending_tag_bind = None
+
+        resp = client.post("/api/admin/register", json={"name": "Alice"})
+        assert resp.status_code == 403
+        assert "deactivat" in resp.json()["detail"].lower()
+        assert mock_context.pending_registration is None
 
     def test_admin_register_rejects_armed_bind(
         self, client, db_session, mock_context, admin_user
@@ -117,6 +226,17 @@ class TestRegistrantEndpoints:
         """POST /api/admin/register requires an active session."""
         resp = client.post("/api/admin/register", json={"name": "Someone"})
         assert resp.status_code == 401
+
+    def test_lan_cannot_start_admin_registration(
+        self, lan_client, mock_context, admin_user
+    ):
+        """LAN POST /api/admin/register is 403 even with a live admin session."""
+        mock_context.session_mgr.start_session(admin_user)
+        mock_context.pending_registration = None
+        mock_context.pending_tag_bind = None
+        resp = lan_client.post("/api/admin/register", json={"name": "Someone"})
+        assert resp.status_code == 403
+        assert mock_context.pending_registration is None
 
     def test_lan_cannot_start_registration(self, lan_client, db_session, mock_context):
         """LAN POST /api/register must not arm enrollment or clear a kiosk bind."""

@@ -1644,6 +1644,61 @@ body::after {
   width: 80%;
 }
 
+/* "Register as admin" toggle on the manual register step */
+.register-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  min-height: 44px;
+  cursor: pointer;
+  user-select: none;
+}
+.register-toggle input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+.register-toggle-track {
+  position: relative;
+  width: 52px;
+  height: 30px;
+  flex-shrink: 0;
+  border-radius: 999px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  transition: background 0.25s var(--ease-smooth), border-color 0.25s var(--ease-smooth);
+}
+.register-toggle-track::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  transition: transform 0.25s var(--ease-smooth), background 0.25s var(--ease-smooth);
+}
+.register-toggle input:checked ~ .register-toggle-track {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+}
+.register-toggle input:checked ~ .register-toggle-track::after {
+  transform: translateX(22px);
+  background: var(--accent);
+}
+.register-toggle input:focus-visible ~ .register-toggle-track {
+  box-shadow: 0 0 0 3px rgba(0,150,65,0.25);
+}
+.register-toggle-text {
+  font-family: var(--font-display);
+  font-size: 0.95rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  color: var(--text);
+}
+
 /* Search input with magnifying glass icon */
 .register-search-group {
   position: relative;
@@ -2235,6 +2290,18 @@ body::after {
   font-size: 0.8rem;
   color: var(--danger);
   text-align: center;
+}
+
+/* Users overlay steps reuse bind-panel / bind-row / bind-* button styles */
+.users-step { display: flex; flex-direction: column; align-items: center; gap: 0.9rem; }
+.users-step.hidden { display: none; }
+/* Long user names ellipsis instead of pushing the row actions off-screen
+   (.bind-row-info already supplies min-width: 0 in the flex chain). */
+#users-list .bind-row-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
 }
 
 /* ============================================================
