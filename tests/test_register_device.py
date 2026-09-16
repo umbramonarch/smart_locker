@@ -111,10 +111,19 @@ class TestUsersOverlayMarkup:
         assert 'id="register-admin-role"' in html
         assert "Register as admin" in html
 
+    def test_register_admin_role_defaults_unchecked(self):
+        """The Register as admin switch is off by default (no checked attr)."""
+        html = _html()
+        start = html.index('id="register-admin-role"')
+        tag_start = html.rindex("<input", 0, start)
+        tag_end = html.index(">", start)
+        tag = html[tag_start:tag_end]
+        assert "checked" not in tag
+
     def test_js_posts_role_to_admin_register(self):
         """app.js sends {name, role} to /api/admin/register."""
         js = _js()
         assert "apiStartAdminRegistration" in js
-        assert "role" in js
+        assert "JSON.stringify({ name, role })" in js
         assert "usersReplacePending" in js
         assert "api/admin/users" in js

@@ -365,7 +365,7 @@ def _push_sse(payload: dict) -> None:
 
 
 def _end_kiosk_session(*, sse_reason: str = "explicit") -> None:
-    """Drop the process-global kiosk session and overlay bind state.
+    """Drop the process-global kiosk session and overlay bind/register state.
 
     Args:
         sse_reason: ``reason`` field on the ``session_ended`` SSE event.
@@ -376,6 +376,7 @@ def _end_kiosk_session(*, sse_reason: str = "explicit") -> None:
     ctx.session_mgr.end_session()
     ctx.admin_overlay_open = False
     assign_pending_tag_bind(ctx, None)
+    assign_pending_registration(ctx, None)
     _push_sse({"event": "session_ended", "reason": sse_reason})
 
 
@@ -440,9 +441,8 @@ def _arm_registration(pending: PendingRegistration) -> None:
     """Atomically claim the NFC reader for a registration window.
 
     Under ``pending_state_lock`` (RLock — callers may already hold it):
-    raises on a live bind/registration conflict, clears any pending tag
-    bind, then assigns the registration. Concurrent callers cannot both
-    pass the conflict check.
+    raises on a live bind/registration conflict, then assigns the
+    registration. Concurrent callers cannot both pass the conflict check.
 
     Args:
         pending: The registration window to arm.
@@ -454,7 +454,6 @@ def _arm_registration(pending: PendingRegistration) -> None:
         conflict = _pending_nfc_conflict()
         if conflict:
             raise HTTPException(status_code=409, detail=conflict)
-        assign_pending_tag_bind(ctx_module.context, None)
         assign_pending_registration(ctx_module.context, pending)
 
 
@@ -1047,7 +1046,7 @@ def get_registrants(db: Session = Depends(get_db)):
     names = [
         r.display_name
         for r in registrants
-        if r.display_name.lower() not in registered_lower
+        if r.display_name.strip().lower() not in registered_lower
     ]
     return {"names": names}
 
@@ -1167,8 +1166,9 @@ def start_admin_registration(
 
     Raises:
         HTTPException: 503 if system not ready, 403 if caller is not admin
-                       or the name belongs to a deactivated user,
-                       409 if a bind/registration window is already armed.
+                       or the name belongs to a deactivated user, 422 if
+                       the name is blank, 409 if a bind/registration
+                       window is already armed.
     """
     if ctx_module.context is None:
         raise HTTPException(status_code=503, detail="System not ready.")
@@ -1176,13 +1176,16 @@ def start_admin_registration(
     if user_session.user.role != UserRole.ADMIN:
         raise HTTPException(status_code=403, detail="Admin access required.")
 
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="Name must not be blank.")
     _reject_deactivated_name(db, body.name)
     _arm_registration(
-        PendingRegistration(display_name=body.name.strip(), role=body.role)
+        PendingRegistration(display_name=name, role=body.role)
     )
     logger.info(
         "Admin-initiated registration for '%s' (role=%s) by admin %s. Awaiting card tap.",
-        body.name.strip(), body.role, user_session.user.display_name,
+        name, body.role, user_session.user.display_name,
     )
     return {"success": True, "message": "Tap the new user's NFC card to complete registration."}
 

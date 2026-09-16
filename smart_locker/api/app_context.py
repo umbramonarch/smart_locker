@@ -465,6 +465,7 @@ class AppContext:
                                 "role": target.role.value,
                             },
                             "replaced": True,
+                            "replace_user_id": pending.replace_user_id,
                         })
                 except ValueError as e:
                     self.broadcast_sse({

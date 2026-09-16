@@ -663,6 +663,8 @@ function showAuthFailed() {
  */
 async function endSession(fromTimeout = false, fromSSE = false) {
   clearTimeout(S.idleTimer);
+  clearTimeout(sessionEndedFallbackTimer);
+  sessionEndedFallbackTimer = null;
   clearInterval(S.cdTimer);
   dismissInactivity();
   dismissSlotOverlay();
@@ -670,6 +672,7 @@ async function endSession(fromTimeout = false, fromSSE = false) {
   S.user     = null;
   S.devices  = [];
   S.selected = null;
+  S.adminRegistration = false;
   adminSessionActive = false;
   closeAdminPanel();
   hideRegisterDeviceOverlay();
@@ -2777,6 +2780,12 @@ let usersCountdownTimer = null;
 let usersList = [];
 /** @type {number|null} User id pending deactivate confirm or replace tap. */
 let usersTargetId = null;
+/** @type {boolean} Replace-card POST in flight; extra clicks are ignored. */
+let usersReplaceArming = false;
+/** @type {number|null} Users overlay auto-return timer (success/error steps). */
+let usersStepTimer = null;
+/** @type {number|null} Fallback idle timer after self-deactivate (SSE loss). */
+let sessionEndedFallbackTimer = null;
 
 /**
  * Show a Users overlay step and hide the others.
@@ -2877,12 +2886,13 @@ function renderUsersList() {
 async function loadUsersList() {
   const users = await apiAdminListUsers();
   if (users === null) {
-    usersList = [];
     document.getElementById('users-error').textContent = 'Could not load users.';
+    if (!usersList.length) renderUsersList();
   } else {
     usersList = users;
+    document.getElementById('users-error').textContent = '';
+    renderUsersList();
   }
-  renderUsersList();
 }
 
 /**
@@ -2910,6 +2920,8 @@ async function adminOpenUsers() {
  */
 function hideUsersOverlay() {
   clearInterval(usersCountdownTimer);
+  clearTimeout(usersStepTimer);
+  usersStepTimer = null;
   S.usersReplacePending = false;
   const overlay = document.getElementById('overlay-users');
   if (!overlay || overlay.style.display === 'none') return;
@@ -2918,11 +2930,32 @@ function hideUsersOverlay() {
 }
 
 /**
+ * Whether the Users overlay tap-the-new-card step is currently visible.
+ * @returns {boolean} True if the tap step is showing.
+ */
+function isUsersTapStepShowing() {
+  const step = document.getElementById('users-step-tap');
+  return !!step && !step.classList.contains('hidden');
+}
+
+/**
+ * Enable or disable the Users list Replace buttons (arming feedback).
+ * @param {boolean} disabled - True to disable while the arm POST is in flight.
+ */
+function setUsersReplaceButtonsDisabled(disabled) {
+  document.querySelectorAll('#users-list [data-replace-id]').forEach(b => {
+    b.disabled = disabled;
+  });
+}
+
+/**
  * Close the Users overlay, cancel an armed replace window, reopen the panel.
  */
 function closeUsersOverlay() {
   clearInterval(usersCountdownTimer);
-  if (S.usersReplacePending) {
+  // Closing from the tap step must always release the server window, even if
+  // a late response already cleared the pending flag (double-click race).
+  if (S.usersReplacePending || isUsersTapStepShowing()) {
     S.usersReplacePending = false;
     apiCancelRegistration();
   }
@@ -2969,6 +3002,10 @@ async function usersDeactivate() {
     }
     if (data.session_ended) {
       hideUsersOverlay();
+      // The backend session is authoritatively dead; drop the local user now
+      // so the fallback can tell a re-login apart from SSE loss.
+      S.user = null;
+      scheduleSessionEndedFallback();
       return; // session_ended SSE navigates to idle
     }
     showUsersStep('users-step-list');
@@ -2976,6 +3013,19 @@ async function usersDeactivate() {
   } catch (_) {
     errEl.textContent = 'Could not deactivate.';
   }
+}
+
+/**
+ * Idle locally if the session_ended SSE never arrives after self-deactivate.
+ * Conservative: only fires when no (re-)login happened since — a live
+ * session always has S.user set and leaves the admin screen.
+ */
+function scheduleSessionEndedFallback() {
+  clearTimeout(sessionEndedFallbackTimer);
+  sessionEndedFallbackTimer = setTimeout(() => {
+    sessionEndedFallbackTimer = null;
+    if (S.user === null && S.screen === 'admin') endSession(false, true);
+  }, 2500);
 }
 
 /**
@@ -2995,9 +3045,17 @@ async function usersReplaceCard(id) {
     showUsersStep('users-step-success');
     document.getElementById('users-success-msg').textContent =
       `Card replaced for ${u.name}.`;
-    setTimeout(() => { showUsersStep('users-step-list'); }, 2500);
+    clearTimeout(usersStepTimer);
+    usersStepTimer = setTimeout(() => { showUsersStep('users-step-list'); }, 2500);
     return;
   }
+  // In-flight guard: a double-click's second POST would 409 against the
+  // window the first POST just armed, then clear the pending flag and hide
+  // its error on the now-hidden list step. Separate from
+  // S.usersReplacePending, which tracks the armed window for close/cancel.
+  if (usersReplaceArming) return;
+  usersReplaceArming = true;
+  setUsersReplaceButtonsDisabled(true);
   // Mark pending BEFORE the POST: the backend arms its window the moment the
   // request arrives, so a fast tap's SSE result can land before this fetch
   // resolves. Cleared on every HTTP failure below.
@@ -3005,12 +3063,19 @@ async function usersReplaceCard(id) {
   try {
     const res = await fetch(`/api/admin/users/${id}/replace-card`, { method: 'POST' });
     const data = await res.json().catch(() => ({}));
+    usersReplaceArming = false;
+    setUsersReplaceButtonsDisabled(false);
     if (!res.ok) {
+      // Late loser of a double-arm race: the tap step is already up from the
+      // winning POST, so leave the armed window alone and stay silent.
+      if (res.status === 409 && isUsersTapStepShowing()) return;
       S.usersReplacePending = false;
       errEl.textContent = data.detail || 'Could not replace card.';
       return;
     }
   } catch (_) {
+    usersReplaceArming = false;
+    setUsersReplaceButtonsDisabled(false);
     S.usersReplacePending = false;
     errEl.textContent = 'Could not replace card.';
     return;
@@ -3038,7 +3103,8 @@ function startUsersCountdown() {
       showUsersStep('users-step-error');
       document.getElementById('users-error-msg').textContent =
         'Card replace timed out. Please try again.';
-      setTimeout(() => {
+      clearTimeout(usersStepTimer);
+      usersStepTimer = setTimeout(() => {
         showUsersStep('users-step-list');
         loadUsersList();
       }, 2500);
@@ -3067,7 +3133,8 @@ function handleUsersReplaceResult(data, ok) {
     document.getElementById('users-error-msg').textContent =
       data.reason || 'Card replace failed. Please try again.';
   }
-  setTimeout(() => {
+  clearTimeout(usersStepTimer);
+  usersStepTimer = setTimeout(() => {
     showUsersStep('users-step-list');
     loadUsersList();
   }, 2500);
@@ -3421,10 +3488,10 @@ function connectSSE() {
   source.addEventListener('registration_success', e => {
     if (S.updating) return;
     const data = JSON.parse(e.data);
-    // Payload-first routing: a replace result belongs to the Users overlay
-    // even if it lands before the POST resolves and the pending flag is set.
+    // Payload-first routing: every replace-path result carries replaced:true
+    // (app_context.py), so no pending-flag fallback is needed — and it would
+    // misroute an enrol result landing mid-flight to the Users overlay.
     if (data.replaced === true) { handleUsersReplaceResult(data, true); return; }
-    if (S.usersReplacePending) { handleUsersReplaceResult(data, true); return; }
     handleRegistrationSuccess(data);
   });
 
@@ -3433,7 +3500,6 @@ function connectSSE() {
     const data = JSON.parse(e.data);
     // Payload-first routing: see registration_success above.
     if (data.replaced === true) { handleUsersReplaceResult(data, false); return; }
-    if (S.usersReplacePending) { handleUsersReplaceResult(data, false); return; }
     handleRegistrationFailed(data);
   });
 

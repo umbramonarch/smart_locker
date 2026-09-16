@@ -852,8 +852,10 @@ Pi on the LAN can use them — the lock is **physical access**, not a password.
      the admin session and overlay stay open. **Deactivate** keeps history but
      the card stops working; refused for the last admin or a user still
      holding devices. A deactivated name is blocked from self-registration
-     and admin Register User (re-enrol under a new name), and from the
-     dashboard owner dropdown.
+     and admin Register User: deactivation permanently retires the name, and
+     the old card stays bound to the deactivated row, so re-enrolment needs
+     both a new name and a fresh card. Deactivated names are also hidden
+     from the dashboard owner dropdown.
    - **Register Device** — add a locker unit: **PM + free slot + NFC tap** (catalog
      comes from Excel). Existing rows can bind / unbind / change slot. The list shows
      **name + PM** (and slot).

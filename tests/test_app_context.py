@@ -670,3 +670,45 @@ class TestReplaceCardTap:
         assert events[0]["user"]["role"] == "admin"
         user = ctx.authenticator.authenticate(db_session, "B0B0B0B0")
         assert user.role == UserRole.ADMIN
+
+
+class TestReplaceWindowBoundary:
+    """A card-replace window armed 59s ago is still live."""
+
+    def test_replace_window_live_just_before_timeout(
+        self, db_session, enc_key, hmac_key, monkeypatch
+    ):
+        """Complement to the -61s-expired replace test: the next tap still
+        completes the replace instead of timing out."""
+        from smart_locker.api.app_context import REGISTRATION_TIMEOUT_SECONDS
+
+        assert REGISTRATION_TIMEOUT_SECONDS == 60
+        admin = UserRepository.create(
+            db_session,
+            display_name="Admin",
+            uid_hmac=compute_uid_hmac("ADADADAD", hmac_key),
+            encrypted_card_uid=encrypt("ADADADAD", enc_key),
+            role="admin",
+        )
+        target = UserRepository.create(
+            db_session,
+            display_name="Alice",
+            uid_hmac=compute_uid_hmac("A1B2C3D4", hmac_key),
+            encrypted_card_uid=encrypt("A1B2C3D4", enc_key),
+        )
+        db_session.commit()
+        ctx = _make_ctx(monkeypatch)
+        ctx.session_mgr.start_session(admin)
+        ctx.admin_overlay_open = True
+        pending = PendingRegistration(
+            "Alice",
+            replace_user_id=target.id,
+            created_at=time.monotonic() - 59,
+        )
+        assert pending.is_expired is False
+        ctx.pending_registration = pending
+        _run(ctx, "E5E5E5E5")
+        events = _events(ctx)
+        assert events[0]["event"] == "registration_success"
+        assert events[0]["replaced"] is True
+        assert events[0]["user"]["name"] == "Alice"

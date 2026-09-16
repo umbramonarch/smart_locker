@@ -76,6 +76,9 @@ class LockerService:
             return False
 
         with user_admin_lock:
+            # Drop pre-lock reads: route/NFC pre-loads pin Device/User rows in
+            # this session's identity map, so the guards below must hit the DB.
+            db_session.expire_all()
             user = user_session.user
             holder = UserRepository.find_by_id(db_session, user.id)
             if holder is None or not holder.is_active:
@@ -232,6 +235,9 @@ class LockerService:
             return False
 
         with user_admin_lock:
+            # Drop pre-lock reads: route/NFC pre-loads pin Device/User rows in
+            # this session's identity map, so the guards below must hit the DB.
+            db_session.expire_all()
             device = DeviceRepository.find_by_id(db_session, device_id)
             if device is None:
                 logger.warning("Transfer failed: device %d not found.", device_id)

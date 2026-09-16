@@ -423,11 +423,14 @@ class TestReplaceCard:
 
         svc, user = self._svc_and_user(db_session, enc_key, hmac_key)
         old_hmac = user.uid_hmac
+        old_role = user.role
         svc.replace_card(db_session, user, "e5e5e5e5")  # lowercase canonicalises
         db_session.flush()
         assert user.uid_hmac != old_hmac
         assert decrypt(user.encrypted_card_uid, enc_key) == "E5E5E5E5"
         assert user.display_name == "Alice"
+        assert user.role == old_role
+        assert user.role == UserRole.USER
         # New card logs in; old card does not.
         auth = Authenticator(hmac_key)
         assert auth.authenticate(db_session, "A1B2C3D4") is None

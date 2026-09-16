@@ -709,11 +709,12 @@ class TestAdminUsers:
         inactive.is_active = False
         db_session.commit()
         mock_context.session_mgr.start_session(admin_user)
-        assert client.post("/api/admin/users/99999/deactivate").status_code == 404
-        assert (
-            client.post(f"/api/admin/users/{inactive.id}/deactivate").status_code
-            == 404
-        )
+        missing = client.post("/api/admin/users/99999/deactivate")
+        assert missing.status_code == 404
+        assert missing.json()["detail"] == "User not found."
+        gone = client.post(f"/api/admin/users/{inactive.id}/deactivate")
+        assert gone.status_code == 404
+        assert gone.json()["detail"] == "User not found."
 
     def test_replace_card_arms_pending(
         self, client, mock_context, admin_user, test_user
@@ -739,6 +740,7 @@ class TestAdminUsers:
         mock_context.session_mgr.start_session(admin_user)
         resp = client.post("/api/admin/users/99999/replace-card")
         assert resp.status_code == 404
+        assert resp.json()["detail"] == "User not found."
 
     def test_replace_card_requires_admin_403(
         self, client, mock_context, test_user
@@ -747,4 +749,159 @@ class TestAdminUsers:
         mock_context.session_mgr.start_session(test_user)
         resp = client.post(f"/api/admin/users/{test_user.id}/replace-card")
         assert resp.status_code == 403
+
+    def test_deactivate_requires_session(self, client, mock_context, test_user):
+        """POST .../deactivate returns 401 without a session."""
+        resp = client.post(f"/api/admin/users/{test_user.id}/deactivate")
+        assert resp.status_code == 401
+
+    def test_deactivate_rejects_non_admin(self, client, mock_context, test_user):
+        """POST .../deactivate returns 403 for a normal user session."""
+        mock_context.session_mgr.start_session(test_user)
+        resp = client.post(f"/api/admin/users/{test_user.id}/deactivate")
+        assert resp.status_code == 403
+
+    def test_deactivate_refuses_lan_with_admin_session(
+        self, lan_client, mock_context, admin_user, test_user
+    ):
+        """LAN cannot deactivate even with a live admin session."""
+        mock_context.session_mgr.start_session(admin_user)
+        resp = lan_client.post(f"/api/admin/users/{test_user.id}/deactivate")
+        assert resp.status_code == 403
+
+    def test_replace_card_requires_session(self, client, mock_context, test_user):
+        """POST .../replace-card returns 401 without a session."""
+        resp = client.post(f"/api/admin/users/{test_user.id}/replace-card")
+        assert resp.status_code == 401
+
+    def test_replace_card_refuses_lan_with_admin_session(
+        self, lan_client, mock_context, admin_user, test_user
+    ):
+        """LAN cannot arm a card replace even with a live admin session."""
+        mock_context.session_mgr.start_session(admin_user)
+        resp = lan_client.post(f"/api/admin/users/{test_user.id}/replace-card")
+        assert resp.status_code == 403
+
+    def test_list_users_requires_session(self, client, mock_context):
+        """GET /api/admin/users returns 401 without a session."""
+        resp = client.get("/api/admin/users")
+        assert resp.status_code == 401
+
+    @pytest.mark.parametrize("role", [None, "Admin", ""])
+    def test_admin_register_role_variants_are_422(
+        self, client, mock_context, admin_user, role
+    ):
+        """role null / 'Admin' / '' are 422 and arm no pending registration."""
+        mock_context.session_mgr.start_session(admin_user)
+        mock_context.pending_registration = None
+        mock_context.pending_tag_bind = None
+        resp = client.post(
+            "/api/admin/register", json={"name": "Someone", "role": role}
+        )
+        assert resp.status_code == 422
+        assert mock_context.pending_registration is None
+
+    def test_admin_register_extra_fields_ignored(
+        self, client, mock_context, admin_user
+    ):
+        """Unknown body fields are ignored (pydantic default, codebase-wide):
+        200 with role applied and the extra key dropped."""
+        mock_context.session_mgr.start_session(admin_user)
+        mock_context.pending_registration = None
+        mock_context.pending_tag_bind = None
+        resp = client.post(
+            "/api/admin/register",
+            json={"name": "Someone", "role": "admin", "nickname": "X"},
+        )
+        assert resp.status_code == 200
+        pending = mock_context.pending_registration
+        assert pending is not None
+        assert pending.display_name == "Someone"
+        assert pending.role == "admin"
+
+    def test_admin_call_after_self_deactivate_is_401(
+        self, client, mock_context, admin_user, db_session
+    ):
+        """After self-deactivate the old session is gone: an admin GET is 401,
+        SSE carries session_ended/deactivated, and the overlay is cleared."""
+        UserRepository.create(
+            db_session,
+            display_name="Second Admin",
+            uid_hmac="admin2hmac",
+            encrypted_card_uid="admin2",
+            role="admin",
+        )
+        db_session.commit()
+        mock_context.session_mgr.start_session(admin_user)
+        mock_context.admin_overlay_open = True
+        resp = client.post(f"/api/admin/users/{admin_user.id}/deactivate")
+        assert resp.status_code == 200
+        assert resp.json()["session_ended"] is True
+        assert mock_context.admin_overlay_open is False
+        sse = mock_context.sse_queue.get_nowait()
+        assert sse == {"event": "session_ended", "reason": "deactivated"}
+        assert client.get("/api/admin/users").status_code == 401
+
+    def test_deactivated_card_fails_through_tap_router(
+        self, client, mock_context, admin_user, db_session, enc_key, hmac_key
+    ):
+        """Endpoint-deactivate, then an idle tap of that card goes
+        classify_uid -> WORK_CARD, idle handler -> auth_failed, no session."""
+        from smart_locker.auth.tap_router import TapKind, classify_uid, handle_insert
+        from smart_locker.security.encryption import encrypt
+
+        uid = "D3ADB33F"
+        user = UserRepository.create(
+            db_session,
+            display_name="Departed",
+            uid_hmac=compute_uid_hmac(uid, hmac_key),
+            encrypted_card_uid=encrypt(uid, enc_key),
+        )
+        db_session.commit()
+        mock_context.session_mgr.start_session(admin_user)
+        resp = client.post(f"/api/admin/users/{user.id}/deactivate")
+        assert resp.status_code == 200
+        mock_context.session_mgr.end_session()
+        db_session.expire_all()  # route commits in its own session
+
+        mgr = SessionManager(timeout_seconds=60)
+        kind, found, device = classify_uid(db_session, uid, hmac_key)
+        assert kind is TapKind.WORK_CARD
+        assert found is not None
+        assert found.id == user.id
+        assert found.is_active is False
+        assert device is None
+        result = handle_insert(db_session, uid, hmac_key, mgr)
+        assert result.event == "auth_failed"
+        assert not mgr.has_active_session
+        assert uid not in result.cli_message
+
+    def test_history_readable_after_deactivate(
+        self, client, mock_context, admin_user, test_user, test_devices, db_session
+    ):
+        """Deactivation keeps history: borrow/return rows stay readable and
+        attributable to the deactivated user."""
+        from smart_locker.database.repositories import TransactionRepository
+
+        DeviceRepository.borrow(db_session, test_devices[0], test_user.id)
+        TransactionRepository.log_borrow(
+            db_session, test_user.id, test_devices[0].id
+        )
+        DeviceRepository.return_device(db_session, test_devices[0])
+        TransactionRepository.log_return(
+            db_session, test_user.id, test_devices[0].id
+        )
+        db_session.commit()
+        mock_context.session_mgr.start_session(admin_user)
+        resp = client.post(f"/api/admin/users/{test_user.id}/deactivate")
+        assert resp.status_code == 200
+        db_session.expire_all()  # route commits in its own session
+
+        history = TransactionRepository.get_user_history(db_session, test_user.id)
+        assert len(history) == 2
+        assert {t.user_id for t in history} == {test_user.id}
+        kept = UserRepository.find_by_id(db_session, test_user.id)
+        assert kept is not None
+        assert kept.display_name == "Test User"
+        assert kept.is_active is False
 

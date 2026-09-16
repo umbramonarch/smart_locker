@@ -227,6 +227,17 @@ class TestRegistrantEndpoints:
         resp = client.post("/api/admin/register", json={"name": "Someone"})
         assert resp.status_code == 401
 
+    def test_lan_cannot_start_admin_registration(
+        self, lan_client, mock_context, admin_user
+    ):
+        """LAN POST /api/admin/register is 403 even with a live admin session."""
+        mock_context.session_mgr.start_session(admin_user)
+        mock_context.pending_registration = None
+        mock_context.pending_tag_bind = None
+        resp = lan_client.post("/api/admin/register", json={"name": "Someone"})
+        assert resp.status_code == 403
+        assert mock_context.pending_registration is None
+
     def test_lan_cannot_start_registration(self, lan_client, db_session, mock_context):
         """LAN POST /api/register must not arm enrollment or clear a kiosk bind."""
         RegistrantRepository.add_names(db_session, {"Alice"})
