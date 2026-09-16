@@ -28,13 +28,24 @@ class TestDeviceEndpoints:
         resp = client.get("/api/devices")
         assert resp.status_code == 401
 
-    def test_list_devices(self, client, mock_context, test_user, test_devices):
-        """Verify GET /api/devices returns all devices with correct fields and shape."""
+    def test_list_devices(
+        self, client, mock_context, test_user, test_devices, db_session
+    ):
+        """Verify GET /api/devices returns tagged devices with correct fields and shape."""
+        DeviceRepository.create(
+            db_session,
+            name="Ghost",
+            device_type="general",
+            pm_number="PM-999",
+            locker_slot=9,
+        )
+        db_session.commit()
         mock_context.session_mgr.start_session(test_user)
         resp = client.get("/api/devices")
         assert resp.status_code == 200
         data = resp.json()
         assert len(data) == 3
+        assert "Ghost" not in {d["name"] for d in data}
         # Check device shape
         cam = next(d for d in data if d["name"] == "Camera")
         assert cam["status"] == "available"
@@ -54,6 +65,73 @@ class TestDeviceEndpoints:
         self, client, mock_context, test_user, test_devices, db_session
     ):
         """A device without a bound sticker is not listed on the kiosk."""
+        DeviceRepository.create(
+            db_session,
+            name="Ghost",
+            device_type="general",
+            pm_number="PM-999",
+            locker_slot=9,
+        )
+        db_session.commit()
+        mock_context.session_mgr.start_session(test_user)
+        resp = client.get("/api/devices")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data) == 3
+        assert "Ghost" not in {d["name"] for d in data}
+
+    def test_list_devices_shows_own_borrowed_untagged(
+        self, client, mock_context, test_user, test_devices, db_session
+    ):
+        """A BORROWED untagged loan held by the caller stays on the kiosk list."""
+        ghost = DeviceRepository.create(
+            db_session,
+            name="Ghost",
+            device_type="general",
+            pm_number="PM-999",
+            locker_slot=9,
+        )
+        db_session.commit()
+        user_session = mock_context.session_mgr.start_session(test_user)
+        assert LockerService.borrow_device(db_session, user_session, ghost.id) is True
+        db_session.commit()
+
+        resp = client.get("/api/devices")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data) == 4
+        row = next(d for d in data if d["name"] == "Ghost")
+        assert row["status"] == "borrowed"
+        assert row["borrower_name"] == "You"
+        assert row["has_tag"] is False
+
+    def test_list_devices_hides_other_borrowed_untagged(
+        self, client, mock_context, test_user, admin_user, test_devices, db_session
+    ):
+        """A BORROWED untagged loan held by someone else stays hidden."""
+        ghost = DeviceRepository.create(
+            db_session,
+            name="Ghost",
+            device_type="general",
+            pm_number="PM-999",
+            locker_slot=9,
+        )
+        db_session.commit()
+        admin_session = mock_context.session_mgr.start_session(admin_user)
+        assert LockerService.borrow_device(db_session, admin_session, ghost.id) is True
+        db_session.commit()
+
+        mock_context.session_mgr.start_session(test_user)
+        resp = client.get("/api/devices")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data) == 3
+        assert "Ghost" not in {d["name"] for d in data}
+
+    def test_list_devices_hides_available_untagged(
+        self, client, mock_context, test_user, test_devices, db_session
+    ):
+        """An AVAILABLE untagged row is admin-only even for a logged-in user."""
         DeviceRepository.create(
             db_session,
             name="Ghost",
@@ -166,6 +244,34 @@ class TestBorrowReturn:
         resp = client.post(f"/api/devices/{ghost.id}/borrow")
         assert resp.status_code == 409
         assert resp.json()["detail"] == "Tap the sticker to bind it first."
+
+    def test_borrow_409_then_bind_then_borrow_ok(
+        self, client, mock_context, test_user, db_session, hmac_key
+    ):
+        """Untagged borrow is 409; after the sticker bind the same borrow works."""
+        ghost = DeviceRepository.create(
+            db_session,
+            name="Ghost",
+            device_type="general",
+            pm_number="PM-999",
+            locker_slot=9,
+        )
+        db_session.commit()
+        mock_context.session_mgr.start_session(test_user)
+
+        refused = client.post(f"/api/devices/{ghost.id}/borrow")
+        assert refused.status_code == 409
+
+        DeviceRepository.bind_tag(
+            db_session, ghost, compute_uid_hmac("GHOST-TAP", hmac_key)
+        )
+        db_session.commit()
+
+        resp = client.post(f"/api/devices/{ghost.id}/borrow")
+        assert resp.status_code == 200
+        assert resp.json()["success"] is True
+        db_session.expire_all()
+        assert ghost.status == DeviceStatus.BORROWED
 
     def test_borrow_no_session(self, client, test_devices):
         """Verify borrow returns 401 when no session exists."""

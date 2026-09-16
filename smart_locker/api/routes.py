@@ -686,8 +686,10 @@ def list_devices(
     Returns a flat list of device dicts with status and borrower name.
     The current user's own borrowed devices show ``"You"`` as the borrower.
     Only tagged locker devices are returned — untagged rows are admin-only
-    until the sticker is bound; the hidden-admin panel uses
-    ``GET /api/admin/devices`` which lists every row.
+    until the sticker is bound — except a loan the session user holds
+    themselves: a BORROWED row whose borrower is the caller stays visible
+    (tagged or not) so it can still be returned. The hidden-admin panel
+    uses ``GET /api/admin/devices`` which lists every row.
 
     Args:
         db: Database session (injected by ``get_db``).
@@ -701,6 +703,10 @@ def list_devices(
         _device_payload(d, current_user_id)
         for d in DeviceRepository.list_all(db)
         if d.tag_hmac is not None
+        or (
+            d.status == DeviceStatus.BORROWED
+            and d.current_borrower_id == current_user_id
+        )
     ]
 
 
@@ -1416,6 +1422,29 @@ def start_device_tag_bind(
     return {"success": True, "message": "Tap the sticker to bind it."}
 
 
+def _refresh_borrow_guard(db: Session, device: Device) -> None:
+    """Re-read the row and refuse the unbind if it is borrowed now.
+
+    Best-effort narrowing of the unbind check-then-act window: SQLite
+    offers no row locks, so the 409 re-check runs on a freshly read row
+    immediately before the mutation. A borrow committing between this
+    refresh and the unbind commit can still strand a borrowed+untagged
+    loan; that residual race needs a serialising store to close fully.
+
+    Args:
+        db: Active database session.
+        device: Locker device about to be unbound.
+
+    Raises:
+        HTTPException: 409 if the device is currently borrowed.
+    """
+    db.refresh(device)
+    if device.status == DeviceStatus.BORROWED:
+        raise HTTPException(
+            409, "Return the device first — a borrowed sticker cannot be unbound."
+        )
+
+
 @router.post("/api/admin/devices/{device_id}/unbind-tag")
 def unbind_device_tag(
     device_id: int,
@@ -1442,10 +1471,7 @@ def unbind_device_tag(
     device = DeviceRepository.find_by_id(db, device_id)
     if device is None:
         raise HTTPException(status_code=404, detail="Device not found.")
-    if device.status == DeviceStatus.BORROWED:
-        raise HTTPException(
-            409, "Return the device first — a borrowed sticker cannot be unbound."
-        )
+    _refresh_borrow_guard(db, device)
 
     DeviceRepository.unbind_tag(db, device)
     if ctx_module.context is not None:
@@ -2066,10 +2092,7 @@ def dashboard_unbind_tag(
     device = DeviceRepository.find_by_pm(db, pm)
     if device is None:
         raise HTTPException(status_code=404, detail="Device not found.")
-    if device.status == DeviceStatus.BORROWED:
-        raise HTTPException(
-            409, "Return the device first — a borrowed sticker cannot be unbound."
-        )
+    _refresh_borrow_guard(db, device)
 
     DeviceRepository.unbind_tag(db, device)
     if ctx_module.context is not None:

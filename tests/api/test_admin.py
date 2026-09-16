@@ -140,6 +140,29 @@ class TestDeviceTagBindApi:
         listed = client.get("/api/devices").json()
         assert "Camera" in {d["name"] for d in listed}
 
+    def test_borrow_unbind409_return_unbind_ok(
+        self, client, mock_context, admin_user, test_user, test_devices, db_session
+    ):
+        """Borrowed row refuses unbind (409); after the return unbind succeeds."""
+        mock_context.session_mgr.start_session(test_user)
+        borrowed = client.post(f"/api/devices/{test_devices[0].id}/borrow")
+        assert borrowed.json()["success"] is True
+
+        mock_context.session_mgr.start_session(admin_user)
+        refused = client.post(f"/api/admin/devices/{test_devices[0].id}/unbind-tag")
+        assert refused.status_code == 409
+
+        mock_context.session_mgr.start_session(test_user)
+        returned = client.post(f"/api/devices/{test_devices[0].id}/return")
+        assert returned.json()["success"] is True
+
+        mock_context.session_mgr.start_session(admin_user)
+        resp = client.post(f"/api/admin/devices/{test_devices[0].id}/unbind-tag")
+        assert resp.status_code == 200
+        assert resp.json()["success"] is True
+        db_session.expire_all()
+        assert test_devices[0].tag_hmac is None
+
 
 class TestAdminOverlaySession:
     """Admin overlay session flag and device-list payload used by Register Device."""
@@ -258,7 +281,10 @@ class TestAdminOverlaySession:
     def test_list_devices_has_tag_true(
         self, client, mock_context, test_user, test_devices, db_session, hmac_key
     ):
-        """has_tag is True when tag_hmac is set; digest is not in the payload."""
+        """has_tag flips False->True across a bind; digest is not in the payload."""
+        DeviceRepository.unbind_tag(db_session, test_devices[0])
+        db_session.commit()
+        assert test_devices[0].tag_hmac is None
         DeviceRepository.bind_tag(
             db_session,
             test_devices[0],
@@ -275,6 +301,17 @@ class TestAdminOverlaySession:
         self, client, test_devices, db_session, hmac_key
     ):
         """Public dashboard JSON must not include tag_hmac after a bind."""
+        DeviceRepository.unbind_tag(db_session, test_devices[0])
+        db_session.commit()
+        assert test_devices[0].tag_hmac is None
+        assert (
+            next(
+                r
+                for r in client.get("/api/dashboard/devices").json()
+                if r["name"] == "Camera"
+            )["has_tag"]
+            is False
+        )
         digest = compute_uid_hmac("AABBCCDD", hmac_key)
         DeviceRepository.bind_tag(db_session, test_devices[0], digest)
         db_session.commit()
@@ -576,6 +613,111 @@ class TestCatalogLockerList:
         assert resp.status_code == 200
         assert resp.json() == {"rows": []}
 
+    def test_locked_workbook_is_503(
+        self, client, mock_context, admin_user, monkeypatch, tmp_path
+    ):
+        """Share file locked during the copy step → 503."""
+        import shutil
+
+        path = self._workbook(tmp_path / "device-list.xlsx", [
+            ["Equipment", "Name", "Location"],
+            ["PM-100", "Scope", "Locker"],
+        ])
+
+        def _locked(_src, _dst):
+            raise PermissionError("locked")
+
+        monkeypatch.setattr(shutil, "copy2", _locked)
+        monkeypatch.setattr("config.settings.SOURCE_EXCEL_PATH", str(path))
+        mock_context.session_mgr.start_session(admin_user)
+        resp = client.get("/api/admin/devices/catalog-locker")
+        assert resp.status_code == 503
+
+    def test_corrupt_workbook_is_503(
+        self, client, mock_context, admin_user, monkeypatch, tmp_path
+    ):
+        """Text saved as .xlsx is unreadable → 503."""
+        path = tmp_path / "device-list.xlsx"
+        path.write_text("this is not a workbook", encoding="utf-8")
+        monkeypatch.setattr("config.settings.SOURCE_EXCEL_PATH", str(path))
+        mock_context.session_mgr.start_session(admin_user)
+        resp = client.get("/api/admin/devices/catalog-locker")
+        assert resp.status_code == 503
+
+    def test_header_only_workbook_is_503(
+        self, client, mock_context, admin_user, monkeypatch, tmp_path
+    ):
+        """Headers with no data rows → 503, not an empty pick list."""
+        path = self._workbook(tmp_path / "device-list.xlsx", [
+            ["Equipment", "Name", "Location"],
+        ])
+        monkeypatch.setattr("config.settings.SOURCE_EXCEL_PATH", str(path))
+        mock_context.session_mgr.start_session(admin_user)
+        resp = client.get("/api/admin/devices/catalog-locker")
+        assert resp.status_code == 503
+
+    def test_no_pm_column_is_503(
+        self, client, mock_context, admin_user, monkeypatch, tmp_path
+    ):
+        """Sheet without a PM/equipment column → 503."""
+        path = self._workbook(tmp_path / "device-list.xlsx", [
+            ["Name", "Location"],
+            ["Scope", "Locker"],
+        ])
+        monkeypatch.setattr("config.settings.SOURCE_EXCEL_PATH", str(path))
+        mock_context.session_mgr.start_session(admin_user)
+        resp = client.get("/api/admin/devices/catalog-locker")
+        assert resp.status_code == 503
+
+    def test_sorted_by_name_then_pm(
+        self, client, mock_context, admin_user, monkeypatch, tmp_path
+    ):
+        """Same-name rows tie-break on PM number."""
+        path = self._workbook(tmp_path / "device-list.xlsx", [
+            ["Equipment", "Name", "Location"],
+            ["PM-102", "Meter", "Locker"],
+            ["PM-101", "Meter", "Locker"],
+            ["PM-100", "Alpha Probe", "Locker"],
+        ])
+        monkeypatch.setattr("config.settings.SOURCE_EXCEL_PATH", str(path))
+        mock_context.session_mgr.start_session(admin_user)
+        resp = client.get("/api/admin/devices/catalog-locker")
+        assert resp.status_code == 200
+        assert [r["pm_number"] for r in resp.json()["rows"]] == [
+            "PM-100",
+            "PM-101",
+            "PM-102",
+        ]
+
+    def test_register_excludes_pm_from_pick_list(
+        self, client, mock_context, admin_user, db_session, monkeypatch, tmp_path
+    ):
+        """Registering a PM drops it from the pick list on the next GET."""
+        path = self._workbook(tmp_path / "device-list.xlsx", [
+            ["Equipment", "Name", "Manufacturer", "Model", "Location"],
+            ["PM-100", "Zeta Scope", "Keysight", "DSOX", "Locker"],
+            ["PM-101", "Alpha Meter", "BK", "880", "Locker"],
+        ])
+        monkeypatch.setattr("config.settings.SOURCE_EXCEL_PATH", str(path))
+        monkeypatch.setattr(
+            "smart_locker.sync.location_writeback.schedule_write_location",
+            lambda: None,
+        )
+        mock_context.session_mgr.start_session(admin_user)
+        mock_context.pending_tag_bind = None
+        before = client.get("/api/admin/devices/catalog-locker").json()["rows"]
+        assert [r["pm_number"] for r in before] == ["PM-101", "PM-100"]
+
+        created = client.post(
+            "/api/admin/devices/register",
+            json={"pm_number": "PM-100", "locker_slot": 5},
+        )
+        assert created.status_code == 200
+        assert DeviceRepository.find_by_pm(db_session, "PM-100") is not None
+
+        after = client.get("/api/admin/devices/catalog-locker").json()["rows"]
+        assert [r["pm_number"] for r in after] == ["PM-101"]
+
 
 class TestAdminDevicesList:
     """GET /api/admin/devices — every locker row for the Register Device panel."""
@@ -615,3 +757,79 @@ class TestAdminDevicesList:
         assert "Ghost" not in {d["name"] for d in kiosk}
         kiosk_row = kiosk[0]
         assert set(ghost_row) == set(kiosk_row)
+
+    def test_duplicate_name_untagged_twin_on_admin_list(
+        self, client, mock_context, admin_user, db_session, hmac_key
+    ):
+        """Same name, different PM — the admin bind list shows the untagged twin."""
+        tagged = DeviceRepository.create(
+            db_session,
+            name="Fluke 87V",
+            device_type="Multimeter",
+            pm_number="PM-101",
+            locker_slot=1,
+        )
+        twin = DeviceRepository.create(
+            db_session,
+            name="Fluke 87V",
+            device_type="Multimeter",
+            pm_number="PM-102",
+            locker_slot=2,
+        )
+        tagged.tag_hmac = compute_uid_hmac("TAG-101", hmac_key)
+        db_session.commit()
+        assert twin.tag_hmac is None
+        mock_context.session_mgr.start_session(admin_user)
+
+        resp = client.get("/api/admin/devices")
+        assert resp.status_code == 200
+        rows = [d for d in resp.json() if d["name"] == "Fluke 87V"]
+        assert len(rows) == 2
+        assert {d["pm_number"] for d in rows} == {"PM-101", "PM-102"}
+        twin_row = next(d for d in rows if d["pm_number"] == "PM-102")
+        assert twin_row["has_tag"] is False
+
+        kiosk = client.get("/api/devices").json()
+        assert {d["pm_number"] for d in kiosk} == {"PM-101"}
+
+    def test_slot_accuracy_counts_untagged_rows(
+        self, client, mock_context, admin_user, test_devices, db_session
+    ):
+        """Slot occupancy from the admin list includes untagged rows."""
+        DeviceRepository.create(
+            db_session,
+            name="Ghost",
+            device_type="general",
+            pm_number="PM-999",
+            locker_slot=9,
+        )
+        db_session.commit()
+        mock_context.session_mgr.start_session(admin_user)
+
+        admin_slots = {d["locker_slot"] for d in client.get("/api/admin/devices").json()}
+        assert admin_slots == {1, 2, 3, 9}
+        kiosk_slots = {d["locker_slot"] for d in client.get("/api/devices").json()}
+        assert kiosk_slots == {1, 2, 3}
+
+
+class TestRegisterDuplicatePmApi:
+    """POST /api/admin/devices/register refuses an already-registered PM."""
+
+    def test_duplicate_pm_is_409(
+        self, client, mock_context, admin_user, test_devices, monkeypatch, tmp_path
+    ):
+        """Registering PM-001 twice is 409 ('already in the locker')."""
+        wb = Workbook()
+        ws = wb.active
+        ws.append(["Equipment", "Name", "Manufacturer", "Model", "Location"])
+        ws.append(["PM-001", "Camera", "Fluke", "87V", "Locker"])
+        path = tmp_path / "device-list.xlsx"
+        wb.save(path)
+        monkeypatch.setattr("config.settings.SOURCE_EXCEL_PATH", str(path))
+        mock_context.session_mgr.start_session(admin_user)
+        resp = client.post(
+            "/api/admin/devices/register",
+            json={"pm_number": "PM-001", "locker_slot": 9},
+        )
+        assert resp.status_code == 409
+        assert "already in the locker" in resp.json()["detail"]

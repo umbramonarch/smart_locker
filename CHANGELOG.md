@@ -13,6 +13,7 @@ Work on `main` after the `v0.2.0` tag. Merging to `main` is not a release; the n
 
 ### Fixed
 
+- Kiosk grids keep showing a loan the signed-in user holds themselves even when its sticker is unbound (`GET /api/devices`); other users still see tagged rows only, and both unbind endpoints re-check the borrowed state on a freshly read row so a late borrow is still refused with 409.
 - Unbinding a borrowed device's sticker is rejected with 409 on the kiosk (`POST /api/admin/devices/{id}/unbind-tag`) and the dashboard (`POST /api/dashboard/unbind-tag`), so a loan can no longer vanish from the Return grids. Record the return first, then unbind.
 - Register Device pick list offers only Excel rows whose Location is exactly the in-locker token; other cabinets (e.g. `Cabinet A`) no longer appear. Registrant-name extraction still treats any locker/cabinet wording as a place, not a person.
 

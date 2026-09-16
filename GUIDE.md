@@ -1284,7 +1284,7 @@ that bridges card taps to the browser.
 | `GET` | `/api/registrants` | Approved names for self-registration |
 | `POST` | `/api/admin/session` | Start the hidden admin-panel session |
 | `POST` | `/api/admin/register` | Admin manual enrolment (skips name check) |
-| `GET` | `/api/admin/devices/catalog-locker` | Unregistered Excel rows with Location = locker (admin session) |
+| `GET` | `/api/admin/devices/catalog-locker` | Unregistered Excel rows whose Location is exactly the in-locker token (admin session) |
 | `POST` | `/api/admin/devices/{id}/bind-tag` | 60s window to bind the next sticker to that device |
 | `POST` | `/api/admin/devices/{id}/unbind-tag` | Clear the sticker HMAC on that device (409 while borrowed — return first) |
 | `POST` | `/api/admin/sync-source` | Trigger the source Excel import now |
