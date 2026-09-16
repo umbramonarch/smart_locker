@@ -1315,7 +1315,7 @@ that bridges card taps to the browser.
 | `GET` | `/api/dashboard/devices` | Public locker inventory (SQLite, no auth) |
 | `GET` | `/api/dashboard/inventory` | Public company catalog (live Excel, no auth) |
 | `GET` | `/api/dashboard/display` | Public kiosk screen snapshot (no person names; no auth) |
-| `GET` | `/api/dashboard/owners` | Owner dropdown names (users + registrants + in-locker token); public |
+| `GET` | `/api/dashboard/owners` | Owner dropdown names (in-locker token + registrant names, skipping deactivated matches); public |
 | `POST` | `/api/dashboard/owner` | Change owner of a non-locker PM (Excel only; 409 if in locker); public |
 | `POST` | `/api/dashboard/bind-tag` | Arm 60s NFC bind for a locker PM (admin secret; tap at the reader) |
 | `POST` | `/api/dashboard/unbind-tag` | Clear sticker HMAC on a locker PM (admin secret; 409 while borrowed) |

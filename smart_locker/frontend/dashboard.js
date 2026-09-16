@@ -51,7 +51,7 @@ let lastInventoryStamp = '';
 /** Last Locker render fingerprint. */
 let lastDevicesStamp = '';
 
-/** Names for the owner datalist (users + registrants + in-locker token). */
+/** Names for the owner datalist (in-locker token + registrants, minus deactivated). */
 let ownerNames = [];
 /** PM currently open in the owner dialog, or ''. */
 let ownerEditPm = '';
@@ -326,7 +326,7 @@ async function _fetchTablesWork() {
 
 
 /**
- * Load dropdown names (registered users + registrants + in-locker token).
+ * Load dropdown names (in-locker token + registrants, minus deactivated).
  * Public; no secret header.
  */
 async function fetchOwners() {
