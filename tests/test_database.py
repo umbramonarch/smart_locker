@@ -198,29 +198,32 @@ class TestDeviceRepository:
         assert DeviceRepository.find_by_tag_hmac(db_session, digest) is None
 
     def test_find_by_slot(self, db_session):
-        """Slot lookup finds the device occupying that locker number."""
+        """Slot lookup returns every device sharing that locker number."""
         DeviceRepository.create(
             db_session, name="Fluke 87V", device_type="t",
             pm_number="PM-SLOT", locker_slot=7,
         )
+        DeviceRepository.create(
+            db_session, name="Keysight 34465A", device_type="t",
+            pm_number="PM-SLOT-2", locker_slot=7,
+        )
         found = DeviceRepository.find_by_slot(db_session, 7)
-        assert found is not None
-        assert found.pm_number == "PM-SLOT"
-        assert DeviceRepository.find_by_slot(db_session, 8) is None
+        assert sorted(d.pm_number for d in found) == ["PM-SLOT", "PM-SLOT-2"]
+        assert DeviceRepository.find_by_slot(db_session, 8) == []
 
-    def test_duplicate_slot_is_integrity_error(self, db_session):
-        """locker_slot unique index rejects two devices in the same slot."""
+    def test_shared_slot_insert_succeeds(self, db_session):
+        """locker_slot is a plain label — two devices may share one slot."""
         DeviceRepository.create(
             db_session, name="A", device_type="t",
             pm_number="PM-DUP-A", locker_slot=3,
         )
         db_session.flush()
-        with pytest.raises(IntegrityError):
-            DeviceRepository.create(
-                db_session, name="B", device_type="t",
-                pm_number="PM-DUP-B", locker_slot=3,
-            )
-            db_session.flush()
+        DeviceRepository.create(
+            db_session, name="B", device_type="t",
+            pm_number="PM-DUP-B", locker_slot=3,
+        )
+        db_session.flush()
+        assert len(DeviceRepository.find_by_slot(db_session, 3)) == 2
 
     def test_tag_hmac_null_uniqueness(self, db_session):
         """SQLite UNIQUE on tag_hmac allows many unbound (NULL) devices."""

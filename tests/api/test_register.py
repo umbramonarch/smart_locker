@@ -284,7 +284,7 @@ class TestRegisterDeviceApi:
     def test_register_accepts_admin(
         self, client, mock_context, admin_user, db_session, tmp_path, monkeypatch
     ):
-        """Known PM + free slot inserts the locker row and arms the sticker bind."""
+        """Known PM + slot inserts the locker row and arms the sticker bind."""
         path = catalog_workbook(tmp_path, [
             ["Equipment", "Manufacturer", "Model"],
             ["PM-XL", "Fluke", "87V"],
@@ -328,20 +328,41 @@ class TestRegisterDeviceApi:
         assert resp.status_code == 404
         assert DeviceRepository.find_by_pm(db_session, "PM-MISSING") is None
 
-    def test_register_duplicate_slot(
-        self, client, mock_context, admin_user, test_devices, tmp_path, monkeypatch
+    def test_register_shared_slot_succeeds(
+        self, client, mock_context, admin_user, test_devices, db_session,
+        tmp_path, monkeypatch
     ):
+        """Registering onto an occupied slot succeeds — slots are shared."""
         path = catalog_workbook(tmp_path, [
             ["Equipment", "Manufacturer"],
             ["PM-NEW", "Keysight"],
         ])
         monkeypatch.setattr("config.settings.SOURCE_EXCEL_PATH", str(path))
         mock_context.session_mgr.start_session(admin_user)
+        mock_context.pending_tag_bind = None
         resp = client.post(
             "/api/admin/devices/register",
             json={"pm_number": "PM-NEW", "locker_slot": test_devices[0].locker_slot},
         )
-        assert resp.status_code == 409
+        assert resp.status_code == 200
+        assert resp.json()["success"] is True
+        assert len(DeviceRepository.find_by_slot(
+            db_session, test_devices[0].locker_slot)) == 2
+
+    def test_set_slot_onto_occupied_succeeds(
+        self, client, mock_context, admin_user, test_devices, db_session
+    ):
+        """Change-slot onto another device's slot succeeds — slots are shared."""
+        mock_context.session_mgr.start_session(admin_user)
+        resp = client.post(
+            f"/api/admin/devices/{test_devices[0].id}/slot",
+            json={"locker_slot": test_devices[1].locker_slot},
+        )
+        assert resp.status_code == 200
+        db_session.expire_all()
+        assert test_devices[0].locker_slot == test_devices[1].locker_slot
+        assert len(DeviceRepository.find_by_slot(
+            db_session, test_devices[1].locker_slot)) == 2
 
     def test_set_slot_accepts_admin(
         self, client, mock_context, admin_user, test_devices, db_session

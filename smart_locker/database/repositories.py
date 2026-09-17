@@ -454,18 +454,20 @@ class DeviceRepository:
         return set(session.execute(select(Device.pm_number)).scalars().all())
 
     @staticmethod
-    def find_by_slot(session: Session, locker_slot: int) -> Device | None:
-        """Look up the locker device occupying a physical slot.
+    def find_by_slot(session: Session, locker_slot: int) -> list[Device]:
+        """Find all locker devices sharing a physical slot.
+
+        Slots are plain non-unique labels — several devices may share one.
 
         Args:
             session: Active database session.
             locker_slot: Cabinet slot number.
 
         Returns:
-            Device object or None if the slot is free.
+            List of Device objects in that slot (may be empty).
         """
         stmt = select(Device).where(Device.locker_slot == locker_slot)
-        return session.execute(stmt).scalar_one_or_none()
+        return list(session.execute(stmt).scalars().all())
 
     @staticmethod
     def find_by_serial(session: Session, serial_number: str) -> Device | None:

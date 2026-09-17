@@ -1,10 +1,11 @@
 """
 File: device_registration.py
 Description: Admin Register Device — look up a PM in the catalog Excel,
-             assign a unique locker slot, and insert one SQLite row. Sync never
+             assign a locker slot label, and insert one SQLite row. Sync never
              creates locker devices; this module is the only insert path.
 Project: smart_locker/services
 Notes: Unknown PM or a missing/locked workbook leaves the database unchanged.
+       Slots are plain non-unique labels; several devices may share one.
        New rows start AVAILABLE. NFC bind is armed by the API after insert.
        After insert, the API commits SQLite then schedules Location write-back.
 """
@@ -38,35 +39,27 @@ class UnknownPm(Exception):
     """The PM number is not in the catalog spreadsheet."""
 
 
-class SlotTaken(Exception):
-    """Another locker device already occupies this slot."""
-
-
 class AlreadyRegistered(Exception):
     """This PM is already a locker device."""
 
 
 class InvalidSlot(Exception):
-    """Slot must be an integer >= 1."""
+    """Slot must be an integer in 1..MAX_LOCKER_SLOT."""
 
 
-def _require_free_slot(session: Session, locker_slot: int, ignore_id: int | None = None) -> None:
-    """Reject a non-positive or occupied slot.
+def _require_valid_slot(locker_slot: int) -> None:
+    """Reject a slot number outside 1..MAX_LOCKER_SLOT.
+
+    Slots are shared labels, so no occupancy check applies.
 
     Args:
-        session: Active database session.
         locker_slot: Requested cabinet number.
-        ignore_id: Device id allowed to keep this slot (reassign to same slot).
 
     Raises:
         InvalidSlot: locker_slot is not in 1..MAX_LOCKER_SLOT.
-        SlotTaken: another device occupies the slot.
     """
     if not isinstance(locker_slot, int) or locker_slot < 1 or locker_slot > MAX_LOCKER_SLOT:
         raise InvalidSlot(f"Slot must be between 1 and {MAX_LOCKER_SLOT}.")
-    occupant = DeviceRepository.find_by_slot(session, locker_slot)
-    if occupant is not None and occupant.id != ignore_id:
-        raise SlotTaken(f"Slot {locker_slot} is already used by {occupant.pm_number}.")
 
 
 def unregistered_locker_rows(session: Session, source_path: str) -> list[CatalogRow]:
@@ -105,7 +98,9 @@ def register_locker_device(
     pm_number: str,
     locker_slot: int,
 ) -> Device:
-    """Insert one locker device from the Excel catalog into a free slot.
+    """Insert one locker device from the Excel catalog into a slot.
+
+    Slots are shared labels — the slot may already hold other devices.
 
     Copies the same locker row the pick list shows; a PM with no locker
     row falls back to its first sheet match.
@@ -114,7 +109,7 @@ def register_locker_device(
         session: Active database session.
         source_path: Path to ``device-list.xlsx``.
         pm_number: Equipment number to look up.
-        locker_slot: Physical cabinet slot (unique, >= 1).
+        locker_slot: Physical cabinet slot (1..MAX_LOCKER_SLOT).
 
     Returns:
         The new Device row (AVAILABLE, no tag yet).
@@ -123,8 +118,7 @@ def register_locker_device(
         CatalogUnavailable: Workbook missing, locked, or unreadable.
         UnknownPm: PM not in the sheet.
         AlreadyRegistered: PM already in SQLite.
-        InvalidSlot: Slot is not >= 1.
-        SlotTaken: Slot occupied.
+        InvalidSlot: Slot is not in 1..MAX_LOCKER_SLOT.
     """
     pm = (pm_number or "").strip()
     if not pm:
@@ -134,7 +128,7 @@ def register_locker_device(
     if existing is not None:
         raise AlreadyRegistered(f"{pm} is already in the locker.")
 
-    _require_free_slot(session, locker_slot)
+    _require_valid_slot(locker_slot)
 
     try:
         catalog = lookup_locker_catalog_by_pm(source_path, pm)
@@ -167,7 +161,7 @@ def register_locker_device(
         detail = f"{e} {getattr(e, 'orig', '')}"
         if "pm_number" in detail:
             raise AlreadyRegistered(f"{pm} is already in the locker.") from e
-        raise SlotTaken(f"Slot {locker_slot} is already used.") from e
+        raise
 
     if catalog.model:
         for sib in DeviceRepository.find_by_model(session, catalog.model):
@@ -183,7 +177,9 @@ def register_locker_device(
 
 
 def set_locker_slot(session: Session, device: Device, locker_slot: int) -> Device:
-    """Move an existing locker device to a different free slot.
+    """Move an existing locker device to a different slot.
+
+    Slots are shared labels — the target may already hold other devices.
 
     Args:
         session: Active database session.
@@ -194,15 +190,14 @@ def set_locker_slot(session: Session, device: Device, locker_slot: int) -> Devic
         The same Device row.
 
     Raises:
-        InvalidSlot: Slot is not >= 1.
-        SlotTaken: Slot occupied by another device.
+        InvalidSlot: Slot is not in 1..MAX_LOCKER_SLOT.
     """
-    _require_free_slot(session, locker_slot, ignore_id=device.id)
+    _require_valid_slot(locker_slot)
     try:
         DeviceRepository.set_locker_slot(session, device, locker_slot)
         session.flush()
-    except IntegrityError as e:
+    except IntegrityError:
         session.rollback()
-        raise SlotTaken(f"Slot {locker_slot} is already used.") from e
+        raise
     logger.info("Moved %s (pm=%s) to slot %s.", device.name, device.pm_number, locker_slot)
     return device

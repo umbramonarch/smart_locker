@@ -1554,10 +1554,11 @@ def register_locker_device(
     db: Session = Depends(get_db),
     user_session: UserSession = Depends(require_session),
 ):
-    """Create a locker row from Excel catalog (PM + free slot) and arm NFC bind.
+    """Create a locker row from Excel catalog (PM + slot) and arm NFC bind.
 
     Looks up the PM in ``device-list.xlsx``, copies catalog fields, assigns the
-    chosen slot, then waits for the sticker tap (same window as bind-tag).
+    chosen slot (shared label — other devices may already use it), then waits
+    for the sticker tap (same window as bind-tag).
 
     Args:
         body: PM number and locker slot.
@@ -1569,8 +1570,8 @@ def register_locker_device(
 
     Raises:
         HTTPException: 503 if not ready / share down, 403 if not admin,
-            400 if source path unset, 404 if PM unknown, 409 if PM or slot
-            taken, or if another NFC window armed during registration.
+            400 if source path unset, 404 if PM unknown, 409 if PM taken
+            or if another NFC window armed during registration.
     """
     if ctx_module.context is None:
         raise HTTPException(status_code=503, detail="System not ready.")
@@ -1590,7 +1591,6 @@ def register_locker_device(
         AlreadyRegistered,
         CatalogUnavailable,
         InvalidSlot,
-        SlotTaken,
         UnknownPm,
         register_locker_device as create_from_catalog,
     )
@@ -1603,7 +1603,7 @@ def register_locker_device(
         raise HTTPException(status_code=503, detail=str(e)) from e
     except UnknownPm as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
-    except (SlotTaken, AlreadyRegistered) as e:
+    except AlreadyRegistered as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
     except InvalidSlot as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
@@ -1650,7 +1650,9 @@ def set_device_slot(
     db: Session = Depends(get_db),
     user_session: UserSession = Depends(require_session),
 ):
-    """Move an existing locker device to a different free slot (admin).
+    """Move an existing locker device to a different slot (admin).
+
+    Slots are shared labels — the target may already hold other devices.
 
     Args:
         device_id: Primary key of the locker device.
@@ -1662,7 +1664,7 @@ def set_device_slot(
         dict: ``{"success": True, "locker_slot": int}``.
 
     Raises:
-        HTTPException: 403 if not admin, 404 if missing, 409 if slot taken.
+        HTTPException: 403 if not admin, 404 if missing, 422 if slot invalid.
     """
     if user_session.user.role != UserRole.ADMIN:
         raise HTTPException(status_code=403, detail="Admin access required.")
@@ -1673,14 +1675,11 @@ def set_device_slot(
 
     from smart_locker.services.device_registration import (
         InvalidSlot,
-        SlotTaken,
         set_locker_slot,
     )
 
     try:
         set_locker_slot(db, device, body.locker_slot)
-    except SlotTaken as e:
-        raise HTTPException(status_code=409, detail=str(e)) from e
     except InvalidSlot as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
 

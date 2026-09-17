@@ -11,16 +11,13 @@
  *               due-soon/overdue shows card badges, a detail line, and an idle
  *               banner (warn only).
  * @project smart_locker/frontend
- * @description Demo mode (?demo), circle-reveal transitions, split text,
- *              inactivity countdown, and self-registration.
+ * @description Circle-reveal transitions, split text, inactivity countdown,
+ *              and self-registration.
  */
 
 /* ============================================================
    STATE — single source of truth for the UI
 ============================================================ */
-/** Whether to use demo mode with mock data. Enabled by adding ?demo to the URL. */
-const USE_DEMO = new URLSearchParams(window.location.search).has('demo');
-
 /* ============================================================
    PERFORMANCE MODE
    window.__LITE__ is set by the detection script in index.html
@@ -50,12 +47,12 @@ function applyAssetLabels(label) {
   const listHint = document.getElementById('bind-list-hint');
   if (listHint) {
     listHint.textContent =
-      `Add a unit from the Excel list (${text} + free slot), then tap its sticker. Existing rows can bind, unbind, or change slot.`;
+      `Add a unit from the Excel list (${text} + slot), then tap its sticker. Slots may hold several units. Existing rows can bind, unbind, or change slot.`;
   }
   const addHint = document.getElementById('bind-add-hint');
   if (addHint) {
     addHint.textContent =
-      `Pick a unit from the Excel locker list or type its ${text}, pick a free slot, then continue to tap the sticker.`;
+      `Pick a unit from the Excel locker list or type its ${text}, pick a slot (shared slots show a count), then continue to tap the sticker.`;
   }
   const catalogNote = document.getElementById('bind-catalog-note');
   if (catalogNote) catalogNote.textContent = '';
@@ -66,11 +63,10 @@ function applyAssetLabels(label) {
 }
 
 /**
- * Load SMART_LOCKER_ASSET_LABEL from the backend. Demo mode keeps the default.
+ * Load SMART_LOCKER_ASSET_LABEL from the backend.
  * @returns {Promise<void>}
  */
 async function loadSiteConfig() {
-  if (USE_DEMO) return;
   try {
     const res = await fetch('/api/config');
     if (!res.ok) return;
@@ -121,74 +117,14 @@ const S = {
 let selectedRegistrantName = null;
 
 /* ============================================================
-   DEMO DATA — remove when real API is connected
-============================================================ */
-const DEMO_USERS = [
-  { id: 1, name: 'Alex Johnson', role: 'admin' },
-  { id: 2, name: 'Jamie Lee',    role: 'user'  },
-  { id: 3, name: 'Morgan Chen',  role: 'user'  },
-];
-/** @type {number} Index into DEMO_USERS, cycles on each simulated card tap */
-let demoUserIdx = 0;
-/** @type {number} Demo-mode calibration warn window (matches backend default). */
-const DEMO_WARN_DAYS = 14;
-
-const DEMO_DEVICES = [
-  { id:1, pm_number:'PM-001', name:'Keysight DSOX3054T',  device_type:'Oscilloscope',   serial_number:'MY12345678',  manufacturer:'Keysight',       model:'DSOX3054T',   barcode:'490001', locker_slot:1,  description:null, image_path:null, calibration_due:'2026-09-15', status:'available',   borrower_name:null, has_tag:true },
-  { id:2, pm_number:'PM-002', name:'Rohde & Schwarz HMC8043', device_type:'Power Supply', serial_number:'RS-HMC-042', manufacturer:'Rohde & Schwarz', model:'HMC8043',    barcode:'490002', locker_slot:2,  description:null, image_path:null, calibration_due:'2026-11-01', status:'borrowed',    borrower_name:'Sarah K.', has_tag:true },
-  { id:3, pm_number:'PM-003', name:'Fluke 87V',           device_type:'Multimeter',     serial_number:'FL-87V-007',  manufacturer:'Fluke',          model:'87V',         barcode:'490003', locker_slot:3,  description:null, image_path:null, calibration_due:'2026-06-30', status:'available',   borrower_name:null, has_tag:true },
-  { id:4, pm_number:'PM-004', name:'Keysight 34465A',     device_type:'Multimeter',     serial_number:'MY98765432',  manufacturer:'Keysight',       model:'34465A',      barcode:'490004', locker_slot:4,  description:null, image_path:null, calibration_due:null,         status:'available',   borrower_name:null, has_tag:true },
-  { id:5, pm_number:'PM-005', name:'Fluke i400s',         device_type:'Current Probe',  serial_number:null,          manufacturer:'Fluke',          model:'i400s',       barcode:'490005', locker_slot:5,  description:null, image_path:null, calibration_due:'2027-01-15', status:'borrowed',    borrower_name:'You', has_tag:true },
-  { id:6, pm_number:'PM-006', name:'Tektronix TBS2104X',  device_type:'Oscilloscope',   serial_number:'TEK-TBS-099', manufacturer:'Tektronix',      model:'TBS2104X',    barcode:'490006', locker_slot:6,  description:null, image_path:null, calibration_due:'2026-08-20', status:'available',   borrower_name:null, has_tag:true },
-  { id:7, pm_number:'PM-007', name:'Hioki DT4282',        device_type:'Multimeter',     serial_number:null,          manufacturer:'Hioki',          model:'DT4282',      barcode:'490007', locker_slot:7,  description:null, image_path:null, calibration_due:null,         status:'available',   borrower_name:null, has_tag:true },
-  { id:8, pm_number:'PM-008', name:'Megger MIT485/2',     device_type:'Insulation Tester', serial_number:'MEG-485-002', manufacturer:'Megger',      model:'MIT485/2',    barcode:'490008', locker_slot:8,  description:null, image_path:null, calibration_due:'2026-12-01', status:'maintenance', borrower_name:null, has_tag:true },
-  { id:9, pm_number:'PM-009', name:'Gossen SECUTEST ST',  device_type:'Safety Tester',  serial_number:'GM-SEC-011',  manufacturer:'Gossen Metrawatt', model:'SECUTEST ST', barcode:'490009', locker_slot:9,  description:null, image_path:null, calibration_due:null,         status:'available',   borrower_name:null, has_tag:false },
-];
-
-/**
- * Demo stub rows for GET /api/admin/devices/catalog-locker. Lets ?demo render
- * the Excel pick list and slot picker; the actual submit stays Pi-only because
- * it would POST a real locker row and arm the NFC bind window.
- * @type {Array<Object>}
- */
-const DEMO_CATALOG = [
-  { pm_number:'PM-101', name:'Fluke 179',         manufacturer:'Fluke',    model:'179' },
-  { pm_number:'PM-102', name:'Keysight E36313A',  manufacturer:'Keysight', model:'E36313A' },
-];
-
-/** @type {string[]} Demo registrant names for testing the name list without backend */
-const DEMO_REGISTRANTS = [
-  'Alice Bauer', 'Bob Fischer', 'Clara Hoffmann', 'David Klein',
-  'Eva Meier', 'Felix Schneider', 'Greta Weber', 'Hans Richter',
-  'Irene Schwarz', 'Jan Lehmann', 'Katrin Braun', 'Lars Werner',
-];
-
-/* ============================================================
-   API — real fetch() calls with demo fallback
+   API — real fetch() calls
 ============================================================ */
 /**
- * Authenticate a user by NFC card tap. In demo mode, cycles through demo users.
- * In live mode, auth is handled via SSE, so this only applies to demo.
- * @param {string} uid_hmac - The HMAC hash of the card UID.
- * @returns {Promise<Object>} Result with success boolean and optional user object.
- */
-async function apiAuthTap(uid_hmac) {
-  if (USE_DEMO) {
-    await sleep(380); // simulate network latency
-    const user = DEMO_USERS[demoUserIdx++ % DEMO_USERS.length];
-    return { success: true, user };
-  }
-  // In live mode, auth comes via SSE — this is only called in demo mode
-  return { success: false };
-}
-
-/**
- * Fetch tagged devices for the kiosk grids. Demo mirrors the server
- * tagged-only filter (untagged rows are admin-only until the sticker binds).
+ * Fetch tagged devices for the kiosk grids (untagged rows are admin-only
+ * until the sticker binds).
  * @returns {Promise<Array<Object>>} Array of device objects, or empty array on error.
  */
 async function apiGetDevices() {
-  if (USE_DEMO) { await sleep(280); return DEMO_DEVICES.filter(d => d.has_tag); } // simulate fetch latency
   const res = await fetch('/api/devices');
   if (!res.ok) return [];
   return await res.json();
@@ -197,14 +133,13 @@ async function apiGetDevices() {
 /**
  * Fetch every locker row for the hidden-admin panel (tagged and untagged).
  * Untagged rows must stay visible so Bind can be retried and slots stay
- * accurate. Returns demo data when in demo mode.
+ * accurate.
  * @returns {Promise<Array<Object>>} Array of device objects.
  * @throws {Error} Typed failure carrying a numeric ``status`` property (0 when
  *                 the request never reached the server). Callers must not treat
  *                 a rejection as an empty locker.
  */
 async function apiGetAdminDevices() {
-  if (USE_DEMO) { await sleep(280); return DEMO_DEVICES; }
   const res = await fetch('/api/admin/devices');
   if (!res.ok) {
     const err = new Error(`Admin device list request failed (${res.status})`);
@@ -215,50 +150,31 @@ async function apiGetAdminDevices() {
 }
 
 /**
- * Borrow a device by ID. In demo mode, updates the local device status directly.
+ * Borrow a device by ID.
  * @param {number} device_id - The database ID of the device to borrow.
  * @returns {Promise<Object>} Result with success boolean and message string.
  */
 async function apiBorrow(device_id) {
-  if (USE_DEMO) {
-    await sleep(480); // simulate borrow API round-trip
-    const d = S.devices.find(x => x.id === device_id);
-    if (d) { d.status = 'borrowed'; d.borrower_name = 'You'; }
-    return { success: true, message: `${d?.name ?? 'Device'} borrowed.` };
-  }
   const res = await fetch(`/api/devices/${device_id}/borrow`, { method: 'POST' });
   return await res.json();
 }
 
 /**
- * Return a borrowed device by ID. In demo mode, resets the local device status.
+ * Return a borrowed device by ID.
  * @param {number} device_id - The database ID of the device to return.
  * @returns {Promise<Object>} Result with success boolean and message string.
  */
 async function apiReturn(device_id) {
-  if (USE_DEMO) {
-    await sleep(480); // simulate return API round-trip
-    const d = S.devices.find(x => x.id === device_id);
-    if (d) { d.status = 'available'; d.borrower_name = null; }
-    return { success: true, message: `${d?.name ?? 'Device'} returned.` };
-  }
   const res = await fetch(`/api/devices/${device_id}/return`, { method: 'POST' });
   return await res.json();
 }
 
 /**
- * Accept a handover of a borrowed device from another user. In demo mode, the
- * local device row is updated so the current user appears as the new borrower.
+ * Accept a handover of a borrowed device from another user.
  * @param {number} device_id - The database ID of the device to transfer.
  * @returns {Promise<Object>} Result with success boolean and message string.
  */
 async function apiTransfer(device_id) {
-  if (USE_DEMO) {
-    await sleep(480);
-    const d = S.devices.find(x => x.id === device_id);
-    if (d) { d.status = 'borrowed'; d.borrower_name = 'You'; }
-    return { success: true, message: `${d?.name ?? 'Device'} transferred to you.` };
-  }
   const res = await fetch(`/api/devices/${device_id}/transfer`, { method: 'POST' });
   return await res.json();
 }
@@ -268,7 +184,6 @@ async function apiTransfer(device_id) {
  * @returns {Promise<void>}
  */
 async function apiEndSession() {
-  if (USE_DEMO) { await sleep(200); return; } // simulate session end
   await fetch('/api/session/end', { method: 'POST' }).catch(() => {});
 }
 
@@ -279,10 +194,6 @@ async function apiEndSession() {
  * @returns {Promise<Object>} Result with success boolean and optional error detail.
  */
 async function apiStartRegistration(name) {
-  if (USE_DEMO) {
-    await sleep(400); // simulate registration API round-trip
-    return { success: true };
-  }
   const res = await fetch('/api/register', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -296,7 +207,6 @@ async function apiStartRegistration(name) {
  * @returns {Promise<void>}
  */
 async function apiCancelRegistration() {
-  if (USE_DEMO) return;
   await fetch('/api/register/cancel', { method: 'POST' }).catch(() => {});
 }
 
@@ -307,10 +217,6 @@ async function apiCancelRegistration() {
  * @returns {Promise<string[]>} Alphabetically sorted array of available names.
  */
 async function apiGetRegistrants() {
-  if (USE_DEMO) {
-    await sleep(300); // simulate API latency
-    return DEMO_REGISTRANTS;
-  }
   try {
     const res = await fetch('/api/registrants');
     if (!res.ok) return [];
@@ -328,10 +234,6 @@ async function apiGetRegistrants() {
  * @returns {Promise<Object>} Result with success boolean and optional detail.
  */
 async function apiStartAdminRegistration(name, role) {
-  if (USE_DEMO) {
-    await sleep(400); // simulate API round-trip
-    return { success: true };
-  }
   try {
     const res = await fetch('/api/admin/register', {
       method: 'POST',
@@ -452,11 +354,10 @@ function navigate(toId) {
 
 /**
  * Tell the Pi which screen the Riverdi is showing so /dashboard Display can poll.
- * Demo mode does not POST. Failures are ignored so navigation never waits.
+ * Failures are ignored so navigation never waits.
  * @param {string} [screenId] - Logical screen id; defaults to S.screen.
  */
 function reportKioskDisplay(screenId) {
-  if (USE_DEMO) return;
   const screen = screenId || S.screen || 'idle';
   fetch('/api/kiosk/display', {
     method: 'POST',
@@ -649,7 +550,7 @@ let sessionTouchTimer = 0;
 function onUserActivity() {
   if (S.screen === 'idle') return;
   armIdle();
-  if (USE_DEMO || !S.user || sessionTouchInFlight) return;
+  if (!S.user || sessionTouchInFlight) return;
   if (sessionTouchTimer) return;
   sessionTouchTimer = setTimeout(() => {
     sessionTouchTimer = 0;
@@ -667,24 +568,6 @@ document.addEventListener('keydown', onUserActivity);
 /* ============================================================
    AUTH
 ============================================================ */
-/**
- * Handle an NFC card tap event in demo mode. Authenticates the user and navigates
- * to the main menu on success, or shows the auth-failed screen on failure.
- * @returns {Promise<void>}
- */
-async function handleTap() {
-  if (S.screen !== 'idle') return;
-  const result = await apiAuthTap('DEMO_UID_HMAC');
-  if (!result.success || !result.user) {
-    showAuthFailed();
-    return;
-  }
-  S.user = result.user;
-  fillMainMenu(result.user);
-  navigate('main-menu');
-  armIdle();
-}
-
 /**
  * Show the authentication failed screen with an animated progress bar that
  * counts down over 3 seconds before automatically returning to the idle screen.
@@ -825,7 +708,7 @@ async function refreshAfterDeviceAction(data) {
 function keepSessionAliveFromTag() {
   dismissInactivity();
   armIdle();
-  if (!USE_DEMO && S.user) {
+  if (S.user) {
     fetch('/api/session/touch', { method: 'POST' }).catch(() => {});
   }
 }
@@ -908,14 +791,14 @@ function safeKioskImagePath(raw) {
 
 /**
  * Days until a device's calibration date (negative when overdue), or null
- * when there is no usable date. Live mode prefers the API-provided
- * calibration_days_left; demo mode (and a missing field) computes from the
+ * when there is no usable date. Prefers the API-provided
+ * calibration_days_left; a missing field falls back to computing from the
  * ISO calibration_due string.
  * @param {Object} dev - Device row.
  * @returns {number|null} Days left, or null.
  */
 function calDaysLeft(dev) {
-  if (!USE_DEMO && typeof dev.calibration_days_left === 'number') {
+  if (typeof dev.calibration_days_left === 'number') {
     return dev.calibration_days_left;
   }
   if (!dev.calibration_due) return null;
@@ -928,44 +811,39 @@ function calDaysLeft(dev) {
 
 /**
  * Calibration alert state for a device: 'overdue' | 'due_soon' | 'ok' | null.
- * Live mode trusts the API's calibration_state when present.
+ * Trusts the API's calibration_state when present.
  * @param {Object} dev - Device row.
  * @returns {string|null}
  */
 function calState(dev) {
-  if (!USE_DEMO && typeof dev.calibration_state === 'string') {
+  if (typeof dev.calibration_state === 'string') {
     return dev.calibration_state;
   }
   const n = calDaysLeft(dev);
   if (n === null) return null;
-  const warnDays = USE_DEMO ? DEMO_WARN_DAYS : S.calibrationWarnDays;
+  const warnDays = S.calibrationWarnDays;
   if (n < 0) return 'overdue';
   if (n <= warnDays) return 'due_soon';
   return 'ok';
 }
 
 /**
- * Refresh the idle-screen overdue-calibration banner. Live mode counts
- * /api/calibration/alerts (loopback, read-only); demo mode counts
- * DEMO_DEVICES. Hidden when nothing is overdue. A failed poll keeps the
- * last banner state.
+ * Refresh the idle-screen overdue-calibration banner by counting
+ * /api/calibration/alerts (loopback, read-only). Hidden when nothing is
+ * overdue. A failed poll keeps the last banner state.
  * @returns {Promise<void>}
  */
 async function refreshIdleCalBanner() {
   const el = document.getElementById('idle-cal-banner');
   if (!el) return;
   let n = 0;
-  if (USE_DEMO) {
-    n = DEMO_DEVICES.filter(d => calState(d) === 'overdue').length;
-  } else {
-    try {
-      const res = await fetch('/api/calibration/alerts');
-      if (!res.ok) return;
-      const data = await res.json();
-      n = data.overdue || 0;
-    } catch (_) {
-      return; // keep previous banner state
-    }
+  try {
+    const res = await fetch('/api/calibration/alerts');
+    if (!res.ok) return;
+    const data = await res.json();
+    n = data.overdue || 0;
+  } catch (_) {
+    return; // keep previous banner state
   }
   el.hidden = n === 0;
   if (n > 0) {
@@ -976,7 +854,26 @@ async function refreshIdleCalBanner() {
 }
 
 /**
+ * Build the designed fallback shown when a device has no photo or the photo
+ * file is missing from images/.
+ * @param {string} slotLabel - Locker slot label shown under the icon.
+ * @returns {HTMLElement}
+ */
+function buildCardImgPlaceholder(slotLabel) {
+  const ph = document.createElement('div');
+  ph.className = 'card-img-placeholder';
+  ph.innerHTML =
+    '<svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>';
+  const slotSpan = document.createElement('span');
+  slotSpan.textContent = slotLabel;
+  ph.appendChild(slotSpan);
+  return ph;
+}
+
+/**
  * Build one locker card with textContent / setAttribute (no catalog HTML).
+ * A photo that fails to load is swapped for the card placeholder so an
+ * emptied images/ dir leaves no broken-image icon.
  * @param {Object} dev
  * @param {string} cls
  * @param {string} statusCls
@@ -993,12 +890,6 @@ function buildDeviceCardEl(dev, cls, statusCls, statusTxt, slotLabel) {
   const imgPath = safeKioskImagePath(dev.image_path);
 
   if (imgPath) {
-    const img = document.createElement('img');
-    img.src = imgPath;
-    img.alt = dev.name || '';
-    img.loading = 'lazy';
-    cardImage.appendChild(img);
-
     const reveal = document.createElement('div');
     reveal.className = 'card-hover-reveal';
     const revealImg = document.createElement('div');
@@ -1010,16 +901,20 @@ function buildDeviceCardEl(dev, cls, statusCls, statusTxt, slotLabel) {
       '<svg viewBox="0 0 24 24"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>';
     reveal.appendChild(revealImg);
     reveal.appendChild(revealIcon);
+
+    const img = document.createElement('img');
+    img.onerror = () => {
+      img.remove();
+      reveal.remove();
+      cardImage.appendChild(buildCardImgPlaceholder(slotLabel));
+    };
+    img.src = imgPath;
+    img.alt = dev.name || '';
+    img.loading = 'lazy';
+    cardImage.appendChild(img);
     cardImage.appendChild(reveal);
   } else {
-    const ph = document.createElement('div');
-    ph.className = 'card-img-placeholder';
-    ph.innerHTML =
-      '<svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>';
-    const slotSpan = document.createElement('span');
-    slotSpan.textContent = slotLabel;
-    ph.appendChild(slotSpan);
-    cardImage.appendChild(ph);
+    cardImage.appendChild(buildCardImgPlaceholder(slotLabel));
   }
 
   const slotEl = document.createElement('div');
@@ -1184,6 +1079,14 @@ function buildGrid(gridId, devices, mode) {
    DEVICE DETAIL OVERLAY
 ============================================================ */
 /**
+ * Generation counter for detail-pane photo loads. Each openDetail bumps it;
+ * a slow img.onerror from a previously viewed device checks its captured
+ * generation and bails out instead of flipping the current placeholder.
+ * @type {number}
+ */
+let detailImgGen = 0;
+
+/**
  * Open the device detail overlay with full information about a device. Populates
  * all detail fields (name, PM, type, serial, image, status, description) and configures
  * the confirm button based on device availability and current mode.
@@ -1245,9 +1148,17 @@ function openDetail(dev, mode) {
   const placeholder = document.getElementById('detail-img-placeholder');
   const existingImg = imgPane.querySelector('img');
   if (existingImg) existingImg.remove();
+  // Invalidate any in-flight error from a previously opened device, even
+  // when the new device has no photo of its own.
+  const imgGen = ++detailImgGen;
   if (imgPath) {
     placeholder.classList.add('hidden');
     const img = document.createElement('img');
+    img.onerror = () => {
+      if (imgGen !== detailImgGen) return; // stale callback — a newer openDetail won
+      img.remove();
+      placeholder.classList.remove('hidden');
+    };
     img.src = imgPath;
     img.alt = dev.name || '';
     imgPane.appendChild(img);
@@ -1636,8 +1547,6 @@ function initMarquee() {
 let registerCountdownTimer = null;
 /** @type {number|null} Timeout that returns to idle after register success/fail. */
 let afterRegisterTimer = null;
-/** @type {number|null} Timeout that simulates the NFC tap in ?demo registration. */
-let demoRegisterTapTimer = null;
 
 /**
  * Cancel the delayed return-to-idle after registration.
@@ -1688,8 +1597,6 @@ function showRegisterStep(stepId) {
 async function openRegister() {
   selectedRegistrantName = null;
   clearInterval(registerCountdownTimer);
-  clearTimeout(demoRegisterTapTimer);
-  demoRegisterTapTimer = null;
   clearAfterRegisterTimer();
 
   if (S.adminRegistration) {
@@ -1817,16 +1724,6 @@ async function submitRegistrationName() {
     document.getElementById('register-error-msg').textContent =
       result.detail || result.message || 'Could not start registration.';
     scheduleAfterRegistration(3500);
-  } else if (USE_DEMO) {
-    // Demo mode has no NFC hardware — simulate the card tap after 1.5 s.
-    clearTimeout(demoRegisterTapTimer);
-    demoRegisterTapTimer = setTimeout(() => {
-      demoRegisterTapTimer = null;
-      handleRegistrationSuccess({
-        user: { id: 0, name, role: role || 'user' },
-        replaced: false,
-      });
-    }, 1500);
   }
 }
 
@@ -1841,17 +1738,15 @@ async function navigateAfterRegistration() {
   apiCancelRegistration();
   if (S.screen !== 'register') return;
 
-  if (!USE_DEMO) {
-    try {
-      const res = await fetch('/api/session');
-      if (S.screen !== 'register') return;
-      const data = await res.json();
-      if (S.screen !== 'register') return;
-      // overlay: leftover admin Register User session. A non-overlay
-      // session is a work-card login (SSE may still be in flight).
-      if (data.active && !data.overlay) return;
-    } catch (_) { /* go idle */ }
-  }
+  try {
+    const res = await fetch('/api/session');
+    if (S.screen !== 'register') return;
+    const data = await res.json();
+    if (S.screen !== 'register') return;
+    // overlay: leftover admin Register User session. A non-overlay
+    // session is a work-card login (SSE may still be in flight).
+    if (data.active && !data.overlay) return;
+  } catch (_) { /* go idle */ }
 
   if (S.screen !== 'register') return;
   await endSession();
@@ -1866,8 +1761,6 @@ async function navigateAfterRegistration() {
  */
 function cancelRegistration() {
   clearInterval(registerCountdownTimer);
-  clearTimeout(demoRegisterTapTimer);
-  demoRegisterTapTimer = null;
   clearAfterRegisterTimer();
   apiCancelRegistration();
   if (S.adminRegistration) {
@@ -2002,19 +1895,10 @@ function dismissAdminToIdle() {
  * Start a real backend admin session via POST /api/admin/session. The backend
  * finds the first active admin user in the database and creates a server-side
  * session so that subsequent API calls (borrow, return, sync) pass the
- * require_session check. Falls back to a demo-mode synthetic user when
- * USE_DEMO is true.
+ * require_session check.
  * @returns {Promise<boolean>} True if the admin session was created, false on failure.
  */
 async function adminStartSession(overlay = true) {
-  if (USE_DEMO) {
-    // Demo mode — no backend, use synthetic admin user
-    adminSessionActive = true;
-    S.user = { id: 0, name: 'Admin', role: 'admin' };
-    fillMainMenu(S.user);
-    return true;
-  }
-
   try {
     const url = overlay ? '/api/admin/session' : '/api/admin/session?overlay=false';
     const res = await fetch(url, { method: 'POST' });
@@ -2330,8 +2214,7 @@ function dismissUpdateOverlay() {
 
 /**
  * Trigger a software update from the admin panel. Confirms first, then shows
- * the full-screen overlay, then POSTs `/api/admin/update`. Demo mode never
- * POSTs — it shows a dismissible "Pi only" message after a brief overlay.
+ * the full-screen overlay, then POSTs `/api/admin/update`.
  * @returns {Promise<void>}
  */
 async function adminUpdate() {
@@ -2341,13 +2224,6 @@ async function adminUpdate() {
   }
 
   showUpdateOverlay();
-
-  if (USE_DEMO) {
-    setUpdateStatusLine('Demo preview — on the Pi this screen stays until the update finishes.');
-    const dismiss = document.getElementById('update-dismiss');
-    if (dismiss) dismiss.classList.remove('hidden');
-    return;
-  }
 
   const launchedAt = Date.now();
   const gen = updatePollGen;
@@ -2723,24 +2599,27 @@ let slotChangeDevice = null;
 let selectedChangeSlot = null;
 
 /**
- * Occupied locker slot numbers, optionally ignoring one device (the one being moved).
+ * Device counts per locker slot, optionally ignoring one device (the one
+ * being moved). Slots are shared labels — a count above zero is a hint,
+ * not a block.
  * @param {number|null} [exceptId]
- * @returns {Set<number>}
+ * @returns {Map<number, number>} Slot number to device count.
  */
 function occupiedSlots(exceptId) {
-  const used = new Set();
+  const counts = new Map();
   (S.adminDevices || []).forEach(d => {
     if (d.locker_slot == null) return;
     if (exceptId != null && d.id === exceptId) return;
-    used.add(d.locker_slot);
+    counts.set(d.locker_slot, (counts.get(d.locker_slot) || 0) + 1);
   });
-  return used;
+  return counts;
 }
 
 /**
- * Render a 1..N slot picker. Occupied slots are disabled.
+ * Render a 1..N slot picker. Shared slots stay clickable and show a
+ * count badge of the devices already using them.
  * @param {string} containerId
- * @param {Set<number>} occupied
+ * @param {Map<number, number>} occupied Slot number to device count.
  * @param {number|null} selected
  * @param {function(number): void} onPick
  */
@@ -2749,16 +2628,21 @@ function renderSlotGrid(containerId, occupied, selected, onPick) {
   if (!el) return;
   el.innerHTML = '';
   let maxUsed = 0;
-  occupied.forEach(n => { if (n > maxUsed) maxUsed = n; });
+  occupied.forEach((count, n) => { if (n > maxUsed) maxUsed = n; });
   const max = Math.min(SLOT_GRID_MAX, Math.max(SLOT_GRID_MIN, maxUsed + 1));
   for (let n = 1; n <= max; n++) {
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'bind-slot-btn';
     btn.textContent = String(n);
-    if (occupied.has(n)) {
+    const count = occupied.get(n) || 0;
+    if (count > 0) {
       btn.classList.add('taken');
-      btn.disabled = true;
+      btn.title = `${count} unit${count === 1 ? '' : 's'} in this slot`;
+      const badge = document.createElement('span');
+      badge.className = 'bind-slot-count';
+      badge.textContent = `\u00d7${count}`;
+      btn.appendChild(badge);
     }
     if (selected === n) btn.classList.add('selected');
     btn.addEventListener('click', () => { clickSound(); onPick(n); });
@@ -2796,7 +2680,6 @@ function startBindCountdown() {
  * in-locker and not registered yet. Tap a row to fill the PM input; typing
  * clears the highlight. Failure/empty shows a note — typed PM still works,
  * except after a 401/403 where the register POST needs the same session.
- * Demo renders stub rows so the pick UI can be exercised on any machine.
  * @returns {Promise<void>}
  */
 async function populateCatalogList() {
@@ -2807,26 +2690,21 @@ async function populateCatalogList() {
   list.innerHTML = '';
   note.textContent = '';
   let rows;
-  if (USE_DEMO) {
-    await sleep(200); // simulate fetch latency
-    rows = DEMO_CATALOG;
-  } else {
-    let status = 0;
-    try {
-      const res = await fetch('/api/admin/devices/catalog-locker');
-      status = res.status;
-      if (!res.ok) throw new Error(`Catalog locker request failed (${res.status})`);
-      const data = await res.json();
-      rows = data && data.rows;
-    } catch (_) {
-      list.innerHTML = '';
-      if (status === 401 || status === 403) {
-        note.textContent = 'Session expired or not admin — sign in again as admin.';
-      } else {
-        note.textContent = `Excel list unavailable — type the ${ASSET_LABEL}.`;
-      }
-      return;
+  let status = 0;
+  try {
+    const res = await fetch('/api/admin/devices/catalog-locker');
+    status = res.status;
+    if (!res.ok) throw new Error(`Catalog locker request failed (${res.status})`);
+    const data = await res.json();
+    rows = data && data.rows;
+  } catch (_) {
+    list.innerHTML = '';
+    if (status === 401 || status === 403) {
+      note.textContent = 'Session expired or not admin — sign in again as admin.';
+    } else {
+      note.textContent = `Excel list unavailable — type the ${ASSET_LABEL}.`;
     }
+    return;
   }
   if (!Array.isArray(rows)) {
     note.textContent = `Excel list unavailable — type the ${ASSET_LABEL}.`;
@@ -2866,8 +2744,7 @@ async function populateCatalogList() {
 }
 
 /**
- * Open the Add from Excel step (pick from the locker list or type PM + free slot).
- * Demo opens the step with stub catalog rows; only the submit stays Pi-only.
+ * Open the Add from Excel step (pick from the locker list or type PM + slot).
  * The slot picker is not painted when the device list failed to load.
  */
 function openAddFromExcel() {
@@ -2877,7 +2754,7 @@ function openAddFromExcel() {
   populateCatalogList();
   const paint = () => {
     if (!adminDevicesOk) {
-      // Slot occupancy is unknown — a picker painted now would offer taken slots.
+      // Slot occupancy is unknown — a picker painted now would show no counts.
       document.getElementById('bind-add-error').textContent =
         'Device list unavailable — back out and retry the list before picking a slot.';
       return;
@@ -2893,14 +2770,9 @@ function openAddFromExcel() {
 
 /**
  * POST PM + slot, then wait for the sticker tap (bind window already armed).
- * Demo never POSTs: the Add step is explorable but submit stays Pi-only.
  * @returns {Promise<void>}
  */
 async function submitRegisterDevice() {
-  if (USE_DEMO) {
-    showToast('Add from Excel is Pi only', 'error');
-    return;
-  }
   const pm = (document.getElementById('bind-pm-input').value || '').trim();
   const err = document.getElementById('bind-add-error');
   err.textContent = '';
@@ -2909,7 +2781,7 @@ async function submitRegisterDevice() {
     return;
   }
   if (!selectedAddSlot) {
-    err.textContent = 'Pick a free slot.';
+    err.textContent = 'Pick a slot.';
     return;
   }
   try {
@@ -2945,7 +2817,7 @@ function openChangeSlot(dev) {
   document.getElementById('bind-slot-error').textContent = '';
   const paint = () => {
     if (!adminDevicesOk) {
-      // Slot occupancy is unknown — a picker painted now would offer taken slots.
+      // Slot occupancy is unknown — a picker painted now would show no counts.
       document.getElementById('bind-slot-error').textContent =
         'Device list unavailable — back out and retry the list before picking a slot.';
       return;
@@ -2971,12 +2843,6 @@ async function submitChangeSlot() {
   if (!slotChangeDevice) return;
   if (!selectedChangeSlot) {
     err.textContent = 'Pick a slot.';
-    return;
-  }
-  if (USE_DEMO) {
-    slotChangeDevice.locker_slot = selectedChangeSlot;
-    showBindStep('bind-step-list');
-    populateBindList();
     return;
   }
   try {
@@ -3022,22 +2888,12 @@ async function unbindDeviceTag(dev) {
 /**
  * Toggle a locker device in/out of maintenance from the Register Device
  * list (out for calibration). Refusals (borrowed, already set) toast the
- * API detail. Demo mode flips the row's status locally.
+ * API detail.
  * @param {Object} dev - Device row.
  * @returns {Promise<void>}
  */
 async function adminSetMaintenance(dev) {
   const on = dev.status !== 'maintenance';
-  if (USE_DEMO) {
-    await sleep(300); // simulate API latency
-    dev.status = on ? 'maintenance' : 'available';
-    showToast(
-      on ? `${dev.name} flagged for maintenance` : `${dev.name} back in service`,
-      'success'
-    );
-    await populateBindList();
-    return;
-  }
   try {
     const res = await fetch(`/api/admin/devices/${dev.id}/maintenance`, {
       method: 'POST',
@@ -3127,24 +2983,10 @@ function showUsersStep(stepId) {
 }
 
 /**
- * Fetch active users for the Users overlay. Demo mode builds a static list
- * from DEMO_USERS with borrowed counts derived from DEMO_DEVICES.
+ * Fetch active users for the Users overlay.
  * @returns {Promise<Array<Object>|null>} User rows, or null on failure.
  */
 async function apiAdminListUsers() {
-  if (USE_DEMO) {
-    await sleep(300); // simulate API latency
-    const counts = {};
-    DEMO_DEVICES.forEach(d => {
-      if (d.status === 'borrowed' && d.borrower_name) {
-        counts[d.borrower_name] = (counts[d.borrower_name] || 0) + 1;
-      }
-    });
-    return DEMO_USERS.map(u => ({
-      id: u.id, name: u.name, role: u.role,
-      borrowed_count: counts[u.name] || 0,
-    }));
-  }
   try {
     const res = await fetch('/api/admin/users');
     if (!res.ok) return null;
@@ -3318,13 +3160,6 @@ async function usersDeactivate() {
   const id = usersTargetId;
   const errEl = document.getElementById('users-confirm-error');
   errEl.textContent = '';
-  if (USE_DEMO) {
-    await sleep(300);
-    usersList = usersList.filter(u => u.id !== id);
-    showUsersStep('users-step-list');
-    renderUsersList();
-    return;
-  }
   try {
     const res = await fetch(`/api/admin/users/${id}/deactivate`, { method: 'POST' });
     const data = await res.json().catch(() => ({}));
@@ -3372,15 +3207,6 @@ async function usersReplaceCard(id) {
   document.getElementById('users-tap-name').textContent = u.name;
   const errEl = document.getElementById('users-error');
   errEl.textContent = '';
-  if (USE_DEMO) {
-    await sleep(300);
-    showUsersStep('users-step-success');
-    document.getElementById('users-success-msg').textContent =
-      `Card replaced for ${u.name}.`;
-    clearTimeout(usersStepTimer);
-    usersStepTimer = setTimeout(() => { showUsersStep('users-step-list'); }, 2500);
-    return;
-  }
   // In-flight guard: a double-click's second POST would 409 against the
   // window the first POST just armed, then clear the pending flag and hide
   // its error on the now-hidden list step. Separate from
@@ -3508,16 +3334,12 @@ function adminEndSession() {
 }
 
 /**
- * Close Chromium kiosk (backend stays up). Confirm first. Demo never POSTs.
+ * Close Chromium kiosk (backend stays up). Confirm first.
  * @returns {Promise<void>}
  */
 async function adminExitKiosk() {
   if (S.updating) return;
   if (!confirm('Close the kiosk browser? The locker service stays running. Chromium will not come back until the next login or reboot.')) {
-    return;
-  }
-  if (USE_DEMO) {
-    showToast('Demo preview — Exit kiosk is Pi only', 'success');
     return;
   }
   try {
@@ -3536,7 +3358,7 @@ async function adminExitKiosk() {
 /**
  * Show the full-screen shutting-down overlay over the admin panel.
  * Sets ``S.updating`` so SSE handlers ignore card taps until poweroff
- * finishes or the overlay is dismissed (failed start / demo).
+ * finishes or the overlay is dismissed on a failed start.
  */
 function showPowerOverlay() {
   S.updating = true;
@@ -3564,7 +3386,7 @@ function hidePowerOverlay() {
 }
 
 /**
- * Power off the Pi. Confirm first. Demo never POSTs.
+ * Power off the Pi. Confirm first.
  * @returns {Promise<void>}
  */
 async function adminShutdown() {
@@ -3573,12 +3395,6 @@ async function adminShutdown() {
     return;
   }
   showPowerOverlay();
-  if (USE_DEMO) {
-    showToast('Demo preview — Shut down is Pi only', 'success');
-    const dismiss = document.getElementById('power-dismiss');
-    if (dismiss) dismiss.classList.remove('hidden');
-    return;
-  }
   try {
     const res = await fetch('/api/admin/shutdown', { method: 'POST' });
     const data = await res.json().catch(() => ({}));
@@ -3727,7 +3543,7 @@ document.getElementById('power-dismiss').addEventListener('click', () => { click
 ============================================================ */
 /**
  * Return a Promise that resolves after the specified delay. Utility for
- * simulating async delays in demo mode and sequencing UI transitions.
+ * sequencing UI transitions.
  * @param {number} ms - Delay in milliseconds.
  * @returns {Promise<void>} Resolves after the delay.
  */
@@ -3795,7 +3611,7 @@ function probePerformance() {
 probePerformance();
 
 /* ============================================================
-   SSE — real-time events from backend (live mode only)
+   SSE — real-time events from backend
 ============================================================ */
 /**
  * Establish a Server-Sent Events connection to the backend for real-time
@@ -3940,19 +3756,10 @@ async function checkExistingSession() {
   } catch (_) { /* server not reachable — stay on idle */ }
 }
 
-if (USE_DEMO) {
-  // In demo mode, clicking anywhere on the idle screen simulates a card tap
-  document.getElementById('screen-idle').addEventListener('click', (e) => {
-    // Don't intercept the register link
-    if (e.target.closest('.idle-register-link')) return;
-    handleTap();
-  });
-} else {
-  loadSiteConfig();
-  connectSSE();
-  checkExistingSession();
-  reportKioskDisplay('idle');
-}
+loadSiteConfig();
+connectSSE();
+checkExistingSession();
+reportKioskDisplay('idle');
 
 // Calibration alerts: refresh the idle overdue banner now and every 60 s.
 refreshIdleCalBanner();
@@ -3963,16 +3770,32 @@ setInterval(refreshIdleCalBanner, 60000);
    Activates ONLY when the backend reports the fake NFC reader is
    running (SMART_LOCKER_FAKE_READER). In production /api/dev/status
    returns fake_reader:false, so nothing below is wired up and there
-   is zero visible footprint. Provides a floating "Simulate tap"
-   button plus the F2 keyboard shortcut; both POST /api/dev/tap, which
-   flows through the real NFC bridge exactly like a physical card tap
-   (work-card login/logout, device-tag auto-intent, or pending bind).
+   is zero visible footprint. Provides a floating preset tap panel
+   (3 work cards + 3 device tags) plus the F2 keyboard shortcut; every
+   tap POSTs /api/dev/tap, which flows through the real NFC bridge
+   exactly like a physical tap (work-card login/logout, device-tag
+   auto-intent, or pending bind).
 ============================================================ */
 (function initDevTap() {
   fetch('/api/dev/status')
     .then(r => (r.ok ? r.json() : null))
     .then(status => {
       if (!status || !status.fake_reader) return;   // not in simulation mode
+
+      /**
+       * Fixed preset UIDs for the fake-reader tap panel. Cards live in the
+       * 04… family, device tags in the 05… family so the two are visually
+       * distinct. Every value is contiguous uppercase hex with an even digit
+       * count, matching scripts/enroll_card.py `_normalize_uid` (which strips
+       * whitespace, upper-cases, and rejects anything `bytes.fromhex` rejects),
+       * so a seed script can enroll exactly these strings and later taps HMAC
+       * to the same digest. (04…/05… also mirror the leading byte of real
+       * 4-byte MIFARE UIDs without colliding with issued cards.)
+       * @type {string[]} FAKE_CARD_UIDS — 3 work cards (panel keys 1/2/3).
+       * @type {string[]} FAKE_TAG_UIDS — 3 device tags (panel keys A/S/D).
+       */
+      const FAKE_CARD_UIDS = ['040000A1', '040000A2', '040000A3'];
+      const FAKE_TAG_UIDS = ['050000B1', '050000B2', '050000B3'];
 
       async function simulateTap(uid) {
         try {
@@ -3994,26 +3817,98 @@ setInterval(refreshIdleCalBanner, 60000);
         }
       }
 
-      const btn = document.createElement('button');
-      btn.id = 'dev-tap-btn';
-      btn.type = 'button';
-      btn.textContent = '⊙ Simulate tap (F2)';
-      btn.setAttribute('aria-label', 'Simulate an NFC card tap (developer tool)');
-      Object.assign(btn.style, {
+      /**
+       * Build one preset button that injects its UID via simulateTap.
+       * @param {string} label - Visible keycap text (1/2/3 or A/S/D).
+       * @param {string} uid - Fake UID to POST to /api/dev/tap.
+       * @param {string} kind - 'card' (solid) or 'tag' (outline).
+       * @returns {HTMLButtonElement}
+       */
+      function presetButton(label, uid, kind) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.textContent = label;
+        b.title = (kind === 'card' ? 'Work card ' : 'Device tag ') + uid;
+        b.setAttribute('aria-label', b.title + ' (developer tool)');
+        Object.assign(b.style, {
+          minWidth: '34px', padding: '6px 8px',
+          font: '600 13px Inter, system-ui, sans-serif', color: '#fff',
+          background: kind === 'card' ? '#009641' : 'transparent',
+          border: '1px solid #009641', borderRadius: '6px',
+          cursor: 'pointer',
+        });
+        b.addEventListener('click', () => simulateTap(uid));
+        return b;
+      }
+
+      // Dev-only floating panel (kiosk palette, inline styles like the rest
+      // of this block). Deliberately no entrance animation: the harness must
+      // stay inert under prefers-reduced-motion and add no motion otherwise.
+      const panel = document.createElement('div');
+      panel.id = 'dev-tap-panel';
+      Object.assign(panel.style, {
         position: 'fixed', right: '12px', bottom: '12px', zIndex: '9999',
-        padding: '8px 12px', font: '600 13px Inter, system-ui, sans-serif',
-        color: '#fff', background: 'rgba(150,20,20,.85)',
-        border: '1px solid rgba(255,255,255,.35)', borderRadius: '8px',
-        cursor: 'pointer', letterSpacing: '.02em',
+        display: 'flex', flexDirection: 'column', gap: '6px',
+        padding: '8px', background: '#181d24',
+        border: '1px solid rgba(255,255,255,.25)', borderRadius: '8px',
+        font: '600 12px Inter, system-ui, sans-serif', color: '#fff',
       });
-      btn.addEventListener('click', () => simulateTap());
-      document.body.appendChild(btn);
+      /**
+       * Build one labeled preset row (Card 1/2/3 or Tag A/S/D).
+       * @param {string} caption - Row label text.
+       * @param {string[]} labels - Keycap texts.
+       * @param {string[]} uids - Fake UIDs, one per keycap.
+       * @param {string} kind - 'card' or 'tag'.
+       * @returns {HTMLDivElement}
+       */
+      function presetRow(caption, labels, uids, kind) {
+        const row = document.createElement('div');
+        Object.assign(row.style, {
+          display: 'flex', alignItems: 'center', gap: '6px',
+        });
+        const cap = document.createElement('span');
+        cap.textContent = caption;
+        Object.assign(cap.style, { minWidth: '36px', opacity: '.8' });
+        row.appendChild(cap);
+        labels.forEach((label, i) => row.appendChild(presetButton(label, uids[i], kind)));
+        return row;
+      }
+      panel.appendChild(presetRow('Card', ['1', '2', '3'], FAKE_CARD_UIDS, 'card'));
+      panel.appendChild(presetRow('Tag', ['A', 'S', 'D'], FAKE_TAG_UIDS, 'tag'));
+      const defaultBtn = document.createElement('button');
+      defaultBtn.id = 'dev-tap-btn';
+      defaultBtn.type = 'button';
+      defaultBtn.textContent = 'Tap (F2)';
+      defaultBtn.setAttribute('aria-label', 'Simulate a tap with the server default UID (developer tool)');
+      Object.assign(defaultBtn.style, {
+        padding: '6px 8px', font: '600 12px Inter, system-ui, sans-serif',
+        color: '#fff', background: 'transparent',
+        border: '1px solid rgba(255,255,255,.35)', borderRadius: '6px',
+        cursor: 'pointer',
+      });
+      defaultBtn.addEventListener('click', () => simulateTap());
+      panel.appendChild(defaultBtn);
+      document.body.appendChild(panel);
 
       document.addEventListener('keydown', (e) => {
-        if (e.key === 'F2') { e.preventDefault(); simulateTap(); }
+        if (e.repeat) return; // held key must not auto-repeat taps
+        if (e.key === 'F2') { e.preventDefault(); simulateTap(); return; }
+        // This listener is only registered after fake_reader:true, so an
+        // inactive harness has no handler at all. Preset keys additionally
+        // stay out of editable focus and modified shortcuts (Ctrl+S etc.).
+        if (e.ctrlKey || e.metaKey || e.altKey) return;
+        const target = e.target;
+        const tag = target && target.tagName ? target.tagName.toUpperCase() : '';
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+        if (target && target.isContentEditable) return;
+        const key = (e.key || '').toLowerCase();
+        const cardIdx = '123'.indexOf(key);
+        if (cardIdx !== -1) { simulateTap(FAKE_CARD_UIDS[cardIdx]); return; }
+        const tagIdx = 'asd'.indexOf(key);
+        if (tagIdx !== -1) { simulateTap(FAKE_TAG_UIDS[tagIdx]); }
       });
 
-      console.info('[sim] Fake NFC reader active — press F2 or the corner button to inject a tap.');
+      console.info('[sim] Fake NFC reader active — tap panel keys 1/2/3 (cards) and A/S/D (tags), or F2 for the server default UID.');
     })
     .catch(() => { /* dev status unavailable — ignore */ });
 })();

@@ -74,6 +74,32 @@ def _index_exists(cursor: sqlite3.Cursor, index_name: str) -> bool:
     return cursor.fetchone() is not None
 
 
+def _index_is_unique(cursor: sqlite3.Cursor, index_name: str) -> bool:
+    """Check whether a named index enforces uniqueness.
+
+    Reads the CREATE statement from ``sqlite_master``; auto-indexes created
+    for constraints have NULL sql and are treated as unique.
+
+    Args:
+        cursor: An open SQLite cursor.
+        index_name: Name of the index to inspect.
+
+    Returns:
+        True if the index is unique, False if it is a plain index or missing.
+    """
+    cursor.execute(
+        "SELECT sql FROM sqlite_master WHERE type='index' AND name=?",
+        (index_name,),
+    )
+    row = cursor.fetchone()
+    if row is None:
+        return False
+    sql = row[0]
+    if sql is None:
+        return True
+    return "UNIQUE" in sql.upper()
+
+
 def migrate() -> None:
     """Apply pending column migrations to the Smart Locker database.
 
@@ -117,14 +143,19 @@ def migrate() -> None:
         )
         print("  CREATE UNIQUE INDEX ix_devices_tag_hmac")
 
-    # Unique locker slots (SQLite UNIQUE still allows multiple NULLs).
+    # Plain (non-unique) locker-slot label: several devices may share a slot.
+    # Older Pi databases carry this index as UNIQUE — drop and recreate it.
+    # Touches only the index; device rows are left alone.
+    if _index_is_unique(cur, "ix_devices_locker_slot"):
+        cur.execute("DROP INDEX ix_devices_locker_slot")
+        print("  DROP  UNIQUE ix_devices_locker_slot (slots are now shared)")
     if _index_exists(cur, "ix_devices_locker_slot"):
         print("  SKIP  ix_devices_locker_slot (already exists)")
     else:
         cur.execute(
-            "CREATE UNIQUE INDEX ix_devices_locker_slot ON devices (locker_slot)"
+            "CREATE INDEX ix_devices_locker_slot ON devices (locker_slot)"
         )
-        print("  CREATE UNIQUE INDEX ix_devices_locker_slot")
+        print("  CREATE INDEX ix_devices_locker_slot")
 
     # --- Table creation: registrants (self-service registration name list) ---
     if _table_exists(cur, "registrants"):

@@ -1,7 +1,7 @@
 """
 File: test_device_registration.py
 Description: Tests for admin Register Device: look up a PM in the Excel
-             catalog, assign a free locker slot, and insert one SQLite
+             catalog, assign a locker slot label, and insert one SQLite
              row. Sync must never create locker devices.
 Project: smart_locker/tests
 Notes: Run with: python -m pytest tests/test_device_registration.py -v
@@ -21,7 +21,6 @@ from smart_locker.services.device_registration import (
     AlreadyRegistered,
     CatalogUnavailable,
     InvalidSlot,
-    SlotTaken,
     UnknownPm,
     register_locker_device,
     set_locker_slot,
@@ -91,7 +90,7 @@ class TestLookupCatalogByPm:
 
 
 class TestRegisterLockerDevice:
-    """PM + free slot creates one locker row from Excel; failures leave the DB empty."""
+    """PM + slot creates one locker row from Excel; failures leave the DB empty."""
 
     def test_known_pm_and_free_slot_creates_from_excel(self, db_session):
         """Register Device copies catalog fields and stores the chosen slot."""
@@ -163,8 +162,8 @@ class TestRegisterLockerDevice:
         db_session.rollback()
         assert DeviceRepository.find_by_pm(db_session, "PM-001") is None
 
-    def test_duplicate_slot_fails(self, db_session):
-        """A slot already used by a locker device is rejected."""
+    def test_shared_slot_accepts_second_pm(self, db_session):
+        """A slot already used by a locker device accepts another PM."""
         DeviceRepository.create(
             db_session, name="Existing", device_type="general",
             pm_number="PM-OLD", locker_slot=2,
@@ -175,10 +174,10 @@ class TestRegisterLockerDevice:
             ["PM-NEW", "Keysight", "34465A"],
         ])
         try:
-            with pytest.raises(SlotTaken):
-                register_locker_device(db_session, path, "PM-NEW", locker_slot=2)
-            db_session.rollback()
-            assert DeviceRepository.find_by_pm(db_session, "PM-NEW") is None
+            device = register_locker_device(db_session, path, "PM-NEW", locker_slot=2)
+            db_session.commit()
+            assert device.locker_slot == 2
+            assert len(DeviceRepository.find_by_slot(db_session, 2)) == 2
         finally:
             path.unlink(missing_ok=True)
 
@@ -200,7 +199,7 @@ class TestRegisterLockerDevice:
             path.unlink(missing_ok=True)
 
     def test_pm_unique_race_maps_to_already_registered(self, db_session, monkeypatch):
-        """A PM-unique IntegrityError (same-PM race) is AlreadyRegistered, not SlotTaken."""
+        """A PM-unique IntegrityError (same-PM race) is AlreadyRegistered."""
         from sqlalchemy.exc import IntegrityError
 
         def _race(*_args, **_kwargs):
@@ -220,14 +219,14 @@ class TestRegisterLockerDevice:
         finally:
             path.unlink(missing_ok=True)
 
-    def test_slot_unique_race_maps_to_slot_taken(self, db_session, monkeypatch):
-        """A slot-unique IntegrityError (slot race) stays SlotTaken."""
+    def test_non_pm_integrity_error_propagates(self, db_session, monkeypatch):
+        """A non-PM IntegrityError is unexpected — it propagates, unmapped."""
         from sqlalchemy.exc import IntegrityError
 
         def _race(*_args, **_kwargs):
             raise IntegrityError(
                 "INSERT INTO devices", {},
-                Exception("UNIQUE constraint failed: devices.locker_slot"),
+                Exception("UNIQUE constraint failed: devices.tag_hmac"),
             )
 
         monkeypatch.setattr(DeviceRepository, "create", _race)
@@ -236,7 +235,7 @@ class TestRegisterLockerDevice:
             ["PM-001", "Fluke"],
         ])
         try:
-            with pytest.raises(SlotTaken):
+            with pytest.raises(IntegrityError):
                 register_locker_device(db_session, path, "PM-001", locker_slot=1)
         finally:
             path.unlink(missing_ok=True)
@@ -329,7 +328,7 @@ class TestRegisterLockerDevice:
 
 
 class TestSetLockerSlot:
-    """Admin can reassign a free slot; cannot steal an occupied one."""
+    """Admin can reassign a slot; moving onto an occupied one shares it."""
 
     def test_reassign_to_free_slot(self, db_session):
         """Change slot on an existing locker row."""
@@ -343,8 +342,8 @@ class TestSetLockerSlot:
         db_session.expire_all()
         assert DeviceRepository.find_by_pm(db_session, "PM-001").locker_slot == 5
 
-    def test_cannot_steal_occupied_slot(self, db_session):
-        """Slot uniqueness holds when changing an existing device."""
+    def test_move_to_occupied_slot_shares_it(self, db_session):
+        """Slots are shared — moving onto another device's slot is allowed."""
         a = DeviceRepository.create(
             db_session, name="A", device_type="general",
             pm_number="PM-A", locker_slot=1,
@@ -354,8 +353,24 @@ class TestSetLockerSlot:
             pm_number="PM-B", locker_slot=2,
         )
         db_session.commit()
-        with pytest.raises(SlotTaken):
-            set_locker_slot(db_session, a, 2)
+        set_locker_slot(db_session, a, 2)
+        db_session.commit()
+        db_session.expire_all()
+        assert DeviceRepository.find_by_pm(db_session, "PM-A").locker_slot == 2
+        assert len(DeviceRepository.find_by_slot(db_session, 2)) == 2
+
+    def test_move_to_invalid_slot_fails(self, db_session):
+        """Out-of-range moves are still InvalidSlot."""
+        device = DeviceRepository.create(
+            db_session, name="A", device_type="general",
+            pm_number="PM-A", locker_slot=1,
+        )
+        db_session.commit()
+        with pytest.raises(InvalidSlot):
+            set_locker_slot(db_session, device, 0)
+        db_session.rollback()
+        with pytest.raises(InvalidSlot):
+            set_locker_slot(db_session, device, 999999)
         db_session.rollback()
         assert DeviceRepository.find_by_pm(db_session, "PM-A").locker_slot == 1
 
