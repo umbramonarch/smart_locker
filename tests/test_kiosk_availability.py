@@ -145,7 +145,7 @@ class TestAdminHoverIsCheap:
         """html.lite must not animate or translate admin tiles on hover."""
         css = _css()
         lite, _, rest = css.partition("html.lite .admin-action-btn {")
-        lite_block, _, after = rest.partition("html.lite .btn-reveal-img")
+        lite_block, _, after = rest.partition("html.lite .btn-reveal-tint")
         assert "animation: none" in lite_block
         assert "html.lite .admin-action-btn:hover" in after or "html.lite .admin-action-btn:hover" in lite_block
         hover_lite = lite_block + after[:400]
@@ -176,10 +176,11 @@ class TestMainMenuHoverIsCheap:
         assert "transition-delay:" not in block
         assert "animation: action-tile-in" in block
         assert "backwards" in block
-        img_hover, _, img_rest = css.partition(".action-btn:hover .btn-reveal-img {")
-        img_block, _, _ = img_rest.partition("}")
-        assert "clip-path:" not in img_block
-        assert "transform:" not in img_block
+        tint_hover, _, tint_rest = css.partition(".action-btn:hover .btn-reveal-tint {")
+        assert tint_rest, ".action-btn:hover .btn-reveal-tint rule is missing"
+        tint_block, _, _ = tint_rest.partition("}")
+        assert "clip-path:" not in tint_block
+        assert "transform:" not in tint_block
 
     def test_lite_skips_action_hover_lift(self):
         """html.lite must not animate or translate main-menu tiles on hover."""

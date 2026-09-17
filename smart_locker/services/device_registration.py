@@ -44,7 +44,7 @@ class AlreadyRegistered(Exception):
 
 
 class InvalidSlot(Exception):
-    """Slot must be an integer >= 1."""
+    """Slot must be an integer in 1..MAX_LOCKER_SLOT."""
 
 
 def _require_valid_slot(locker_slot: int) -> None:

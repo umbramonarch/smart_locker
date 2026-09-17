@@ -676,29 +676,11 @@ body::after {
 .action-btn:nth-child(2) { --i: 1; }
 .action-btn:nth-child(3) { --i: 2; }
 
-/* Ellipse-reveal background: entrance is a one-shot animation; hover is opacity only. */
-.btn-reveal-img {
-  position: absolute;
-  inset: 0;
-  background-size: cover;
-  background-position: center;
-  clip-path: ellipse(120% 120% at 50% 100%);
-  transform: none;
-  opacity: 0.18;
-  transition: opacity 0.2s ease;
-  pointer-events: none;
-}
-.screen.active .action-btn .btn-reveal-img {
-  animation: action-reveal-in 0.45s var(--ease-smooth) backwards;
-  animation-delay: calc(var(--i, 0) * 0.08s + 0.08s);
-}
+/* Ellipse-reveal entrance, shared one-shot; the tint below is the only reveal layer. */
 @keyframes action-reveal-in {
   from {
     clip-path: ellipse(0% 0% at 50% 100%);
   }
-}
-.action-btn:hover .btn-reveal-img {
-  opacity: 0.25;
 }
 .btn-reveal-tint {
   position: absolute;
@@ -2562,8 +2544,7 @@ html.lite .card-image img {
 }
 html.lite .card-hover-reveal { display: none; }   /* blurred/filtered hover image */
 
-/* — Menu action-button image reveals: show flat, skip the clip-path anim — */
-html.lite .btn-reveal-img,
+/* — Menu action-button tint reveal: show flat, skip the clip-path anim — */
 html.lite .btn-reveal-tint {
   transition: none !important;
   animation: none !important;
