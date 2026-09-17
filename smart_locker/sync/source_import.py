@@ -369,20 +369,17 @@ def _cell_str(row, idx: int | None) -> str | None:
     return val if val else None
 
 
-def _load_rows(
-    path: Path,
-    sheet_name: str | None = None,
-) -> tuple[list | None, str | None]:
-    """Copy the workbook to a temp file and return ``(rows, error)``.
+def _copy_to_temp(path: Path) -> tuple[Path | None, str | None]:
+    """Copy the share workbook to a temp file, returning ``(tmp_path, error)``.
 
     Copying first lets the read succeed when Excel has the share file open.
+    The caller owns the temp file and must unlink it.
 
     Args:
         path: Path to the source ``.xlsx``.
-        sheet_name: Sheet to read, or None for the active sheet.
 
     Returns:
-        ``(rows, None)`` on success, or ``(None, error_message)``.
+        ``(tmp_path, None)`` on success, or ``(None, error_message)``.
     """
     if not path.exists():
         return None, f"File not found: {path}"
@@ -402,7 +399,25 @@ def _load_rows(
     finally:
         if tmp_fd >= 0:
             os.close(tmp_fd)
+    return tmp_path, None
 
+
+def _read_value_rows(
+    tmp_path: Path,
+    sheet_name: str | None = None,
+) -> tuple[list | None, str | None]:
+    """Read cached cell values from a temp snapshot, returning ``(rows, error)``.
+
+    Loads the data-only view of a snapshot previously made by
+    ``_copy_to_temp``. The caller still owns the snapshot and unlinks it.
+
+    Args:
+        tmp_path: Temp snapshot of the source ``.xlsx``.
+        sheet_name: Sheet to read, or None for the active sheet.
+
+    Returns:
+        ``(rows, None)`` on success, or ``(None, error_message)``.
+    """
     try:
         wb = load_workbook(tmp_path, read_only=True, data_only=True)
         if sheet_name:
@@ -419,44 +434,54 @@ def _load_rows(
         return rows, None
     except (OSError, BadZipFile, InvalidFileException) as e:
         return None, f"Source workbook unreadable: {e}"
+
+
+def _load_rows(
+    path: Path,
+    sheet_name: str | None = None,
+) -> tuple[list | None, str | None]:
+    """Copy the workbook to a temp file and return ``(rows, error)``.
+
+    Copying first lets the read succeed when Excel has the share file open.
+
+    Args:
+        path: Path to the source ``.xlsx``.
+        sheet_name: Sheet to read, or None for the active sheet.
+
+    Returns:
+        ``(rows, None)`` on success, or ``(None, error_message)``.
+    """
+    tmp_path, copy_err = _copy_to_temp(path)
+    if copy_err:
+        return None, copy_err
+    try:
+        return _read_value_rows(tmp_path, sheet_name)
     finally:
         tmp_path.unlink(missing_ok=True)
 
 
 def _calibration_formula_rows(
-    path: Path,
+    tmp_path: Path,
     sheet_name: str | None,
     cal_idx: int,
 ) -> set[int]:
     """Return rows-list indexes whose calibration cell holds a formula.
 
-    Loads the formula view (``data_only=False``) of the workbook on a temp
-    copy, mirroring ``_load_rows`` so a read succeeds while Excel has the
-    share file open. Indexes match the ``_load_rows`` rows list (header is
-    0, first data row is 1). Any failure returns an empty set and warns —
-    the import then treats blanks as before.
+    Loads the formula view (``data_only=False``) from an already-copied
+    temp snapshot owned by the caller — this function never copies or
+    unlinks, so values and formula flags come from one file state.
+    Indexes match the ``_read_value_rows`` rows list (header is 0, first
+    data row is 1). Any failure returns an empty set and warns — the
+    import then treats blanks as before.
 
     Args:
-        path: Path to the source ``.xlsx``.
+        tmp_path: Temp snapshot previously made by ``_copy_to_temp``.
         sheet_name: Sheet to read, or None for the active sheet.
         cal_idx: 0-based calibration column in the values tuples.
 
     Returns:
         Set of rows-list indexes with a formula calibration cell.
     """
-    tmp_fd, tmp_path_str = tempfile.mkstemp(suffix=".xlsx")
-    tmp_path = Path(tmp_path_str)
-    try:
-        os.close(tmp_fd)
-        tmp_fd = -1
-        shutil.copy2(path, tmp_path)
-    except (PermissionError, OSError):
-        tmp_path.unlink(missing_ok=True)
-        logger.warning("Formula view unreadable (locked): %s", path)
-        return set()
-    finally:
-        if tmp_fd >= 0:
-            os.close(tmp_fd)
     try:
         wb = load_workbook(tmp_path, read_only=True, data_only=False)
         if sheet_name:
@@ -478,8 +503,6 @@ def _calibration_formula_rows(
     except (OSError, BadZipFile, InvalidFileException) as e:
         logger.warning("Formula view unreadable: %s", e)
         return set()
-    finally:
-        tmp_path.unlink(missing_ok=True)
 
 
 def _catalog_from_row(
@@ -672,23 +695,35 @@ def lookup_locker_catalog_by_pm(
     compose_name = cols["name"] is None
     has_location = cols["location"] is not None
     fallback: CatalogRow | None = None
+    locker_match: CatalogRow | None = None
+    locker_count = 0
     for row in rows[1:]:
         catalog = _catalog_from_row(row, cols, compose_name, default_type)
         if catalog is None or pm_match_key(catalog.pm_number) != want:
             continue
-        if not has_location or is_own_locker_location(
+        if has_location and not is_own_locker_location(
             _cell_str(row, cols["location"]) or ""
         ):
-            if fallback is not None:
-                logger.warning(
-                    "Duplicate PM %s — registering the locker row, "
-                    "ignoring the '%s' row.",
-                    catalog.pm_number,
-                    fallback.name,
-                )
-            return catalog
-        if fallback is None:
-            fallback = catalog
+            if fallback is None:
+                fallback = catalog
+            continue
+        locker_count += 1
+        if locker_match is None:
+            locker_match = catalog
+    if locker_match is not None:
+        if fallback is not None:
+            logger.warning(
+                "Duplicate PM %s — registering the locker row, "
+                "ignoring the '%s' row.",
+                locker_match.pm_number,
+                fallback.name,
+            )
+        if has_location and locker_count > 1:
+            logger.warning(
+                "Duplicate PM %s in locker catalog — keeping first row.",
+                locker_match.pm_number,
+            )
+        return locker_match
     return fallback
 
 
@@ -772,69 +807,78 @@ def import_from_source_excel(
     path = Path(source_path)
 
     logger.info("Reading source Excel: %s", path)
-    rows, err = _load_rows(path, sheet_name)
-    if err:
-        logger.warning("%s", err)
+    tmp_path, copy_err = _copy_to_temp(path)
+    if copy_err:
+        logger.warning("%s", copy_err)
         result.errors = 1
-        result.error_details.append(err)
+        result.error_details.append(copy_err)
         return result
+    try:
+        rows, err = _read_value_rows(tmp_path, sheet_name)
+        if err:
+            logger.warning("%s", err)
+            result.errors = 1
+            result.error_details.append(err)
+            return result
 
-    if not rows or len(rows) < 2:
-        logger.warning("Source Excel has no data rows.")
-        return result
+        if not rows or len(rows) < 2:
+            logger.warning("Source Excel has no data rows.")
+            return result
 
-    headers = [str(h).strip() if h else "" for h in rows[0]]
-    cols = _detect_columns(headers, column_overrides)
+        headers = [str(h).strip() if h else "" for h in rows[0]]
+        cols = _detect_columns(headers, column_overrides)
 
-    if cols["pm"] is None:
-        result.errors = 1
-        result.error_details.append(f"Could not find PM/equipment column. Headers: {headers}")
-        return result
+        if cols["pm"] is None:
+            result.errors = 1
+            result.error_details.append(f"Could not find PM/equipment column. Headers: {headers}")
+            return result
 
-    compose_name = cols["name"] is None
+        compose_name = cols["name"] is None
 
-    # --- Registrant extraction: collect unique person names from ALL rows ---
-    registrant_names: set[str] = set()
-    if cols["location"] is not None:
-        for row in rows[1:]:
-            location = _cell_str(row, cols["location"])
-            if location and not is_in_locker_location(location):
-                registrant_names.add(location.strip())
+        # --- Registrant extraction: collect unique person names from ALL rows ---
+        registrant_names: set[str] = set()
+        if cols["location"] is not None:
+            for row in rows[1:]:
+                location = _cell_str(row, cols["location"])
+                if location and not is_in_locker_location(location):
+                    registrant_names.add(location.strip())
 
-    if registrant_names:
-        logger.info(
-            "Found %d unique registrant name(s) in the Location column.",
-            len(registrant_names),
-        )
-
-    parsed: list[CatalogRow] = []
-    formula_rows: set[int] | None = None
-    for index, row in enumerate(rows[1:], start=1):
-        if (
-            formula_rows is None
-            and cols["calibration"] is not None
-            and (row[cols["calibration"]] is None
-                 or str(row[cols["calibration"]]).strip() == "")
-        ):
-            # First blank cached value: check once whether any calibration
-            # cell is a formula whose result Excel has not recalculated.
-            formula_rows = _calibration_formula_rows(
-                path, sheet_name, cols["calibration"]
+        if registrant_names:
+            logger.info(
+                "Found %d unique registrant name(s) in the Location column.",
+                len(registrant_names),
             )
-        catalog = _catalog_from_row(
-            row,
-            cols,
-            compose_name,
-            default_type,
-            calibration_is_formula=(
-                formula_rows is not None and index in formula_rows
-            ),
-        )
-        if catalog is None:
-            continue
-        parsed.append(catalog)
 
-    logger.info("Parsed %d Excel PM row(s).", len(parsed))
+        parsed: list[CatalogRow] = []
+        formula_rows: set[int] | None = None
+        for index, row in enumerate(rows[1:], start=1):
+            if (
+                formula_rows is None
+                and cols["calibration"] is not None
+                and (row[cols["calibration"]] is None
+                     or str(row[cols["calibration"]]).strip() == "")
+            ):
+                # First blank cached value: check once whether any calibration
+                # cell is a formula whose result Excel has not recalculated.
+                formula_rows = _calibration_formula_rows(
+                    tmp_path, sheet_name, cols["calibration"]
+                )
+            catalog = _catalog_from_row(
+                row,
+                cols,
+                compose_name,
+                default_type,
+                calibration_is_formula=(
+                    formula_rows is not None and index in formula_rows
+                ),
+            )
+            if catalog is None:
+                continue
+            parsed.append(catalog)
+
+        logger.info("Parsed %d Excel PM row(s).", len(parsed))
+    finally:
+        tmp_path.unlink(missing_ok=True)
 
     from sqlalchemy.orm import Session as EngineSession
 

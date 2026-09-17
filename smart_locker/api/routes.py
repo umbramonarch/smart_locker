@@ -1616,10 +1616,16 @@ def register_locker_device(
         raise
     from smart_locker.sync.location_writeback import schedule_write_location
 
-    schedule_write_location()
     # Atomic re-check: the Excel read + row insert above left a gap after
     # the early conflict check, so another window may have armed since.
-    _arm_tag_bind(PendingTagBind(device_id=device.id))
+    # All-or-nothing: roll the new row back so a 409 leaves no orphan.
+    try:
+        _arm_tag_bind(PendingTagBind(device_id=device.id))
+    except HTTPException:
+        db.delete(device)
+        db.commit()
+        raise
+    schedule_write_location()
     logger.info(
         "Locker device registered %s (pm=%s, slot=%s) by admin %s. Awaiting sticker.",
         device.name,
@@ -1746,6 +1752,7 @@ def set_device_maintenance(
                 )
             device.status = DeviceStatus.AVAILABLE
 
+        new_status = device.status.value
         db.flush()
         try:
             db.commit()
@@ -1763,7 +1770,7 @@ def set_device_maintenance(
         device.pm_number,
         user_session.user.display_name,
     )
-    return {"success": True, "status": device.status.value}
+    return {"success": True, "status": new_status}
 
 
 @router.post("/api/admin/devices/{device_id}/bind-tag")

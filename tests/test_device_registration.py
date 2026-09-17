@@ -309,6 +309,24 @@ class TestRegisterLockerDevice:
         finally:
             path.unlink(missing_ok=True)
 
+    def test_duplicate_locker_rows_register_first_row(self, db_session, caplog):
+        """Two Locker rows sharing a PM register sheet-order first row's metadata."""
+        import logging
+
+        path = _create_excel([
+            ["Equipment", "Name", "Location", "Calibration Due"],
+            ["PM-001", "First Meter", "Locker", "15.03.2020"],
+            ["PM-001", "Second Meter", "Locker", "15.03.2030"],
+        ])
+        try:
+            with caplog.at_level(logging.WARNING):
+                device = register_locker_device(db_session, path, "PM-001", locker_slot=1)
+            assert device.name == "First Meter"
+            assert device.calibration_due == date(2020, 3, 15)
+            assert any("keeping first row" in r.message for r in caplog.records)
+        finally:
+            path.unlink(missing_ok=True)
+
 
 class TestSetLockerSlot:
     """Admin can reassign a free slot; cannot steal an occupied one."""

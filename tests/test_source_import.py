@@ -1124,3 +1124,48 @@ class TestCalibrationFormulaCells:
             )
         finally:
             path.unlink(missing_ok=True)
+
+    def test_import_snapshots_share_file_once(
+        self, db_session, monkeypatch
+    ):
+        """Values and formula views share one temp copy per import.
+
+        The share file is copied exactly once even when a blank cached
+        calibration value triggers the lazy formula-view read.
+        """
+        import smart_locker.sync.source_import as src
+
+        from datetime import date
+
+        DeviceRepository.create(
+            db_session,
+            name="Fluke 87V",
+            device_type="Multimeter",
+            pm_number="PM-001",
+            calibration_due=date(2026, 6, 30),
+            locker_slot=1,
+        )
+        db_session.commit()
+
+        wb = Workbook()
+        ws = wb.active
+        ws.append(["Equipment", "Calibration due"])
+        ws.append(["PM-001", "=DATE(2030,6,30)"])
+        path = Path(tempfile.mktemp(suffix=".xlsx"))
+        wb.save(path)
+        try:
+            calls: list = []
+            real_copy = src._copy_to_temp
+
+            def counting_copy(copy_path):
+                """Count snapshot copies, delegating to the real copy."""
+                calls.append(copy_path)
+                return real_copy(copy_path)
+
+            monkeypatch.setattr(src, "_copy_to_temp", counting_copy)
+            from smart_locker.database.engine import get_engine
+            result = import_from_source_excel(get_engine(), path)
+            assert result.errors == 0
+            assert len(calls) == 1
+        finally:
+            path.unlink(missing_ok=True)

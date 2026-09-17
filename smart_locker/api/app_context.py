@@ -412,7 +412,9 @@ class AppContext:
         not logout; the replace path keeps the admin session on the Users
         overlay. Replace-path results (success and failure) carry ``replaced``
         and ``replace_user_id`` so the frontend can route them to the Users
-        overlay without depending on request timing.
+        overlay without depending on request timing. The enrol path holds
+        ``user_admin_lock`` across the deactivated-name recheck and the
+        enroll commit so an admin deactivation cannot slip between them.
 
         Args:
             pending: The claimed registration window (``_dispatch_insert``
@@ -426,6 +428,7 @@ class AppContext:
         from smart_locker.database.repositories import DeviceRepository, UserRepository
         from smart_locker.security.hashing import compute_uid_hmac
         from smart_locker.security.key_manager import key_manager
+        from smart_locker.services.user_admin_lock import user_admin_lock
         from smart_locker.services.user_service import UserService, name_is_deactivated
 
         is_replace = pending is not None and pending.replace_user_id is not None
@@ -520,9 +523,39 @@ class AppContext:
                         })
                         return
 
-                    # Re-check at completion: the name may have been
-                    # deactivated after the window was armed.
-                    if name_is_deactivated(db_session, pending.display_name):
+                    # Re-check at completion under user_admin_lock (shared
+                    # with the admin deactivate endpoint): a deactivation
+                    # committing between this SELECT and the INSERT below
+                    # would otherwise let a deactivated name re-enrol. The
+                    # commit lands inside the lock — get_session would only
+                    # commit after the block exits. The outcome is computed
+                    # under the lock and broadcast after release
+                    # (broadcast_sse takes _sse_lock).
+                    with user_admin_lock:
+                        # Drop pre-lock reads so the recheck sees a
+                        # deactivation committed just before the lock.
+                        db_session.expire_all()
+                        if name_is_deactivated(db_session, pending.display_name):
+                            enrolled: dict | None = None
+                        else:
+                            user = user_svc.enroll_user(
+                                db_session,
+                                display_name=pending.display_name,
+                                card_uid_hex=uid,
+                                role=pending.role,
+                            )
+                            try:
+                                db_session.commit()
+                            except Exception:
+                                db_session.rollback()
+                                raise
+                            enrolled = {
+                                "id": user.id,
+                                "name": user.display_name,
+                                "role": user.role.value,
+                            }
+
+                    if enrolled is None:
                         logger.warning(
                             "Registration failed: name '%s' is deactivated.",
                             pending.display_name,
@@ -533,25 +566,15 @@ class AppContext:
                         })
                         return
 
-                    user = user_svc.enroll_user(
-                        db_session,
-                        display_name=pending.display_name,
-                        card_uid_hex=uid,
-                        role=pending.role,
-                    )
                     logger.info(
                         "Self-registered user: %s (id=%d, role=%s)",
-                        user.display_name,
-                        user.id,
-                        user.role.value,
+                        enrolled["name"],
+                        enrolled["id"],
+                        enrolled["role"],
                     )
                     self.broadcast_sse({
                         "event": "registration_success",
-                        "user": {
-                            "id": user.id,
-                            "name": user.display_name,
-                            "role": user.role.value,
-                        },
+                        "user": enrolled,
                         "replaced": False,
                     })
             except Exception:

@@ -391,7 +391,8 @@ class TestReplaceRaceGuards:
         js = _js()
         body = _fn_body(js, "async function usersReplaceCard(id) {", "\n}\n")
         assert "const epoch = usersReplaceEpoch" in body
-        epoch_branch = body.split("epoch !== usersReplaceEpoch", 1)[1]
+        # Last occurrence: the success-path stale branch (error branches guard first).
+        epoch_branch = body.rsplit("epoch !== usersReplaceEpoch", 1)[1]
         assert "apiCancelRegistration()" in epoch_branch.split("return;", 1)[0]
 
     def test_consumed_window_keeps_result_step(self):
@@ -403,6 +404,43 @@ class TestReplaceRaceGuards:
         assert tail.index("if (!S.usersReplacePending)") < tail.index(
             "showUsersStep('users-step-tap')"
         )
+
+    def test_stale_arm_cancel_gated_on_no_live_replace(self):
+        """A stale arm response cancels only when no fresh replace is live."""
+        js = _js()
+        body = _fn_body(js, "async function usersReplaceCard(id) {", "\n}\n")
+        branch = body.rsplit("epoch !== usersReplaceEpoch", 1)[1]
+        gate = branch.split("apiCancelRegistration()", 1)[0]
+        assert "if (" in gate
+        gate_if = gate.rsplit("if (", 1)[1]
+        assert "!S.usersReplacePending" in gate_if
+        assert "!isUsersTapStepShowing()" in gate_if
+        assert "!usersReplaceArming" in gate_if
+
+    def test_http_error_branch_guards_stale_epoch(self):
+        """A stale arm POST's HTTP failure stays silent on a fresh overlay."""
+        js = _js()
+        body = _fn_body(js, "async function usersReplaceCard(id) {", "\n}\n")
+        err_branch = body.split("if (!res.ok) {", 1)[1].split("} catch", 1)[0]
+        assert "epoch !== usersReplaceEpoch" in err_branch
+        assert err_branch.index("epoch !== usersReplaceEpoch") < err_branch.index(
+            "res.status === 409"
+        )
+        stale = err_branch.index("epoch !== usersReplaceEpoch")
+        stale_return = err_branch.index("return;", stale)
+        assert stale_return < err_branch.index("S.usersReplacePending = false")
+        assert stale_return < err_branch.index("errEl.textContent")
+
+    def test_catch_branch_guards_stale_epoch(self):
+        """A stale arm POST's network failure stays silent on a fresh overlay."""
+        js = _js()
+        body = _fn_body(js, "async function usersReplaceCard(id) {", "\n}\n")
+        catch_branch = body.split("} catch (_) {", 1)[1].split("\n  if (epoch", 1)[0]
+        assert "epoch !== usersReplaceEpoch" in catch_branch
+        stale = catch_branch.index("epoch !== usersReplaceEpoch")
+        stale_return = catch_branch.index("return;", stale)
+        assert stale_return < catch_branch.index("S.usersReplacePending = false")
+        assert stale_return < catch_branch.index("errEl.textContent")
 
     def test_disconnect_resets_session_ui(self):
         """reader_disconnected ends the session UI; nothing waits on a dead reader."""

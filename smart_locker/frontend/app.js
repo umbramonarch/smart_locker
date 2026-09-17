@@ -3399,6 +3399,10 @@ async function usersReplaceCard(id) {
     usersReplaceArming = false;
     setUsersReplaceButtonsDisabled(false);
     if (!res.ok) {
+      // Stale incarnation: the overlay closed and reopened while this POST
+      // was in flight, so its failure belongs to the old incarnation — stay
+      // silent instead of writing into the fresh overlay.
+      if (epoch !== usersReplaceEpoch) return;
       // Late loser of a double-arm race: the tap step is already up from the
       // winning POST, so leave the armed window alone and stay silent.
       if (res.status === 409 && isUsersTapStepShowing()) return;
@@ -3409,15 +3413,23 @@ async function usersReplaceCard(id) {
   } catch (_) {
     usersReplaceArming = false;
     setUsersReplaceButtonsDisabled(false);
+    // Stale incarnation (the overlay closed mid-POST): stay silent — the
+    // network failure belongs to the old incarnation, not the fresh overlay.
+    if (epoch !== usersReplaceEpoch) return;
     S.usersReplacePending = false;
     errEl.textContent = 'Could not replace card.';
     return;
   }
   if (epoch !== usersReplaceEpoch) {
     // The overlay closed while this POST was in flight: the server window
-    // it just armed is orphaned (the close-time cancel raced it), so
-    // release it instead of showing the tap step.
-    apiCancelRegistration();
+    // it just armed is orphaned (the close-time cancel raced it) — unless a
+    // fresh incarnation already holds a live window, in which case this
+    // POST's orphan is necessarily already dead and /api/register/cancel
+    // clears whatever window is live, not this POST's. Cancel only when
+    // nothing is live, and never show the tap step here.
+    if (!S.usersReplacePending && !isUsersTapStepShowing() && !usersReplaceArming) {
+      apiCancelRegistration();
+    }
     return;
   }
   if (!S.usersReplacePending) {

@@ -843,3 +843,50 @@ class TestEnrollRechecksDeactivatedName:
         assert "deactivated" in events[0]["reason"].lower()
         active = UserRepository.list_active(db_session)
         assert [u.display_name for u in active] == ["Admin"]
+
+
+class TestEnrollSerializesOnUserAdminLock:
+    """The tap-time enroll recheck + commit must hold user_admin_lock."""
+
+    def test_enroll_tap_blocks_while_lock_held(
+        self, db_session, enc_key, hmac_key, monkeypatch
+    ):
+        """Holding user_admin_lock stalls the tap; release completes enroll.
+
+        Proves the deactivated-name recheck and the enroll commit run
+        under the same lock as the admin deactivate endpoint, so a
+        deactivation cannot commit between the SELECT and the INSERT.
+        Determinism via events + join timeouts only — no sleeps.
+        """
+        from smart_locker.services.user_admin_lock import user_admin_lock
+
+        ctx = _make_ctx(monkeypatch)
+        ctx.pending_registration = PendingRegistration("Bob")
+        started = threading.Event()
+        errors: list[BaseException] = []
+
+        def tap() -> None:
+            started.set()
+            try:
+                _run(ctx, "B0B0B0B0")
+            except BaseException as exc:
+                errors.append(exc)
+
+        user_admin_lock.acquire()
+        try:
+            worker = threading.Thread(target=tap)
+            worker.start()
+            assert started.wait(timeout=15)
+            worker.join(timeout=5)
+            assert worker.is_alive()
+            assert _events(ctx) == []
+        finally:
+            user_admin_lock.release()
+        worker.join(timeout=15)
+        assert not worker.is_alive()
+        assert errors == []
+        events = _events(ctx)
+        assert events[0]["event"] == "registration_success"
+        assert events[0]["user"]["name"] == "Bob"
+        db_session.expire_all()
+        assert UserRepository.find_by_display_name(db_session, "Bob") is not None
