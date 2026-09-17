@@ -20,6 +20,7 @@ from smart_locker.database.repositories import DeviceRepository, RegistrantRepos
 from smart_locker.security.hashing import compute_uid_hmac
 
 import smart_locker.api.app_context as ctx_module
+import smart_locker.api.routes as routes_module
 
 class TestDeviceTagBindApi:
     """Auth gates for bind/unbind, has_tag on the kiosk list, duplicate names."""
@@ -832,6 +833,61 @@ class TestRegisterDuplicatePmApi:
         )
         assert resp.status_code == 409
         assert "already in the locker" in resp.json()["detail"]
+
+
+class TestRegisterNfcRaceRollback:
+    """Register is all-or-nothing when a rival NFC window arms mid-request."""
+
+    def test_arm_conflict_after_insert_rolls_back_row(
+        self, client, mock_context, admin_user, db_session, monkeypatch, tmp_path
+    ):
+        """409 from the late arm leaves no row and no write-back; retry works."""
+        wb = Workbook()
+        ws = wb.active
+        ws.append(["Equipment", "Name", "Manufacturer", "Model", "Location"])
+        ws.append(["PM-100", "Zeta Scope", "Keysight", "DSOX", "Locker"])
+        path = tmp_path / "device-list.xlsx"
+        wb.save(path)
+        monkeypatch.setattr("config.settings.SOURCE_EXCEL_PATH", str(path))
+        writebacks = []
+        monkeypatch.setattr(
+            "smart_locker.sync.location_writeback.schedule_write_location",
+            lambda: writebacks.append(1),
+        )
+        mock_context.session_mgr.start_session(admin_user)
+        mock_context.pending_tag_bind = None
+        mock_context.pending_registration = None
+
+        real_arm = routes_module._arm_tag_bind
+        raced = []
+
+        def racing_arm(bind):
+            # Simulate a rival window arming after this request's early
+            # conflict check but before its late arm (the Excel+insert gap).
+            if not raced:
+                raced.append(1)
+                mock_context.pending_registration = PendingRegistration("Rival")
+            return real_arm(bind)
+
+        monkeypatch.setattr("smart_locker.api.routes._arm_tag_bind", racing_arm)
+
+        resp = client.post(
+            "/api/admin/devices/register",
+            json={"pm_number": "PM-100", "locker_slot": 5},
+        )
+        assert resp.status_code == 409
+        assert DeviceRepository.find_by_pm(db_session, "PM-100") is None
+        assert writebacks == []
+
+        # Slot is free and the PM retries clean once the rival clears.
+        mock_context.pending_registration = None
+        retry = client.post(
+            "/api/admin/devices/register",
+            json={"pm_number": "PM-100", "locker_slot": 5},
+        )
+        assert retry.status_code == 200
+        assert DeviceRepository.find_by_pm(db_session, "PM-100") is not None
+        assert writebacks == [1]
 
 
 class TestMaintenanceApi:

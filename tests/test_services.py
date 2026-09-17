@@ -34,6 +34,9 @@ class TestLockerService:
             db_session, name="Multimeter", device_type="measurement",
             pm_number="PM-001", serial_number="SN001",
         )
+        DeviceRepository.bind_tag(
+            db_session, device, compute_uid_hmac("A1B2C3D4-TAG", hmac_key)
+        )
         db_session.flush()
 
         mgr = SessionManager(timeout_seconds=60)
@@ -81,6 +84,12 @@ class TestLockerService:
         user, device1, session = self._setup(db_session, enc_key, hmac_key)
         device2 = DeviceRepository.create(db_session, name="Scope", device_type="measurement", pm_number="PM-002", serial_number="SN002")
         device3 = DeviceRepository.create(db_session, name="PSU", device_type="power", pm_number="PM-003", serial_number="SN003")
+        DeviceRepository.bind_tag(
+            db_session, device2, compute_uid_hmac("SCOPE-TAG", hmac_key)
+        )
+        DeviceRepository.bind_tag(
+            db_session, device3, compute_uid_hmac("PSU-TAG", hmac_key)
+        )
         db_session.flush()
 
         assert LockerService.borrow_device(db_session, session, device1.id) is True
@@ -97,6 +106,9 @@ class TestLockerService:
 
         user1, device1, session1 = self._setup(db_session, enc_key, hmac_key)
         device2 = DeviceRepository.create(db_session, name="Scope", device_type="measurement", pm_number="PM-002", serial_number="SN002")
+        DeviceRepository.bind_tag(
+            db_session, device2, compute_uid_hmac("SCOPE-TAG", hmac_key)
+        )
         db_session.flush()
 
         assert LockerService.borrow_device(db_session, session1, device1.id) is True

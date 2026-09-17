@@ -223,6 +223,18 @@ class AppContext:
             except Exception:
                 logger.debug("SSE fan-out drop", exc_info=True)
 
+    def _drop_nfc_windows_on_session_end(self) -> None:
+        """Clear armed NFC windows when the session ends without a tap.
+
+        Reader disconnect and session timeout share this: a pending card
+        registration/replacement or tag bind must not outlive the session
+        that armed it — otherwise the next fresh tap would complete an
+        operation nobody is supervising.
+        """
+        self.admin_overlay_open = False
+        assign_pending_tag_bind(self, None)
+        assign_pending_registration(self, None)
+
     async def _nfc_bridge_loop(self) -> None:
         """Poll NFC events and push SSE events to the browser.
 
@@ -244,8 +256,7 @@ class AppContext:
             # Check for session timeout transition
             currently_active = self.session_mgr.has_active_session
             if had_session and not currently_active:
-                self.admin_overlay_open = False
-                assign_pending_tag_bind(self, None)
+                self._drop_nfc_windows_on_session_end()
                 self.broadcast_sse({"event": "session_timeout"})
                 logger.info("Session timeout detected by NFC bridge.")
             had_session = currently_active
@@ -278,8 +289,7 @@ class AppContext:
                     logger.warning("NFC reader disconnected.")
                     if self.session_mgr.has_active_session:
                         self.session_mgr.end_session()
-                    self.admin_overlay_open = False
-                    assign_pending_tag_bind(self, None)
+                    self._drop_nfc_windows_on_session_end()
                     self.broadcast_sse({"event": "reader_disconnected"})
                 elif event.event_type == ReaderEventType.CONNECTED:
                     logger.info("NFC reader reconnected.")
@@ -402,7 +412,9 @@ class AppContext:
         not logout; the replace path keeps the admin session on the Users
         overlay. Replace-path results (success and failure) carry ``replaced``
         and ``replace_user_id`` so the frontend can route them to the Users
-        overlay without depending on request timing.
+        overlay without depending on request timing. The enrol path holds
+        ``user_admin_lock`` across the deactivated-name recheck and the
+        enroll commit so an admin deactivation cannot slip between them.
 
         Args:
             pending: The claimed registration window (``_dispatch_insert``
@@ -416,7 +428,8 @@ class AppContext:
         from smart_locker.database.repositories import DeviceRepository, UserRepository
         from smart_locker.security.hashing import compute_uid_hmac
         from smart_locker.security.key_manager import key_manager
-        from smart_locker.services.user_service import UserService
+        from smart_locker.services.user_admin_lock import user_admin_lock
+        from smart_locker.services.user_service import UserService, name_is_deactivated
 
         is_replace = pending is not None and pending.replace_user_id is not None
         try:
@@ -510,25 +523,58 @@ class AppContext:
                         })
                         return
 
-                    user = user_svc.enroll_user(
-                        db_session,
-                        display_name=pending.display_name,
-                        card_uid_hex=uid,
-                        role=pending.role,
-                    )
+                    # Re-check at completion under user_admin_lock (shared
+                    # with the admin deactivate endpoint): a deactivation
+                    # committing between this SELECT and the INSERT below
+                    # would otherwise let a deactivated name re-enrol. The
+                    # commit lands inside the lock — get_session would only
+                    # commit after the block exits. The outcome is computed
+                    # under the lock and broadcast after release
+                    # (broadcast_sse takes _sse_lock).
+                    with user_admin_lock:
+                        # Drop pre-lock reads so the recheck sees a
+                        # deactivation committed just before the lock.
+                        db_session.expire_all()
+                        if name_is_deactivated(db_session, pending.display_name):
+                            enrolled: dict | None = None
+                        else:
+                            user = user_svc.enroll_user(
+                                db_session,
+                                display_name=pending.display_name,
+                                card_uid_hex=uid,
+                                role=pending.role,
+                            )
+                            try:
+                                db_session.commit()
+                            except Exception:
+                                db_session.rollback()
+                                raise
+                            enrolled = {
+                                "id": user.id,
+                                "name": user.display_name,
+                                "role": user.role.value,
+                            }
+
+                    if enrolled is None:
+                        logger.warning(
+                            "Registration failed: name '%s' is deactivated.",
+                            pending.display_name,
+                        )
+                        self.broadcast_sse({
+                            "event": "registration_failed",
+                            "reason": "This name is deactivated. Ask an admin to re-enrol under a new name.",
+                        })
+                        return
+
                     logger.info(
                         "Self-registered user: %s (id=%d, role=%s)",
-                        user.display_name,
-                        user.id,
-                        user.role.value,
+                        enrolled["name"],
+                        enrolled["id"],
+                        enrolled["role"],
                     )
                     self.broadcast_sse({
                         "event": "registration_success",
-                        "user": {
-                            "id": user.id,
-                            "name": user.display_name,
-                            "role": user.role.value,
-                        },
+                        "user": enrolled,
                         "replaced": False,
                     })
             except Exception:

@@ -712,3 +712,181 @@ class TestReplaceWindowBoundary:
         assert events[0]["event"] == "registration_success"
         assert events[0]["replaced"] is True
         assert events[0]["user"]["name"] == "Alice"
+
+
+async def _wait_for_sse(ctx: AppContext, name: str, timeout: float = 10.0) -> dict:
+    """Poll the SSE queue until an event named ``name`` arrives."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        for event in _events(ctx):
+            if event.get("event") == name:
+                return event
+        await asyncio.sleep(0.05)
+    raise TimeoutError(f"SSE {name} never arrived")
+
+
+def _admin_and_alice(db_session, enc_key, hmac_key):
+    """Create an active admin and an active Alice; returns (admin, alice)."""
+    admin = UserRepository.create(
+        db_session,
+        display_name="Admin",
+        uid_hmac=compute_uid_hmac("ADADADAD", hmac_key),
+        encrypted_card_uid=encrypt("ADADADAD", enc_key),
+        role="admin",
+    )
+    alice = UserRepository.create(
+        db_session,
+        display_name="Alice",
+        uid_hmac=compute_uid_hmac("A1B2C3D4", hmac_key),
+        encrypted_card_uid=encrypt("A1B2C3D4", enc_key),
+    )
+    db_session.commit()
+    return admin, alice
+
+
+class TestSessionEndClearsPendingRegistration:
+    """Disconnect/timeout must not leave card registration armed."""
+
+    def test_drop_helper_clears_both_windows(self, monkeypatch):
+        """The shared cleanup drops bind + registration + overlay flag."""
+        ctx = _make_ctx(monkeypatch)
+        ctx.admin_overlay_open = True
+        assign_pending_registration(ctx, PendingRegistration("Bob"))
+        assign_pending_tag_bind(ctx, PendingTagBind(device_id=1))
+        ctx._drop_nfc_windows_on_session_end()
+        assert ctx.pending_registration is None
+        assert ctx.pending_tag_bind is None
+        assert ctx.admin_overlay_open is False
+
+    def test_bridge_disconnect_clears_pending_registration(
+        self, db_session, enc_key, hmac_key, monkeypatch
+    ):
+        """A disconnect ends the session and disarms registration + bind.
+
+        Otherwise a fresh tap within 60s of reconnect could complete an
+        armed replace with no admin session left.
+        """
+        from smart_locker.nfc.reader_observer import ReaderEvent, ReaderEventType
+
+        admin, alice = _admin_and_alice(db_session, enc_key, hmac_key)
+        ctx = _make_ctx(monkeypatch)
+        ctx.session_mgr.start_session(admin)
+        ctx.admin_overlay_open = True
+        assign_pending_registration(
+            ctx, PendingRegistration("Alice", replace_user_id=alice.id)
+        )
+        assign_pending_tag_bind(ctx, PendingTagBind(device_id=1))
+
+        async def drive():
+            task = asyncio.create_task(ctx._nfc_bridge_loop())
+            try:
+                ctx.reader._event_queue.put(
+                    ReaderEvent(ReaderEventType.DISCONNECTED, "test")
+                )
+                await _wait_for_sse(ctx, "reader_disconnected")
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+        asyncio.run(drive())
+        assert not ctx.session_mgr.has_active_session
+        assert ctx.pending_registration is None
+        assert ctx.pending_tag_bind is None
+        assert ctx.admin_overlay_open is False
+
+    def test_bridge_timeout_clears_pending_registration(
+        self, db_session, enc_key, hmac_key, monkeypatch
+    ):
+        """A session timeout disarms registration + bind like a disconnect."""
+        admin, alice = _admin_and_alice(db_session, enc_key, hmac_key)
+        ctx = _make_ctx(monkeypatch)
+        ctx.session_mgr.start_session(admin)
+        ctx.admin_overlay_open = True
+        assign_pending_registration(
+            ctx, PendingRegistration("Alice", replace_user_id=alice.id)
+        )
+        assign_pending_tag_bind(ctx, PendingTagBind(device_id=1))
+
+        async def drive():
+            task = asyncio.create_task(ctx._nfc_bridge_loop())
+            try:
+                # Let the loop latch the live session before it ends.
+                await asyncio.sleep(1.5)
+                ctx.session_mgr.end_session()
+                await _wait_for_sse(ctx, "session_timeout")
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+        asyncio.run(drive())
+        assert ctx.pending_registration is None
+        assert ctx.pending_tag_bind is None
+        assert ctx.admin_overlay_open is False
+
+
+class TestEnrollRechecksDeactivatedName:
+    """Completion must recheck the deactivated-name restriction, not just the arm."""
+
+    def test_enroll_after_mid_window_deactivation_fails(
+        self, db_session, enc_key, hmac_key, monkeypatch
+    ):
+        """Deactivating between arm and tap refuses the enrollment."""
+        _admin, alice = _admin_and_alice(db_session, enc_key, hmac_key)
+        ctx = _make_ctx(monkeypatch)
+        ctx.pending_registration = PendingRegistration("Alice")
+        # Overlapping admin op: deactivate before the tap lands.
+        UserRepository.deactivate(db_session, alice)
+        db_session.commit()
+        _run(ctx, "F5F5F5F5")
+        events = _events(ctx)
+        assert events[0]["event"] == "registration_failed"
+        assert "deactivated" in events[0]["reason"].lower()
+        active = UserRepository.list_active(db_session)
+        assert [u.display_name for u in active] == ["Admin"]
+
+
+class TestEnrollSerializesOnUserAdminLock:
+    """The tap-time enroll recheck + commit must hold user_admin_lock."""
+
+    def test_enroll_tap_blocks_while_lock_held(
+        self, db_session, enc_key, hmac_key, monkeypatch
+    ):
+        """Holding user_admin_lock stalls the tap; release completes enroll.
+
+        Proves the deactivated-name recheck and the enroll commit run
+        under the same lock as the admin deactivate endpoint, so a
+        deactivation cannot commit between the SELECT and the INSERT.
+        Determinism via events + join timeouts only — no sleeps.
+        """
+        from smart_locker.services.user_admin_lock import user_admin_lock
+
+        ctx = _make_ctx(monkeypatch)
+        ctx.pending_registration = PendingRegistration("Bob")
+        started = threading.Event()
+        errors: list[BaseException] = []
+
+        def tap() -> None:
+            started.set()
+            try:
+                _run(ctx, "B0B0B0B0")
+            except BaseException as exc:
+                errors.append(exc)
+
+        user_admin_lock.acquire()
+        try:
+            worker = threading.Thread(target=tap)
+            worker.start()
+            assert started.wait(timeout=15)
+            worker.join(timeout=5)
+            assert worker.is_alive()
+            assert _events(ctx) == []
+        finally:
+            user_admin_lock.release()
+        worker.join(timeout=15)
+        assert not worker.is_alive()
+        assert errors == []
+        events = _events(ctx)
+        assert events[0]["event"] == "registration_success"
+        assert events[0]["user"]["name"] == "Bob"
+        db_session.expire_all()
+        assert UserRepository.find_by_display_name(db_session, "Bob") is not None

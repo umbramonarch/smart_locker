@@ -51,6 +51,7 @@ def race_db(tmp_path):
     dev = DeviceRepository.create(
         setup, name="Meter", device_type="Meter", pm_number="PM-RACE"
     )
+    DeviceRepository.bind_tag(setup, dev, "tag-race")
     setup.commit()
     ids = (u1.id, u2.id, u3.id, dev.id)
     setup.close()

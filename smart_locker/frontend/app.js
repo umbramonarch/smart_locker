@@ -3107,6 +3107,10 @@ let usersList = [];
 let usersTargetId = null;
 /** @type {boolean} Replace-card POST in flight; extra clicks are ignored. */
 let usersReplaceArming = false;
+/** @type {number} Bumped whenever the Users overlay hides; a late arm
+ * response from a previous incarnation must release its server window
+ * instead of showing the tap step. */
+let usersReplaceEpoch = 0;
 /** @type {number|null} Users overlay auto-return timer (success/error steps). */
 let usersStepTimer = null;
 /** @type {number|null} Fallback idle timer after self-deactivate (SSE loss). */
@@ -3248,6 +3252,9 @@ function hideUsersOverlay() {
   clearTimeout(usersStepTimer);
   usersStepTimer = null;
   S.usersReplacePending = false;
+  // Invalidate any arm POST still in flight: its late response must not
+  // resurrect the tap step on the next overlay incarnation.
+  usersReplaceEpoch++;
   const overlay = document.getElementById('overlay-users');
   if (!overlay || overlay.style.display === 'none') return;
   overlay.classList.remove('visible');
@@ -3385,12 +3392,17 @@ async function usersReplaceCard(id) {
   // request arrives, so a fast tap's SSE result can land before this fetch
   // resolves. Cleared on every HTTP failure below.
   S.usersReplacePending = true;
+  const epoch = usersReplaceEpoch;
   try {
     const res = await fetch(`/api/admin/users/${id}/replace-card`, { method: 'POST' });
     const data = await res.json().catch(() => ({}));
     usersReplaceArming = false;
     setUsersReplaceButtonsDisabled(false);
     if (!res.ok) {
+      // Stale incarnation: the overlay closed and reopened while this POST
+      // was in flight, so its failure belongs to the old incarnation — stay
+      // silent instead of writing into the fresh overlay.
+      if (epoch !== usersReplaceEpoch) return;
       // Late loser of a double-arm race: the tap step is already up from the
       // winning POST, so leave the armed window alone and stay silent.
       if (res.status === 409 && isUsersTapStepShowing()) return;
@@ -3401,8 +3413,28 @@ async function usersReplaceCard(id) {
   } catch (_) {
     usersReplaceArming = false;
     setUsersReplaceButtonsDisabled(false);
+    // Stale incarnation (the overlay closed mid-POST): stay silent — the
+    // network failure belongs to the old incarnation, not the fresh overlay.
+    if (epoch !== usersReplaceEpoch) return;
     S.usersReplacePending = false;
     errEl.textContent = 'Could not replace card.';
+    return;
+  }
+  if (epoch !== usersReplaceEpoch) {
+    // The overlay closed while this POST was in flight: the server window
+    // it just armed is orphaned (the close-time cancel raced it) — unless a
+    // fresh incarnation already holds a live window, in which case this
+    // POST's orphan is necessarily already dead and /api/register/cancel
+    // clears whatever window is live, not this POST's. Cancel only when
+    // nothing is live, and never show the tap step here.
+    if (!S.usersReplacePending && !isUsersTapStepShowing() && !usersReplaceArming) {
+      apiCancelRegistration();
+    }
+    return;
+  }
+  if (!S.usersReplacePending) {
+    // A fast tap's SSE result already consumed the window and showed the
+    // result step; stay there instead of re-showing "tap card".
     return;
   }
   showUsersStep('users-step-tap');
@@ -3808,6 +3840,9 @@ function connectSSE() {
   source.addEventListener('reader_disconnected', () => {
     if (S.updating) return;
     showToast('NFC reader disconnected', 'error');
+    // The backend ends the session and drops armed NFC windows, so reset
+    // the UI the same way: no replace/bind screen may wait on a dead reader.
+    endSession(true, true);
   });
 
   source.addEventListener('reader_connected', () => {

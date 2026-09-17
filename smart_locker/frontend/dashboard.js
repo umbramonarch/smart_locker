@@ -453,14 +453,15 @@ function calRowClass(d) {
 }
 
 /**
- * Update the header calibration badge. Counts Inventory rows when the
- * catalog loaded, otherwise Locker rows; shows "N calibration" and turns
+ * Update the header calibration badge from the visible tab's rows: Locker
+ * rows on the Locker tab, catalog rows on the Inventory tab when loaded
+ * (Locker rows while the share is down). Shows "N calibration" and turns
  * red when any row is overdue.
  */
 function updateCalBadge() {
   const el = document.getElementById('cal-badge');
   if (!el) return;
-  const rows = (!inventoryError && inventoryData.length)
+  const rows = (activeTabName() === 'inventory' && !inventoryError && inventoryData.length)
     ? inventoryData
     : devicesData;
   const flagged = rows.filter(d =>
@@ -505,11 +506,13 @@ function renderInventory() {
 
   count.textContent = `${data.length} / ${inventoryData.length}`;
 
+  // The badge counts the global caches, so refresh it even when the
+  // visible rows are unchanged and the tbody rebuild below is skipped.
+  updateCalBadge();
+
   const stamp = `${inventoryError}|${q}|${s.key}|${s.dir}|${data.length}|${JSON.stringify(data)}`;
   if (stamp === lastInventoryStamp) return;
   lastInventoryStamp = stamp;
-
-  updateCalBadge();
 
   if (data.length === 0) {
     tbody.innerHTML = '';
@@ -555,11 +558,13 @@ function renderDevices() {
   const avail = devicesData.filter(d => d.status === 'available').length;
   count.textContent = `${avail} available / ${devicesData.length} total`;
 
+  // The badge counts the global caches, so refresh it even when the
+  // visible rows are unchanged and the tbody rebuild below is skipped.
+  updateCalBadge();
+
   const stamp = `${activeFilter}|${s.key}|${s.dir}|${data.length}|${JSON.stringify(data)}`;
   if (stamp === lastDevicesStamp) return;
   lastDevicesStamp = stamp;
-
-  updateCalBadge();
 
   if (data.length === 0) {
     tbody.innerHTML = '';

@@ -438,6 +438,9 @@ class TestWritebackWiring:
             pm_number="PM-001",
             locker_slot=1,
         )
+        DeviceRepository.bind_tag(
+            db_session, device, compute_uid_hmac("METER-TAG", hmac_key)
+        )
         db_session.flush()
         session = SessionManager(timeout_seconds=60).start_session(user)
 
@@ -727,6 +730,9 @@ class TestWritebackOffRequestPath:
             device_type="general",
             pm_number="PM-001",
             locker_slot=1,
+        )
+        DeviceRepository.bind_tag(
+            db_session, device, compute_uid_hmac("METER-TAG", hmac_key)
         )
         db_session.flush()
         session = SessionManager(timeout_seconds=60).start_session(user)

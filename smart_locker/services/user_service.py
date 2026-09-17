@@ -21,6 +21,27 @@ from smart_locker.security.hashing import compute_uid_hmac
 logger = logging.getLogger(__name__)
 
 
+def name_is_deactivated(db_session: Session, name: str) -> bool:
+    """Whether an inactive user row already holds this display name.
+
+    Shared by the enrollment arms (HTTP 403) and the NFC-tap completion
+    path (``registration_failed`` SSE) so a name deactivated after the
+    window was armed still cannot re-enrol. Uses the duplicate-tolerant
+    ``display_names_lower`` set — ``find_by_display_name`` would raise on
+    duplicate display names.
+
+    Args:
+        db_session: Active database session.
+        name: Display name as submitted (compared case-insensitively).
+
+    Returns:
+        True if an inactive user holds this name.
+    """
+    return name.strip().lower() in UserRepository.display_names_lower(
+        db_session, False
+    )
+
+
 @dataclass
 class PublicUserInfo:
     """Public-facing user information returned to non-admin callers.

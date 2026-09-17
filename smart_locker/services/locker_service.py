@@ -60,7 +60,9 @@ class LockerService:
         Guards and commit run under ``user_admin_lock`` so a concurrent
         deactivation cannot interleave; the holder's active flag is
         re-read from the database because the session user object may
-        predate deactivation.
+        predate deactivation. The device must have a sticker bound —
+        the route checks this too, but only the in-lock recheck closes
+        the unbind race.
 
         Args:
             db_session: Active database session.
@@ -108,6 +110,15 @@ class LockerService:
                     device_id,
                     device.name,
                     device.status.value,
+                )
+                return False
+            if device.tag_hmac is None:
+                # Re-checked here (not only in the route) so an unbind
+                # committing after the route check still refuses the loan.
+                logger.warning(
+                    "Borrow failed: device %d (%s) has no sticker bound.",
+                    device_id,
+                    device.name,
                 )
                 return False
             DeviceRepository.borrow(db_session, device, user.id)
