@@ -8,10 +8,12 @@ Project: smart_locker/sync
 Notes: Called by the scheduler, ``python -m scripts.sync_source``, or
        POST /api/admin/sync-source. Status, borrower, slot, image,
        description, and tag_hmac are never overwritten. A Slot/cabinet
-       column is unused. lookup_catalog_by_pm is the Register Device lookup;
+       column is unused. lookup_locker_catalog_by_pm is the Register Device
+       lookup (locker row preferred, first match anywhere as fallback);
        list_in_locker_catalog is its "pick from the Excel locker list" feed.
-       Calibration cells: blank clears the stored date, unparsable text keeps
-       it (warning logged), no Calibration column leaves it alone.
+       Calibration cells: blank clears the stored date, unparsable text or
+       a formula without a cached result keeps it (warning logged), no
+       Calibration column leaves it alone.
 """
 
 import logging
@@ -421,11 +423,71 @@ def _load_rows(
         tmp_path.unlink(missing_ok=True)
 
 
+def _calibration_formula_rows(
+    path: Path,
+    sheet_name: str | None,
+    cal_idx: int,
+) -> set[int]:
+    """Return rows-list indexes whose calibration cell holds a formula.
+
+    Loads the formula view (``data_only=False``) of the workbook on a temp
+    copy, mirroring ``_load_rows`` so a read succeeds while Excel has the
+    share file open. Indexes match the ``_load_rows`` rows list (header is
+    0, first data row is 1). Any failure returns an empty set and warns —
+    the import then treats blanks as before.
+
+    Args:
+        path: Path to the source ``.xlsx``.
+        sheet_name: Sheet to read, or None for the active sheet.
+        cal_idx: 0-based calibration column in the values tuples.
+
+    Returns:
+        Set of rows-list indexes with a formula calibration cell.
+    """
+    tmp_fd, tmp_path_str = tempfile.mkstemp(suffix=".xlsx")
+    tmp_path = Path(tmp_path_str)
+    try:
+        os.close(tmp_fd)
+        tmp_fd = -1
+        shutil.copy2(path, tmp_path)
+    except (PermissionError, OSError):
+        tmp_path.unlink(missing_ok=True)
+        logger.warning("Formula view unreadable (locked): %s", path)
+        return set()
+    finally:
+        if tmp_fd >= 0:
+            os.close(tmp_fd)
+    try:
+        wb = load_workbook(tmp_path, read_only=True, data_only=False)
+        if sheet_name:
+            if sheet_name not in wb.sheetnames:
+                wb.close()
+                return set()
+            ws = wb[sheet_name]
+        else:
+            ws = wb.active
+        found: set[int] = set()
+        for sheet_row, cells in enumerate(ws.iter_rows(), start=1):
+            if sheet_row == 1 or cal_idx >= len(cells):
+                continue
+            value = cells[cal_idx].value
+            if isinstance(value, str) and value.startswith("="):
+                found.add(sheet_row - 1)
+        wb.close()
+        return found
+    except (OSError, BadZipFile, InvalidFileException) as e:
+        logger.warning("Formula view unreadable: %s", e)
+        return set()
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
 def _catalog_from_row(
     row,
     cols: dict[str, int | None],
     compose_name: bool,
     default_type: str,
+    calibration_is_formula: bool = False,
 ) -> CatalogRow | None:
     """Parse one Excel data row into catalog fields, or None if PM is empty.
 
@@ -434,6 +496,11 @@ def _catalog_from_row(
         cols: Column index map from ``_detect_columns``.
         compose_name: True when the sheet has no name column (use manufacturer + model).
         default_type: Fallback device_type.
+        calibration_is_formula: True when the calibration cell holds a
+            formula (import passes this from the formula view). A blank
+            cached value over a formula keeps the previous date instead
+            of clearing it — openpyxl drops cached results on save, so a
+            blank there means "Excel has not recalculated", not deletion.
 
     Returns:
         CatalogRow, or None when the PM cell is empty.
@@ -475,8 +542,15 @@ def _catalog_from_row(
     if cols["calibration"] is not None:
         raw = row[cols["calibration"]]
         if raw is None or str(raw).strip() == "":
-            # Blank cell in an existing column clears the date on next Sync.
-            present.add("calibration_due")
+            if calibration_is_formula:
+                logger.warning(
+                    "Calibration for %s is a formula without a cached "
+                    "result; keeping previous value.",
+                    pm_number,
+                )
+            else:
+                # Blank cell in an existing column clears the date on next Sync.
+                present.add("calibration_due")
         else:
             calibration_due = parse_date(raw)
             if calibration_due is not None:
@@ -563,6 +637,59 @@ def lookup_catalog_by_pm(
         if catalog is not None and pm_match_key(catalog.pm_number) == want:
             return catalog
     return None
+
+
+def lookup_locker_catalog_by_pm(
+    source_path: str | Path,
+    pm_number: str,
+    sheet_name: str | None = None,
+    default_type: str = "general",
+    column_overrides: dict[str, str] | None = None,
+) -> CatalogRow | None:
+    """Return catalog fields for one PM, preferring this kiosk's locker row.
+
+    Same row the Register Device picker shows: the first sheet-order match
+    whose Location passes ``is_own_locker_location``. When no locker row
+    matches (or the sheet has no Location column), falls back to the first
+    match anywhere so a manually entered PM still registers.
+
+    Args:
+        source_path: Path to ``device-list.xlsx``.
+        pm_number: Equipment number to match (stripped; compared as stored).
+        sheet_name: Sheet to read (default: active sheet).
+        default_type: Device type when the sheet has no category column.
+        column_overrides: Optional header-name overrides.
+
+    Returns:
+        CatalogRow if the PM is on the sheet, otherwise None.
+
+    Raises:
+        CatalogReadError: File missing, locked, empty, or no PM column.
+    """
+    rows, cols = _load_catalog(source_path, sheet_name, column_overrides)
+
+    want = pm_match_key(pm_number)
+    compose_name = cols["name"] is None
+    has_location = cols["location"] is not None
+    fallback: CatalogRow | None = None
+    for row in rows[1:]:
+        catalog = _catalog_from_row(row, cols, compose_name, default_type)
+        if catalog is None or pm_match_key(catalog.pm_number) != want:
+            continue
+        if not has_location or is_own_locker_location(
+            _cell_str(row, cols["location"]) or ""
+        ):
+            if fallback is not None:
+                logger.warning(
+                    "Duplicate PM %s — registering the locker row, "
+                    "ignoring the '%s' row.",
+                    catalog.pm_number,
+                    fallback.name,
+                )
+            return catalog
+        if fallback is None:
+            fallback = catalog
+    return fallback
 
 
 def list_in_locker_catalog(
@@ -681,8 +808,28 @@ def import_from_source_excel(
         )
 
     parsed: list[CatalogRow] = []
-    for row in rows[1:]:
-        catalog = _catalog_from_row(row, cols, compose_name, default_type)
+    formula_rows: set[int] | None = None
+    for index, row in enumerate(rows[1:], start=1):
+        if (
+            formula_rows is None
+            and cols["calibration"] is not None
+            and (row[cols["calibration"]] is None
+                 or str(row[cols["calibration"]]).strip() == "")
+        ):
+            # First blank cached value: check once whether any calibration
+            # cell is a formula whose result Excel has not recalculated.
+            formula_rows = _calibration_formula_rows(
+                path, sheet_name, cols["calibration"]
+            )
+        catalog = _catalog_from_row(
+            row,
+            cols,
+            compose_name,
+            default_type,
+            calibration_is_formula=(
+                formula_rows is not None and index in formula_rows
+            ),
+        )
         if catalog is None:
             continue
         parsed.append(catalog)

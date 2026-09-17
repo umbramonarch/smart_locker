@@ -279,6 +279,36 @@ class TestRegisterLockerDevice:
         finally:
             path.unlink(missing_ok=True)
 
+    def test_duplicate_pm_prefers_locker_row(self, db_session):
+        """With duplicate PM rows, registration copies the Locker row the picker shows."""
+        path = _create_excel([
+            ["Equipment", "Name", "Location", "Calibration Due"],
+            ["PM-001", "Other Meter", "Jack B.", "15.03.2030"],
+            ["PM-001", "Locker Meter", "Locker", "15.03.2020"],
+        ])
+        try:
+            shown = unregistered_locker_rows(db_session, path)
+            assert [r.pm_number for r in shown] == ["PM-001"]
+            assert shown[0].name == "Locker Meter"
+            device = register_locker_device(db_session, path, "PM-001", locker_slot=1)
+            assert device.name == "Locker Meter"
+            assert device.calibration_due == date(2020, 3, 15)
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_non_locker_pm_still_registers_from_only_row(self, db_session):
+        """A PM with no Locker row falls back to its only sheet row."""
+        path = _create_excel([
+            ["Equipment", "Name", "Location", "Calibration Due"],
+            ["PM-001", "Field Meter", "Jack B.", "15.03.2030"],
+        ])
+        try:
+            device = register_locker_device(db_session, path, "PM-001", locker_slot=1)
+            assert device.name == "Field Meter"
+            assert device.calibration_due == date(2030, 3, 15)
+        finally:
+            path.unlink(missing_ok=True)
+
 
 class TestSetLockerSlot:
     """Admin can reassign a free slot; cannot steal an occupied one."""

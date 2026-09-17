@@ -1079,3 +1079,48 @@ class TestCalibrationBlankCell:
             assert device.calibration_due == date(2026, 1, 1)
         finally:
             path.unlink(missing_ok=True)
+
+
+class TestCalibrationFormulaCells:
+    """Formula dates keep the stored value when Excel has not recalculated."""
+
+    def test_formula_without_cached_value_keeps_stored_date(
+        self, db_session, caplog
+    ):
+        """A blank cached value over a formula cell is not an intentional clear.
+
+        Saving through openpyxl (Location write-back) drops cached formula
+        results; a Sync before Excel recalculates must keep the previous
+        date and warn, like unparsable text.
+        """
+        import logging
+        from datetime import date
+
+        DeviceRepository.create(
+            db_session,
+            name="Fluke 87V",
+            device_type="Multimeter",
+            pm_number="PM-001",
+            calibration_due=date(2026, 6, 30),
+            locker_slot=1,
+        )
+        db_session.commit()
+
+        wb = Workbook()
+        ws = wb.active
+        ws.append(["Equipment", "Calibration due"])
+        ws.append(["PM-001", "=DATE(2030,6,30)"])
+        path = Path(tempfile.mktemp(suffix=".xlsx"))
+        wb.save(path)
+        try:
+            from smart_locker.database.engine import get_engine
+            with caplog.at_level(logging.WARNING):
+                result = import_from_source_excel(get_engine(), path)
+            assert result.errors == 0
+            device = DeviceRepository.find_by_pm(db_session, "PM-001")
+            assert device.calibration_due == date(2026, 6, 30)
+            assert any(
+                "formula" in r.message.lower() for r in caplog.records
+            )
+        finally:
+            path.unlink(missing_ok=True)

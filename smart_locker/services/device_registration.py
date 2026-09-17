@@ -23,7 +23,7 @@ from smart_locker.sync.source_import import (
     CatalogReadError,
     CatalogRow,
     list_in_locker_catalog,
-    lookup_catalog_by_pm,
+    lookup_locker_catalog_by_pm,
     pm_match_key,
 )
 
@@ -107,6 +107,9 @@ def register_locker_device(
 ) -> Device:
     """Insert one locker device from the Excel catalog into a free slot.
 
+    Copies the same locker row the pick list shows; a PM with no locker
+    row falls back to its first sheet match.
+
     Args:
         session: Active database session.
         source_path: Path to ``device-list.xlsx``.
@@ -134,7 +137,7 @@ def register_locker_device(
     _require_free_slot(session, locker_slot)
 
     try:
-        catalog = lookup_catalog_by_pm(source_path, pm)
+        catalog = lookup_locker_catalog_by_pm(source_path, pm)
     except CatalogReadError as e:
         raise CatalogUnavailable(str(e)) from e
 
