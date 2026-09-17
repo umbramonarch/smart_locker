@@ -17,6 +17,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Smart Locker</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' rx='14' fill='%23009641'/><rect x='22' y='12' width='20' height='40' rx='3' fill='none' stroke='%23ffffff' stroke-width='4'/><circle cx='37' cy='32' r='3' fill='%23ffffff'/></svg>">
   <link rel="stylesheet" href="style.css">
 
   <!-- ================================================================
@@ -292,7 +293,6 @@
 
     <div class="menu-actions">
       <button class="action-btn pick-btn" id="btn-borrow">
-        <div class="btn-reveal-img" style="background-image:url('images/camera.jpg')"></div>
         <div class="btn-reveal-tint"></div>
         <div class="btn-icon">
           <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12l7-7 7 7"/></svg>
@@ -303,7 +303,6 @@
         </div>
       </button>
       <button class="action-btn pick-btn" id="btn-return">
-        <div class="btn-reveal-img" style="background-image:url('images/drone.jpg')"></div>
         <div class="btn-reveal-tint"></div>
         <div class="btn-icon">
           <svg viewBox="0 0 24 24"><path d="M12 19V5M5 12l7 7 7-7"/></svg>
@@ -584,7 +583,7 @@
       </div>
 
       <div class="bind-step" id="bind-step-list">
-        <p class="bind-hint" id="bind-list-hint">Add a unit from the Excel list (PM + free slot), then tap its sticker. Existing rows can bind, unbind, or change slot.</p>
+        <p class="bind-hint" id="bind-list-hint">Add a unit from the Excel list (PM + slot), then tap its sticker. Slots may hold several units. Existing rows can bind, unbind, or change slot.</p>
         <button type="button" class="bind-add-open" id="bind-add-open">Add from Excel</button>
         <div class="register-search-group bind-search-group">
           <svg class="register-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
@@ -596,7 +595,7 @@
       </div>
 
       <div class="bind-step hidden" id="bind-step-add">
-        <p class="bind-hint" id="bind-add-hint">Pick a unit from the Excel locker list or type its PM number, pick a free slot, then continue to tap the sticker.</p>
+        <p class="bind-hint" id="bind-add-hint">Pick a unit from the Excel locker list or type its PM number, pick a slot (shared slots show a count), then continue to tap the sticker.</p>
         <div class="bind-device-list bind-catalog-list" id="bind-catalog-list"></div>
         <p class="bind-hint bind-catalog-note" id="bind-catalog-note"></p>
         <div class="register-input-group bind-pm-group">
@@ -612,7 +611,7 @@
       </div>
 
       <div class="bind-step hidden" id="bind-step-slot">
-        <p class="bind-hint">Pick a free slot for <strong id="bind-slot-name">—</strong>.</p>
+        <p class="bind-hint">Pick a slot for <strong id="bind-slot-name">—</strong>. Slots may hold several units.</p>
         <div class="bind-slot-grid" id="bind-change-slot-grid"></div>
         <div class="bind-add-actions">
           <button type="button" class="bind-unbind" id="bind-slot-back">Back</button>

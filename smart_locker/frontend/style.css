@@ -253,11 +253,15 @@ body::after {
   align-items: center;
 }
 
-/* Hero background image */
+/* Hero background photo over a designed charcoal gradient. When images/ is
+   emptied the photo request still 404s — the gradient underneath keeps the
+   backdrop designed instead of a flat void (see test_frontend_images.py). */
 .hero-bg {
   position: absolute;
   inset: 0;
-  background: url('images/hero_bg.jpg') center/cover no-repeat;
+  background:
+    url('images/hero_bg.jpg') center/cover no-repeat,
+    linear-gradient(155deg, #242d3a 0%, #141920 72%);
   opacity: 0.07;
   filter: blur(2px) saturate(1.4);
   animation: hero-drift 20s ease-in-out infinite alternate;
@@ -322,12 +326,16 @@ body::after {
   50%       { box-shadow: 0 0 40px rgba(0,150,65,0.38), 0 0 100px rgba(0,150,65,0.12); transform: scale(1.06); }
 }
 
-/* Option 4: NFC texture reveal — slow breathing ellipse loop */
+/* Option 4: NFC texture reveal — slow breathing ellipse loop. Same honest
+   contract as .hero-bg: the photo may 404 when images/ is emptied, and the
+   gradient underneath carries the visual. */
 .nfc-texture-reveal {
   position: absolute;
   inset: 0;
   border-radius: 50%;
-  background: url('images/hero_bg.jpg') center/cover no-repeat;
+  background:
+    url('images/hero_bg.jpg') center/cover no-repeat,
+    linear-gradient(150deg, #1d3327 0%, #141920 75%);
   opacity: 0.35;
   clip-path: ellipse(0% 0% at 50% 50%);
   animation: nfc-reveal-breathe 4.5s ease-in-out infinite;
@@ -2289,8 +2297,14 @@ body::after {
   color: var(--accent);
 }
 .bind-slot-btn.taken {
-  opacity: 0.35;
-  cursor: not-allowed;
+  border-color: var(--accent);
+  position: relative;
+}
+.bind-slot-count {
+  display: block;
+  font-size: 0.65rem;
+  font-weight: 700;
+  color: var(--accent);
 }
 .bind-add-actions {
   display: flex;

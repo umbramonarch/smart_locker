@@ -1,7 +1,7 @@
 """
 File: test_register_device.py
 Description: Contract tests for admin Register Device: add by PM from Excel,
-             pick a free slot, then tap NFC. Existing locker rows keep Bind
+             pick a slot, then tap NFC. Existing locker rows keep Bind
              / Replace tag / Unbind / change-slot.
 Project: smart_locker/tests
 Notes: Run with: python -m pytest tests/test_register_device.py -v
@@ -66,7 +66,7 @@ class TestRegisterDeviceAddFromExcel:
         assert 'id="bind-add-submit"' in html
 
     def test_change_slot_step_present(self):
-        """Existing locker rows can pick a different free slot."""
+        """Existing locker rows can pick a different slot."""
         html = _html()
         assert 'id="bind-step-slot"' in html
         assert 'id="bind-slot-submit"' in html
@@ -91,11 +91,14 @@ class TestRegisterDeviceAddFromExcel:
         assert "/slot" in js
         assert "bind-step-slot" in js
 
-    def test_demo_mode_does_not_post_register(self):
-        """?demo must not create a locker row against a missing workbook."""
+    def test_register_posts_live_with_no_demo_gate(self):
+        """submitRegisterDevice POSTs the live endpoint; the ?demo mock (and
+        its "Pi only" refusal toast) was deleted, so no demo gate remains."""
         js = _js()
         assert "submitRegisterDevice" in js
-        assert "Add from Excel is Pi only" in js
+        assert "Add from Excel is Pi only" not in js
+        body = _fn_body(js, "async function submitRegisterDevice", "function openChangeSlot")
+        assert "/api/admin/devices/register" in body
 
     def test_js_loads_asset_label_from_config(self):
         """Kiosk copy for the join-key label comes from GET /api/config."""
@@ -233,36 +236,47 @@ class TestCatalogFailureBranches:
         assert "this locker's Location" in js
 
 
-class TestDemoExercisesNewBehavior:
-    """M3: ?demo mirrors the tagged-only filter and renders stub catalog rows."""
+class TestDemoMockDeleted:
+    """M3 retired: the ?demo frontend mock was deleted outright, so the live
+    fetch paths below must stand alone with no stub branch behind them."""
 
-    def test_demo_devices_mirror_tagged_only_filter(self):
-        """Demo apiGetDevices filters has_tag like GET /api/devices."""
+    def test_no_demo_remnants_in_app_js(self):
+        """No USE_DEMO flag, DEMO_ stubs, or ?demo wiring survive in app.js."""
+        js = _js()
+        assert "USE_DEMO" not in js
+        assert "DEMO_USERS" not in js
+        assert "DEMO_DEVICES" not in js
+        assert "DEMO_CATALOG" not in js
+        assert "DEMO_REGISTRANTS" not in js
+        assert "DEMO_WARN_DAYS" not in js
+        assert "demoUserIdx" not in js
+        assert "demoRegisterTapTimer" not in js
+        assert "?demo" not in js
+        assert "Pi only" not in js
+
+    def test_api_get_devices_fetches_live_feed(self):
+        """apiGetDevices is now just the live GET /api/devices (tagged-only
+        filtering lives server-side; the DEMO_DEVICES.filter mirror is gone)."""
         js = _js()
         body = _fn_body(js, "async function apiGetDevices", "async function apiGetAdminDevices")
-        assert "DEMO_DEVICES.filter" in body
-        assert "has_tag" in body
+        assert "fetch('/api/devices')" in body
+        assert "has_tag" not in body
 
-    def test_demo_has_untagged_row(self):
-        """At least one demo device is untagged so bind/No-tag renders."""
+    def test_catalog_list_fetches_live_with_no_stubs(self):
+        """populateCatalogList serves only the live catalog-locker fetch."""
         js = _js()
-        assert "has_tag:false" in js
-        assert "has_tag:true" in js
-
-    def test_demo_renders_stub_catalog_rows(self):
-        """populateCatalogList serves DEMO_CATALOG stubs under USE_DEMO."""
-        js = _js()
-        assert "DEMO_CATALOG" in js
         body = _fn_body(js, "async function populateCatalogList", "function openAddFromExcel")
-        assert "DEMO_CATALOG" in body
+        assert "/api/admin/devices/catalog-locker" in body
 
-    def test_demo_opens_add_step_but_submit_stays_pi_only(self):
-        """Add step is explorable in demo; only the POST keeps the Pi gate."""
+    def test_add_step_and_submit_have_no_pi_gate(self):
+        """Add step opens and submits unconditionally; the demo Pi-only
+        refusal was deleted with the mock."""
         js = _js()
         add = _fn_body(js, "function openAddFromExcel", "async function submitRegisterDevice")
         assert "Pi only" not in add
         submit = _fn_body(js, "async function submitRegisterDevice", "function openChangeSlot")
-        assert "Add from Excel is Pi only" in submit
+        assert "Pi only" not in submit
+        assert "/api/admin/devices/register" in submit
 
 
 class TestAddStepFitsViewport:
@@ -309,6 +323,41 @@ class TestKioskGridRefreshAfterAdminMutation:
         """Dashboard refetches on a timer, so no kiosk-to-dashboard push exists."""
         dashboard = (FRONTEND / "dashboard.js").read_text(encoding="utf-8")
         assert "setInterval(fetchTables" in dashboard
+
+
+class TestSharedSlotPicker:
+    """Slots are shared labels: taken slots stay clickable with a count."""
+
+    def test_render_slot_grid_keeps_shared_slots_clickable(self):
+        """renderSlotGrid badges shared slots instead of disabling them."""
+        js = _js()
+        body = _fn_body(js, "function renderSlotGrid", "function startBindCountdown")
+        assert "disabled = true" not in body
+        assert "bind-slot-count" in body
+        assert "occupied.get(n)" in body
+
+    def test_occupied_slots_counts_per_slot(self):
+        """occupiedSlots returns per-slot counts from S.adminDevices."""
+        js = _js()
+        body = js.split("function occupiedSlots", 1)[1].split(
+            "function renderSlotGrid", 1
+        )[0]
+        assert "new Map" in body
+        assert "counts.set" in body
+
+    def test_taken_slot_style_stays_clickable(self):
+        """The taken badge style no longer greys out or blocks clicks."""
+        css = _css()
+        taken = css.split(".bind-slot-btn.taken", 1)[1].split(
+            ".bind-add-actions", 1
+        )[0]
+        assert "not-allowed" not in taken
+        assert ".bind-slot-count" in taken
+
+    def test_no_free_slot_copy(self):
+        """Kiosk copy no longer promises free (exclusive) slots."""
+        assert "free slot" not in _js().lower()
+        assert "free slot" not in _html().lower()
 
 
 class TestMaintenanceToggle:

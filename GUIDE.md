@@ -718,7 +718,7 @@ locker.** It only refreshes catalog fields (name, type, serial, manufacturer, mo
 calibration) for PMs that are **already** locker rows. Platz/Schrank is unused.
 
 A device enters the locker when an admin uses **Register Device**: pick it from the
-Excel `Locker` list or enter the **PM** number, pick a **free slot**, tap the NFC
+Excel `Locker` list or enter the **PM** number, pick a **slot** (slots may be shared), tap the NFC
 sticker. The Pi looks up that PM in
 `device-list.xlsx` and copies name / type / manufacturer / model / serial / cal.
 Unknown PM or share down → error, no ghost row.
@@ -860,7 +860,7 @@ Pi on the LAN can use them — the lock is **physical access**, not a password.
      both a new name and a fresh card. Deactivated names are also hidden
      from the dashboard owner dropdown.
    - **Register Device** — add a locker unit: pick from the Excel `Locker` list
-     or type the **PM**, then **free slot + NFC tap** (catalog
+     or type the **PM**, then **slot + NFC tap** (slots may be shared; catalog
      comes from Excel). Existing rows can bind / unbind / change slot. The list shows
      **name + PM** (and slot).
    - **Export to Excel** — download a snapshot of devices / transactions / users.
@@ -910,7 +910,7 @@ usually succeeds.
 
 3. Sync **never inserts** locker devices. It updates catalog fields for PMs already
    in SQLite. A device enters the locker only via admin **Register Device**
-   (PM + free slot + NFC). Platz/Schrank is unused.
+   (PM + slot + NFC; slots may be shared). Platz/Schrank is unused.
 
 4. After that import, the Pi writes **Location** for locker PMs
    back into the same workbook (available → `Locker`, borrowed → the borrower's
@@ -1351,8 +1351,8 @@ still logs out; a device tag does not. An unknown UID while logged in stays logg
 
 **Register Device** (hidden admin panel): pick a unit from the Excel `Locker`
 list (`GET /api/admin/devices/catalog-locker` — rows whose Location is exactly
-the in-locker token, not yet registered) or type the **PM**, pick a **free slot**,
-tap the
+the in-locker token, not yet registered) or type the **PM**, pick a **slot**
+(slots may be shared), tap the
 sticker. Catalog (name, type, manufacturer, model, serial, cal) is copied from Excel.
 Unknown PM or share down fails with no ghost row. Existing rows can bind / unbind /
 change slot, and **To maintenance** / **Back in service** flags a device out for
@@ -1374,3 +1374,34 @@ There is no USB barcode scanner and no `GET /api/devices/barcode/{barcode}`.
 - **Multi-reader support** — currently the first matching reader is used.
 - **Email / webhook alerts** — overdue devices, borrow-limit hits.
 - **Device condition reporting** — let users flag damaged equipment on return.
+
+---
+
+## 17. Dev quickstart — no-hardware fake NFC reader (never on the Pi)
+
+Develop the kiosk on your PC with no reader: the simulated reader injects taps from a
+dev panel (keys `1`/`2`/`3` = work cards, `A`/`S`/`D` = device tags, `F2` = default tap).
+
+```bash
+python -m venv venv
+venv\Scripts\activate            # (or: source venv/bin/activate)
+pip install -r requirements.txt
+python -m scripts.generate_key  # paste both keys into .env (see .env.example,
+                                # incl. SMART_LOCKER_FAKE_READER=1 — dev only)
+python -m scripts.init_db       # optional — boot creates the DB anyway
+python -m scripts.migrate_db    # existing dev DBs only — converts the slot index to shared
+python -m scripts.seed_fake_nfc # enrolls the 6 preset UIDs (needs the fake flag)
+python -m smart_locker.app      # open http://localhost:8000, tap 1/2/3/A/S/D
+```
+
+`seed_fake_nfc` enrolls 3 users (first one admin) and binds the 3 tags to locker PMs —
+`--name-1/2/3`, `--role-1/2/3` (defaults: `Fake Admin`/`admin`, `Fake User 2`/`3` as users)
+and `--pm-a/--pm-s/--pm-d` (defaults `PM-001`/`PM-002`/`PM-003`; see
+`python -m scripts.seed_fake_nfc --help`). The PMs must already be registered locker
+devices (hidden admin **Register Device**) — the script never creates device rows, and a
+missing PM aborts the bind step (users stay enrolled; rerun after registering — reruns are
+idempotent no-ops). The 6 UIDs are pinned in `app.js` (`initDevTap`) and
+`tests/test_dev_tap_panel.py`; `SMART_LOCKER_FAKE_DEFAULT_UID` is the `F2` fallback.
+Upgrading a dev DB created before shared slots: the `migrate_db` run above drops the
+old UNIQUE slot index (device rows untouched; reruns are no-ops). Fresh DBs already get
+the shared index from `init_db`/boot, and the Pi runs this migration via its update flow.

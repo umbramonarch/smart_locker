@@ -66,13 +66,23 @@ class TestAdminExitAndShutdownButtons:
         assert "/api/admin/shutdown" in js
         assert "admin-shutdown" in js
 
-    def test_demo_mode_does_not_post_exit_or_shutdown(self):
-        """?demo must not close a developer browser or call poweroff."""
+    def test_exit_and_shutdown_post_live_with_no_demo_gate(self):
+        """Exit kiosk / Shut down POST the live endpoints; the ?demo mock (and
+        its "Pi only" preview toasts) was deleted, so no demo gate remains."""
         js = _js()
         assert "adminExitKiosk" in js
         assert "adminShutdown" in js
-        assert "Exit kiosk is Pi only" in js
-        assert "Shut down is Pi only" in js
+        assert "Exit kiosk is Pi only" not in js
+        assert "Shut down is Pi only" not in js
+        assert "Demo preview" not in js
+        exit_body = js.split("async function adminExitKiosk", 1)[1].split(
+            "function showPowerOverlay", 1
+        )[0]
+        assert "/api/admin/exit-kiosk" in exit_body
+        shutdown_body = js.split("async function adminShutdown", 1)[1].split(
+            "AUDIO CLICK FEEDBACK", 1
+        )[0]
+        assert "/api/admin/shutdown" in shutdown_body
 
     def test_power_overlay_freezes_sse(self):
         """Shut down overlay must ignore card SSE the same way the update overlay does."""

@@ -254,7 +254,7 @@ class TestOverlaySessionRestore:
         """checkExistingSession stays idle when GET /api/session overlay is true."""
         js = _js()
         fn = js.split("async function checkExistingSession", 1)[1].split(
-            "if (USE_DEMO)", 1
+            "loadSiteConfig();", 1
         )[0]
         assert "data.overlay" in fn
         assert "!data.overlay" in fn
