@@ -342,6 +342,9 @@ class TestSessionDeviceTags:
         first = DeviceRepository.create(
             db_session, name="Held", device_type="t", pm_number="PM-HELD",
         )
+        DeviceRepository.bind_tag(
+            db_session, first, compute_uid_hmac("HELD-TAG", hmac_key)
+        )
         tagged = self._device_with_tag(
             db_session, hmac_key, "Fluke 87V", "PM-001", "AABBCCDD"
         )

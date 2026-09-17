@@ -468,14 +468,33 @@ def _arm_registration(pending: PendingRegistration) -> None:
         assign_pending_registration(ctx_module.context, pending)
 
 
+def _arm_tag_bind(bind: PendingTagBind) -> None:
+    """Atomically claim the NFC reader for a device-tag bind window.
+
+    Under ``pending_state_lock`` (RLock — callers may already hold it):
+    raises on a live bind/registration conflict, then assigns the bind.
+    Concurrent callers cannot both pass the conflict check.
+
+    Args:
+        bind: The tag-bind window to arm.
+
+    Raises:
+        HTTPException: 409 if another NFC window is armed.
+    """
+    with pending_state_lock:
+        conflict = _pending_nfc_conflict()
+        if conflict:
+            raise HTTPException(status_code=409, detail=conflict)
+        assign_pending_tag_bind(ctx_module.context, bind)
+
+
 def _reject_deactivated_name(db: Session, name: str) -> None:
     """Reject enrollment when the name belongs to a deactivated user.
 
     Deactivation keeps the ``User`` row with ``is_active=False``; the name
     disappearing from ``GET /api/registrants`` only hides it from the kiosk
     list. Both enrollment arms call this so a fresh card cannot re-enrol
-    the name. Uses the duplicate-tolerant ``display_names_lower`` set —
-    ``find_by_display_name`` would raise on duplicate display names.
+    the name; the NFC-tap path rechecks via the same predicate.
 
     Args:
         db: Active database session.
@@ -1548,7 +1567,8 @@ def register_locker_device(
 
     Raises:
         HTTPException: 503 if not ready / share down, 403 if not admin,
-            400 if source path unset, 404 if PM unknown, 409 if PM or slot taken.
+            400 if source path unset, 404 if PM unknown, 409 if PM or slot
+            taken, or if another NFC window armed during registration.
     """
     if ctx_module.context is None:
         raise HTTPException(status_code=503, detail="System not ready.")
@@ -1595,9 +1615,9 @@ def register_locker_device(
     from smart_locker.sync.location_writeback import schedule_write_location
 
     schedule_write_location()
-    assign_pending_tag_bind(
-        ctx_module.context, PendingTagBind(device_id=device.id)
-    )
+    # Atomic re-check: the Excel read + row insert above left a gap after
+    # the early conflict check, so another window may have armed since.
+    _arm_tag_bind(PendingTagBind(device_id=device.id))
     logger.info(
         "Locker device registered %s (pm=%s, slot=%s) by admin %s. Awaiting sticker.",
         device.name,
@@ -1689,6 +1709,10 @@ def set_device_maintenance(
     Returns:
         dict: ``{"success": True, "status": "maintenance"|"available"}``.
 
+    Guards and commit run under the shared ``user_admin_lock`` with
+    borrow/unbind/deactivate so a borrow committing between the status
+    read and this commit cannot be stranded under MAINTENANCE.
+
     Raises:
         HTTPException: 403 if not admin, 404 if missing, 409 on a borrowed
             device or when the flag is already as requested.
@@ -1696,33 +1720,36 @@ def set_device_maintenance(
     if user_session.user.role != UserRole.ADMIN:
         raise HTTPException(status_code=403, detail="Admin access required.")
 
-    device = DeviceRepository.find_by_id(db, device_id)
-    if device is None:
-        raise HTTPException(status_code=404, detail="Device not found.")
+    with user_admin_lock:
+        # Drop pre-lock reads: the guards below must see committed borrows.
+        db.expire_all()
+        device = DeviceRepository.find_by_id(db, device_id)
+        if device is None:
+            raise HTTPException(status_code=404, detail="Device not found.")
 
-    if body.maintenance:
-        if device.status == DeviceStatus.BORROWED:
-            raise HTTPException(
-                status_code=409, detail="Return the device first."
-            )
-        if device.status == DeviceStatus.MAINTENANCE:
-            raise HTTPException(
-                status_code=409, detail="Already in maintenance."
-            )
-        device.status = DeviceStatus.MAINTENANCE
-    else:
-        if device.status != DeviceStatus.MAINTENANCE:
-            raise HTTPException(
-                status_code=409, detail="Device is not in maintenance."
-            )
-        device.status = DeviceStatus.AVAILABLE
+        if body.maintenance:
+            if device.status == DeviceStatus.BORROWED:
+                raise HTTPException(
+                    status_code=409, detail="Return the device first."
+                )
+            if device.status == DeviceStatus.MAINTENANCE:
+                raise HTTPException(
+                    status_code=409, detail="Already in maintenance."
+                )
+            device.status = DeviceStatus.MAINTENANCE
+        else:
+            if device.status != DeviceStatus.MAINTENANCE:
+                raise HTTPException(
+                    status_code=409, detail="Device is not in maintenance."
+                )
+            device.status = DeviceStatus.AVAILABLE
 
-    db.flush()
-    try:
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
+        db.flush()
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
 
     from smart_locker.sync.location_writeback import schedule_write_location
 
@@ -1770,13 +1797,7 @@ def start_device_tag_bind(
     if device is None:
         raise HTTPException(status_code=404, detail="Device not found.")
 
-    conflict = _pending_nfc_conflict()
-    if conflict:
-        raise HTTPException(status_code=409, detail=conflict)
-
-    assign_pending_tag_bind(
-        ctx_module.context, PendingTagBind(device_id=device_id)
-    )
+    _arm_tag_bind(PendingTagBind(device_id=device_id))
     logger.info(
         "Device tag bind started for %s (pm=%s) by admin %s. Awaiting sticker.",
         device.name,
@@ -1789,11 +1810,11 @@ def start_device_tag_bind(
 def _refresh_borrow_guard(db: Session, device: Device) -> None:
     """Re-read the row and refuse the unbind if it is borrowed now.
 
-    Best-effort narrowing of the unbind check-then-act window: SQLite
-    offers no row locks, so the 409 re-check runs on a freshly read row
-    immediately before the mutation. A borrow committing between this
-    refresh and the unbind commit can still strand a borrowed+untagged
-    loan; that residual race needs a serialising store to close fully.
+    Callers hold ``user_admin_lock`` across this refresh and the unbind
+    commit, so a borrow cannot commit between the refresh and the
+    commit and strand a borrowed+untagged loan. SQLite offers no row
+    locks; the shared process lock is the serialisation point (the
+    service runs a single uvicorn worker).
 
     Args:
         db: Active database session.
@@ -1832,12 +1853,22 @@ def unbind_device_tag(
     if user_session.user.role != UserRole.ADMIN:
         raise HTTPException(status_code=403, detail="Admin access required.")
 
-    device = DeviceRepository.find_by_id(db, device_id)
-    if device is None:
-        raise HTTPException(status_code=404, detail="Device not found.")
-    _refresh_borrow_guard(db, device)
+    with user_admin_lock:
+        # Drop pre-lock reads; the guard re-reads under the lock and the
+        # commit below lands before the lock is released, so no borrow
+        # can commit between the guard and the unbind.
+        db.expire_all()
+        device = DeviceRepository.find_by_id(db, device_id)
+        if device is None:
+            raise HTTPException(status_code=404, detail="Device not found.")
+        _refresh_borrow_guard(db, device)
 
-    DeviceRepository.unbind_tag(db, device)
+        DeviceRepository.unbind_tag(db, device)
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
     if ctx_module.context is not None:
         assign_pending_tag_bind(ctx_module.context, None)
     logger.info(
@@ -2406,19 +2437,12 @@ def dashboard_bind_tag(
             detail="A kiosk session is active. Bind from the kiosk or end the session.",
         )
 
-    conflict = _pending_nfc_conflict()
-    if conflict:
-        raise HTTPException(status_code=409, detail=conflict)
-
     pm = body.pm_number.strip()
     device = DeviceRepository.find_by_pm(db, pm)
     if device is None:
         raise HTTPException(status_code=404, detail="Device not found.")
 
-    assign_pending_tag_bind(
-        ctx_module.context,
-        PendingTagBind(device_id=device.id, from_dashboard=True),
-    )
+    _arm_tag_bind(PendingTagBind(device_id=device.id, from_dashboard=True))
     logger.info(
         "Dashboard tag bind armed for %s (pm=%s). Awaiting sticker at kiosk.",
         device.name,
@@ -2455,12 +2479,22 @@ def dashboard_unbind_tag(
             device; 409 if the device is currently borrowed.
     """
     pm = body.pm_number.strip()
-    device = DeviceRepository.find_by_pm(db, pm)
-    if device is None:
-        raise HTTPException(status_code=404, detail="Device not found.")
-    _refresh_borrow_guard(db, device)
+    with user_admin_lock:
+        # Same serialisation as the kiosk unbind: guard re-read and
+        # commit share the lock with borrow, so no loan can commit
+        # between them.
+        db.expire_all()
+        device = DeviceRepository.find_by_pm(db, pm)
+        if device is None:
+            raise HTTPException(status_code=404, detail="Device not found.")
+        _refresh_borrow_guard(db, device)
 
-    DeviceRepository.unbind_tag(db, device)
+        DeviceRepository.unbind_tag(db, device)
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
     if ctx_module.context is not None:
         assign_pending_tag_bind(ctx_module.context, None)
     logger.info(

@@ -91,9 +91,12 @@ class TestDeviceEndpoints:
             pm_number="PM-999",
             locker_slot=9,
         )
+        DeviceRepository.bind_tag(db_session, ghost, "tag-ghost")
         db_session.commit()
         user_session = mock_context.session_mgr.start_session(test_user)
         assert LockerService.borrow_device(db_session, user_session, ghost.id) is True
+        # Stranded shape: the sticker is removed from the live loan.
+        DeviceRepository.unbind_tag(db_session, ghost)
         db_session.commit()
 
         resp = client.get("/api/devices")
@@ -116,9 +119,12 @@ class TestDeviceEndpoints:
             pm_number="PM-999",
             locker_slot=9,
         )
+        DeviceRepository.bind_tag(db_session, ghost, "tag-ghost")
         db_session.commit()
         admin_session = mock_context.session_mgr.start_session(admin_user)
         assert LockerService.borrow_device(db_session, admin_session, ghost.id) is True
+        # Stranded shape: the sticker is removed from the live loan.
+        DeviceRepository.unbind_tag(db_session, ghost)
         db_session.commit()
 
         mock_context.session_mgr.start_session(test_user)
