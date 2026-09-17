@@ -223,6 +223,18 @@ class AppContext:
             except Exception:
                 logger.debug("SSE fan-out drop", exc_info=True)
 
+    def _drop_nfc_windows_on_session_end(self) -> None:
+        """Clear armed NFC windows when the session ends without a tap.
+
+        Reader disconnect and session timeout share this: a pending card
+        registration/replacement or tag bind must not outlive the session
+        that armed it — otherwise the next fresh tap would complete an
+        operation nobody is supervising.
+        """
+        self.admin_overlay_open = False
+        assign_pending_tag_bind(self, None)
+        assign_pending_registration(self, None)
+
     async def _nfc_bridge_loop(self) -> None:
         """Poll NFC events and push SSE events to the browser.
 
@@ -244,8 +256,7 @@ class AppContext:
             # Check for session timeout transition
             currently_active = self.session_mgr.has_active_session
             if had_session and not currently_active:
-                self.admin_overlay_open = False
-                assign_pending_tag_bind(self, None)
+                self._drop_nfc_windows_on_session_end()
                 self.broadcast_sse({"event": "session_timeout"})
                 logger.info("Session timeout detected by NFC bridge.")
             had_session = currently_active
@@ -278,8 +289,7 @@ class AppContext:
                     logger.warning("NFC reader disconnected.")
                     if self.session_mgr.has_active_session:
                         self.session_mgr.end_session()
-                    self.admin_overlay_open = False
-                    assign_pending_tag_bind(self, None)
+                    self._drop_nfc_windows_on_session_end()
                     self.broadcast_sse({"event": "reader_disconnected"})
                 elif event.event_type == ReaderEventType.CONNECTED:
                     logger.info("NFC reader reconnected.")
@@ -416,7 +426,7 @@ class AppContext:
         from smart_locker.database.repositories import DeviceRepository, UserRepository
         from smart_locker.security.hashing import compute_uid_hmac
         from smart_locker.security.key_manager import key_manager
-        from smart_locker.services.user_service import UserService
+        from smart_locker.services.user_service import UserService, name_is_deactivated
 
         is_replace = pending is not None and pending.replace_user_id is not None
         try:
@@ -507,6 +517,19 @@ class AppContext:
                         self.broadcast_sse({
                             "event": "registration_failed",
                             "reason": "This card is already registered.",
+                        })
+                        return
+
+                    # Re-check at completion: the name may have been
+                    # deactivated after the window was armed.
+                    if name_is_deactivated(db_session, pending.display_name):
+                        logger.warning(
+                            "Registration failed: name '%s' is deactivated.",
+                            pending.display_name,
+                        )
+                        self.broadcast_sse({
+                            "event": "registration_failed",
+                            "reason": "This name is deactivated. Ask an admin to re-enrol under a new name.",
                         })
                         return
 

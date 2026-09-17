@@ -503,7 +503,9 @@ def _reject_deactivated_name(db: Session, name: str) -> None:
     Raises:
         HTTPException: 403 if an inactive user holds this name.
     """
-    if name.strip().lower() in UserRepository.display_names_lower(db, False):
+    from smart_locker.services.user_service import name_is_deactivated
+
+    if name_is_deactivated(db, name):
         raise HTTPException(
             status_code=403,
             detail="This name is deactivated. Ask an admin to re-enrol under a new name.",

@@ -363,3 +363,39 @@ class TestUsersOverlayMarkup:
         assert "JSON.stringify({ name, role })" in js
         assert "usersReplacePending" in js
         assert "api/admin/users" in js
+
+
+class TestReplaceRaceGuards:
+    """Replace-card late-response guards in app.js (text contracts)."""
+
+    def test_hide_bumps_replace_epoch(self):
+        """Hiding the overlay invalidates any arm POST still in flight."""
+        js = _js()
+        body = _fn_body(js, "function hideUsersOverlay() {", "\n}\n")
+        assert "usersReplaceEpoch++" in body
+
+    def test_late_arm_after_close_cancels_window(self):
+        """An arm response from a closed overlay releases the orphaned window."""
+        js = _js()
+        body = _fn_body(js, "async function usersReplaceCard(id) {", "\n}\n")
+        assert "const epoch = usersReplaceEpoch" in body
+        epoch_branch = body.split("epoch !== usersReplaceEpoch", 1)[1]
+        assert "apiCancelRegistration()" in epoch_branch.split("return;", 1)[0]
+
+    def test_consumed_window_keeps_result_step(self):
+        """A fast tap's SSE result is not overwritten by the arm response."""
+        js = _js()
+        body = _fn_body(js, "async function usersReplaceCard(id) {", "\n}\n")
+        tail = body.split("apiCancelRegistration();", 1)[1]
+        assert "if (!S.usersReplacePending)" in tail
+        assert tail.index("if (!S.usersReplacePending)") < tail.index(
+            "showUsersStep('users-step-tap')"
+        )
+
+    def test_disconnect_resets_session_ui(self):
+        """reader_disconnected ends the session UI; nothing waits on a dead reader."""
+        js = _js()
+        assert "source.addEventListener('reader_disconnected'" in js
+        branch = js.split("source.addEventListener('reader_disconnected'", 1)[1]
+        branch = branch.split("});", 1)[0]
+        assert "endSession(true, true)" in branch
