@@ -314,3 +314,29 @@ class TestCalibrationAlertsDashboard:
         assert "cal-overdue" in js
         assert "calibration_state" in js
         assert "updateCalBadge" in js
+
+    def test_badge_follows_visible_tab(self):
+        """The badge counts the visible tab, not stale Inventory cache on Locker."""
+        js = _js()
+        body = js.split("function updateCalBadge() {", 1)[1].split("\n}\n", 1)[0]
+        assert "activeTabName()" in body
+        assert "inventoryData" in body
+        assert "devicesData" in body
+
+    def test_badge_updates_before_inventory_render_skip(self):
+        """The badge refreshes even when the Inventory rows are unchanged."""
+        js = _js()
+        body = js.split("function renderInventory() {", 1)[1].split("\n}\n", 1)[0]
+        main = body.split("inventoryData.length}`;", 1)[1]
+        head, sep, _ = main.partition("if (stamp === lastInventoryStamp) return;")
+        assert sep
+        assert "updateCalBadge();" in head
+
+    def test_badge_updates_before_locker_render_skip(self):
+        """The badge refreshes even when the Locker rows are unchanged."""
+        js = _js()
+        body = js.split("function renderDevices() {", 1)[1].split("\n}\n", 1)[0]
+        main = body.split("devicesData.length} total`;", 1)[1]
+        head, sep, _ = main.partition("if (stamp === lastDevicesStamp) return;")
+        assert sep
+        assert "updateCalBadge();" in head

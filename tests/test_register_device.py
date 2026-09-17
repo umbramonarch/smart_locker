@@ -52,6 +52,18 @@ class TestFrontendSyntaxGate:
         )
         assert proc.returncode == 0, proc.stderr
 
+    def test_dashboard_js_parses_with_node(self):
+        """node --check passes on dashboard.js (skipped when node is absent)."""
+        node = shutil.which("node")
+        if node is None:
+            pytest.skip("node not installed")
+        proc = subprocess.run(
+            [node, "--check", str(FRONTEND / "dashboard.js")],
+            capture_output=True,
+            text=True,
+        )
+        assert proc.returncode == 0, proc.stderr
+
 
 class TestRegisterDeviceAddFromExcel:
     """Register Device is PM + slot + NFC, not bind-only on existing rows."""
