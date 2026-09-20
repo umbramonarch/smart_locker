@@ -1,6 +1,6 @@
 # ADR 0006: Vanilla kiosk UI (HTML/CSS/JS, no Node)
 
-**Architecture Decision Record** — a short note for a choice that is expensive to undo (protocol, pinout, crate vs vendor HAL, flash layout). **Not** a Rust-only file. Most work never needs one; put tiny decisions in the git Issue.
+**Architecture Decision Record** — a short note for a choice that is expensive to undo (protocol, pinout, crate vs vendor HAL, flash layout). **Not** a Rust-only file. Most work never needs one; put tiny decisions in the issue tracker.
 
 Copy to `docs/adr/NNNN-title.md` in the **project**. Number from `0001`.
 

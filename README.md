@@ -32,7 +32,7 @@ Work branches (cut from `main`): `feature/`, `fix/`, `refactor/`, `docs/`, `chor
   `main` has moved. Merge hotfix into `main` **and** into the living `release/x.y` if both
   exist.
 
-Pytest is the merge gate for `main`. Run it on the work branch before opening the MR. CI (`.git/workflows/ci.yml`) runs `python -m pytest tests/ -v` on Python 3.11 and 3.13.
+Pytest is the merge gate for `main`. Run it on the work branch before opening the MR. CI runs `python -m pytest tests/ -v` on Python 3.11 and 3.13.
 
 ## Project Structure
 
@@ -106,7 +106,6 @@ smart_locker/
 ├── tests/                       # hardware-free pytest suite
 ├── docs/adr/                    # architecture decision records
 ├── docs/planning/               # historical plans (keep nfc-device-tags.md)
-├── .git/                     # Issue/MR templates + pytest CI
 ├── requirements.txt
 ├── .env.example
 ├── CHANGELOG.md
@@ -176,7 +175,7 @@ See **GUIDE.md** for detailed step-by-step instructions.
 
 ## System Architecture
 
-git renders this mermaid flowchart (three tiers: clients, FastAPI, then SQLite / NFC / Excel).
+Your git host renders this mermaid flowchart (three tiers: clients, FastAPI, then SQLite / NFC / Excel).
 
 ```mermaid
 flowchart TB

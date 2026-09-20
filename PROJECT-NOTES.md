@@ -32,7 +32,7 @@ sudo bash deploy/install/install.sh
 # then .env from deploy/.env.pi.example, init_db, enroll admin, mount the locker share, start service
 ```
 
-- **CI:** CI `.git/workflows/ci.yml` on merge requests and on push to `main`. Matrix Python 3.11 and 3.13: `pip install -r requirements.txt` then `python -m pytest tests/ -v`. No ruff. No `pip install -e .`. Pytest on the work branch remains the merge gate.
+- **CI:** `python -m pytest tests/ -v` on merge requests and on push to `main`. Matrix Python 3.11 and 3.13: `pip install -r requirements.txt` then `python -m pytest tests/ -v`. No ruff. No `pip install -e .`. Pytest on the work branch remains the merge gate.
 - **Manual verification:** real ACR1252U work-card tap, then device-sticker borrow/return, Riverdi touch screen, CIFS import/export. Checklist: `deploy/PI-VALIDATION-CHECKLIST.md`.
 
 ## Hardware risk

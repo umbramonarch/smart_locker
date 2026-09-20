@@ -1,7 +1,7 @@
 # Plan: NFC device tags (replace barcode scanner)
 
 **Branch:** `feature/nfc-device-tags` (cut from `main` at MR #2 / `467de11`; deleted after merge)
-**Status:** implemented — merged to `main` in [MR #3](https://git.example.invalid/anas.alshaer/smart_locker/pull/3) (`63f0cf9`)
+**Status:** implemented — merged to `main` in MR #3 (`63f0cf9`)
 **Hardware:** same ACR1252U as work cards. No USB barcode scanner.
 
 Shipped as specified. Historical plan — do not treat this file as open work.

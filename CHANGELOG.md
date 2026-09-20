@@ -46,8 +46,8 @@ Second tagged appliance ship (`v0.2.0`). NFC stickers, Location write-back, dash
 - Admin **Exit kiosk** (closes Chromium, service stays) and **Shut down** (`systemctl poweroff` via sudoers).
 - Signed `pack_release` tarball + HMAC sidecar for Pi updates from the locker share.
 - MIT license (`LICENSE`).
-- Keep a Changelog, architecture decision records (ADRs 0001–0009), and git Issue/MR templates.
-- CI CI runs `python -m pytest tests/ -v` on Python 3.11 and 3.13 via `requirements.txt`.
+- Keep a Changelog and architecture decision records (ADRs 0001–0009).
+- CI runs `python -m pytest tests/ -v` on Python 3.11 and 3.13 via `requirements.txt`.
 
 ### Fixed
 
