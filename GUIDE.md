@@ -1111,7 +1111,7 @@ The test suite needs no NFC hardware (it uses in-memory SQLite and mock data):
 
 ```bash
 python -m pytest tests/ -v          # all tests
-python -m pytest tests/test_security.py -v
+python -m pytest tests/api -v       # API end-to-end tests only
 ```
 
 ---
