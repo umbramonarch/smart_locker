@@ -77,6 +77,28 @@ def find_bash() -> str | None:
     return None
 
 
+def gnu_tools_available(bash: str) -> bool:
+    """Probe the GNU-isms update.sh relies on (``sort -V``, ``xargs -r``,
+    GNU tar's ``--warning``, ``stat -c``). The script itself only ever runs
+    on the Pi's Debian userland; a stock BSD toolchain (e.g. macOS) would
+    misbehave rather than fail cleanly, so the suite skips such hosts."""
+    probe = (
+        'printf "10\\n9\\n" | sort -V | head -n1 | grep -qx 9'
+        ' && printf "" | xargs -r true'
+        ' && tar --warning=no-file-changed --version >/dev/null 2>&1'
+        ' && stat -c %Y . >/dev/null 2>&1'
+    )
+    try:
+        return (
+            subprocess.run(
+                [bash, "-c", probe], capture_output=True, timeout=20
+            ).returncode
+            == 0
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
 # --- Fake system boundary (written into <tmp>/bin and prepended to PATH) ----
 
 _FAKE_SUDO = """\
@@ -96,13 +118,16 @@ _FAKE_SYSTEMCTL = """\
 #!/usr/bin/env bash
 # Fake systemctl: the locker "service" is a state file under $SL_E2E_ROOT.
 # `start` only brings it up when the installed code can boot — a BOOT_FAIL
-# file at the app root (shipped by a bad payload) keeps it down.
+# file at the app root (shipped by a bad payload) keeps it down. A
+# FORCE_START_FAIL marker at the sandbox root keeps even the rolled-back
+# service down, driving the rollback_unhealthy outcome.
 printf 'systemctl %s\\n' "$*" >> "$SL_E2E_ROOT/systemctl.log"
 case "${1:-}" in
   stop)
     printf 'stopped\\n' > "$SL_E2E_ROOT/service.state" ;;
   start)
-    if [ -f "$SMART_LOCKER_DIR/BOOT_FAIL" ]; then
+    if [ -f "$SL_E2E_ROOT/FORCE_START_FAIL" ] || \\
+       [ -f "$SMART_LOCKER_DIR/BOOT_FAIL" ]; then
       printf 'failed\\n' > "$SL_E2E_ROOT/service.state"
     else
       printf 'running\\n' > "$SL_E2E_ROOT/service.state"
@@ -116,13 +141,17 @@ _FAKE_CURL = """\
 # Fake curl: answers the updater's /api/health probe from the fake service
 # state. When the service is "running" it reports the installed tree's
 # VERSION file, so a rollback is observable as the old version answering.
+# Every emitted answer is appended to curl.log so tests see exactly what the
+# health gate saw — including which URL was probed.
 state="stopped"
 [ -f "$SL_E2E_ROOT/service.state" ] && state="$(cat "$SL_E2E_ROOT/service.state")"
 if [ "$state" = "running" ]; then
   ver=""
   [ -f "$SMART_LOCKER_DIR/VERSION" ] && \\
     ver="$(tr -d '[:space:]' < "$SMART_LOCKER_DIR/VERSION")"
-  printf '{"status":"ok","version":"%s"}\\n' "${ver:-unknown}"
+  body="$(printf '{"status":"ok","version":"%s"}' "${ver:-unknown}")"
+  printf '%s | curl %s\\n' "$body" "$*" >> "$SL_E2E_ROOT/curl.log"
+  printf '%s\\n' "$body"
   exit 0
 fi
 exit 7
@@ -131,13 +160,76 @@ exit 7
 _FAKE_PIP = """\
 #!/usr/bin/env bash
 # venv pip stub: logs the install; fails when the new tree carries PIP_FAIL.
+# A real install mutates the venv — drop a marker (also on failure: a
+# half-installed venv is the dangerous rollback case) so tests can prove the
+# venv itself was restored.
 printf 'pip %s\\n' "$*" >> "$SL_E2E_ROOT/pip.log"
+printf 'mutated\\n' > "$SMART_LOCKER_DIR/venv/PIP_MUTATED"
 if [ -f "$SMART_LOCKER_DIR/PIP_FAIL" ]; then
   echo "pip: PIP_FAIL marker present — simulating wheel install failure" >&2
   exit 1
 fi
 exit 0
 """
+
+
+_NEXT_REAL = """\
+# Resolve the real tool: the first executable of this name on PATH that is
+# not this shim itself. String compare cannot spot the shim — MSYS aliases
+# the Windows temp dir as /tmp — so use file identity (-ef).
+real=""
+_oldifs="$IFS"; IFS=':'
+for _d in $PATH; do
+  _cand="$_d/__NAME__"
+  [ -x "$_cand" ] || continue
+  [ "$_cand" -ef "$0" ] && continue
+  real="$_cand"
+  break
+done
+IFS="$_oldifs"
+"""
+
+
+def _fake_tar() -> str:
+    """tar that delegates to the real one — except a TAR_CREATE_FAIL marker
+    under the sandbox root forces archive *creation* to fail (extraction
+    still works), covering the code-snapshot step's ERR path for real."""
+    return (
+        """\
+#!/usr/bin/env bash
+if [ -f "$SL_E2E_ROOT/TAR_CREATE_FAIL" ]; then
+  for a in "$@"; do
+    case "$a" in -c*|--create)
+      echo "tar: forced create failure for e2e" >&2
+      exit 1 ;;
+    esac
+  done
+fi
+"""
+        + _NEXT_REAL.replace("__NAME__", "tar")
+        + """\
+if [ -z "$real" ]; then echo "tar shim: real tar not found on PATH" >&2; exit 127; fi
+exec "$real" "$@"
+"""
+    )
+
+
+def _perm_wrap(name: str) -> str:
+    """chown/chmod shim: records the call in perms.log, then delegates to the
+    real tool found later on PATH (never this shim). Git Bash cannot apply
+    POSIX ownership, but the logged calls prove rollback re-applies the
+    runtime fixups; on the Pi they apply for real."""
+    return (
+        f"""\
+#!/usr/bin/env bash
+printf '%s %s\\n' "{name}" "$*" >> "$SL_E2E_ROOT/perms.log"
+"""
+        + _NEXT_REAL.replace("__NAME__", name)
+        + """\
+if [ -n "$real" ]; then exec "$real" "$@"; fi
+exit 0
+"""
+    )
 
 _VENV_PYTHON = """\
 #!/usr/bin/env bash
@@ -207,6 +299,7 @@ while IFS= read -r -d '' it; do
   if [ -d "$src/$rel" ]; then
     mkdir -p "$dst/$rel"
   else
+    mkdir -p "$(dirname "$dst/$rel")"
     cp -p "$src/$rel" "$dst/$rel"
   fi
 done < <(cd "$src" && find . -mindepth 1 -print0)
@@ -264,6 +357,10 @@ class UpdateSandbox:
                 "VERSION": "1.0.0\n",
                 "smart_locker/__init__.py": "",
                 "smart_locker/app.py": 'APP_MARK = "old-1.0.0"\n',
+                # A committed UI asset and a runtime device photo — a rollback
+                # must keep the photo while removing payload-only assets.
+                "smart_locker/frontend/images/hero_bg.jpg": "bg\n",
+                "smart_locker/frontend/images/device_photo.jpg": "photo\n",
                 "requirements.txt": "fastapi>=0.100\n",
                 "deploy/install/update.sh": UPDATE_SH.read_text(encoding="utf-8"),
                 "deploy/install/apply-sudoers.sh": _APPLY_SUDOERS_STUB,
@@ -291,6 +388,9 @@ class UpdateSandbox:
             "sudo": _FAKE_SUDO,
             "systemctl": _FAKE_SYSTEMCTL,
             "curl": _FAKE_CURL,
+            "tar": _fake_tar(),
+            "chown": _perm_wrap("chown"),
+            "chmod": _perm_wrap("chmod"),
         }
         have_rsync = (
             subprocess.run(
@@ -368,22 +468,23 @@ class UpdateSandbox:
 
     # -- payloads ----------------------------------------------------------
 
-    def write_payload(
+    def _payload_files(
         self,
         version: str,
         *,
         boot_fail: bool = False,
         pip_fail: bool = False,
         migrate_fail: bool = False,
-    ) -> Path:
-        """Drop a locker-updates/ incoming tree into the appliance."""
-        shutil.rmtree(self.updates_dir, ignore_errors=True)
+    ) -> dict[str, str]:
         files = {
             "VERSION": f"{version}\n",
             "smart_locker/__init__.py": "",
             "smart_locker/app.py": f'APP_MARK = "new-{version}"\n',
             # Only in the new tree — a rollback must remove it again.
             "smart_locker/new_feature.py": "NEW = True\n",
+            # Committed UI asset added by the release — a rollback must
+            # remove it while leaving runtime photos untouched.
+            "smart_locker/frontend/images/new_ui.png": "png\n",
             "requirements.txt": "fastapi>=0.100\n",
             "deploy/install/update.sh": UPDATE_SH.read_text(encoding="utf-8"),
             "deploy/install/apply-sudoers.sh": _APPLY_SUDOERS_STUB,
@@ -398,8 +499,45 @@ class UpdateSandbox:
             files["BOOT_FAIL"] = "1\n"
         if pip_fail:
             files["PIP_FAIL"] = "1\n"
-        self._write_tree(self.updates_dir, files)
+        return files
+
+    def write_payload(
+        self,
+        version: str,
+        *,
+        boot_fail: bool = False,
+        pip_fail: bool = False,
+        migrate_fail: bool = False,
+    ) -> Path:
+        """Drop a locker-updates/ incoming tree into the appliance."""
+        shutil.rmtree(self.updates_dir, ignore_errors=True)
+        self._write_tree(
+            self.updates_dir,
+            self._payload_files(
+                version,
+                boot_fail=boot_fail,
+                pip_fail=pip_fail,
+                migrate_fail=migrate_fail,
+            ),
+        )
         return self.updates_dir
+
+    def write_usb_payload(self, version: str, *, stick: str = "USBSTICK", **kw) -> Path:
+        """Drop a repo tree under the fake media root (<root>/media/<stick>/
+        locker-updates) — exercises find_usb_tree and the USB→local staging
+        copy."""
+        dest = self.root / "media" / stick / "locker-updates"
+        self._write_tree(dest, self._payload_files(version, **kw))
+        return dest
+
+    def write_nested_payload(self, version: str, *, child: str = "nested-tree", **kw) -> Path:
+        """Repo tree at locker-updates/<child>/ — the apply source is a
+        DESCENDANT of locker-updates; the staging copy must not delete its
+        own source."""
+        shutil.rmtree(self.updates_dir, ignore_errors=True)
+        dest = self.updates_dir / child
+        self._write_tree(dest, self._payload_files(version, **kw))
+        return dest
 
     def write_garbage_payload(self) -> Path:
         """A locker-updates/ dir that is not a valid repo tree."""
@@ -423,6 +561,9 @@ class UpdateSandbox:
         env["SL_E2E_ROOT"] = _posix(self.root)
         env["SMART_LOCKER_DIR"] = _posix(self.app)
         env["SMART_LOCKER_DB_PATH"] = _posix(self.db)
+        # Fake Pi media root: keeps a real /media (or a mounted stick on a
+        # Linux dev box) out of the sandbox so discovery is deterministic.
+        env["SMART_LOCKER_USB_MEDIA_ROOT"] = _posix(self.root / "media")
         env["SMART_LOCKER_SERVICE"] = "e2e-locker"
         env["SMART_LOCKER_USER"] = "locker"
         env["SMART_LOCKER_HEALTH_URL"] = "http://127.0.0.1:9/api/health"
@@ -453,6 +594,17 @@ class UpdateSandbox:
 
     def systemctl_calls(self) -> list[str]:
         p = self.root / "systemctl.log"
+        return p.read_text(encoding="utf-8").splitlines() if p.exists() else []
+
+    def curl_answers(self) -> list[str]:
+        """Every health answer the fake curl emitted, in order — what the
+        health gate actually saw (the version the service was reporting)."""
+        p = self.root / "curl.log"
+        return p.read_text(encoding="utf-8").splitlines() if p.exists() else []
+
+    def perms_log(self) -> list[str]:
+        """chown/chmod calls the updater made, in order."""
+        p = self.root / "perms.log"
         return p.read_text(encoding="utf-8").splitlines() if p.exists() else []
 
     def service_state(self) -> str:

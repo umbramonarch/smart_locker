@@ -17,12 +17,18 @@ import shutil
 
 import pytest
 
-from tests.e2e.update_sandbox import UpdateSandbox, find_bash
+from tests.e2e.update_sandbox import (
+    UpdateSandbox,
+    find_bash,
+    gnu_tools_available,
+)
 
 BASH = find_bash()
 
 pytestmark = pytest.mark.skipif(
-    BASH is None, reason="update.sh e2e tests need GNU bash on PATH"
+    BASH is None or not gnu_tools_available(BASH),
+    reason="update.sh e2e tests need bash and GNU coreutils "
+    "(sort -V, xargs -r, GNU tar, stat -c) on PATH",
 )
 
 OLD_ROW = ("PM-1", "Scope", 3, "available")
@@ -39,12 +45,8 @@ def sandbox_no_cal(tmp_path):
     return UpdateSandbox(tmp_path, BASH).build(include_calibration_column=False)
 
 
-def _assert_rolled_back(sb: UpdateSandbox, env_before: bytes) -> None:
-    """Previous code + DB restored, service back up on the old version."""
-    status = sb.status_json()
-    assert status["state"] == "rolled_back", (
-        f"status={status!r}\n--- update.log ---\n{sb.update_log()}"
-    )
+def _assert_old_tree_restored(sb: UpdateSandbox) -> None:
+    """Code, venv, and images exactly as before the update."""
     assert sb.version() == "1.0.0"
     assert 'APP_MARK = "old-1.0.0"' in sb.path("smart_locker/app.py").read_text(
         encoding="utf-8"
@@ -53,10 +55,46 @@ def _assert_rolled_back(sb: UpdateSandbox, env_before: bytes) -> None:
     assert not sb.path("smart_locker/new_feature.py").exists()
     assert not sb.path("BOOT_FAIL").exists()
     assert not sb.path("PIP_FAIL").exists()
-    assert sb.env_file.read_bytes() == env_before
     assert sb.device_rows() == [OLD_ROW]
-    # The service the health gate sees afterwards is the old version.
+    # The failed update's pip changes are gone too — the fake pip's mutation
+    # marker means a rollback that skipped the venv would leak it.
+    assert not sb.path("venv/PIP_MUTATED").exists()
+    # New-release UI assets are gone; the runtime device photo is kept.
+    assert not sb.path("smart_locker/frontend/images/new_ui.png").exists()
+    assert sb.path("smart_locker/frontend/images/device_photo.jpg").exists()
+
+
+def _assert_runtime_fixups_reapplied(sb: UpdateSandbox) -> None:
+    """The swap's ownership/permission fixups also ran during the rollback —
+    the restore leaves the tree root:root, so .env, logs/, backups/, the
+    images dir and the DB must be re-granted or the old service cannot boot
+    (.env unreadable, RotatingFileHandler raising, SQLite read-only)."""
+    calls = sb.perms_log()
+    for needle in ("/.env", "/logs", "frontend/images", "smart_locker.db"):
+        hits = [c for c in calls if needle in c]
+        assert len(hits) >= 2, (
+            f"expected swap+rollback fixups for {needle!r}, got:\n{calls!r}\n"
+            f"--- update.log ---\n{sb.update_log()}"
+        )
+    assert sum(1 for c in calls if c.startswith("chmod 640 ")) >= 2
+    assert sum(1 for c in calls if c.startswith("chmod 1775 ")) >= 2
+
+
+def _assert_rolled_back(sb: UpdateSandbox, env_before: bytes) -> None:
+    """Previous code + DB restored, service back up on the old version."""
+    status = sb.status_json()
+    assert status["state"] == "rolled_back", (
+        f"status={status!r}\n--- update.log ---\n{sb.update_log()}"
+    )
+    # The status reports the version actually on the box, not the failed one.
+    assert status["version"] == "1.0.0"
+    _assert_old_tree_restored(sb)
+    assert sb.env_file.read_bytes() == env_before
+    # The service the health gate saw afterwards is the old version.
     assert sb.service_state() == "running"
+    last_answer = sb.curl_answers()[-1]
+    assert '"version":"1.0.0"' in last_answer and "api/health" in last_answer
+    _assert_runtime_fixups_reapplied(sb)
 
 
 # ---------------------------------------------------------------------------
@@ -82,10 +120,15 @@ def test_good_payload_is_healthy_and_preserves_runtime_files(sandbox):
         "smart_locker/app.py"
     ).read_text(encoding="utf-8")
     assert sandbox.path("smart_locker/new_feature.py").exists()
+    # The release's UI asset was overlaid next to the runtime photo.
+    assert sandbox.path("smart_locker/frontend/images/new_ui.png").exists()
+    assert sandbox.path("smart_locker/frontend/images/device_photo.jpg").exists()
 
     # Runtime files survived the code swap untouched.
     assert sandbox.env_file.read_bytes() == env_before
     assert sandbox.device_rows() == [OLD_ROW]
+    # The health gate saw the NEW version answering.
+    assert '"version":"1.1.0"' in sandbox.curl_answers()[-1]
 
     # The service was stopped for the swap and restarted on the new version.
     assert sandbox.systemctl_calls() == [
@@ -179,6 +222,96 @@ def test_missing_payload_leaves_running_app_alone(sandbox):
     ).read_text(encoding="utf-8")
 
 
+def test_rollback_unhealthy_when_service_never_recovers(sandbox):
+    """Even the restored tree cannot boot (e.g. the box itself is the
+    problem) — the updater must say so instead of reporting success."""
+    sandbox.write_payload("1.1.0", boot_fail=True)
+    (sandbox.root / "FORCE_START_FAIL").write_text("1\n", encoding="utf-8")
+
+    r = sandbox.run_update()
+
+    assert r.returncode == 1
+    status = sandbox.status_json()
+    assert status["state"] == "rollback_unhealthy", (
+        f"status={status!r}\n--- update.log ---\n{sandbox.update_log()}"
+    )
+    # Reports the version that should be running — not the failed payload.
+    assert status["version"] == "1.0.0"
+    assert sandbox.service_state() == "failed"
+    _assert_old_tree_restored(sandbox)
+    _assert_runtime_fixups_reapplied(sandbox)
+    assert sandbox.systemctl_calls() == [
+        "systemctl stop e2e-locker",
+        "systemctl start e2e-locker",
+        "systemctl stop e2e-locker",
+        "systemctl start e2e-locker",
+    ]
+
+
+# ---------------------------------------------------------------------------
+# A payload found on USB media is staged to local disk first; a nested
+# locker-updates tree is applied in place — never deleted by its own copy.
+# ---------------------------------------------------------------------------
+
+
+def test_usb_payload_is_staged_to_local_disk_and_applied(sandbox):
+    sandbox.write_usb_payload("1.1.0")
+
+    r = sandbox.run_update()
+
+    assert r.returncode == 0, (
+        f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}\n--- update.log ---\n"
+        f"{sandbox.update_log()}"
+    )
+    assert sandbox.status_json()["state"] == "success"
+    assert sandbox.version() == "1.1.0"
+    # The stick's tree was copied off the media root into locker-updates/.
+    assert "Copying incoming tree" in sandbox.update_log()
+    assert (
+        sandbox.updates_dir / "VERSION"
+    ).read_text(encoding="utf-8").strip() == "1.1.0"
+
+
+def test_nested_payload_is_not_deleted_by_its_own_staging_copy(sandbox):
+    """locker-updates/<child>/ is itself the repo tree: the staging copy must
+    not `rm -rf locker-updates` — that would delete the source mid-update."""
+    nested = sandbox.write_nested_payload("1.1.0")
+
+    r = sandbox.run_update()
+
+    assert r.returncode == 0, (
+        f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}\n--- update.log ---\n"
+        f"{sandbox.update_log()}"
+    )
+    assert sandbox.status_json()["state"] == "success"
+    assert sandbox.version() == "1.1.0"
+    # The payload tree survived in place.
+    assert (nested / "VERSION").exists()
+
+
+# ---------------------------------------------------------------------------
+# A backup failure aborts before any change — and the ERR trap fires once.
+# ---------------------------------------------------------------------------
+
+
+def test_backup_failure_aborts_before_stopping_the_service(sandbox):
+    sandbox.write_payload("1.1.0")
+    (sandbox.root / "TAR_CREATE_FAIL").write_text("1\n", encoding="utf-8")
+
+    r = sandbox.run_update()
+
+    assert r.returncode == 1
+    assert sandbox.status_json()["state"] == "failed"
+    assert sandbox.systemctl_calls() == []
+    assert sandbox.service_state() == "running"
+    assert sandbox.version() == "1.0.0"
+    # on_err ran exactly once — the ERR trap did not double-fire from the
+    # command-substitution/subshell boundary — and no rollback ran (nothing
+    # was backed up to roll back to).
+    assert sandbox.update_log().count("ERROR on line") == 1
+    assert "ROLLBACK" not in sandbox.update_log()
+
+
 def test_bad_or_older_payload_never_stops_the_service(sandbox):
     # Garbage in locker-updates/ is not a repo tree — nothing happens.
     sandbox.write_garbage_payload()
@@ -249,6 +382,7 @@ def test_migration_adding_a_column_runs(sandbox_no_cal):
 
 def test_failed_boot_after_migration_restores_pre_migration_db(sandbox_no_cal):
     assert "calibration_due" not in sandbox_no_cal.device_columns()
+    env_before = sandbox_no_cal.env_file.read_bytes()
     sandbox_no_cal.write_payload("1.1.0", boot_fail=True)
 
     r = sandbox_no_cal.run_update()
@@ -260,4 +394,4 @@ def test_failed_boot_after_migration_restores_pre_migration_db(sandbox_no_cal):
     # failed version added is gone again.
     assert "calibration_due" not in sandbox_no_cal.device_columns()
     assert sandbox_no_cal.device_rows() == [OLD_ROW]
-    _assert_rolled_back(sandbox_no_cal, sandbox_no_cal.env_file.read_bytes())
+    _assert_rolled_back(sandbox_no_cal, env_before)

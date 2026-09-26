@@ -22,7 +22,11 @@
 #        PRESERVE keeps runtime files (.env, DB, last_sync.json, venv, logs, backups,
 #        wheelhouse, deploy/system-packages, device photos) across rsync --delete;
 #        committed UI images from the incoming tree are overlaid afterwards without
-#        --delete. Extra .whl files in the incoming locker-updates tree are copied
+#        --delete. The rollback snapshot additionally carries the venv and the
+#        images dir so a revert restores the exact dependency set and the
+#        previous release's UI assets, and rollback re-applies the same runtime
+#        ownership/permission fixups as the swap so the restored service can
+#        boot. Extra .whl files in the incoming locker-updates tree are copied
 #        into the Pi wheelhouse when the Pi does not already have that filename.
 #        Missing wheels are not a refuse; pip failure after backup rolls back.
 #        Set SMART_LOCKER_UPDATE_LIB=1 before sourcing this file from tests.
@@ -46,6 +50,18 @@ if [ -f "$APP_DIR/.env" ]; then
   set -a
   while IFS='=' read -r _env_key _env_val; do
     [[ "$_env_key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+    # Match python-dotenv closely enough for our keys: trim whitespace, a
+    # fully-quoted value keeps an inner '#', otherwise ' #' starts a comment.
+    # (SMART_LOCKER_USER="locker" used to export the quotes literally.)
+    _env_val="${_env_val#"${_env_val%%[![:space:]]*}"}"
+    _env_val="${_env_val%"${_env_val##*[![:space:]]}"}"
+    if [[ "$_env_val" =~ ^\"(.*)\"[[:space:]]*(\#.*)?$ ]] \
+      || [[ "$_env_val" =~ ^\'(.*)\'[[:space:]]*(\#.*)?$ ]]; then
+      _env_val="${BASH_REMATCH[1]}"
+    else
+      _env_val="${_env_val%%[[:space:]]#*}"
+      _env_val="${_env_val%"${_env_val##*[![:space:]]}"}"
+    fi
     export "$_env_key=$_env_val"
   done < <(grep -vE '^[[:space:]]*(#|$)' "$APP_DIR/.env")
   set +a
@@ -74,8 +90,9 @@ SERVICE="${SMART_LOCKER_SERVICE:-smart-locker}"
 HEALTH_URL="${SMART_LOCKER_HEALTH_URL:-http://127.0.0.1:8000/api/health}"
 HEALTH_TIMEOUT="${SMART_LOCKER_HEALTH_TIMEOUT:-45}"   # seconds to wait for a healthy boot
 
-# Raspberry Pi OS auto-mounts USB sticks at /media/<user>/<label>. Not an .env key.
-USB_MEDIA_ROOT="/media"
+# Raspberry Pi OS auto-mounts USB sticks at /media/<user>/<label>. Not an .env
+# key on the appliance — overridable so the e2e sandbox injects a fake media root.
+USB_MEDIA_ROOT="${SMART_LOCKER_USB_MEDIA_ROOT:-/media}"
 # Apply source: Windows copy_update payload, or USB locker-updates copied here.
 LOCAL_UPDATES="$APP_DIR/locker-updates"
 
@@ -101,6 +118,20 @@ INCOMING_SKIP=(".env" "venv" "logs" "backups" "smart_locker.db" "smart_locker.db
 PAYLOAD_SKIP=(".env" "venv" "logs" "backups" "smart_locker.db" "smart_locker.db-wal"
               "smart_locker.db-shm" ".update-staging" ".git" "locker-updates")
 
+# The rollback snapshot keeps the same runtime files out of the tar EXCEPT the
+# venv and the images dir: pip runs before the health gate, so a rollback must
+# restore the exact dependency set and the previous release's committed UI
+# assets — not leave old code running on the new payload's venv/images. Both
+# stay in PRESERVE for the forward swap (an incoming tree must not overwrite
+# the venv, and --delete must not remove device photos).
+BACKUP_SKIP=()
+for p in "${PRESERVE[@]}"; do
+  case "$p" in
+    venv|smart_locker/frontend/images) ;;
+    *) BACKUP_SKIP+=("$p") ;;
+  esac
+done
+
 mkdir -p "$BACKUP_DIR" "$APP_DIR/logs"
 
 # --- Logging ----------------------------------------------------------------
@@ -116,8 +147,8 @@ _status_python() {
   fi
 }
 
-write_status() {  # write_status <state> <message>
-  local state="$1" msg="$2" ver="${NEW_VERSION:-${CUR_VERSION:-unknown}}" at
+write_status() {  # write_status <state> <message> [version]
+  local state="$1" msg="$2" ver="${3:-${NEW_VERSION:-${CUR_VERSION:-unknown}}}" at
   at="$(date '+%Y-%m-%dT%H:%M:%S%z')"
   local pybin
   pybin="$(_status_python)" || pybin=""
@@ -136,6 +167,7 @@ PY
 }
 
 BACKED_UP=0
+ROLLBACK_RAN=0
 CODE_BACKUP=""
 DB_BACKUP=""
 OLD_VERSION=""
@@ -169,43 +201,99 @@ PYEOF
   log "DB snapshot -> $DB_BACKUP"
 }
 
+# --- Ownership/permissions after any rsync into $APP_DIR --------------------
+# Shared by the swap and the rollback so both leave the tree service-ready.
+# Newly written files are root-owned (this unit runs as root). Keep it that
+# way: do NOT chown the tree to the service account. Only runtime dirs
+# (logs, photos, backups) and the SQLite files are service-writable; .env is
+# group-readable by the service account.
+apply_runtime_permissions() {
+  chown -R root:root "$APP_DIR" 2>/dev/null || true
+  chmod -R u=rwX,go=rX "$APP_DIR" 2>/dev/null || true
+  chmod +x "$APP_DIR/deploy/install/"*.sh "$APP_DIR/deploy/kiosk/start-kiosk.sh" 2>/dev/null || true
+  chown root:"$(id -gn "$APP_USER" 2>/dev/null || echo root)" "$APP_DIR" 2>/dev/null || true
+  chmod 1775 "$APP_DIR" 2>/dev/null || true
+  mkdir -p "$APP_DIR/logs" "$APP_DIR/smart_locker/frontend/images" "$APP_DIR/backups"
+  chown -R "$APP_USER":"$APP_USER" "$APP_DIR/logs" 2>/dev/null || true
+  chown -R "$APP_USER":"$APP_USER" "$APP_DIR/backups" 2>/dev/null || true
+  if [ -f "$APP_DIR/.env" ]; then
+    chown root:"$(id -gn "$APP_USER" 2>/dev/null || echo root)" "$APP_DIR/.env" 2>/dev/null || true
+    chmod 640 "$APP_DIR/.env" 2>/dev/null || true
+  fi
+  local f
+  for f in "$DB_PATH" "$DB_PATH-wal" "$DB_PATH-shm" "$APP_DIR/last_sync.json"; do
+    if [ -e "$f" ]; then
+      chown "$APP_USER":"$APP_USER" "$f" 2>/dev/null || true
+    fi
+  done
+  chown -R "$APP_USER":"$APP_USER" "$APP_DIR/smart_locker/frontend/images" 2>/dev/null || true
+}
+
 # --- Rollback (restore the pre-update code + DB, restart on the old version) -
 rollback() {
+  # Only the top-level shell restores: under `set -E` the ERR trap is
+  # inherited by $(...) and ( ... ) subshells, so a restore must never run
+  # inside a substitution and then again in the parent.
+  if [ "${BASH_SUBSHELL:-0}" -gt 0 ]; then
+    return 1
+  fi
+  # A second restore on top of a completed one is a no-op.
+  if [ "$ROLLBACK_RAN" = "1" ]; then
+    return 0
+  fi
+  ROLLBACK_RAN=1
   log "ROLLBACK: restoring previous version."
   # One rollback only: a failure inside the restore must not re-enter on_err
-  # and start a second restore on top of the first.
+  # and start a second restore on top of the first. The restore itself is
+  # best-effort (set +e): one bad step must not skip the DB restore, the
+  # service restart, or the status write — that would leave the box stopped
+  # with a stale "updating" status forever.
   trap - ERR
+  set +e
+  rm -rf "$BACKUP_DIR"/.restore-* 2>/dev/null
   sudo systemctl stop "$SERVICE" 2>/dev/null || true
   if [ -n "$CODE_BACKUP" ] && [ -f "$CODE_BACKUP" ]; then
     # tar-over-APP_DIR would only overwrite: files the failed version added
     # (and only it has) would survive, leaving a mixed old/new tree. Extract
     # the snapshot aside and rsync --delete it back so the code tree is
-    # exactly what it was. The PRESERVE set the swap uses keeps .env, the DB,
-    # venv, logs, backups, wheelhouse, photos and locker-updates untouched.
+    # exactly what it was. BACKUP_SKIP keeps .env, the DB, logs, backups,
+    # wheelhouse and locker-updates untouched — the venv and the images dir
+    # ARE restored so the old code gets its own dependencies and UI assets.
     local restore_dir="$BACKUP_DIR/.restore-$STAMP"
     rm -rf "$restore_dir"
     mkdir -p "$restore_dir"
     tar -xzf "$CODE_BACKUP" -C "$restore_dir"
-    local restore_excludes=()
-    for p in "${PRESERVE[@]}"; do restore_excludes+=( --exclude="/$p" ); done
-    rsync -a --delete "${restore_excludes[@]}" "$restore_dir"/ "$APP_DIR"/
+    # --delete only onto a snapshot that still looks like a tree — a corrupt
+    # or truncated backup must not wipe the current code into nothing.
+    if is_repo_tree "$restore_dir"; then
+      local restore_excludes=()
+      for p in "${BACKUP_SKIP[@]}"; do restore_excludes+=( --exclude="/$p" ); done
+      rsync -a --delete "${restore_excludes[@]}" "$restore_dir"/ "$APP_DIR"/
+      log "Restored code from $CODE_BACKUP"
+    else
+      log "WARNING: $CODE_BACKUP did not extract to a valid tree — code left as-is."
+    fi
     rm -rf "$restore_dir"
-    chown -R root:root "$APP_DIR" 2>/dev/null || true
-    log "Restored code from $CODE_BACKUP"
   fi
   if [ -n "$DB_BACKUP" ] && [ -f "$DB_BACKUP" ]; then
     rm -f "$DB_PATH-wal" "$DB_PATH-shm"
     cp -f "$DB_BACKUP" "$DB_PATH"
     log "Restored DB from $DB_BACKUP"
   fi
-  [ -n "$OLD_VERSION" ] && printf '%s\n' "$OLD_VERSION" > "$VERSION_FILE"
+  if [ -n "$OLD_VERSION" ]; then
+    printf '%s\n' "$OLD_VERSION" > "$VERSION_FILE"
+  fi
+  # The restore left the tree root:root again — re-apply the same runtime
+  # ownership the swap performs, or the service account cannot read .env or
+  # write logs/, the DB, or device photos.
+  apply_runtime_permissions
   sudo systemctl start "$SERVICE" 2>/dev/null || true
   if wait_for_health; then
     log "Rollback healthy — running previous version ${OLD_VERSION:-?}."
-    write_status "rolled_back" "Update failed; reverted to previous version and recovered."
+    write_status "rolled_back" "Update failed; reverted to previous version and recovered." "$OLD_VERSION"
   else
     log "WARNING: service did not report healthy after rollback — check 'journalctl -u $SERVICE'."
-    write_status "rollback_unhealthy" "Update failed and the service is not healthy after rollback — manual check needed."
+    write_status "rollback_unhealthy" "Update failed and the service is not healthy after rollback — manual check needed." "$OLD_VERSION"
   fi
 }
 
@@ -214,6 +302,13 @@ on_err() {
   # Never re-enter: a failure inside this handler (or inside rollback) must
   # not fire the ERR trap again and stack another restore on top.
   trap - ERR
+  # The ERR trap is inherited by $(...) and ( ... ) subshells under set -E:
+  # this handler would fire there AND again in the parent. Only the
+  # top-level shell does the work — a subshell exits nonzero so the
+  # parent's own ERR trap runs the one real on_err.
+  if [ "${BASH_SUBSHELL:-0}" -gt 0 ]; then
+    exit 1
+  fi
   log "ERROR on line $line."
   if [ "$BACKED_UP" = "1" ]; then
     rollback
@@ -494,13 +589,20 @@ write_status "updating" "Copying $NEW_VERSION onto local disk."
 _src_abs="$(cd "$SOURCE_PATH" && pwd)"
 mkdir -p "$LOCAL_UPDATES"
 _local_abs="$(cd "$LOCAL_UPDATES" && pwd)"
-if [ "$_src_abs" != "$_local_abs" ]; then
-  log "Copying incoming tree to $LOCAL_UPDATES (USB can be unplugged after this)."
-  rm -rf "$LOCAL_UPDATES"
-  copy_payload_tree "$SOURCE_PATH" "$LOCAL_UPDATES"
-  SOURCE_PATH="$LOCAL_UPDATES"
-  log "Incoming tree is at $LOCAL_UPDATES."
-fi
+case "$_src_abs" in
+  "$_local_abs"|"$_local_abs"/*)
+    # Already under $LOCAL_UPDATES (a nested payload tree). rm -rf'ing
+    # $LOCAL_UPDATES here would destroy SOURCE_PATH before it is copied —
+    # a descendant source never triggers the staging copy.
+    ;;
+  *)
+    log "Copying incoming tree to $LOCAL_UPDATES (USB can be unplugged after this)."
+    rm -rf "$LOCAL_UPDATES"
+    copy_payload_tree "$SOURCE_PATH" "$LOCAL_UPDATES"
+    SOURCE_PATH="$LOCAL_UPDATES"
+    log "Incoming tree is at $LOCAL_UPDATES."
+    ;;
+esac
 
 # ============================================================================
 # 3. Stage onto local disk (USB can be unplugged after this)
@@ -526,11 +628,14 @@ write_status "updating" "Applying $NEW_VERSION. USB stick can be unplugged."
 # ============================================================================
 CODE_BACKUP="$BACKUP_DIR/code-$STAMP.tar.gz"
 TAR_EXCLUDES=()
-for p in "${PRESERVE[@]}"; do TAR_EXCLUDES+=( --exclude="./$p" ); done
+for p in "${BACKUP_SKIP[@]}"; do TAR_EXCLUDES+=( --exclude="./$p" ); done
 # No subshell: under `set -E` the ERR trap also fires inside ( ... ) and then
 # again in the parent when the subshell exits nonzero — a backup/migrate
 # failure would run on_err (and rollback) twice.
-tar -czf "$CODE_BACKUP" "${TAR_EXCLUDES[@]}" -C "$APP_DIR" .
+# --warning=no-file-changed: the service still runs while this snapshot is
+# taken, so a __pycache__ rewrite mid-tar must not abort a healthy update.
+tar --warning=no-file-changed --exclude='*/__pycache__' \
+  -czf "$CODE_BACKUP" "${TAR_EXCLUDES[@]}" -C "$APP_DIR" .
 log "Code snapshot -> $CODE_BACKUP"
 backup_db
 BACKED_UP=1
@@ -544,33 +649,13 @@ sudo systemctl stop "$SERVICE"
 RSYNC_EXCLUDES=()
 for p in "${PRESERVE[@]}"; do RSYNC_EXCLUDES+=( --exclude="/$p" ); done
 rsync -a --delete "${RSYNC_EXCLUDES[@]}" "$STAGING_DIR"/ "$APP_DIR"/
-# Newly written files are root-owned (this unit runs as root). Keep it that
-# way: do NOT chown the tree to the service account. Only runtime dirs
-# (logs, photos, backups) and the SQLite files are service-writable.
-chown -R root:root "$APP_DIR" 2>/dev/null || true
-chmod -R u=rwX,go=rX "$APP_DIR" 2>/dev/null || true
-chmod +x "$APP_DIR/deploy/install/"*.sh "$APP_DIR/deploy/kiosk/start-kiosk.sh" 2>/dev/null || true
-chown root:"$(id -gn "$APP_USER" 2>/dev/null || echo root)" "$APP_DIR" 2>/dev/null || true
-chmod 1775 "$APP_DIR" 2>/dev/null || true
-mkdir -p "$APP_DIR/logs" "$APP_DIR/smart_locker/frontend/images" "$APP_DIR/backups"
-chown -R "$APP_USER":"$APP_USER" "$APP_DIR/logs" 2>/dev/null || true
-chown -R "$APP_USER":"$APP_USER" "$APP_DIR/backups" 2>/dev/null || true
-if [ -f "$APP_DIR/.env" ]; then
-  chown root:"$(id -gn "$APP_USER" 2>/dev/null || echo root)" "$APP_DIR/.env" 2>/dev/null || true
-  chmod 640 "$APP_DIR/.env" 2>/dev/null || true
-fi
-for f in "$APP_DIR/smart_locker.db" "$APP_DIR/smart_locker.db-wal" "$APP_DIR/smart_locker.db-shm" "$APP_DIR/last_sync.json"; do
-  if [ -e "$f" ]; then
-    chown "$APP_USER":"$APP_USER" "$f" 2>/dev/null || true
-  fi
-done
 # PRESERVE skipped this dir so gitignored device photos survive --delete.
 # Overlay committed UI assets from the staged release without removing photos.
 if [ -d "$STAGING_DIR/smart_locker/frontend/images" ]; then
   mkdir -p "$APP_DIR/smart_locker/frontend/images"
   rsync -a "$STAGING_DIR/smart_locker/frontend/images/" "$APP_DIR/smart_locker/frontend/images/"
 fi
-chown -R "$APP_USER":"$APP_USER" "$APP_DIR/smart_locker/frontend/images" 2>/dev/null || true
+apply_runtime_permissions
 log "New code in place."
 
 # ============================================================================
@@ -581,9 +666,12 @@ log "Installing dependencies from offline wheelhouse..."
 "$VENV_DIR/bin/pip" install --ignore-installed --no-index --find-links "$WHEELHOUSE" -r "$REQS_FOR_UPDATE" >>"$LOG_FILE" 2>&1
 
 log "Running database migrations..."
-# Run the script file directly: migrate_db.py puts its parent dir on sys.path
-# itself, so no `cd`/`-m` subshell is needed — see the ERR-trap note above.
-"$PY" "$APP_DIR/scripts/migrate_db.py" >>"$LOG_FILE" 2>&1
+# The documented entry point run from the app root — a plain `cd` in this
+# shell, not a `( cd && ... )` subshell, so the ERR trap fires once and the
+# script's internal sys.path shim is not depended on. Everything past this
+# point already uses absolute paths.
+cd "$APP_DIR"
+"$PY" -m scripts.migrate_db >>"$LOG_FILE" 2>&1
 
 # ============================================================================
 # 7. Restart and HEALTH-GATE
@@ -606,9 +694,11 @@ if wait_for_health; then
     fi
   fi
   rm -rf "$STAGING_DIR"
-  # Prune old backups, keep the most recent KEEP_BACKUPS of each kind.
-  ls -1t "$BACKUP_DIR"/code-*.tar.gz 2>/dev/null | tail -n +"$((KEEP_BACKUPS+1))" | xargs -r rm -f
-  ls -1t "$BACKUP_DIR"/db-*.sqlite   2>/dev/null | tail -n +"$((KEEP_BACKUPS+1))" | xargs -r rm -f
+  # Prune old backups, keep the most recent KEEP_BACKUPS of each kind. A prune
+  # hiccup must not fail a run that already wrote "success".
+  ls -1t "$BACKUP_DIR"/code-*.tar.gz 2>/dev/null | tail -n +"$((KEEP_BACKUPS+1))" | xargs -r rm -f || true
+  ls -1t "$BACKUP_DIR"/db-*.sqlite   2>/dev/null | tail -n +"$((KEEP_BACKUPS+1))" | xargs -r rm -f || true
+  rm -rf "$BACKUP_DIR"/.restore-* 2>/dev/null || true
   exit 0
 else
   log "New version did NOT become healthy within ${HEALTH_TIMEOUT}s — rolling back."
