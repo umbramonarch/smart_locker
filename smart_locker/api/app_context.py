@@ -35,10 +35,13 @@ class PendingRegistration:
     Created when a user submits their name on the registration screen. The
     registration is valid for ``REGISTRATION_TIMEOUT_SECONDS`` (60s) — if no
     card is tapped before then, the attempt expires and the user must retry.
+    ``role`` is "admin" only for first-boot Setup; every other path keeps
+    the default "user".
     """
 
     display_name: str
     created_at: float = field(default_factory=time.monotonic)
+    role: str = "user"
 
     @property
     def is_expired(self) -> bool:
@@ -362,6 +365,9 @@ class AppContext:
                     session_mgr,
                     registration_display_name=(
                         pending_reg.display_name if pending_reg is not None else None
+                    ),
+                    registration_role=(
+                        pending_reg.role if pending_reg is not None else "user"
                     ),
                     registration_expired=expired_reg,
                     tag_bind_device_id=(

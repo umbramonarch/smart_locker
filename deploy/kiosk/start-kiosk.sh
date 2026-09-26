@@ -57,6 +57,7 @@ mkdir -p "$PROFILE_DIR"
 exec "$CHROME" \
   --kiosk \
   --user-data-dir="$PROFILE_DIR" \
+  --password-store=basic \
   --noerrdialogs \
   --disable-infobars \
   --disable-session-crashed-bubble \

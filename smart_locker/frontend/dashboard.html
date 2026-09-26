@@ -143,6 +143,28 @@
     </div>
   </div>
 
+  <div class="admin-secret-dialog" id="setup-dialog" hidden>
+    <div class="admin-secret-card" role="dialog" aria-labelledby="setup-dialog-title">
+      <h3 class="admin-secret-title" id="setup-dialog-title">First-admin setup</h3>
+      <p class="admin-secret-hint" id="setup-dialog-hint">
+        No administrator is enrolled yet. Enter the admin's name and a
+        dashboard password, then tap the new admin card on the locker reader.
+      </p>
+      <label class="admin-secret-label" for="setup-name-input">Admin name</label>
+      <input type="text" class="search-input" id="setup-name-input" autocomplete="off" maxlength="100">
+      <label class="admin-secret-label" for="setup-password-input">Dashboard password</label>
+      <input type="password" class="search-input" id="setup-password-input" autocomplete="off" maxlength="200">
+      <p class="error-msg" id="setup-dialog-error" style="display:none"></p>
+      <p class="admin-secret-hint" id="setup-dialog-waiting" style="display:none">
+        Waiting — tap the admin card on the locker reader…
+      </p>
+      <div class="admin-secret-actions">
+        <button type="button" class="admin-secret-cancel" id="setup-dialog-cancel">Cancel</button>
+        <button type="button" class="admin-secret-confirm" id="setup-dialog-confirm">Enroll admin</button>
+      </div>
+    </div>
+  </div>
+
   <div class="admin-secret-dialog" id="admin-secret-dialog" hidden>
     <div class="admin-secret-card" role="dialog" aria-labelledby="admin-secret-title">
       <h3 class="admin-secret-title" id="admin-secret-title">Admin access</h3>

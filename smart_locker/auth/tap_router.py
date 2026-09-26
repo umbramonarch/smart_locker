@@ -103,12 +103,14 @@ def handle_registration_tap(
     display_name: str,
     hmac_key: bytes,
     enc_key: bytes | None,
+    role: str = "user",
 ) -> TapResult:
     """Enroll ``display_name`` from a fresh card tap.
 
     Classification, duplicate rejection, and enrollment deliberately share the
     caller's session. The AppContext owns the pending-window timeout and
     session-clearing policy; this function owns the database tap policy.
+    ``role`` is "admin" only when a first-boot Setup window armed the tap.
     """
     kind, user, _ = classify_uid(db_session, card_uid_hex, hmac_key)
     if kind == TapKind.DEVICE_TAG:
@@ -134,7 +136,7 @@ def handle_registration_tap(
         db_session,
         display_name=display_name,
         card_uid_hex=card_uid_hex,
-        role="user",
+        role=role,
     )
     logger.info("Self-registered user: %s (id=%d)", user.display_name, user.id)
     return TapResult(
@@ -296,6 +298,7 @@ def dispatch_insert(
     session_mgr: SessionManager,
     *,
     registration_display_name: str | None = None,
+    registration_role: str = "user",
     registration_expired: bool = False,
     tag_bind_device_id: int | None = None,
     admin_overlay_open: bool = False,
@@ -338,6 +341,7 @@ def dispatch_insert(
                 display_name=registration_display_name,
                 hmac_key=hmac_key,
                 enc_key=enc_key,
+                role=registration_role,
             )
         except Exception:
             logger.exception(

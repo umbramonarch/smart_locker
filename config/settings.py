@@ -176,6 +176,10 @@ HMAC_KEY_ENV_VAR = "SMART_LOCKER_HMAC_KEY"
 # Header LAN browsers send for dashboard mutations (bind/unbind, later owner).
 DASHBOARD_ADMIN_HEADER = "X-Smart-Locker-Admin"
 
+# Environment variable that stores the dashboard admin password. Setup writes
+# it to .env on first boot when the operator types a password.
+DASHBOARD_ADMIN_SECRET_ENV_VAR = "SMART_LOCKER_DASHBOARD_ADMIN_SECRET"
+
 
 def dashboard_admin_secret() -> str:
     """Shared secret for dashboard admin mutations.
@@ -186,4 +190,4 @@ def dashboard_admin_secret() -> str:
     Returns:
         Stripped ``SMART_LOCKER_DASHBOARD_ADMIN_SECRET``, or ``""``.
     """
-    return (os.getenv("SMART_LOCKER_DASHBOARD_ADMIN_SECRET") or "").strip()
+    return (os.getenv(DASHBOARD_ADMIN_SECRET_ENV_VAR) or "").strip()

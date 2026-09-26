@@ -8,7 +8,8 @@ Description: REST API endpoints and SSE event stream for the Smart Locker kiosk.
              (public Inventory from Excel and Locker from SQLite, Display
              snapshot without person names, admin-secret owner edit and 5-tap
              unbind / arm-bind), an admin-only Excel export download, admin
-             Exit kiosk / Shut down, and source sync that writes Location back.
+             Stop system / Shut down, first-boot Setup (enroll the first admin
+             via a cabinet card tap), and source sync that writes Location back.
 Project: smart_locker/api
 Notes: Kiosk session mutations require an active session AND a loopback
        client (require_session). LAN browsers must not ride the process-global
@@ -18,7 +19,9 @@ Notes: Kiosk session mutations require an active session AND a loopback
        bypasses this check. Catalog GETs
        under /api/dashboard/ stay public. Dashboard mutations require
        SMART_LOCKER_DASHBOARD_ADMIN_SECRET (header X-Smart-Locker-Admin), not
-       loopback. Appliance session/shutdown/exit/update are kiosk-loopback only.
+       loopback. Appliance session/shutdown/stop-system are kiosk-loopback
+       only. Software update accepts the admin session, the dashboard secret,
+       or — on a first boot with neither — the open Setup gate.
 """
 
 import asyncio
@@ -28,7 +31,14 @@ import logging
 import secrets
 import time
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    HTTPException,
+    Request,
+    Response,
+)
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -63,10 +73,11 @@ from smart_locker.nfc.factory import fake_reader_enabled
 from smart_locker.services.appliance import (
     ApplianceError,
     ApplianceUnavailable,
+    SYSTEMCTL,
     SYSTEMD_RUN,
-    exit_kiosk,
     launch_update,
     shutdown as appliance_shutdown,
+    stop_system,
 )
 from smart_locker.services.device_catalog import device_record, unbind_device_tag as clear_device_tag
 from smart_locker.services.locker_service import LockerService
@@ -78,6 +89,7 @@ from smart_locker.services.owner_edit import (
     owner_choices,
     set_owner,
 )
+from smart_locker.services.setup_service import setup_needed, write_dashboard_secret
 from smart_locker.sync import sync_status
 from smart_locker.sync.inventory_reader import InventoryReadError, read_inventory
 from smart_locker.sync.workbook_adapter import configured_workbook
@@ -114,6 +126,9 @@ def _last_update_status() -> dict | None:
 # button is disabled (clean 503) anywhere this is absent (dev box / Windows).
 # Resolved once at import — it cannot change while the process runs.
 _SYSTEMD_RUN = SYSTEMD_RUN
+
+# Same for Stop system: systemctl must exist to stop the service.
+_SYSTEMCTL = SYSTEMCTL
 
 
 # --- Page routes ------------------------------------------------------------
@@ -976,6 +991,108 @@ def get_registrants(db: Session = Depends(get_db)):
     return {"names": names, "syncing": import_in_progress()}
 
 
+# --- First-boot Setup -------------------------------------------------------
+
+class SetupRequest(BaseModel):
+    """Setup arm: the first admin's name, plus the dashboard admin password.
+
+    ``password`` is written to the Pi .env as
+    ``SMART_LOCKER_DASHBOARD_ADMIN_SECRET`` when that secret is unset; when it
+    is already set it must arrive in the ``X-Smart-Locker-Admin`` header (the
+    typed password then doubles as authorization) and .env is left alone.
+    """
+
+    name: str = Field(..., min_length=1, max_length=100)
+    password: str = Field("", max_length=200)
+
+
+@router.get("/api/setup")
+def setup_state(db: Session = Depends(get_db)) -> dict:
+    """Report whether first-boot Setup is open (no active admin enrolled).
+
+    Public: the kiosk (5-tap) and the dashboard (Admin button / 5-tap) both
+    poll this to decide between Setup and the normal admin path. Exposes only
+    ``needed`` and whether an admin password is already stored — never user
+    rows, UIDs, or the secret.
+
+    Returns:
+        dict: ``needed`` True while no active admin exists; ``secret_set``
+              True when SMART_LOCKER_DASHBOARD_ADMIN_SECRET is configured.
+    """
+    return {
+        "needed": setup_needed(db),
+        "secret_set": bool(dashboard_admin_secret()),
+    }
+
+
+@router.post("/api/setup")
+def start_setup(
+    request: Request,
+    body: SetupRequest,
+    db: Session = Depends(get_db),
+):
+    """Arm a 60s card-tap window that enrolls the tapped card as admin.
+
+    Setup is open only while the database has no active admin — the moment one
+    exists, this returns 404 and Setup is gone. Once
+    ``SMART_LOCKER_DASHBOARD_ADMIN_SECRET`` is set, arming requires that secret
+    in the ``X-Smart-Locker-Admin`` header; before any password exists the arm
+    is open because the physical card tap on the cabinet reader is what
+    authorizes the enrollment — a LAN caller can open the window but cannot
+    finish it.
+
+    Args:
+        request: Incoming ASPI request (admin header check).
+        body: Admin display name and optional dashboard password.
+        db: Active database session (injected by ``get_db``).
+
+    Returns:
+        dict: ``{"success": True, "message": str}``.
+
+    Raises:
+        HTTPException: 503 if system not ready; 404 once an admin exists;
+                       401 when the stored secret does not match; 409 when a
+                       registration/bind window already owns the reader.
+    """
+    if ctx_module.context is None:
+        raise HTTPException(status_code=503, detail="System not ready.")
+
+    if not setup_needed(db):
+        raise HTTPException(status_code=404, detail="Setup is already complete.")
+
+    secret = dashboard_admin_secret()
+    if secret:
+        provided = request.headers.get(DASHBOARD_ADMIN_HEADER) or ""
+        if len(provided) != len(secret) or not secrets.compare_digest(provided, secret):
+            raise HTTPException(
+                status_code=401,
+                detail="Dashboard admin authorization required.",
+            )
+
+    conflict = _pending_nfc_conflict()
+    if conflict:
+        raise HTTPException(status_code=409, detail=conflict)
+
+    password = body.password.strip()
+    if password and not secret:
+        try:
+            write_dashboard_secret(password)
+        except (OSError, ValueError) as e:
+            logger.error("Setup could not store the admin password: %s", type(e).__name__)
+            raise HTTPException(
+                status_code=500,
+                detail="Could not store the admin password.",
+            ) from e
+
+    assign_pending_tag_bind(ctx_module.context, None)
+    assign_pending_registration(
+        ctx_module.context,
+        PendingRegistration(display_name=body.name.strip(), role="admin"),
+    )
+    logger.info("Setup armed: awaiting the first admin card tap.")
+    return {"success": True, "message": "Tap the admin card on the locker reader."}
+
+
 # --- Admin Endpoints --------------------------------------------------------
 
 @router.post("/api/admin/session")
@@ -1524,19 +1641,72 @@ def get_update_status(user_session: UserSession = Depends(require_session)):
     return data
 
 
+def _require_update_authorized(request: Request, db: Session) -> None:
+    """Gate POST /api/admin/update. Never returns on refusal.
+
+    The update does not require an enrolled admin — a first-boot box with no
+    admin and no dashboard password may still take a stick (Setup runs it).
+    Once ``SMART_LOCKER_DASHBOARD_ADMIN_SECRET`` is set, the
+    ``X-Smart-Locker-Admin`` header is what authorizes the call, from the kiosk
+    or the LAN. A loopback admin kiosk session also still authorizes, so the
+    cabinet behaves exactly as before.
+
+    Args:
+        request: Incoming ASGI request (client address + admin header).
+        db: Active database session (injected by ``get_db``).
+
+    Raises:
+        HTTPException: 401 without a matching secret or session, or when no
+                       secret is configured and an admin exists (fail closed);
+                       403 for a non-admin session.
+    """
+    secret = dashboard_admin_secret()
+    provided = request.headers.get(DASHBOARD_ADMIN_HEADER) or ""
+    if secret and len(provided) == len(secret) and secrets.compare_digest(provided, secret):
+        return
+
+    if _is_loopback_request(request):
+        ctx = ctx_module.context
+        session = ctx.session_mgr.current_session if ctx is not None else None
+        if session is not None:
+            if session.user.role == UserRole.ADMIN:
+                return
+            raise HTTPException(status_code=403, detail="Admin access required.")
+        if not secret and UserRepository.first_active_admin(db) is None:
+            # First boot: no admin enrolled and no password stored yet.
+            return
+        raise HTTPException(status_code=401, detail="No active session.")
+
+    # LAN: the secret (checked above) or a true first-boot Setup.
+    if not secret and UserRepository.first_active_admin(db) is None:
+        return
+    raise HTTPException(
+        status_code=401,
+        detail=(
+            "Dashboard admin authorization required."
+            if secret
+            else "Dashboard admin is not configured."
+        ),
+    )
+
+
 @router.post("/api/admin/update")
 def trigger_update(
-    _: None = Depends(require_loopback),
-    user_session: UserSession = Depends(require_session),
+    request: Request,
+    db: Session = Depends(get_db),
 ):
-    """Launch the safe software-update script out-of-process (admin only).
+    """Launch the safe software-update script out-of-process.
 
-    Backs the admin-panel "Software Update" button. The update itself is applied by
-    ``deploy/install/update.sh``, which finds an unpacked ``locker-updates`` tree
-    (USB first, then ``$APP_DIR/locker-updates``), snapshots the DB + code, swaps
-    in the new version, migrates, restarts the service, health-checks, and
-    AUTO-ROLLS-BACK on failure — so a bad update self-reverts on a box no one is
-    standing next to.
+    Backs the admin-panel "Software Update" button and the first-boot Setup
+    screen. Authorized by the dashboard admin secret (header
+    ``X-Smart-Locker-Admin``, kiosk or LAN), by a loopback admin kiosk
+    session, or — on a box with no admin and no password yet — openly so a
+    first boot can take a stick. The update itself is applied by
+    ``deploy/install/update.sh``, which finds an unpacked ``locker-updates``
+    tree (USB first, then ``$APP_DIR/locker-updates``), snapshots the DB +
+    code, swaps in the new version, migrates, restarts the service,
+    health-checks, and AUTO-ROLLS-BACK on failure — so a bad update
+    self-reverts on a box no one is standing next to.
 
     The script restarts the very systemd service that hosts this request, so it
     must run in its OWN cgroup; we launch it as a transient ``systemd-run`` unit
@@ -1544,18 +1714,14 @@ def trigger_update(
     ``systemd-run``, or the script is absent) this returns 503 with a clear
     message rather than pretending to update.
 
-    Args:
-        user_session: The active session (injected by ``require_session``).
-
     Returns:
         dict: ``{"started": True, "message": ...}`` once the updater is launched.
 
     Raises:
-        HTTPException: 403 if not admin; 503 if updates aren't runnable here;
-                       500 if the updater unit could not be launched.
+        HTTPException: 401/403 when not authorized; 503 if updates aren't
+                       runnable here; 500 if the updater unit could not launch.
     """
-    if user_session.user.role != UserRole.ADMIN:
-        raise HTTPException(status_code=403, detail="Admin access required.")
+    _require_update_authorized(request, db)
 
     try:
         launch_update(BASE_DIR, _SYSTEMD_RUN)
@@ -1564,41 +1730,47 @@ def trigger_update(
     except ApplianceError as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
 
-    logger.info("Software update launched by admin %s.", user_session.user.display_name)
+    logger.info("Software update launched.")
     return {"started": True, "message": "Update started. The kiosk will restart briefly."}
 
 
-@router.post("/api/admin/exit-kiosk")
-def admin_exit_kiosk(
+@router.post("/api/admin/stop-system")
+def admin_stop_system(
+    background_tasks: BackgroundTasks,
     _: None = Depends(require_loopback),
     user_session: UserSession = Depends(require_session),
 ):
-    """Stop the Chromium kiosk browser (admin only). The backend stays up.
+    """Stop the whole locker system (admin only): Chromium, then the service.
 
-    Chromium was started by graphical autostart; it does not come back until
-    the next login or reboot. On a Windows/dev host this returns 503.
+    The reply goes out first; a background task then SIGTERMs the kiosk
+    browser and runs ``sudo -n /usr/bin/systemctl stop smart-locker``. An
+    explicit ``systemctl stop`` stays stopped — ``Restart=always`` does not
+    bring the service back, and nothing runs until the next boot. On a
+    Windows/dev host (no systemctl) this returns 503.
 
     Args:
+        background_tasks: FastAPI post-response task runner.
         user_session: The active session (injected by ``require_session``).
 
     Returns:
-        dict: ``{"ok": True, "message": ...}`` after SIGTERM was sent.
+        dict: ``{"ok": True, "message": ...}`` — the stop then follows.
 
     Raises:
-        HTTPException: 403 if not admin; 503 if this host has no kiosk
-                       browser; 500 if the stop command failed.
+        HTTPException: 403 if not admin; 503 if systemd is absent.
     """
     if user_session.user.role != UserRole.ADMIN:
         raise HTTPException(status_code=403, detail="Admin access required.")
-    try:
-        exit_kiosk()
-    except ApplianceUnavailable as e:
-        raise HTTPException(status_code=503, detail=str(e)) from e
-    except ApplianceError as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
+    if _SYSTEMCTL is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Stop system runs on the Raspberry Pi appliance only.",
+        )
+    background_tasks.add_task(stop_system)
     _end_kiosk_session()
-    logger.info("Kiosk browser stopped by admin %s.", user_session.user.display_name)
-    return {"ok": True, "message": "Kiosk browser closed. Service is still running."}
+    logger.info(
+        "System stop requested by admin %s.", user_session.user.display_name
+    )
+    return {"ok": True, "message": "Stopping the locker system."}
 
 
 @router.post("/api/admin/shutdown")

@@ -208,6 +208,175 @@ async function ensureDashboardAdminSecret() {
 }
 
 
+/* ── First-boot Setup (no admin enrolled yet) ─────────────────────────────── */
+
+/** Interval handle for polling /api/setup while a card tap is awaited. */
+let setupPollTimer = null;
+/** True when SMART_LOCKER_DASHBOARD_ADMIN_SECRET is already configured. */
+let setupSecretConfigured = false;
+
+/**
+ * Whether first-boot Setup is open on the locker (no active admin).
+ * Fails closed: errors are treated as "setup not needed".
+ *
+ * @returns {Promise<boolean>}
+ */
+async function dashboardSetupNeeded() {
+  try {
+    const res = await fetch('/api/setup');
+    if (!res.ok) return false;
+    const data = await res.json();
+    setupSecretConfigured = !!data.secret_set;
+    return !!data.needed;
+  } catch (_) {
+    return false;
+  }
+}
+
+/**
+ * Show the Setup dialog for enrolling the first admin. When a dashboard
+ * password is already configured the typed password only authorizes the
+ * request (header); otherwise it is stored on the Pi as the admin secret.
+ */
+function openSetupDialog() {
+  const dialog = document.getElementById('setup-dialog');
+  const hint = document.getElementById('setup-dialog-hint');
+  const nameInput = document.getElementById('setup-name-input');
+  const pwInput = document.getElementById('setup-password-input');
+  const err = document.getElementById('setup-dialog-error');
+  const waiting = document.getElementById('setup-dialog-waiting');
+  if (nameInput) nameInput.value = '';
+  if (pwInput) pwInput.value = '';
+  if (err) err.style.display = 'none';
+  if (waiting) waiting.style.display = 'none';
+  if (hint) {
+    hint.textContent = setupSecretConfigured
+      ? 'No administrator is enrolled yet. Enter the admin\'s name and the configured dashboard password, then tap the new admin card on the locker reader.'
+      : 'No administrator is enrolled yet. Enter the admin\'s name and choose a dashboard password, then tap the new admin card on the locker reader.';
+  }
+  if (dialog) dialog.hidden = false;
+  if (nameInput) nameInput.focus();
+}
+
+
+/**
+ * Hide the Setup dialog and stop the enrollment poll. An armed card window
+ * on the locker expires by itself after 60s — the dashboard cannot cancel
+ * it remotely (cancel is loopback-only on purpose).
+ */
+function closeSetupDialog() {
+  const dialog = document.getElementById('setup-dialog');
+  if (dialog) dialog.hidden = true;
+  if (setupPollTimer) {
+    clearInterval(setupPollTimer);
+    setupPollTimer = null;
+  }
+}
+
+
+/**
+ * POST /api/setup with the typed name and password, then wait for the
+ * physical card tap by polling GET /api/setup until Setup closes.
+ *
+ * @returns {Promise<void>}
+ */
+async function submitSetupDialog() {
+  const nameInput = document.getElementById('setup-name-input');
+  const pwInput = document.getElementById('setup-password-input');
+  const err = document.getElementById('setup-dialog-error');
+  const waiting = document.getElementById('setup-dialog-waiting');
+  const btn = document.getElementById('setup-dialog-confirm');
+  const name = nameInput ? nameInput.value.trim() : '';
+  const password = pwInput ? pwInput.value : '';
+  if (!name || !password) {
+    if (err) {
+      err.textContent = 'Enter the admin name and a dashboard password.';
+      err.style.display = '';
+    }
+    return;
+  }
+  if (err) err.style.display = 'none';
+  if (btn) btn.disabled = true;
+
+  try {
+    const headers = { 'Content-Type': 'application/json' };
+    if (setupSecretConfigured) headers[ADMIN_HEADER] = password;
+    const res = await fetch('/api/setup', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        name,
+        password: setupSecretConfigured ? '' : password,
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      if (err) {
+        err.textContent = typeof data.detail === 'string'
+          ? data.detail : 'Could not start setup.';
+        err.style.display = '';
+      }
+      return;
+    }
+  } catch (_) {
+    if (err) {
+      err.textContent = 'Could not start setup.';
+      err.style.display = '';
+    }
+    return;
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+
+  // The typed password is the dashboard secret going forward (newly stored,
+  // or the existing one used to authorize) — remember it so the admin
+  // overlay opens without re-prompting once enrollment lands.
+  sessionStorage.setItem(ADMIN_SECRET_KEY, password);
+
+  if (waiting) waiting.style.display = '';
+  pollSetupUntilEnrolled(Date.now() + 65000);
+}
+
+
+/**
+ * Poll /api/setup while the 60s card window is armed. Setup closes the
+ * moment the tapped card enrolls as the first admin.
+ *
+ * @param {number} deadline - Epoch ms when the poll gives up.
+ */
+function pollSetupUntilEnrolled(deadline) {
+  const waiting = document.getElementById('setup-dialog-waiting');
+  const err = document.getElementById('setup-dialog-error');
+  if (setupPollTimer) clearInterval(setupPollTimer);
+  setupPollTimer = setInterval(async () => {
+    const dialog = document.getElementById('setup-dialog');
+    if (!dialog || dialog.hidden || Date.now() > deadline) {
+      clearInterval(setupPollTimer);
+      setupPollTimer = null;
+      if (dialog && !dialog.hidden) {
+        if (waiting) waiting.style.display = 'none';
+        if (err) {
+          err.textContent = 'Card tap timed out. Start setup again.';
+          err.style.display = '';
+        }
+      }
+      return;
+    }
+    try {
+      const res = await fetch('/api/setup');
+      if (!res.ok) return;
+      const data = await res.json();
+      if (!data.needed) {
+        clearInterval(setupPollTimer);
+        setupPollTimer = null;
+        closeSetupDialog();
+        openAdminOverlay();
+      }
+    } catch (_) { /* keep polling */ }
+  }, 2000);
+}
+
+
 /**
  * Apply the site join-key label to Inventory and Locker column headers.
  * @param {string} label - Display noun from GET /api/config.
@@ -665,7 +834,13 @@ async function checkAdminTapSequence() {
   if (adminTaps.length >= ADMIN_TAP_COUNT) {
     adminTaps.length = 0;
     const overlay = document.getElementById('admin-overlay');
-    if (overlay && !overlay.hidden) closeAdminOverlay();
+    if (overlay && !overlay.hidden) {
+      closeAdminOverlay();
+      return;
+    }
+    // First boot: no admin enrolled — the 5-tap opens Setup, not the
+    // secret prompt (there may be no secret to check yet).
+    if (await dashboardSetupNeeded()) openSetupDialog();
     else await openAdminOverlay();
   }
 }
@@ -954,6 +1129,27 @@ function initEvents() {
       if (e.target === secretDialog) resolveAdminSecret('');
     });
   }
+
+  const setupCancel = document.getElementById('setup-dialog-cancel');
+  if (setupCancel) setupCancel.addEventListener('click', closeSetupDialog);
+
+  const setupConfirm = document.getElementById('setup-dialog-confirm');
+  if (setupConfirm) setupConfirm.addEventListener('click', submitSetupDialog);
+
+  const setupDialog = document.getElementById('setup-dialog');
+  if (setupDialog) {
+    setupDialog.addEventListener('click', (e) => {
+      if (e.target === setupDialog) closeSetupDialog();
+    });
+  }
+  ['setup-name-input', 'setup-password-input'].forEach(id => {
+    const input = document.getElementById(id);
+    if (input) {
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') submitSetupDialog();
+      });
+    }
+  });
 }
 
 

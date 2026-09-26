@@ -1,7 +1,7 @@
 """
 File: test_admin.py
 Description: Tests for kiosk admin overlay, device-tag bind/unbind, sync,
-             update, Exit kiosk, and Shut down.
+             update, Stop system, and Shut down.
 Project: smart_locker/tests/api
 Notes: Run with: python -m pytest tests/api/test_admin.py -v
 """
@@ -345,8 +345,56 @@ class TestAdminSyncAndUpdateEndpoints:
         assert "update" in body
         assert "last_writeback" in body
 
-    def test_trigger_update_requires_session(self, client, mock_context):
+    def test_trigger_update_requires_auth_with_admin(self, client, mock_context, admin_user):
+        """Once an admin exists, an unauthenticated update POST is refused."""
         resp = client.post("/api/admin/update")
+        assert resp.status_code == 401
+
+    def test_trigger_update_first_boot_allowed(
+        self, client, mock_context, monkeypatch
+    ):
+        """First boot (no admin, no secret) may launch Software Update."""
+        import smart_locker.api.routes as routes_module
+
+        monkeypatch.setattr(routes_module, "_SYSTEMD_RUN", "/usr/bin/systemd-run")
+        monkeypatch.setattr(routes_module, "launch_update", lambda *a: None)
+        resp = client.post("/api/admin/update")
+        assert resp.status_code == 200
+
+    def test_trigger_update_first_boot_lan(
+        self, lan_client, mock_context, monkeypatch
+    ):
+        """A LAN browser may also launch the update while Setup is open."""
+        import smart_locker.api.routes as routes_module
+
+        monkeypatch.setattr(routes_module, "_SYSTEMD_RUN", "/usr/bin/systemd-run")
+        monkeypatch.setattr(routes_module, "launch_update", lambda *a: None)
+        resp = lan_client.post("/api/admin/update")
+        assert resp.status_code == 200
+
+    def test_trigger_update_accepts_dashboard_secret(
+        self, client, lan_client, mock_context, admin_user,
+        dashboard_secret, monkeypatch,
+    ):
+        """The dashboard secret authorizes the update from the LAN too."""
+        import smart_locker.api.routes as routes_module
+
+        monkeypatch.setattr(routes_module, "_SYSTEMD_RUN", "/usr/bin/systemd-run")
+        monkeypatch.setattr(routes_module, "launch_update", lambda *a: None)
+        headers = {"X-Smart-Locker-Admin": dashboard_secret}
+        assert client.post("/api/admin/update", headers=headers).status_code == 200
+        assert lan_client.post("/api/admin/update", headers=headers).status_code == 200
+
+    def test_trigger_update_rejects_bad_secret(
+        self, lan_client, mock_context, admin_user, dashboard_secret, monkeypatch
+    ):
+        import smart_locker.api.routes as routes_module
+
+        monkeypatch.setattr(routes_module, "_SYSTEMD_RUN", "/usr/bin/systemd-run")
+        monkeypatch.setattr(routes_module, "launch_update", lambda *a: None)
+        resp = lan_client.post(
+            "/api/admin/update", headers={"X-Smart-Locker-Admin": "wrong"}
+        )
         assert resp.status_code == 401
 
     def test_trigger_update_rejects_non_admin(self, client, mock_context, test_user):
@@ -368,58 +416,71 @@ class TestAdminSyncAndUpdateEndpoints:
     def test_trigger_update_refuses_lan(
         self, lan_client, mock_context, admin_user, monkeypatch
     ):
-        """LAN cannot launch Software Update even with a live admin session."""
+        """LAN cannot launch Software Update without the dashboard secret."""
         import smart_locker.api.routes as routes_module
 
         monkeypatch.setattr(routes_module, "_SYSTEMD_RUN", "/usr/bin/systemd-run")
         mock_context.session_mgr.start_session(admin_user)
         resp = lan_client.post("/api/admin/update")
-        assert resp.status_code == 403
-
-    def test_exit_kiosk_requires_session(self, client, mock_context):
-        resp = client.post("/api/admin/exit-kiosk")
         assert resp.status_code == 401
 
-    def test_exit_kiosk_rejects_non_admin(self, client, mock_context, test_user):
+    def test_stop_system_requires_session(self, client, mock_context):
+        resp = client.post("/api/admin/stop-system")
+        assert resp.status_code == 401
+
+    def test_stop_system_rejects_non_admin(self, client, mock_context, test_user):
         mock_context.session_mgr.start_session(test_user)
-        resp = client.post("/api/admin/exit-kiosk")
+        resp = client.post("/api/admin/stop-system")
         assert resp.status_code == 403
 
-    def test_exit_kiosk_unavailable_off_pi(self, client, mock_context, admin_user, monkeypatch):
-        """Dev/Windows hosts must not try to kill a browser — 503, not a hang."""
+    def test_stop_system_unavailable_off_pi(self, client, mock_context, admin_user, monkeypatch):
+        """Dev/Windows hosts (no systemctl) must refuse cleanly — 503, not a hang."""
         import smart_locker.api.routes as routes_module
-        from smart_locker.services.appliance import ApplianceUnavailable
 
-        def _boom():
-            raise ApplianceUnavailable(
-                "Kiosk exit runs on the Raspberry Pi appliance only."
-            )
-
-        monkeypatch.setattr(routes_module, "exit_kiosk", _boom)
+        monkeypatch.setattr(routes_module, "_SYSTEMCTL", None)
         mock_context.session_mgr.start_session(admin_user)
-        resp = client.post("/api/admin/exit-kiosk")
+        resp = client.post("/api/admin/stop-system")
         assert resp.status_code == 503
 
-    def test_exit_kiosk_accepts_admin(self, client, mock_context, admin_user, monkeypatch):
+    def test_stop_system_accepts_admin(self, client, mock_context, admin_user, monkeypatch):
         import smart_locker.api.routes as routes_module
 
-        monkeypatch.setattr(routes_module, "exit_kiosk", lambda: None)
+        monkeypatch.setattr(routes_module, "_SYSTEMCTL", "/usr/bin/systemctl")
+        monkeypatch.setattr(routes_module, "stop_system", lambda: None)
         mock_context.session_mgr.start_session(admin_user)
-        resp = client.post("/api/admin/exit-kiosk")
+        resp = client.post("/api/admin/stop-system")
         assert resp.status_code == 200
         assert resp.json().get("ok") is True
         assert not mock_context.session_mgr.has_active_session
         assert mock_context.admin_overlay_open is False
 
-    def test_exit_kiosk_refuses_lan(
+    def test_stop_system_stops_browser_then_service(
+        self, client, mock_context, admin_user, monkeypatch
+    ):
+        """The post-response task closes Chromium before systemctl stop."""
+        import smart_locker.api.routes as routes_module
+        import smart_locker.services.appliance as appliance
+
+        calls = []
+        monkeypatch.setattr(routes_module, "_SYSTEMCTL", "/usr/bin/systemctl")
+        monkeypatch.setattr(appliance, "exit_kiosk", lambda: calls.append("browser"))
+        monkeypatch.setattr(appliance, "stop_service", lambda: calls.append("service"))
+        monkeypatch.setattr(appliance, "_STOP_RESPONSE_DELAY_SECONDS", 0)
+        mock_context.session_mgr.start_session(admin_user)
+        resp = client.post("/api/admin/stop-system")
+        assert resp.status_code == 200
+        assert calls == ["browser", "service"]
+
+    def test_stop_system_refuses_lan(
         self, lan_client, mock_context, admin_user, monkeypatch
     ):
-        """LAN cannot stop Chromium even with a live admin session."""
+        """LAN cannot stop the system even with a live admin session."""
         import smart_locker.api.routes as routes_module
 
-        monkeypatch.setattr(routes_module, "exit_kiosk", lambda: None)
+        monkeypatch.setattr(routes_module, "_SYSTEMCTL", "/usr/bin/systemctl")
+        monkeypatch.setattr(routes_module, "stop_system", lambda: None)
         mock_context.session_mgr.start_session(admin_user)
-        resp = lan_client.post("/api/admin/exit-kiosk")
+        resp = lan_client.post("/api/admin/stop-system")
         assert resp.status_code == 403
 
     def test_shutdown_requires_session(self, client, mock_context):

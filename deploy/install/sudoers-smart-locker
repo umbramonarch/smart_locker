@@ -1,9 +1,8 @@
 # File: sudoers-smart-locker
 # Description: Grants the Smart Locker service account passwordless sudo for the
-#              EXACT privileged commands the in-app Software Update, Exit kiosk
-#              (no sudo), and Shut down buttons need — managing its own systemd
-#              service, launching the transient update unit, and poweroff —
-#              and nothing else.
+#              EXACT privileged commands the in-app Software Update, Stop system,
+#              and Shut down buttons need — managing its own systemd service,
+#              launching the transient update unit, and poweroff — and nothing else.
 # Project: smart_locker/deploy
 # Notes: apply-sudoers.sh (called from install.sh and update.sh) renders this
 #        to /etc/sudoers.d/smart-locker with __APP_USER__ and __APP_DIR__

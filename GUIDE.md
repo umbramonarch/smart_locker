@@ -588,7 +588,29 @@ This creates `smart_locker.db` with four tables: `users`, `registrants`, `device
 
 ### 4.6 Enroll your first (admin) card
 
-With the reader plugged in:
+The kiosk does this itself — no SSH needed. On a fresh database:
+
+1. Boot the Pi; Chromium opens the idle screen.
+2. Tap the **clock 5× within 3 seconds** — with no admin enrolled, the **First Admin
+   Setup** screen appears instead of the admin menu.
+3. Enter the admin's full name. Optionally enter a dashboard password — it is written
+   to `.env` as `SMART_LOCKER_DASHBOARD_ADMIN_SECRET` (mode `640`) and the dashboard
+   needs it for admin functions. If that secret is already configured in `.env`, the
+   field is required and is used only to authorize.
+4. Continue, then **tap the card** within 60 seconds. That card becomes the first
+   admin; the next tap logs in.
+5. **Software Update** is on the same screen — a first-boot box can take a USB
+   `locker-updates/` stick before any admin exists.
+
+The same flow exists on the dashboard: 5-tap the header clock on
+`http://<pi>:8000/dashboard`, enter name + password, then have someone tap the card
+on the locker reader (enrollment always needs the physical card — a LAN browser can
+start Setup but cannot finish it).
+
+Setup closes for good the moment one active admin exists (`GET /api/setup` reports
+`needed:false`; the POST then returns 404).
+
+The CLI still works if you prefer SSH (or have no kiosk yet):
 
 ```bash
 python -m scripts.enroll_card --name "Your Name" --role admin
@@ -815,7 +837,7 @@ it still asks for a work card first.
 - **Inactivity warning** (overlay) — a countdown with a "Stay Active" button.
 - **Hidden admin panel** (overlay) — opened by tapping the idle clock 5 times. Shortcuts for
   Locker, Return, **Sync source**, Register user, **Register Device**, **Export to Excel**,
-  **Software Update**, **Exit kiosk**, **Shut down**, End Session.
+  **Software Update**, **Stop system**, **Shut down**, End Session.
 
 ### The rules
 
@@ -836,8 +858,8 @@ Pi on the LAN can use them — the lock is **physical access**, not a password.
 1. Be on the idle screen — the one that says **TAP YOUR CARD**, with the live clock.
 2. Tap the **clock** (the time/date at the top) **five times within three seconds**.
 3. The dark admin overlay slides in. The kiosk signs in as the **first enrolled admin**
-   in the database — no card tap. If no admin has been enrolled yet, the panel cannot
-   open (`POST /api/admin/session` returns "no admin").
+   in the database — no card tap. If no admin has been enrolled yet, the **First Admin
+   Setup** screen opens instead (see 4.6).
 4. What the buttons do:
    - **Locker / Return Screen** — jump into the availability overlay or return grid as that admin.
    - **Sync Source** — first tap *previews* Excel changes from the share; second tap *applies* them.
@@ -852,8 +874,10 @@ Pi on the LAN can use them — the lock is **physical access**, not a password.
    - **Software Update** — plug in the USB stick (`locker-updates/` from
      `python -m scripts.copy_update`), then apply. Full-screen overlay, then the kiosk
      reloads. Do not copy onto `/home/locker/smart_locker` in the file manager.
-   - **Exit kiosk** — close Chromium; the locker service stays up. Chromium does not
-     come back until the next graphical login or reboot. Confirm first.
+   - **Stop system** — close Chromium, then `systemctl stop smart-locker`. The reply
+     goes out first; the service then stops and stays stopped (`Restart=always` does
+     not bring it back) until the next boot. The Pi stays powered on. Confirm first.
+     Needs the sudoers drop-in (see Section 9 if the button errors after a first update).
    - **Shut down** — `systemctl poweroff` the Pi. Confirm first. Needs the sudoers
      drop-in (see Section 9 if the button errors after a first update).
    - **End Session** or **X** — close the panel and return to idle. Both end
@@ -1076,14 +1100,14 @@ not refuse solely because wheels were missing; the Windows script already warned
 SSH command. If the app is not running, the button is unavailable — use SSH. The button
 relies on the sudoers drop-in that `apply-sudoers.sh` writes to `/etc/sudoers.d/smart-locker`.
 
-**First apply of Exit kiosk / Shut down:** the *old* `update.sh` on the Pi does not
+**First apply of Stop system / Shut down:** the *old* `update.sh` on the Pi does not
 refresh sudoers. After this release is on disk, SSH once:
 
 `sudo bash /home/locker/smart_locker/deploy/install/apply-sudoers.sh`
 
-Without that, **Shut down** returns an error (sudoers still has only the update rule).
-**Exit kiosk** does not need sudo — it only stops Chromium. Later `update.sh` applies
-refresh sudoers themselves.
+Without that, **Shut down** and **Stop system** return an error (sudoers still has
+only the update rule) — both run `systemctl` (`poweroff`, `stop smart-locker`) as root.
+Later `update.sh` applies refresh sudoers themselves.
 
 The backend restarts for a few seconds. The kiosk stays on the updating overlay,
 then reloads. Progress is in `logs/update.log` and `logs/update-status.json`.

@@ -17,6 +17,7 @@ import os
 import shutil
 import signal
 import subprocess
+import time
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -26,7 +27,13 @@ KIOSK_PROFILE_MARKER = "smart-locker-kiosk"
 
 # Exact argv the sudoers drop-in allows — no wildcard, no ``systemctl`` from PATH.
 _POWEROFF_CMD = ["sudo", "-n", "/usr/bin/systemctl", "poweroff"]
+_STOP_SERVICE_CMD = ["sudo", "-n", "/usr/bin/systemctl", "stop", "smart-locker"]
 SYSTEMD_RUN = shutil.which("systemd-run")
+SYSTEMCTL = shutil.which("systemctl")
+
+# Beat between the HTTP response and the self-stop so the reply can flush
+# before the listener drops.
+_STOP_RESPONSE_DELAY_SECONDS = 0.5
 
 
 class ApplianceUnavailable(Exception):
@@ -118,6 +125,54 @@ def exit_kiosk() -> None:
         )
 
     logger.info("Kiosk Chromium stopped (%s pid(s)).", len(pids))
+
+
+def stop_service() -> None:
+    """Stop the ``smart-locker`` service via ``systemctl stop``.
+
+    An explicit ``systemctl stop`` stays stopped — ``Restart=always`` does not
+    start it again. The next boot starts the service normally.
+
+    Raises:
+        ApplianceUnavailable: systemd is not present (dev/Windows).
+        ApplianceError: sudo/systemctl refused or timed out.
+    """
+    if SYSTEMCTL is None:
+        raise ApplianceUnavailable(
+            "Stop system runs on the Raspberry Pi appliance only."
+        )
+    try:
+        subprocess.run(
+            _STOP_SERVICE_CMD,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except subprocess.CalledProcessError as e:
+        detail = (e.stderr or e.stdout or str(e)).strip()
+        raise ApplianceError(f"Could not stop the service: {detail}") from e
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise ApplianceError(f"Could not stop the service: {e}") from e
+
+    logger.info("smart-locker service stop requested.")
+
+
+def stop_system() -> None:
+    """Close the kiosk browser, then stop the ``smart-locker`` service.
+
+    Runs as a FastAPI background task — the HTTP response is already on the
+    wire. The short delay lets the reply flush before the listener drops. A
+    browser that is already gone (or cannot be signalled) does not keep the
+    service running: the explicit ``systemctl stop`` is the point of the
+    button, and ``Restart=always`` must not resurrect the process.
+    """
+    time.sleep(_STOP_RESPONSE_DELAY_SECONDS)
+    try:
+        exit_kiosk()
+    except (ApplianceUnavailable, ApplianceError) as e:
+        logger.warning("Kiosk browser close failed (%s) — stopping the service anyway.", e)
+    stop_service()
 
 
 def shutdown() -> None:

@@ -1826,10 +1826,41 @@ body::after {
    it would stay painted until the 1.2s clip finishes. Snap it off with the
    screen instead of riding the shrinking circle. */
 #screen-register.exit .register-cancel-btn,
-#screen-register:not(.active) .register-cancel-btn {
+#screen-register:not(.active) .register-cancel-btn,
+#screen-setup.exit .register-cancel-btn,
+#screen-setup:not(.active) .register-cancel-btn {
   opacity: 0;
   pointer-events: none;
   transition: none;
+}
+
+/* Setup screen — secondary "Software Update" action under Continue */
+.setup-update-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 1rem;
+  padding: 0.7rem 1.4rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  color: var(--text-muted);
+  font-family: var(--font-display);
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: background 0.22s, border-color 0.22s, color 0.22s;
+}
+.setup-update-btn svg {
+  width: 16px;
+  height: 16px;
+}
+.setup-update-btn:hover {
+  background: var(--surface-2);
+  border-color: var(--border-accent);
+  color: var(--text);
 }
 
 /* Smaller NFC wrapper for registration tap step */

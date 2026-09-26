@@ -1702,6 +1702,185 @@ function handleRegistrationFailed(data) {
 }
 
 /* ============================================================
+   FIRST-BOOT SETUP — enroll the first admin (empty database)
+============================================================ */
+let setupSecretSet = false;   // a dashboard password is already configured
+let setupCountdownTimer = null;
+let setupAfterTimer = null;
+
+/**
+ * Ask the backend whether first-boot Setup is still open (no active admin).
+ * Fails closed to the normal admin path on any error — a stuck Setup screen
+ * is worse than a 401 toast.
+ * @returns {Promise<boolean>}
+ */
+async function setupNeeded() {
+  if (USE_DEMO) return false;
+  try {
+    const res = await fetch('/api/setup');
+    if (!res.ok) return false;
+    const data = await res.json();
+    setupSecretSet = !!data.secret_set;
+    return !!data.needed;
+  } catch (_) { return false; }
+}
+
+/**
+ * Show a specific step in the Setup flow, hiding the other setup steps.
+ * @param {string} stepId - The DOM ID of the setup step element to show.
+ */
+function showSetupStep(stepId) {
+  document.querySelectorAll('#screen-setup .register-step').forEach(el => el.classList.add('hidden'));
+  const step = document.getElementById(stepId);
+  if (step) {
+    step.classList.remove('hidden');
+    step.style.animation = 'none';
+    void step.offsetHeight;
+    step.style.animation = '';
+  }
+}
+
+/**
+ * Open the Setup screen. When a dashboard password is already configured the
+ * password field becomes required — it is sent as the X-Smart-Locker-Admin
+ * authorization header rather than stored.
+ * @returns {Promise<void>}
+ */
+async function openSetup() {
+  clearInterval(setupCountdownTimer);
+  clearTimeout(setupAfterTimer);
+  document.getElementById('setup-name').value = '';
+  document.getElementById('setup-password').value = '';
+  document.getElementById('setup-next-btn').disabled = true;
+  const pwInput = document.getElementById('setup-password');
+  const pwHint = document.getElementById('setup-password-hint');
+  if (setupSecretSet) {
+    pwInput.placeholder = 'Dashboard password (required)';
+    pwHint.textContent = 'Enter the configured dashboard password to authorize.';
+  } else {
+    pwInput.placeholder = 'Dashboard password (optional)';
+    pwHint.textContent = 'Sets the dashboard admin password on this locker.';
+  }
+  showSetupStep('setup-step-name');
+  navigate('setup');
+  setTimeout(() => document.getElementById('setup-name').focus(), 800);
+}
+
+/**
+ * Submit the Setup form and advance to the "tap the admin card" step. The
+ * backend arms a 60-second window; the next card tap on the cabinet reader
+ * enrolls it as the first admin.
+ * @returns {Promise<void>}
+ */
+async function submitSetup() {
+  const name = document.getElementById('setup-name').value.trim();
+  const password = document.getElementById('setup-password').value;
+  if (!name || (setupSecretSet && !password)) return;
+
+  document.getElementById('setup-next-btn').disabled = true;
+  document.getElementById('setup-confirm-name').textContent = name;
+  showSetupStep('setup-step-tap');
+  startSetupCountdown();
+
+  if (USE_DEMO) return;  // demo shows the tap step; no real enrollment
+
+  try {
+    const headers = { 'Content-Type': 'application/json' };
+    if (setupSecretSet) headers['X-Smart-Locker-Admin'] = password;
+    const res = await fetch('/api/setup', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ name, password: setupSecretSet ? '' : password }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      clearInterval(setupCountdownTimer);
+      showSetupStep('setup-step-error');
+      document.getElementById('setup-error-msg').textContent =
+        data.detail || 'Could not start setup.';
+      scheduleAfterSetup(3500);
+    }
+  } catch (_) {
+    clearInterval(setupCountdownTimer);
+    showSetupStep('setup-step-error');
+    document.getElementById('setup-error-msg').textContent =
+      'Could not start setup.';
+    scheduleAfterSetup(3500);
+  }
+}
+
+/**
+ * Start the 60-second card-tap countdown (matches REGISTRATION_TIMEOUT_SECONDS).
+ */
+function startSetupCountdown() {
+  let secs = 60;
+  const cdEl = document.getElementById('setup-countdown');
+  cdEl.textContent = secs + 's';
+  clearInterval(setupCountdownTimer);
+  setupCountdownTimer = setInterval(() => {
+    secs--;
+    cdEl.textContent = secs + 's';
+    if (secs <= 0) {
+      clearInterval(setupCountdownTimer);
+      showSetupStep('setup-step-error');
+      document.getElementById('setup-error-msg').textContent =
+        'Setup timed out. Please try again.';
+      apiCancelRegistration();  // drop the armed window on the backend too
+      scheduleAfterSetup(3500);
+    }
+  }, 1000);
+}
+
+/**
+ * Return to idle after a Setup result step (success or failure).
+ * @param {number} ms - Delay before navigating away.
+ */
+function scheduleAfterSetup(ms) {
+  clearTimeout(setupAfterTimer);
+  setupAfterTimer = setTimeout(() => {
+    setupAfterTimer = null;
+    if (S.screen === 'setup') navigate('idle');
+  }, ms);
+}
+
+/**
+ * Cancel the Setup flow: drop the armed card window and return to idle.
+ */
+function cancelSetup() {
+  clearInterval(setupCountdownTimer);
+  clearTimeout(setupAfterTimer);
+  apiCancelRegistration();
+  navigate('idle');
+}
+
+/**
+ * Handle registration_success SSE while the Setup screen is up: the tapped
+ * card is now the first admin.
+ * @param {Object} data - SSE payload with the enrolled user.
+ */
+function handleSetupSuccess(data) {
+  if (S.screen !== 'setup') return;
+  clearInterval(setupCountdownTimer);
+  showSetupStep('setup-step-success');
+  document.getElementById('setup-success-msg').textContent =
+    `${data.user.name} is now an administrator — tap the card to log in.`;
+  scheduleAfterSetup(4500);
+}
+
+/**
+ * Handle registration_failed SSE while the Setup screen is up.
+ * @param {Object} data - SSE payload with a human-readable reason.
+ */
+function handleSetupFailed(data) {
+  if (S.screen !== 'setup') return;
+  clearInterval(setupCountdownTimer);
+  showSetupStep('setup-step-error');
+  document.getElementById('setup-error-msg').textContent =
+    data.reason || 'Setup failed. Please try again.';
+  scheduleAfterSetup(4500);
+}
+
+/* ============================================================
    HIDDEN ADMIN PANEL — 5× tap on clock area within 3 seconds
 ============================================================ */
 const adminTaps = [];
@@ -1728,14 +1907,20 @@ function checkAdminTapSequence() {
 
 /**
  * Toggle the admin panel overlay between open and closed states.
+ * On an empty database (no active admin), the 5-tap opens first-boot Setup
+ * instead — the admin menu cannot start a session without an enrolled admin.
  */
-function toggleAdminPanel() {
+async function toggleAdminPanel() {
   const overlay = document.getElementById('overlay-admin');
   if (overlay.classList.contains('visible')) {
     dismissAdminToIdle();
-  } else {
-    openAdminPanel();
+    return;
   }
+  if (await setupNeeded()) {
+    openSetup();
+    return;
+  }
+  openAdminPanel();
 }
 
 /**
@@ -2729,28 +2914,30 @@ function adminEndSession() {
 }
 
 /**
- * Close Chromium kiosk (backend stays up). Confirm first. Demo never POSTs.
+ * Stop the whole locker system: Chromium closes, then the smart-locker
+ * service stops. The Pi stays powered on and comes back on the next boot.
+ * Confirm first. Demo never POSTs.
  * @returns {Promise<void>}
  */
-async function adminExitKiosk() {
+async function adminStopSystem() {
   if (S.updating) return;
-  if (!confirm('Close the kiosk browser? The locker service stays running. Chromium will not come back until the next login or reboot.')) {
+  if (!confirm('Stop the locker system? The kiosk browser and the locker service will stop and stay stopped until the next boot. The Pi stays powered on.')) {
     return;
   }
   if (USE_DEMO) {
-    showToast('Demo preview — Exit kiosk is Pi only', 'success');
+    showToast('Demo preview — Stop system is Pi only', 'success');
     return;
   }
   try {
-    const res = await fetch('/api/admin/exit-kiosk', { method: 'POST' });
+    const res = await fetch('/api/admin/stop-system', { method: 'POST' });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      showToast(data.detail || 'Could not exit kiosk', 'error');
+      showToast(data.detail || 'Could not stop the system', 'error');
       return;
     }
-    showToast(data.message || 'Kiosk closing…', 'success');
+    showToast(data.message || 'Stopping the locker system…', 'success');
   } catch (_) {
-    showToast('Exit kiosk request failed', 'error');
+    showToast('Stop system request failed', 'error');
   }
 }
 
@@ -2898,6 +3085,29 @@ document.getElementById('register-next-btn-admin').addEventListener('click', () 
   clickSound(); submitRegistrationName();
 });
 
+// First-boot Setup — name/password entry, then a physical admin card tap
+const setupNameInput = document.getElementById('setup-name');
+const setupPasswordInput = document.getElementById('setup-password');
+function refreshSetupNext() {
+  document.getElementById('setup-next-btn').disabled =
+    !setupNameInput.value.trim() || (setupSecretSet && !setupPasswordInput.value);
+}
+setupNameInput.addEventListener('input', refreshSetupNext);
+setupPasswordInput.addEventListener('input', refreshSetupNext);
+setupNameInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !document.getElementById('setup-next-btn').disabled) {
+    clickSound(); submitSetup();
+  }
+});
+setupPasswordInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !document.getElementById('setup-next-btn').disabled) {
+    clickSound(); submitSetup();
+  }
+});
+document.getElementById('setup-next-btn').addEventListener('click', () => { clickSound(); submitSetup(); });
+document.getElementById('setup-cancel-btn').addEventListener('click', () => { clickSound(); cancelSetup(); });
+document.getElementById('setup-update').addEventListener('click', () => { clickSound(); adminUpdate(); });
+
 // Admin panel — secret clock tap zone (5× tap within 3s)
 document.querySelector('.clock').addEventListener('click', e => {
   e.stopPropagation();
@@ -2922,7 +3132,7 @@ document.getElementById('bind-slot-back').addEventListener('click', () => { clic
 document.getElementById('bind-slot-submit').addEventListener('click', () => { clickSound(); submitChangeSlot(); });
 document.getElementById('admin-export-excel').addEventListener('click', () => { clickSound(); adminExportExcel(); });
 document.getElementById('admin-update').addEventListener('click', () => { clickSound(); adminUpdate(); });
-document.getElementById('admin-exit-kiosk').addEventListener('click', () => { clickSound(); adminExitKiosk(); });
+document.getElementById('admin-stop-system').addEventListener('click', () => { clickSound(); adminStopSystem(); });
 document.getElementById('admin-shutdown').addEventListener('click', () => { clickSound(); adminShutdown(); });
 document.getElementById('admin-end-session').addEventListener('click', () => { clickSound(); adminEndSession(); });
 document.getElementById('update-dismiss').addEventListener('click', () => { clickSound(); dismissUpdateOverlay(); });
@@ -3038,7 +3248,7 @@ function connectSSE() {
     // After admin enroll the backend drops the overlay session immediately so
     // the next work-card tap is login. The NFC bridge then sees "session gone"
     // and would emit timeout; ignore it while the welcome/error step is up.
-    if (S.screen === 'register') return;
+    if (S.screen === 'register' || S.screen === 'setup') return;
     endSession(true, true);
   });
 
@@ -3055,13 +3265,15 @@ function connectSSE() {
   source.addEventListener('registration_success', e => {
     if (S.updating) return;
     const data = JSON.parse(e.data);
-    handleRegistrationSuccess(data);
+    if (S.screen === 'setup') handleSetupSuccess(data);
+    else handleRegistrationSuccess(data);
   });
 
   source.addEventListener('registration_failed', e => {
     if (S.updating) return;
     const data = JSON.parse(e.data);
-    handleRegistrationFailed(data);
+    if (S.screen === 'setup') handleSetupFailed(data);
+    else handleRegistrationFailed(data);
   });
 
   source.addEventListener('device_action', e => {

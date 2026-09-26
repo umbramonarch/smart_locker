@@ -221,6 +221,91 @@
   </div>
 
   <!-- ================================================================
+       SCREEN — FIRST ADMIN SETUP (empty database; 5× clock tap)
+  ================================================================ -->
+  <div id="screen-setup" class="screen">
+    <div class="hero-bg"></div>
+    <div class="mesh-bg"></div>
+
+    <div class="register-center">
+      <!-- Step 1: admin name + dashboard password -->
+      <div class="register-step" id="setup-step-name">
+        <div class="register-icon-circle admin-register-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+        </div>
+        <h1 class="register-title">
+          <span class="reveal-wrap"><span class="reveal-inner">FIRST ADMIN</span></span>
+        </h1>
+        <p class="register-sub">
+          <span class="reveal-wrap"><span class="reveal-inner" style="transition-delay:0.22s">Enroll the first administrator card</span></span>
+        </p>
+        <div class="register-input-group">
+          <input type="text" id="setup-name" class="register-input" placeholder="Admin full name" maxlength="100" autocomplete="off" spellcheck="false">
+          <div class="register-input-glow"></div>
+        </div>
+        <div class="register-input-group">
+          <input type="password" id="setup-password" class="register-input" placeholder="Dashboard password (optional)" maxlength="200" autocomplete="off" spellcheck="false">
+          <div class="register-input-glow"></div>
+        </div>
+        <p class="register-hint" id="setup-password-hint">Sets the dashboard admin password on this locker.</p>
+        <button class="register-next-btn" id="setup-next-btn" disabled>
+          <span>Continue</span>
+          <svg viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+        </button>
+        <button class="setup-update-btn" id="setup-update">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/></svg>
+          <span>Software Update</span>
+        </button>
+      </div>
+
+      <!-- Step 2: Awaiting NFC tap -->
+      <div class="register-step hidden" id="setup-step-tap">
+        <div class="nfc-wrapper nfc-wrapper-sm">
+          <div class="nfc-ring-outer"></div>
+          <div class="nfc-ring-mid"></div>
+          <div class="nfc-core">
+            <div class="nfc-texture-reveal"></div>
+            <svg class="nfc-svg" viewBox="0 0 64 64">
+              <path d="M32 22 C39 22 44 27 44 32 C44 37 39 42 32 42" stroke-linecap="round"/>
+              <path d="M32 14 C43 14 52 22 52 32 C52 42 43 50 32 50" stroke-linecap="round"/>
+              <path d="M32 30 C34.8 30 36 31 36 32 C36 33 34.8 34 32 34" stroke-linecap="round"/>
+              <circle cx="24" cy="32" r="5" fill="currentColor" stroke="none" style="color:var(--accent)"/>
+            </svg>
+          </div>
+        </div>
+        <h1 class="register-title register-title-sm">TAP THE ADMIN CARD</h1>
+        <p class="register-sub">
+          Enrolling <strong id="setup-confirm-name">—</strong> as administrator
+        </p>
+        <div class="register-countdown" id="setup-countdown">60s</div>
+      </div>
+
+      <!-- Step 3: Success -->
+      <div class="register-step hidden" id="setup-step-success">
+        <div class="register-icon-circle success-circle">
+          <svg viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5"/></svg>
+        </div>
+        <h1 class="register-title register-title-success">ADMIN REGISTERED</h1>
+        <p class="register-sub" id="setup-success-msg">Setup complete — tap the card to log in.</p>
+      </div>
+
+      <!-- Step 3b: Error -->
+      <div class="register-step hidden" id="setup-step-error">
+        <div class="register-icon-circle error-circle">
+          <svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </div>
+        <h1 class="register-title register-title-error">SETUP FAILED</h1>
+        <p class="register-sub" id="setup-error-msg">Something went wrong.</p>
+      </div>
+    </div>
+
+    <button class="register-cancel-btn" id="setup-cancel-btn">
+      <svg viewBox="0 0 24 24"><path d="M19 12H5M12 5l-7 7 7 7"/></svg>
+      <span>Cancel</span>
+    </button>
+  </div>
+
+  <!-- ================================================================
        SCREEN 2 — AUTH FAILED
   ================================================================ -->
   <div id="screen-auth-failed" class="screen">
@@ -500,17 +585,17 @@
           </div>
         </button>
 
-        <button class="admin-action-btn danger" id="admin-exit-kiosk">
+        <button class="admin-action-btn danger" id="admin-stop-system">
           <div class="admin-btn-icon danger-icon">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/>
-              <polyline points="16 17 21 12 16 7"/>
-              <line x1="21" y1="12" x2="9" y2="12"/>
+              <rect x="3" y="4" width="18" height="12" rx="2"/>
+              <line x1="12" y1="8" x2="12" y2="12"/>
+              <line x1="8" y1="20" x2="16" y2="20"/>
             </svg>
           </div>
           <div class="admin-btn-text">
-            <span class="admin-btn-label">Exit kiosk</span>
-            <span class="admin-btn-desc">Close Chromium · service stays</span>
+            <span class="admin-btn-label">Stop system</span>
+            <span class="admin-btn-desc">Close the kiosk &amp; stop the service</span>
           </div>
         </button>
 
