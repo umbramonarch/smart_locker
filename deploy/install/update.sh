@@ -172,9 +172,24 @@ PYEOF
 # --- Rollback (restore the pre-update code + DB, restart on the old version) -
 rollback() {
   log "ROLLBACK: restoring previous version."
+  # One rollback only: a failure inside the restore must not re-enter on_err
+  # and start a second restore on top of the first.
+  trap - ERR
   sudo systemctl stop "$SERVICE" 2>/dev/null || true
   if [ -n "$CODE_BACKUP" ] && [ -f "$CODE_BACKUP" ]; then
-    tar -xzf "$CODE_BACKUP" -C "$APP_DIR"
+    # tar-over-APP_DIR would only overwrite: files the failed version added
+    # (and only it has) would survive, leaving a mixed old/new tree. Extract
+    # the snapshot aside and rsync --delete it back so the code tree is
+    # exactly what it was. The PRESERVE set the swap uses keeps .env, the DB,
+    # venv, logs, backups, wheelhouse, photos and locker-updates untouched.
+    local restore_dir="$BACKUP_DIR/.restore-$STAMP"
+    rm -rf "$restore_dir"
+    mkdir -p "$restore_dir"
+    tar -xzf "$CODE_BACKUP" -C "$restore_dir"
+    local restore_excludes=()
+    for p in "${PRESERVE[@]}"; do restore_excludes+=( --exclude="/$p" ); done
+    rsync -a --delete "${restore_excludes[@]}" "$restore_dir"/ "$APP_DIR"/
+    rm -rf "$restore_dir"
     chown -R root:root "$APP_DIR" 2>/dev/null || true
     log "Restored code from $CODE_BACKUP"
   fi
@@ -196,6 +211,9 @@ rollback() {
 
 on_err() {
   local line="$1"
+  # Never re-enter: a failure inside this handler (or inside rollback) must
+  # not fire the ERR trap again and stack another restore on top.
+  trap - ERR
   log "ERROR on line $line."
   if [ "$BACKED_UP" = "1" ]; then
     rollback
@@ -509,7 +527,10 @@ write_status "updating" "Applying $NEW_VERSION. USB stick can be unplugged."
 CODE_BACKUP="$BACKUP_DIR/code-$STAMP.tar.gz"
 TAR_EXCLUDES=()
 for p in "${PRESERVE[@]}"; do TAR_EXCLUDES+=( --exclude="./$p" ); done
-( cd "$APP_DIR" && tar -czf "$CODE_BACKUP" "${TAR_EXCLUDES[@]}" . )
+# No subshell: under `set -E` the ERR trap also fires inside ( ... ) and then
+# again in the parent when the subshell exits nonzero — a backup/migrate
+# failure would run on_err (and rollback) twice.
+tar -czf "$CODE_BACKUP" "${TAR_EXCLUDES[@]}" -C "$APP_DIR" .
 log "Code snapshot -> $CODE_BACKUP"
 backup_db
 BACKED_UP=1
@@ -560,7 +581,9 @@ log "Installing dependencies from offline wheelhouse..."
 "$VENV_DIR/bin/pip" install --ignore-installed --no-index --find-links "$WHEELHOUSE" -r "$REQS_FOR_UPDATE" >>"$LOG_FILE" 2>&1
 
 log "Running database migrations..."
-( cd "$APP_DIR" && "$PY" -m scripts.migrate_db >>"$LOG_FILE" 2>&1 )
+# Run the script file directly: migrate_db.py puts its parent dir on sys.path
+# itself, so no `cd`/`-m` subshell is needed — see the ERR-trap note above.
+"$PY" "$APP_DIR/scripts/migrate_db.py" >>"$LOG_FILE" 2>&1
 
 # ============================================================================
 # 7. Restart and HEALTH-GATE
