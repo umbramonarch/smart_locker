@@ -7,25 +7,19 @@ Description: Source Excel import — reads the device catalog spreadsheet and
 Project: smart_locker/sync
 Notes: Called by the scheduler, ``python -m scripts.sync_source``, or
        POST /api/admin/sync-source. Status, borrower, slot, image,
-       description, and tag_hmac are never overwritten. A Slot/cabinet
-       column is unused. lookup_catalog_by_pm is the Register Device lookup.
+       description, and tag_hmac are never overwritten.
+       lookup_catalog_by_pm is the Register Device lookup.
 """
 
 import logging
-import os
 import re
-import shutil
-import tempfile
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
-from zipfile import BadZipFile
-
-from openpyxl import load_workbook
-from openpyxl.utils.exceptions import InvalidFileException
 
 from config.settings import id_header_extras, in_locker_token, location_header_extras
 from smart_locker.database.repositories import DeviceRepository
+from smart_locker.sync.workbook_adapter import WorkbookAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -46,15 +40,6 @@ SERIAL_CANDIDATES = [
 ]
 TYPE_CANDIDATES = [
     "type", "device type", "category", "device_type", "kind",
-]
-SLOT_CANDIDATES = [
-    "slot", "locker slot", "locker", "locker_slot", "bay", "cabinet",
-]
-DESC_CANDIDATES = [
-    "description", "desc", "details", "notes",
-]
-IMAGE_CANDIDATES = [
-    "image", "photo", "image_path", "photo_path", "img", "picture", "filename",
 ]
 MANUFACTURER_CANDIDATES = [
     "manufacturer", "make", "brand",
@@ -121,11 +106,10 @@ def location_candidates() -> list[str]:
 class ImportResult:
     """Summary of a source import run with per-category counts.
 
-    ``imported`` stays 0 — Sync never inserts locker rows. ``non_locker_skipped``
-    is Excel PMs that are not already in SQLite. Also replaces the registrant
-    list with person names currently in the Location column.
+    Sync never inserts locker rows. ``non_locker_skipped`` is Excel PMs that
+    are not already in SQLite. Also replaces the registrant list with person
+    names currently in the Location column.
     """
-    imported: int = 0
     updated: int = 0
     unchanged: int = 0
     non_locker_skipped: int = 0
@@ -284,7 +268,7 @@ def _detect_columns(
 ) -> dict[str, int | None]:
     """Detect column indices from headers, with optional manual overrides.
 
-    For each field (pm, name, serial, type, slot, etc.), tries to match the
+    For each catalog field, tries to match the
     override value first (if provided), then falls back to the predefined
     candidate lists for auto-detection.
 
@@ -302,9 +286,6 @@ def _detect_columns(
         "name":         find_column(headers, [ov["name"]] if ov.get("name") else NAME_CANDIDATES),
         "serial":       find_column(headers, [ov["serial"]] if ov.get("serial") else SERIAL_CANDIDATES),
         "type":         find_column(headers, [ov["type"]] if ov.get("type") else TYPE_CANDIDATES),
-        "slot":         find_column(headers, [ov["slot"]] if ov.get("slot") else SLOT_CANDIDATES),
-        "desc":         find_column(headers, DESC_CANDIDATES),
-        "image":        find_column(headers, IMAGE_CANDIDATES),
         "manufacturer": find_column(headers, [ov["manufacturer"]] if ov.get("manufacturer") else MANUFACTURER_CANDIDATES),
         "model":        find_column(headers, [ov["model"]] if ov.get("model") else MODEL_CANDIDATES),
         "calibration":  find_column(headers, [ov["calibration"]] if ov.get("calibration") else CALIBRATION_CANDIDATES),
@@ -344,43 +325,8 @@ def _load_rows(
     Returns:
         ``(rows, None)`` on success, or ``(None, error_message)``.
     """
-    if not path.exists():
-        return None, f"File not found: {path}"
-
-    tmp_fd, tmp_path_str = tempfile.mkstemp(suffix=".xlsx")
-    tmp_path = Path(tmp_path_str)
-    try:
-        os.close(tmp_fd)
-        tmp_fd = -1
-        shutil.copy2(path, tmp_path)
-    except PermissionError:
-        tmp_path.unlink(missing_ok=True)
-        return None, f"Source file locked: {path}"
-    except OSError as e:
-        tmp_path.unlink(missing_ok=True)
-        return None, f"Source file unavailable: {path} ({e})"
-    finally:
-        if tmp_fd >= 0:
-            os.close(tmp_fd)
-
-    try:
-        wb = load_workbook(tmp_path, read_only=True, data_only=True)
-        if sheet_name:
-            if sheet_name not in wb.sheetnames:
-                wb.close()
-                return None, (
-                    f"Sheet '{sheet_name}' not found. Available: {wb.sheetnames}"
-                )
-            ws = wb[sheet_name]
-        else:
-            ws = wb.active
-        rows = list(ws.iter_rows(values_only=True))
-        wb.close()
-        return rows, None
-    except (OSError, BadZipFile, InvalidFileException) as e:
-        return None, f"Source workbook unreadable: {e}"
-    finally:
-        tmp_path.unlink(missing_ok=True)
+    read = WorkbookAdapter(path).read_rows(sheet_name)
+    return read.rows, read.error
 
 
 def _catalog_from_row(
@@ -509,7 +455,7 @@ def import_from_source_excel(
     """Refresh catalog metadata on locker devices that already exist in SQLite.
 
     Excel PMs that are not already locker rows are counted as skipped and
-    never inserted. A Slot/cabinet column is ignored. Status, borrower,
+    never inserted. Status, borrower,
     locker_slot, image_path, description, and tag_hmac are never overwritten.
 
     Args:

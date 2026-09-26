@@ -29,7 +29,7 @@ def _set_test_keys(monkeypatch):
 def _disable_location_writeback(monkeypatch):
     """Do not write a developer SOURCE_EXCEL_PATH during tests.
 
-    Borrow/return call maybe_write_location against settings. Tests that
+    Borrow/return schedule Location write-back against settings. Tests that
     need write-back monkeypatch SOURCE_EXCEL_PATH onto a temp workbook.
     """
     monkeypatch.setattr("config.settings.SOURCE_EXCEL_PATH", "")

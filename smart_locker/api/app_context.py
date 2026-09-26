@@ -217,6 +217,21 @@ class AppContext:
             except Exception:
                 logger.debug("SSE fan-out drop", exc_info=True)
 
+    def end_kiosk_session(
+        self, *, event: str = "session_ended", reason: str | None = None,
+        emit: bool = True,
+    ) -> None:
+        """Clear all kiosk session-scoped state and optionally publish its end event."""
+        self.session_mgr.end_session()
+        self.admin_overlay_open = False
+        assign_pending_registration(self, None)
+        assign_pending_tag_bind(self, None)
+        if emit:
+            payload = {"event": event}
+            if reason is not None:
+                payload["reason"] = reason
+            self.broadcast_sse(payload)
+
     async def _nfc_bridge_loop(self) -> None:
         """Poll NFC events and push SSE events to the browser.
 
@@ -238,9 +253,7 @@ class AppContext:
             # Check for session timeout transition
             currently_active = self.session_mgr.has_active_session
             if had_session and not currently_active:
-                self.admin_overlay_open = False
-                assign_pending_tag_bind(self, None)
-                self.broadcast_sse({"event": "session_timeout"})
+                self.end_kiosk_session(event="session_timeout")
                 logger.info("Session timeout detected by NFC bridge.")
             had_session = currently_active
 
@@ -270,11 +283,7 @@ class AppContext:
             elif isinstance(event, ReaderEvent):
                 if event.event_type == ReaderEventType.DISCONNECTED:
                     logger.warning("NFC reader disconnected.")
-                    if self.session_mgr.has_active_session:
-                        self.session_mgr.end_session()
-                    self.admin_overlay_open = False
-                    assign_pending_tag_bind(self, None)
-                    self.broadcast_sse({"event": "reader_disconnected"})
+                    self.end_kiosk_session(event="reader_disconnected")
                 elif event.event_type == ReaderEventType.CONNECTED:
                     logger.info("NFC reader reconnected.")
                     self.broadcast_sse({"event": "reader_connected"})
@@ -282,14 +291,11 @@ class AppContext:
     async def _dispatch_insert(
         self, uid: str, get_session, reader_name: str = ""
     ) -> None:
-        """Route one insert through pending intercepts, then the tap router.
+        """Dispatch one insert through the application tap policy.
 
-        Expired registration and bind windows are dropped so the tap is
-        classified instead of consumed as a failed enroll/bind. A leftover
-        overlay session is ended when a registration window expires so the
-        same tap can log in rather than log out. Bind + registration are
-        snapshotted under ``pending_state_lock`` so HTTP cancel/arm cannot
-        interleave with this branch.
+        Pending windows are snapshotted and expired windows invalidated under
+        the shared lock. The router receives only scalar snapshots and one
+        database session; this context applies its typed state/SSE outcome.
         """
         with pending_state_lock:
             pending_reg = self.pending_registration
@@ -305,36 +311,10 @@ class AppContext:
 
         if expired_reg:
             logger.info("Registration window expired.")
-            self._end_leftover_session()
-
         if expired_bind:
             logger.info("Device tag bind window expired.")
 
-        if pending_reg is not None:
-            await self._handle_registration_tap(uid, get_session)
-            return
-
-        if pending_bind is not None:
-            if self._uid_is_work_card(uid, get_session):
-                # Bind is for stickers. A work card must still log in (or stay
-                # logged in) rather than consuming the window as tag_bind_failed.
-                if self.session_mgr.has_active_session:
-                    logger.info(
-                        "Work card tapped during device-tag bind; bind window kept."
-                    )
-                    return
-                logger.info(
-                    "Work card login during device-tag bind; bind window will clear."
-                )
-            elif self._uid_is_borrowed_device_tag(uid, get_session):
-                logger.info(
-                    "Borrowed device tag during bind; unattended return wins."
-                )
-            else:
-                await self._handle_tag_bind_tap(uid, get_session)
-                return
-
-        from smart_locker.auth.tap_router import handle_insert
+        from smart_locker.auth.tap_router import dispatch_insert
         from smart_locker.security.key_manager import key_manager
 
         overlay = self.admin_overlay_open
@@ -343,170 +323,47 @@ class AppContext:
 
         def _run_insert():
             with get_session() as db_session:
-                return handle_insert(
+                return dispatch_insert(
                     db_session,
                     uid,
                     hmac_key,
+                    key_manager.enc_key,
                     session_mgr,
+                    registration_display_name=(
+                        pending_reg.display_name if pending_reg is not None else None
+                    ),
+                    registration_expired=expired_reg,
+                    tag_bind_device_id=(
+                        pending_bind.device_id if pending_bind is not None else None
+                    ),
                     admin_overlay_open=overlay,
                     reader_name=reader_name,
                 )
 
-        result = await asyncio.to_thread(_run_insert)
+        outcome = await asyncio.to_thread(_run_insert)
+        result = outcome.result
 
-        if result.event in ("session_ended", "auth_success"):
+        if outcome.clear_pending_registration:
+            with pending_state_lock:
+                if self.pending_registration is pending_reg:
+                    assign_pending_registration(self, None)
+        if outcome.clear_pending_tag_bind:
+            with pending_state_lock:
+                if self.pending_tag_bind is pending_bind:
+                    assign_pending_tag_bind(self, None)
+
+        if outcome.end_leftover_session_silently:
+            self._end_leftover_session()
+        elif result.event == "session_ended":
+            self.end_kiosk_session(
+                reason=result.payload.get("reason", "card_tap"), emit=False
+            )
+        elif result.event == "auth_success":
             self.admin_overlay_open = False
-            assign_pending_tag_bind(self, None)
 
         sse = result.to_sse()
         if sse is not None:
             self.broadcast_sse(sse)
-
-    async def _handle_registration_tap(self, uid: str, get_session) -> None:
-        """Enroll a new user when a card is tapped during pending registration.
-
-        Validates that the registration has not expired and the card is not
-        already enrolled, then creates the user record and pushes a success
-        or failure SSE event to the frontend. Always ends a leftover overlay
-        session so the next work-card tap is login, not logout.
-
-        Args:
-            uid: Hex-encoded card UID from the NFC reader.
-            get_session: Callable returning a SQLAlchemy session context manager.
-
-        Returns:
-            None. Result is pushed to the SSE queue.
-        """
-        from smart_locker.database.repositories import DeviceRepository
-        from smart_locker.security.hashing import compute_uid_hmac
-        from smart_locker.security.key_manager import key_manager
-        from smart_locker.services.user_service import UserService
-
-        pending = None
-        with pending_state_lock:
-            pending = self.pending_registration
-            assign_pending_registration(self, None)
-        try:
-            if pending is None:
-                return
-
-            if pending.is_expired:
-                logger.info("Registration expired for '%s'.", pending.display_name)
-                self.broadcast_sse({
-                    "event": "registration_failed",
-                    "reason": "Registration timed out. Please try again.",
-                })
-                return
-
-            user_svc = UserService(
-                enc_key=key_manager.enc_key, hmac_key=key_manager.hmac_key
-            )
-
-            try:
-                with get_session() as db_session:
-                    uid_hmac = compute_uid_hmac(uid, key_manager.hmac_key)
-                    if DeviceRepository.find_by_tag_hmac(db_session, uid_hmac) is not None:
-                        logger.warning("Registration failed: UID is already a device tag.")
-                        self.broadcast_sse({
-                            "event": "registration_failed",
-                            "reason": "This tag is already bound to a device.",
-                        })
-                        return
-
-                    # Check if card is already enrolled
-                    existing = self.authenticator.authenticate(db_session, uid)
-                    if existing is not None:
-                        logger.warning(
-                            "Registration failed: card already enrolled to %s.",
-                            existing.display_name,
-                        )
-                        self.broadcast_sse({
-                            "event": "registration_failed",
-                            "reason": "This card is already registered.",
-                        })
-                        return
-
-                    user = user_svc.enroll_user(
-                        db_session,
-                        display_name=pending.display_name,
-                        card_uid_hex=uid,
-                        role="user",
-                    )
-                    logger.info(
-                        "Self-registered user: %s (id=%d)",
-                        user.display_name,
-                        user.id,
-                    )
-                    self.broadcast_sse({
-                        "event": "registration_success",
-                        "user": {
-                            "id": user.id,
-                            "name": user.display_name,
-                            "role": user.role.value,
-                        },
-                    })
-            except Exception:
-                logger.exception("Registration failed for '%s'.", pending.display_name)
-                self.broadcast_sse({
-                    "event": "registration_failed",
-                    "reason": "Registration failed. Please try again.",
-                })
-        finally:
-            self._end_leftover_session()
-
-    def _uid_is_work_card(self, uid: str, get_session) -> bool:
-        """Whether this UID is an enrolled work card (not a device sticker).
-
-        Used so an armed bind window does not steal login. Lookup failures
-        are treated as not-a-work-card so a sticker tap still binds.
-
-        Args:
-            uid: Hex-encoded UID from the NFC reader.
-            get_session: Callable returning a SQLAlchemy session context manager.
-
-        Returns:
-            True if the UID matches an active user row.
-        """
-        try:
-            from smart_locker.database.repositories import UserRepository
-            from smart_locker.security.hashing import compute_uid_hmac
-            from smart_locker.security.key_manager import key_manager
-
-            digest = compute_uid_hmac(uid, key_manager.hmac_key)
-            with get_session() as db_session:
-                user = UserRepository.find_by_uid_hmac(db_session, digest)
-            return user is not None and bool(user.is_active)
-        except Exception:
-            logger.exception("Work-card lookup failed during tag-bind intercept.")
-            return False
-
-    def _uid_is_borrowed_device_tag(self, uid: str, get_session) -> bool:
-        """Whether this UID is a sticker on a currently borrowed locker device.
-
-        Unattended return of a borrowed sticker must win over an armed bind
-        window so the slot overlay still runs. Lookup failures are treated
-        as not-borrowed so a new/available tag can still bind.
-
-        Args:
-            uid: Hex-encoded UID from the NFC reader.
-            get_session: Callable returning a SQLAlchemy session context manager.
-
-        Returns:
-            True if the UID matches a device whose status is BORROWED.
-        """
-        try:
-            from smart_locker.database.models import DeviceStatus
-            from smart_locker.database.repositories import DeviceRepository
-            from smart_locker.security.hashing import compute_uid_hmac
-            from smart_locker.security.key_manager import key_manager
-
-            digest = compute_uid_hmac(uid, key_manager.hmac_key)
-            with get_session() as db_session:
-                device = DeviceRepository.find_by_tag_hmac(db_session, digest)
-            return device is not None and device.status == DeviceStatus.BORROWED
-        except Exception:
-            logger.exception("Borrowed-tag lookup failed during tag-bind intercept.")
-            return False
 
     def _end_leftover_session(self) -> None:
         """Drop a leftover overlay session with no session_ended SSE.
@@ -515,75 +372,8 @@ class AppContext:
         the next work-card tap is logout instead of login. The register
         success/fail screen stays until the frontend navigates to idle.
         """
-        self.session_mgr.end_session()
-        self.admin_overlay_open = False
+        self.end_kiosk_session(emit=False)
 
-    async def _handle_tag_bind_tap(self, uid: str, get_session) -> None:
-        """Bind the next insert to the device chosen in Register Device.
-
-        Fails if the UID is a work card or already another device's tag.
-        Does not borrow. Never logs the raw UID.
-
-        Args:
-            uid: Hex-encoded sticker UID from the NFC reader.
-            get_session: Callable returning a SQLAlchemy session context manager.
-        """
-        from smart_locker.auth.tap_router import bind_uid_to_device
-        from smart_locker.database.repositories import DeviceRepository
-        from smart_locker.security.key_manager import key_manager
-
-        with pending_state_lock:
-            pending = self.pending_tag_bind
-            assign_pending_tag_bind(self, None)
-        if pending is None:
-            return
-
-        self.session_mgr.touch()
-
-        if pending.is_expired:
-            logger.info("Device tag bind timed out for device_id=%d.", pending.device_id)
-            self.broadcast_sse({
-                "event": "tag_bind_failed",
-                "reason": "Bind timed out. Please try again.",
-            })
-            return
-
-        try:
-            with get_session() as db_session:
-                device = DeviceRepository.find_by_id(db_session, pending.device_id)
-                if device is None:
-                    self.broadcast_sse({
-                        "event": "tag_bind_failed",
-                        "reason": "Device not found.",
-                    })
-                    return
-                bind_uid_to_device(
-                    db_session, device, uid, key_manager.hmac_key
-                )
-                logger.info(
-                    "Bound device tag for %s (pm=%s).",
-                    device.name,
-                    device.pm_number,
-                )
-                self.broadcast_sse({
-                    "event": "tag_bind_success",
-                    "device_id": device.id,
-                    "device_name": device.name,
-                    "pm_number": device.pm_number,
-                })
-        except ValueError as e:
-            self.broadcast_sse({
-                "event": "tag_bind_failed",
-                "reason": str(e),
-            })
-        except Exception:
-            logger.exception(
-                "Device tag bind failed for device_id=%d.", pending.device_id
-            )
-            self.broadcast_sse({
-                "event": "tag_bind_failed",
-                "reason": "Bind failed. Please try again.",
-            })
 
 
 # Module-level singleton — initialized by server.py lifespan

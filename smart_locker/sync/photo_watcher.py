@@ -23,6 +23,7 @@ from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
 from smart_locker.sync.fs_utils import is_network_path
+from smart_locker.sync.photo_matcher import photo_matches_device
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +90,10 @@ def process_photo(photo_path: Path, serve_dir: Path, engine) -> int:
 
     updated = 0
     with get_session() as session:
-        devices = DeviceRepository.find_by_model(session, model)
+        devices = [
+            device for device in DeviceRepository.list_all(session)
+            if photo_matches_device(model, device)
+        ]
         if not devices:
             logger.info(
                 "Photo '%s' does not match any device model — file copied "

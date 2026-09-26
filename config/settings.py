@@ -31,8 +31,6 @@ DATABASE_URL = f"sqlite:///{DB_PATH}"
 # --- NFC Reader ---
 # Substring matched against connected reader names to auto-select the correct device
 READER_NAME_FILTER = os.getenv("SMART_LOCKER_READER_NAME", "ACR1252")
-# pyscard CardMonitor polling interval in milliseconds (500 ms balances responsiveness and CPU)
-CARD_POLL_INTERVAL_MS = 500
 
 
 def _env_int(name: str, default: int, *, minimum: int | None = None) -> int:

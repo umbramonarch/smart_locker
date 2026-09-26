@@ -24,6 +24,9 @@ from smart_locker.auth.tap_router import bind_uid_to_device
 from smart_locker.database.engine import get_session, init_db
 from smart_locker.database.repositories import DeviceRepository
 from smart_locker.security.key_manager import key_manager
+from scripts.uid_helpers import (
+    mask_uid, normalize_uid as _shared_normalize_uid, read_uid_from_reader,
+)
 
 
 def _mask_uid(uid: str) -> str:
@@ -35,9 +38,7 @@ def _mask_uid(uid: str) -> str:
     Returns:
         Masked UID (e.g. "AA****DD"). UIDs of 4 chars or fewer are fully masked.
     """
-    if len(uid) <= 4:
-        return "*" * len(uid)
-    return uid[:2] + "*" * (len(uid) - 4) + uid[-2:]
+    return mask_uid(uid)
 
 
 def _normalize_uid(raw: str) -> str:
@@ -52,19 +53,7 @@ def _normalize_uid(raw: str) -> str:
     Raises:
         SystemExit: If the value is empty or not valid hexadecimal.
     """
-    cleaned = "".join(raw.split()).upper()
-    if not cleaned:
-        print("ERROR: --uid is empty.")
-        raise SystemExit(2)
-    try:
-        bytes.fromhex(cleaned)
-    except ValueError:
-        print(
-            f"ERROR: --uid '{raw}' is not valid hex "
-            "(expected an even number of hex digits, e.g. AABBCCDD)."
-        )
-        raise SystemExit(2)
-    return cleaned
+    return _shared_normalize_uid(raw)
 
 
 def _bind(uid: str, pm_number: str, force: bool) -> None:
@@ -101,44 +90,12 @@ def _bind(uid: str, pm_number: str, force: bool) -> None:
 
 
 def _read_uid_from_reader() -> str | None:
-    """Wait for a sticker tap on the NFC reader and return its UID hex.
-
-    pyscard and the reader modules are imported here (not at module load) so
-    the no-hardware ``--uid`` path never requires a PC/SC stack.
-
-    Returns:
-        The UID hex string, or None on timeout or an unreadable tag.
-    """
-    import time
-
-    from smart_locker.nfc.reader import NFCReader
-    from smart_locker.nfc.card_observer import CardEvent, CardEventType
-    from smart_locker.nfc.reader_observer import ReaderEvent
-
-    reader = NFCReader()
-    try:
-        reader_name = reader.start()
-        print(f"Reader: {reader_name}")
-        print("Place the device sticker on the reader...")
-
-        deadline = time.monotonic() + 30
-        while time.monotonic() < deadline:
-            remaining = deadline - time.monotonic()
-            evt = reader.wait_for_event(timeout=max(remaining, 0.1))
-            if evt is None:
-                break
-            if isinstance(evt, ReaderEvent):
-                continue
-            if isinstance(evt, CardEvent) and evt.event_type == CardEventType.INSERTED:
-                if evt.uid is None:
-                    print("Could not read tag UID. Hold the sticker steady and try again.")
-                    return None
-                return evt.uid
-
-        print("Timeout — no tag detected. Try again.")
-        return None
-    finally:
-        reader.stop()
+    """Wait for a sticker tap using the shared bench reader loop."""
+    return read_uid_from_reader(
+        "Place the device sticker on the reader...",
+        "Could not read tag UID. Hold the sticker steady and try again.",
+        "Timeout — no tag detected. Try again.",
+    )
 
 
 def main() -> None:

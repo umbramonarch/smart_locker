@@ -17,16 +17,11 @@ Notes: Called after borrow/return, Register Device, and source import.
 from __future__ import annotations
 
 import logging
-import os
-import shutil
-import tempfile
 import threading
-import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from openpyxl import load_workbook
 from sqlalchemy.orm import Session
 
 from config.settings import in_locker_token
@@ -38,6 +33,11 @@ from smart_locker.sync.source_import import (
     pm_candidates,
     pm_match_key,
 )
+from smart_locker.sync.workbook_adapter import (
+    WRITE_RETRY_ATTEMPTS,
+    WorkbookAdapter,
+    WorkbookStaleError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,16 +45,10 @@ logger = logging.getLogger(__name__)
 # Live writes use config.settings.in_locker_token().
 IN_LOCKER_TOKEN = "Locker"
 
-_MAX_RETRIES = 3
-_RETRY_DELAY_SECONDS = 1.0
 _IO_TIMEOUT_SECONDS = 8.0
 _excel_writer_lock = threading.Lock()
 _scheduled_lock = threading.Lock()
 _scheduled_threads: list[threading.Thread] = []
-
-
-class _StaleWorkbook(Exception):
-    """The source xlsx changed on disk after we copied it; retry from the latest file."""
 
 
 @dataclass
@@ -201,38 +195,11 @@ def _wanted_by_pm(session: Session) -> dict[str, str]:
     return wanted
 
 
-def _replace_into(tmp_path: Path, dest: Path) -> None:
-    """Atomically replace ``dest`` with ``tmp_path``, retrying a lock.
-
-    Args:
-        tmp_path: Staged workbook in the same directory as ``dest``.
-        dest: Target ``device-list.xlsx`` on the share or disk.
-
-    Raises:
-        PermissionError: Still locked after ``_MAX_RETRIES`` attempts.
-        OSError: Replace failed for a reason other than a lock.
-    """
-    for attempt in range(1, _MAX_RETRIES + 1):
-        try:
-            tmp_path.replace(dest)
-            return
-        except PermissionError:
-            if attempt < _MAX_RETRIES:
-                logger.debug(
-                    "Location write-back: %s is locked, retrying in %ss "
-                    "(attempt %d/%d)",
-                    dest, _RETRY_DELAY_SECONDS, attempt, _MAX_RETRIES,
-                )
-                time.sleep(_RETRY_DELAY_SECONDS)
-            else:
-                raise
-
-
-def _write_once(path: Path, wanted: dict[str, str]) -> WritebackResult:
+def _write_once(workbook: WorkbookAdapter, wanted: dict[str, str]) -> WritebackResult:
     """Copy, edit Location, and replace if anything changed.
 
     Args:
-        path: Source ``device-list.xlsx``.
+        workbook: Adapter for the source ``device-list.xlsx``.
         wanted: PM number → Location text to write.
 
     Returns:
@@ -242,19 +209,11 @@ def _write_once(path: Path, wanted: dict[str, str]) -> WritebackResult:
         OSError: Copy, load, save, or replace failed (caller retries/logs).
     """
     result = WritebackResult()
+    path = workbook.path
     if not wanted:
         return result
 
-    mtime = path.stat().st_mtime
-    work_fd, work_str = tempfile.mkstemp(suffix=".xlsx")
-    os.close(work_fd)
-    work_path = Path(work_str)
-    dest_path: Path | None = None
-    wb = None
-    try:
-        shutil.copy2(path, work_path)
-        wb = load_workbook(work_path)
-        ws = wb.active
+    def edit(ws) -> bool:
         headers = [
             str(cell.value).strip() if cell.value else ""
             for cell in ws[1]
@@ -267,7 +226,7 @@ def _write_once(path: Path, wanted: dict[str, str]) -> WritebackResult:
                 path, headers,
             )
             result.error = "no_pm_column"
-            return result
+            return False
         if loc_idx is None:
             logger.warning(
                 "Location write-back skipped — no Location column "
@@ -275,7 +234,7 @@ def _write_once(path: Path, wanted: dict[str, str]) -> WritebackResult:
                 path, headers,
             )
             result.error = "no_location_column"
-            return result
+            return False
 
         pm_col = pm_idx + 1
         loc_col = loc_idx + 1
@@ -297,41 +256,19 @@ def _write_once(path: Path, wanted: dict[str, str]) -> WritebackResult:
             dirty = True
 
         result.skipped = len(wanted) - len(seen)
-        if not dirty:
-            return result
+        return dirty
 
-        dest_fd, dest_str = tempfile.mkstemp(suffix=".xlsx", dir=path.parent)
-        os.close(dest_fd)
-        dest_path = Path(dest_str)
-        wb.save(dest_path)
-        wb.close()
-        wb = None
-        try:
-            if path.stat().st_mtime != mtime:
-                raise _StaleWorkbook()
-        except FileNotFoundError:
-            raise _StaleWorkbook() from None
-        _replace_into(dest_path, path)
-        dest_path = None
-        result.saved = True
+    result.saved = workbook.edit_active_sheet(edit)
+    if result.saved:
         logger.info(
             "Location write-back: %d written, %d unchanged, %d not in Excel (%s).",
             result.written, result.unchanged, result.skipped, path,
         )
-        return result
-    finally:
-        if wb is not None:
-            try:
-                wb.close()
-            except Exception:
-                pass
-        work_path.unlink(missing_ok=True)
-        if dest_path is not None:
-            dest_path.unlink(missing_ok=True)
+    return result
 
 
 def write_location_values(
-    source_path: str | Path, wanted: dict[str, str], *, engine=None
+    source: WorkbookAdapter | str | Path, wanted: dict[str, str], *, engine=None
 ) -> WritebackResult:
     """Write PM → Location cells. Never raises.
 
@@ -342,7 +279,7 @@ def write_location_values(
     edit after our copy.
 
     Args:
-        source_path: Path to ``device-list.xlsx``.
+        source: Workbook adapter or path to ``device-list.xlsx``.
         wanted: Mapping of PM number to Location text (any spelling).
         engine: Optional SQLAlchemy engine; when set, ``wanted`` is rebuilt
             from SQLite on each attempt.
@@ -354,10 +291,15 @@ def write_location_values(
     """
     result = WritebackResult()
     try:
-        path = Path(source_path) if source_path else None
-        if path is None or not str(source_path).strip():
+        workbook = (
+            source if isinstance(source, WorkbookAdapter) else WorkbookAdapter(source)
+            if source
+            else None
+        )
+        if workbook is None or not str(workbook.path).strip():
             result.error = "unconfigured"
             return result
+        path = workbook.path
         if not path.exists():
             logger.warning("Location write-back skipped — file not found: %s", path)
             result.error = "missing"
@@ -374,10 +316,10 @@ def write_location_values(
                 if engine is not None:
                     with Session(engine) as session:
                         live = _wanted_by_pm(session)
-                return _write_once(path, live)
+                return _write_once(workbook, live)
 
         try:
-            for attempt in range(1, _MAX_RETRIES + 1):
+            for attempt in range(1, WRITE_RETRY_ATTEMPTS + 1):
                 try:
                     result = _call_with_timeout(
                         _attempt, _IO_TIMEOUT_SECONDS, keyed
@@ -390,12 +332,12 @@ def write_location_values(
                     )
                     result.error = "timeout"
                     return result
-                except _StaleWorkbook:
-                    if attempt < _MAX_RETRIES:
+                except WorkbookStaleError:
+                    if attempt < WRITE_RETRY_ATTEMPTS:
                         logger.info(
                             "Location write-back: %s changed during edit, "
                             "retrying (%d/%d).",
-                            path, attempt, _MAX_RETRIES,
+                            path, attempt, WRITE_RETRY_ATTEMPTS,
                         )
                         continue
                     logger.warning(
@@ -469,12 +411,12 @@ def _call_with_timeout(fn, timeout: float, *args):
 
 
 def write_location_value(
-    source_path: str | Path, pm_number: str, value: str
+    source: WorkbookAdapter | str | Path, pm_number: str, value: str
 ) -> WritebackResult:
     """Write one PM's Location cell. Never raises.
 
     Args:
-        source_path: Path to ``device-list.xlsx``.
+        source: Workbook adapter or path to ``device-list.xlsx``.
         pm_number: Equipment number to match.
         value: Text to put in the Location cell.
 
@@ -484,87 +426,51 @@ def write_location_value(
     pm = (pm_number or "").strip()
     if not pm:
         return WritebackResult(error="no_pm")
-    return write_location_values(source_path, {pm: (value or "").strip()})
+    return write_location_values(source, {pm: (value or "").strip()})
 
 
-def write_location(session: Session, source_path: str | Path) -> WritebackResult:
-    """Write locker location into the Location column. Never raises.
-
-    Args:
-        session: Active database session (reads devices; does not commit).
-        source_path: Path to the source ``device-list.xlsx``.
-
-    Returns:
-        WritebackResult. ``saved`` is False when nothing changed or the
-        file could not be written.
-    """
-    return write_location_values(source_path, _wanted_by_pm(session))
-
-
-def write_location_with_engine(engine, source_path: str | Path) -> WritebackResult:
+def write_location_with_engine(
+    engine, source: WorkbookAdapter | str | Path
+) -> WritebackResult:
     """Write Location using a short-lived session on ``engine``. Never raises.
 
     Args:
         engine: SQLAlchemy engine (committed locker state).
-        source_path: Path to ``device-list.xlsx``.
+        source: Workbook adapter or path to ``device-list.xlsx``.
 
     Returns:
-        WritebackResult from ``write_location``.
+        WritebackResult from ``write_location_values``.
     """
     try:
         with Session(engine) as session:
-            return write_location_values(source_path, _wanted_by_pm(session), engine=engine)
+            return write_location_values(source, _wanted_by_pm(session), engine=engine)
     except Exception:
         logger.exception(
             "Location write-back failed for %s — locker database is unchanged.",
-            source_path,
+            source,
         )
         failed = WritebackResult(error="failed")
         _remember_writeback(failed)
         return failed
 
 
-def maybe_write_location(session: Session) -> None:
-    """Write-back when ``SOURCE_EXCEL_PATH`` is set. Never raises.
-
-    Args:
-        session: The request/tap session that just changed borrow state.
-
-    Returns:
-        None.
-    """
-    try:
-        import config.settings as settings
-
-        path = settings.SOURCE_EXCEL_PATH
-        if not path:
-            return
-        write_location(session, path)
-    except Exception:
-        logger.exception(
-            "Location write-back failed — locker database is unchanged."
-        )
-
-
-def schedule_write_location() -> None:
+def schedule_write_location(workbook: WorkbookAdapter) -> None:
     """Enqueue Location write-back on a worker thread. Never raises.
 
-    Commits must already be visible on the engine. Empty SOURCE_EXCEL_PATH
-    is a no-op. Tests that need the file written call
-    ``flush_scheduled_writeback``.
+    Commits must already be visible on the engine. The configured workbook is
+    selected by the application boundary before this function is called. Tests
+    that need the file written call ``flush_scheduled_writeback``.
+
+    Args:
+        workbook: Adapter for the configured source workbook.
     """
     try:
-        import config.settings as settings
-
-        path = settings.SOURCE_EXCEL_PATH
-        if not path:
-            return
         from smart_locker.database.engine import get_engine
 
         engine = get_engine()
 
         def _run() -> None:
-            write_location_with_engine(engine, path)
+            write_location_with_engine(engine, workbook)
 
         worker = threading.Thread(
             target=_run, daemon=True, name="location-writeback"

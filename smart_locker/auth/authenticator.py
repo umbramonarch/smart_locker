@@ -13,8 +13,7 @@ import logging
 from sqlalchemy.orm import Session
 
 from smart_locker.database.models import User
-from smart_locker.database.repositories import UserRepository
-from smart_locker.security.hashing import compute_uid_hmac
+from smart_locker.auth.tap_router import TapKind, classify_uid
 
 logger = logging.getLogger(__name__)
 
@@ -41,11 +40,9 @@ class Authenticator:
         Returns:
             User object if authenticated, None if not found or inactive.
         """
-        uid_hmac = compute_uid_hmac(card_uid_hex, self._hmac_key)
-        user = UserRepository.find_by_uid_hmac(session, uid_hmac)
-
-        if user is None:
-            logger.warning("Unknown card: HMAC=%s...", uid_hmac[:16])
+        kind, user, _ = classify_uid(session, card_uid_hex, self._hmac_key)
+        if kind != TapKind.WORK_CARD or user is None:
+            logger.warning("Unknown card.")
             return None
 
         if not user.is_active:

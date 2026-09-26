@@ -16,6 +16,7 @@ Notes: Workbooks are built with tests.api.helpers.catalog_workbook (same helper
        deterministically inside the request handler.
 """
 
+import threading
 import time
 
 from smart_locker.database.engine import get_engine
@@ -112,7 +113,6 @@ def test_sync_source_endpoint_updates_locker_rows_from_workbook(
     assert resp.status_code == 200, resp.text
     assert resp.json() == {
         "success": True,
-        "imported": 0,
         "updated": 1,
         "unchanged": 0,
         "errors": 0,
@@ -147,7 +147,6 @@ def test_sync_source_endpoint_updates_locker_rows_from_workbook(
     status = h.client.get("/api/admin/sync-status").json()
     assert status["trigger"] == "manual"
     assert status["ok"] is True
-    assert status["imported"] == 0
     assert status["updated"] == 1
     assert status["errors"] == 0
     assert status["at"]
@@ -180,7 +179,6 @@ def test_sync_preview_reports_diff_and_writes_nothing(
     assert resp.status_code == 200, resp.text
     assert resp.json() == {
         "preview": True,
-        "imported": 0,
         "updated": 1,
         "unchanged": 0,
         "skipped": 1,
@@ -242,8 +240,7 @@ def test_sync_source_returns_409_when_import_lock_is_held(
 
 
 def test_start_scheduler_runs_immediate_startup_import(e2e, tmp_path):
-    """start_scheduler performs one synchronous import (trigger=startup)
-    before its interval job and file watcher are armed."""
+    """start_scheduler queues one startup import and records its outcome."""
     h = e2e()
     device_id = add_device(h, name="Old Name", pm_number="PM-100", locker_slot=3)
     path = catalog_workbook(tmp_path, [
@@ -260,6 +257,63 @@ def test_start_scheduler_runs_immediate_startup_import(e2e, tmp_path):
         assert get_device(h, device_id).name == "Boot Scope"
         assert get_device(h, device_id).serial_number == "SN-BOOT"
     finally:
+        scheduler.stop_scheduler()
+
+
+def test_start_scheduler_does_not_wait_for_startup_import(e2e, tmp_path, monkeypatch):
+    """A slow startup workbook import runs in the scheduler worker, not boot."""
+    e2e()
+    path = catalog_workbook(tmp_path, [
+        HEADERS,
+        ["PM-100", "Boot Scope", "Oscilloscope", "Rigol", "DS1054Z",
+         "SN-BOOT", "Locker"],
+    ])
+    import_started = threading.Event()
+    allow_import_to_finish = threading.Event()
+
+    def slow_import(_engine, _source_path, trigger):
+        assert trigger == "startup"
+        import_started.set()
+        assert allow_import_to_finish.wait(timeout=5.0)
+        return None
+
+    monkeypatch.setattr(scheduler, "_run_source_import", slow_import)
+    monkeypatch.setattr(scheduler, "_try_dashboard_launcher", lambda: None)
+
+    try:
+        scheduler.start_scheduler(get_engine(), str(path), interval_hours=1)
+        assert import_started.wait(timeout=1.0)
+    finally:
+        allow_import_to_finish.set()
+        scheduler.stop_scheduler()
+
+
+def test_health_is_available_while_startup_import_runs(e2e, tmp_path, monkeypatch):
+    """The real lifespan exposes health while its startup import is blocked."""
+    path = catalog_workbook(tmp_path, [
+        HEADERS,
+        ["PM-100", "Boot Scope", "Oscilloscope", "Rigol", "DS1054Z",
+         "SN-BOOT", "Locker"],
+    ])
+    import_started = threading.Event()
+    allow_import_to_finish = threading.Event()
+
+    def slow_import(_engine, _source_path, trigger):
+        assert trigger == "startup"
+        import_started.set()
+        assert allow_import_to_finish.wait(timeout=5.0)
+        return None
+
+    _use_source(monkeypatch, path)
+    monkeypatch.setattr(scheduler, "_run_source_import", slow_import)
+    monkeypatch.setattr(scheduler, "_try_dashboard_launcher", lambda: None)
+
+    try:
+        h = e2e()
+        assert h.client.get("/api/health").status_code == 200
+        assert import_started.wait(timeout=1.0)
+    finally:
+        allow_import_to_finish.set()
         scheduler.stop_scheduler()
 
 

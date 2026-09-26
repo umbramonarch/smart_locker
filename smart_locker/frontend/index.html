@@ -6,7 +6,8 @@
     Register Device, software update, and appliance shut down.
   Project: smart_locker/frontend
   Notes: Served as a static file by FastAPI. Requires app.js and style.css.
-    All interactivity is in app.js. Offline: system fonts only.
+    Shared clock/config behavior is in shared.js; interactivity is in app.js.
+    Offline: system fonts only.
 -->
 <!DOCTYPE html>
 <html lang="en">
@@ -689,6 +690,7 @@
   <!-- Toast notification -->
   <div id="toast"></div>
 
+  <script src="shared.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

@@ -16,6 +16,9 @@ Notes: The photo watcher keeps a module-level Observer singleton — every
 
 import time
 
+from openpyxl import load_workbook
+
+import scripts.update_device as update_script
 from smart_locker.database.engine import get_engine
 from smart_locker.sync.dashboard_launcher import write_dashboard_launcher
 from smart_locker.sync.photo_watcher import (
@@ -64,6 +67,34 @@ def test_process_photo_updates_every_matching_model(e2e, tmp_path, monkeypatch):
     assert get_device(h, cam_a).image_path == "images/CAMX.jpg"
     assert get_device(h, cam_b).image_path == "images/CAMX.jpg"
     assert get_device(h, other).image_path is None
+
+
+def test_auto_photo_command_matches_model_and_exports(e2e, tmp_path, monkeypatch):
+    """The bench --auto command updates every model match, not the PM match."""
+    h = e2e()
+    first = add_device(h, name="First", pm_number="PM-340", locker_slot=31, model="CamX")
+    second = add_device(h, name="Second", pm_number="PM-341", locker_slot=32, model="camx")
+    other = add_device(h, name="Other", pm_number="PM-342", locker_slot=33, model="Different")
+    images = tmp_path / "smart_locker" / "frontend" / "images"
+    images.mkdir(parents=True)
+    (images / "CAMX.jpg").write_bytes(JPEG_BYTES)
+    export = tmp_path / "export.xlsx"
+    monkeypatch.setattr(update_script, "__file__", str(tmp_path / "scripts" / "update_device.py"))
+    monkeypatch.setattr("config.settings.EXCEL_SYNC_PATH", str(export))
+
+    update_script.auto_match_images()
+
+    assert get_device(h, first).image_path == "images/CAMX.jpg"
+    assert get_device(h, second).image_path == "images/CAMX.jpg"
+    assert get_device(h, other).image_path is None
+    workbook = load_workbook(export, read_only=True)
+    try:
+        rows = list(workbook["Devices"].values)
+    finally:
+        workbook.close()
+    assert {(row[0], row[4]) for row in rows[1:]} >= {
+        ("PM-340", "CamX"), ("PM-341", "camx"),
+    }
 
 
 def test_process_photo_without_matching_model_touches_no_device(

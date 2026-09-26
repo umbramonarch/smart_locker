@@ -19,6 +19,7 @@ from smart_locker.database.models import DeviceStatus
 from smart_locker.database.repositories import DeviceRepository, UserRepository
 
 import smart_locker.api.app_context as ctx_module
+from smart_locker.api.app_context import AppContext
 
 
 @pytest.fixture()
@@ -140,6 +141,21 @@ def mock_context(session_mgr):
     mock_ctx.kiosk_screen = "idle"
     mock_ctx.pending_tag_bind = None
     mock_ctx.pending_registration = None
+    real_context = AppContext.__new__(AppContext)
+    real_context.session_mgr = session_mgr
+    real_context.sse_queue = mock_ctx.sse_queue
+    real_context.admin_overlay_open = False
+    real_context.pending_tag_bind = None
+    real_context.pending_registration = None
+    real_context.broadcast_sse = mock_ctx.broadcast_sse
+
+    def end_kiosk_session(**kwargs):
+        real_context.end_kiosk_session(**kwargs)
+        mock_ctx.admin_overlay_open = real_context.admin_overlay_open
+        mock_ctx.pending_tag_bind = real_context.pending_tag_bind
+        mock_ctx.pending_registration = real_context.pending_registration
+
+    mock_ctx.end_kiosk_session = end_kiosk_session
     ctx_module.context = mock_ctx
     yield mock_ctx
     ctx_module.context = None

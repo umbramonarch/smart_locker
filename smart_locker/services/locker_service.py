@@ -14,6 +14,7 @@ Notes: The borrow limit is configured via MAX_BORROWS in config/settings.py
 
 import logging
 
+from sqlalchemy import event
 from sqlalchemy.orm import Session
 
 from config.settings import MAX_BORROWS
@@ -25,17 +26,25 @@ logger = logging.getLogger(__name__)
 
 
 def _write_location(db_session: Session) -> None:
-    """Commit SQLite, then enqueue Location write-back. Never blocks on Excel."""
-    db_session.flush()
-    try:
-        db_session.commit()
-    except Exception:
-        logger.exception("Commit before Location write-back failed.")
-        db_session.rollback()
-        raise
-    from smart_locker.sync.location_writeback import schedule_write_location
+    """Mark a changed loan for write-back after its caller commits SQLite."""
+    db_session.info["location_writeback_pending"] = True
 
-    schedule_write_location()
+
+@event.listens_for(Session, "after_commit")
+def _schedule_committed_location(session: Session) -> None:
+    """Only committed loan changes can trigger a workbook write."""
+    if session.info.pop("location_writeback_pending", False):
+        from smart_locker.sync.location_writeback import schedule_write_location
+        from smart_locker.sync.workbook_adapter import configured_workbook
+
+        workbook = configured_workbook()
+        if workbook is not None:
+            schedule_write_location(workbook)
+
+
+@event.listens_for(Session, "after_rollback")
+def _discard_uncommitted_location(session: Session) -> None:
+    session.info.pop("location_writeback_pending", None)
 
 
 class LockerService:
@@ -336,28 +345,3 @@ class LockerService:
             original_borrower_id,
         )
         return True
-
-    @staticmethod
-    def get_available_devices(db_session: Session) -> list:
-        """Return all devices with AVAILABLE status.
-
-        Args:
-            db_session: Active database session.
-
-        Returns:
-            List of available Device objects.
-        """
-        return DeviceRepository.get_available_devices(db_session)
-
-    @staticmethod
-    def get_user_borrowed_devices(db_session: Session, user_id: int) -> list:
-        """Return all devices currently borrowed by a specific user.
-
-        Args:
-            db_session: Active database session.
-            user_id: ID of the borrower.
-
-        Returns:
-            List of Device objects borrowed by the user.
-        """
-        return DeviceRepository.get_borrowed_by_user(db_session, user_id)

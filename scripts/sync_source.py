@@ -62,8 +62,8 @@ def main() -> None:
         write_location_with_engine(get_engine(), source_path)
 
     print(
-        f"\nDone: {result.imported} imported, {result.updated} updated, "
-        f"{result.unchanged} unchanged, {result.non_locker_skipped} not in locker, "
+        f"\nDone: {result.updated} updated, {result.unchanged} unchanged, "
+        f"{result.non_locker_skipped} not in locker, "
         f"{result.errors} errors."
     )
     for detail in result.error_details:

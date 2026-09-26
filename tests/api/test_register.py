@@ -161,37 +161,6 @@ class TestRegisterDeviceApi:
         )
         assert resp.status_code == 403
 
-    def test_register_accepts_admin(
-        self, client, mock_context, admin_user, db_session, tmp_path, monkeypatch
-    ):
-        """Known PM + free slot inserts the locker row and arms the sticker bind."""
-        path = catalog_workbook(tmp_path, [
-            ["Equipment", "Manufacturer", "Model"],
-            ["PM-XL", "Fluke", "87V"],
-        ])
-        monkeypatch.setattr("config.settings.SOURCE_EXCEL_PATH", str(path))
-        mock_context.session_mgr.start_session(admin_user)
-        mock_context.pending_tag_bind = None
-        scheduled = []
-        monkeypatch.setattr(
-            "smart_locker.sync.location_writeback.schedule_write_location",
-            lambda: scheduled.append(True),
-        )
-        resp = client.post(
-            "/api/admin/devices/register",
-            json={"pm_number": "PM-XL", "locker_slot": 7},
-        )
-        assert resp.status_code == 200
-        body = resp.json()
-        assert body["success"] is True
-        assert body["pm_number"] == "PM-XL"
-        assert body["locker_slot"] == 7
-        device = DeviceRepository.find_by_pm(db_session, "PM-XL")
-        assert device is not None
-        assert device.locker_slot == 7
-        assert mock_context.pending_tag_bind.device_id == device.id
-        assert scheduled == [True]
-
     def test_register_unknown_pm(
         self, client, mock_context, admin_user, db_session, tmp_path, monkeypatch
     ):

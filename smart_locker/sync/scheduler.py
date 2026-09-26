@@ -1,8 +1,8 @@
 """
 File: scheduler.py
 Description: Scheduled and reactive source Excel import, then Location
-             write-back. Combines three trigger mechanisms: (1) an immediate
-             import on application startup, (2) a watchdog file watcher on
+             write-back. Combines three trigger mechanisms: (1) an asynchronous
+             import immediately after application startup, (2) a watchdog file watcher on
              local filesystems, and (3) a periodic APScheduler interval job
              (default 6 hours). After each successful import the Pi writes
              Location for locker PMs back into the sheet.
@@ -20,6 +20,7 @@ Notes: Interval defaults to 6 hours, configurable via
 
 import logging
 import threading
+from datetime import datetime
 from pathlib import Path
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -89,14 +90,16 @@ def run_source_import_exclusive(
         _import_lock.release()
 
 
-def _interval_import(engine, source_path: str | Path, trigger: str = "interval") -> None:
-    """Interval job entry: skip if import/sync already holds the mutex."""
+def _scheduled_import(
+    engine, source_path: str | Path, trigger: str = "interval"
+) -> None:
+    """Scheduled import entry: skip if another import/sync holds the mutex."""
     try:
         run_source_import_exclusive(engine, source_path, trigger=trigger)
     except ImportInProgress:
         logger.info("Source import already running — interval skipped.")
     except Exception:
-        logger.exception("Periodic source import failed.")
+        logger.exception("%s source import failed.", trigger.capitalize())
     _try_dashboard_launcher()
 
 
@@ -130,8 +133,8 @@ def _run_source_import(engine, source_path: str | Path, trigger: str = "interval
     try:
         result = import_from_source_excel(engine, path)
         logger.info(
-            "Source import complete: %d imported, %d updated, %d unchanged, %d errors.",
-            result.imported, result.updated, result.unchanged, result.errors,
+            "Source import complete: %d updated, %d unchanged, %d errors.",
+            result.updated, result.unchanged, result.errors,
         )
         sync_status.record_result(trigger, result)
         from smart_locker.sync.location_writeback import write_location_with_engine
@@ -266,10 +269,12 @@ def start_scheduler(
     source_path: str | Path,
     interval_hours: int = 6,
 ) -> None:
-    """Start the background scheduler, run an immediate import, and watch for changes.
+    """Start source sync and watch for changes.
 
     Performs three setup actions:
-    1. Runs an immediate source import so the database is current on startup.
+    1. Queues a source import to run immediately in the scheduler background
+       thread, so application startup and health checks do not wait for a
+       slow or unavailable workbook.
     2. Starts a watchdog file observer on the source directory when the path
        is a local filesystem (skipped on CIFS/NFS).
     3. Starts an APScheduler interval job (default every 6 hours).
@@ -298,17 +303,9 @@ def start_scheduler(
         hours = 6
     source = Path(source_path).resolve()
 
-    # --- 1. Immediate import on startup ---
-    try:
-        run_source_import_exclusive(engine, source, trigger="startup")
-    except ImportInProgress:
-        logger.info("Source import already running — startup import skipped.")
-    except Exception:
-        logger.exception("Startup source import failed.")
-
     _try_dashboard_launcher()
 
-    # --- 2. File watcher for live changes (local filesystems only) ---
+    # --- 1. File watcher for live changes (local filesystems only) ---
     # inotify does not deliver events for writes made by other hosts on a network
     # share, so on the Pi (source Excel on the mounted CIFS share) we skip the live
     # watch and rely on the startup import, the interval job, and admin Sync.
@@ -334,10 +331,20 @@ def start_scheduler(
             source.parent,
         )
 
-    # --- 3. Interval job (safety net) ---
+    # --- 2. Scheduler jobs: immediate startup import and interval safety net ---
     _scheduler = BackgroundScheduler()
     _scheduler.add_job(
-        _interval_import,
+        _scheduled_import,
+        trigger="date",
+        run_date=datetime.now(),
+        args=[engine, source, "startup"],
+        id="source_excel_startup_import",
+        name="Startup source Excel import",
+        misfire_grace_time=3600,
+        max_instances=1,
+    )
+    _scheduler.add_job(
+        _scheduled_import,
         trigger=IntervalTrigger(hours=hours),
         args=[engine, source, "interval"],
         id="source_excel_import",

@@ -55,6 +55,21 @@ class TapResult:
         return data
 
 
+@dataclass
+class TapDispatchOutcome:
+    """Complete application outcome for one NFC insert.
+
+    The caller supplies the pending-window snapshot captured under its state
+    lock.  This keeps registration, armed bind, and ordinary tap policy in one
+    place while leaving UI state and SSE delivery to the API layer.
+    """
+
+    result: TapResult
+    clear_pending_registration: bool = False
+    clear_pending_tag_bind: bool = False
+    end_leftover_session_silently: bool = False
+
+
 def classify_uid(
     db_session: Session,
     card_uid_hex: str,
@@ -79,6 +94,59 @@ def classify_uid(
     if device is not None:
         return TapKind.DEVICE_TAG, None, device
     return TapKind.UNKNOWN, None, None
+
+
+def handle_registration_tap(
+    db_session: Session,
+    card_uid_hex: str,
+    *,
+    display_name: str,
+    hmac_key: bytes,
+    enc_key: bytes,
+) -> TapResult:
+    """Enroll ``display_name`` from a fresh card tap.
+
+    Classification, duplicate rejection, and enrollment deliberately share the
+    caller's session. The AppContext owns the pending-window timeout and
+    session-clearing policy; this function owns the database tap policy.
+    """
+    kind, user, _ = classify_uid(db_session, card_uid_hex, hmac_key)
+    if kind == TapKind.DEVICE_TAG:
+        logger.warning("Registration failed: UID is already a device tag.")
+        return TapResult(
+            event="registration_failed",
+            payload={"reason": "This tag is already bound to a device."},
+        )
+
+    if kind == TapKind.WORK_CARD and user is not None and user.is_active:
+        logger.warning(
+            "Registration failed: card already enrolled to %s.",
+            user.display_name,
+        )
+        return TapResult(
+            event="registration_failed",
+            payload={"reason": "This card is already registered."},
+        )
+
+    from smart_locker.services.user_service import UserService
+
+    user = UserService(enc_key=enc_key, hmac_key=hmac_key).enroll_user(
+        db_session,
+        display_name=display_name,
+        card_uid_hex=card_uid_hex,
+        role="user",
+    )
+    logger.info("Self-registered user: %s (id=%d)", user.display_name, user.id)
+    return TapResult(
+        event="registration_success",
+        payload={
+            "user": {
+                "id": user.id,
+                "name": user.display_name,
+                "role": user.role.value,
+            },
+        },
+    )
 
 
 def bind_uid_to_device(
@@ -110,6 +178,67 @@ def bind_uid_to_device(
     DeviceRepository.bind_tag(db_session, device, tag_hmac)
 
 
+def handle_tag_bind_tap(
+    db_session: Session,
+    card_uid_hex: str,
+    *,
+    device_id: int,
+    hmac_key: bytes,
+    session_mgr: SessionManager,
+    admin_overlay_open: bool = False,
+    reader_name: str = "",
+) -> tuple[TapResult, bool]:
+    """Apply an armed tag bind, preserving normal work-card and return taps.
+
+    Returns the tap result and whether the pending bind should be cleared.
+    Classification, bind lookup, and any fall-through tap handling share the
+    caller's session; no ORM row escapes this function.
+    """
+    kind, user, device = classify_uid(db_session, card_uid_hex, hmac_key)
+    if kind == TapKind.WORK_CARD and user is not None:
+        if session_mgr.has_active_session:
+            return TapResult(event=None), False
+        return (
+            handle_insert(
+                db_session, card_uid_hex, hmac_key, session_mgr,
+                admin_overlay_open=admin_overlay_open, reader_name=reader_name,
+                classified_uid=(kind, user, device),
+            ),
+            True,
+        )
+
+    if (
+        kind == TapKind.DEVICE_TAG and device is not None
+        and device.status == DeviceStatus.BORROWED
+    ):
+        return (
+            handle_insert(
+                db_session, card_uid_hex, hmac_key, session_mgr,
+                admin_overlay_open=admin_overlay_open, reader_name=reader_name,
+                classified_uid=(kind, user, device),
+            ),
+            False,
+        )
+
+    target = DeviceRepository.find_by_id(db_session, device_id)
+    if target is None:
+        return TapResult(
+            event="tag_bind_failed", payload={"reason": "Device not found."}
+        ), True
+    try:
+        bind_uid_to_device(db_session, target, card_uid_hex, hmac_key)
+    except ValueError as exc:
+        return TapResult(event="tag_bind_failed", payload={"reason": str(exc)}), True
+    return TapResult(
+        event="tag_bind_success",
+        payload={
+            "device_id": target.id,
+            "device_name": target.name,
+            "pm_number": target.pm_number,
+        },
+    ), True
+
+
 def handle_insert(
     db_session: Session,
     card_uid_hex: str,
@@ -118,6 +247,7 @@ def handle_insert(
     *,
     admin_overlay_open: bool = False,
     reader_name: str = "",
+    classified_uid: tuple[TapKind, User | None, Device | None] | None = None,
 ) -> TapResult:
     """Apply auto-intent / logout / idle-login for one NFC insert.
 
@@ -136,7 +266,11 @@ def handle_insert(
         Idle borrowed tags return without a session. Available tags at idle
         do not borrow.
     """
-    kind, user, device = classify_uid(db_session, card_uid_hex, hmac_key)
+    kind, user, device = (
+        classified_uid
+        if classified_uid is not None
+        else classify_uid(db_session, card_uid_hex, hmac_key)
+    )
     reader = reader_name or "reader"
 
     if session_mgr.has_active_session:
@@ -151,6 +285,103 @@ def handle_insert(
         )
     return _handle_idle(
         db_session, session_mgr, kind, user, device, reader_name=reader
+    )
+
+
+def dispatch_insert(
+    db_session: Session,
+    card_uid_hex: str,
+    hmac_key: bytes,
+    enc_key: bytes,
+    session_mgr: SessionManager,
+    *,
+    registration_display_name: str | None = None,
+    registration_expired: bool = False,
+    tag_bind_device_id: int | None = None,
+    admin_overlay_open: bool = False,
+    reader_name: str = "",
+) -> TapDispatchOutcome:
+    """Apply the pending-window intercept or ordinary policy for one insert.
+
+    All UID classification and database work runs through the supplied
+    ``db_session``.  Pending values are scalar snapshots, never ORM rows.
+    Expired registration ends an overlay session before normal classification
+    so its tap can log in rather than log out, matching registration completion.
+    """
+    if registration_expired:
+        session_mgr.end_session()
+        result = handle_insert(
+            db_session,
+            card_uid_hex,
+            hmac_key,
+            session_mgr,
+            admin_overlay_open=admin_overlay_open,
+            reader_name=reader_name,
+        )
+        return TapDispatchOutcome(
+            result,
+            clear_pending_registration=True,
+        )
+
+    if registration_display_name is not None:
+        try:
+            result = handle_registration_tap(
+                db_session,
+                card_uid_hex,
+                display_name=registration_display_name,
+                hmac_key=hmac_key,
+                enc_key=enc_key,
+            )
+        except Exception:
+            logger.exception(
+                "Registration failed for '%s'.", registration_display_name
+            )
+            result = TapResult(
+                event="registration_failed",
+                payload={"reason": "Registration failed. Please try again."},
+            )
+        return TapDispatchOutcome(
+            result,
+            clear_pending_registration=True,
+            end_leftover_session_silently=True,
+        )
+
+    if tag_bind_device_id is not None:
+        # An armed bind has always kept an active kiosk session alive while it
+        # waits for its sticker, including a work-card tap that is ignored.
+        session_mgr.touch()
+        try:
+            result, clear_bind = handle_tag_bind_tap(
+                db_session,
+                card_uid_hex,
+                device_id=tag_bind_device_id,
+                hmac_key=hmac_key,
+                session_mgr=session_mgr,
+                admin_overlay_open=admin_overlay_open,
+                reader_name=reader_name,
+            )
+        except Exception:
+            logger.exception(
+                "Device tag bind failed for device_id=%d.", tag_bind_device_id
+            )
+            result = TapResult(
+                event="tag_bind_failed",
+                payload={"reason": "Bind failed. Please try again."},
+            )
+            clear_bind = True
+        return TapDispatchOutcome(result, clear_pending_tag_bind=clear_bind)
+
+    result = handle_insert(
+        db_session,
+        card_uid_hex,
+        hmac_key,
+        session_mgr,
+        admin_overlay_open=admin_overlay_open,
+        reader_name=reader_name,
+    )
+    return TapDispatchOutcome(
+        result,
+        clear_pending_tag_bind=result.event == "auth_success",
     )
 
 
@@ -239,7 +470,6 @@ def _handle_logged_in(
     if kind == TapKind.WORK_CARD and user is not None:
         active = session_mgr.current_session
         name = active.user.display_name if active is not None else "user"
-        session_mgr.end_session()
         return TapResult(
             event="session_ended",
             payload={"reason": "card_tap"},
@@ -292,7 +522,7 @@ def _auto_intent(
         success = LockerService.borrow_device(db_session, user_session, device.id)
         message = f"{name} borrowed." if success else f"Could not borrow {name}."
         return _device_action(
-            device, success=success, action="borrow", message=message
+            device, success=success, action="borrow" if success else "refused", message=message
         )
 
     if device.status == DeviceStatus.BORROWED:
@@ -321,4 +551,4 @@ def _auto_intent(
         )
 
     message = f"Could not borrow {name}."
-    return _device_action(device, success=False, action="borrow", message=message)
+    return _device_action(device, success=False, action="refused", message=message)

@@ -15,9 +15,12 @@ Notes: SOURCE_EXCEL_PATH is monkeypatched per test — the suite autouse fixture
        skips the sheet with an error result.
 """
 
+import pytest
 from openpyxl import load_workbook
+from sqlalchemy.orm import Session
 
 from config.settings import in_locker_token
+from smart_locker.database.models import DeviceStatus
 from smart_locker.sync.location_writeback import flush_scheduled_writeback
 from smart_locker.sync.source_import import (
     find_column,
@@ -114,6 +117,36 @@ def test_borrow_writes_borrower_name_to_location(e2e, tmp_path, monkeypatch):
     assert _location_cell(path, "PM-100") == "E2E Borrower"
 
 
+def test_failed_borrow_commit_does_not_mirror_uncommitted_loan(
+    e2e, tmp_path, monkeypatch
+):
+    """A failed HTTP commit leaves both SQLite and the workbook available."""
+    path = catalog_workbook(tmp_path, [
+        CATALOG_HEADERS,
+        ["PM-100", "Camera", "Tool", "Locker"],
+    ])
+    _point_source_at(monkeypatch, path)
+    h = e2e()
+    add_user(h, CARD_USER, display_name="E2E Borrower")
+    device_id = add_device(h, pm_number="PM-100", tag_uid=TAG_PM100)
+    _login(h, CARD_USER)
+
+    real_commit = Session.commit
+
+    def fail_loan_commit(session):
+        if session.info.get("location_writeback_pending"):
+            raise RuntimeError("simulated SQLite commit failure")
+        return real_commit(session)
+
+    monkeypatch.setattr(Session, "commit", fail_loan_commit)
+    with pytest.raises(RuntimeError, match="simulated SQLite commit failure"):
+        h.client.post(f"/api/devices/{device_id}/borrow")
+
+    flush_scheduled_writeback(timeout=10)
+    assert get_device(h, device_id).current_borrower_id is None
+    assert _location_cell(path, "PM-100") == "Locker"
+
+
 def test_return_writes_in_locker_token(e2e, tmp_path, monkeypatch):
     """A return puts the in-locker token (not a blank) back into Location."""
     path = catalog_workbook(tmp_path, [
@@ -170,7 +203,7 @@ def test_maintenance_device_location_not_written(e2e, tmp_path, monkeypatch):
     h.tap(TAG_PM999)
     refused = h.wait_event("device_action")
     assert refused["success"] is False
-    assert refused["action"] == "borrow"
+    assert refused["action"] == "refused"
 
     # A real borrow drives the write-back pass over the whole sheet.
     h.tap(TAG_PM100)
@@ -233,6 +266,13 @@ def test_register_device_writes_in_locker_token(e2e, tmp_path, monkeypatch):
     assert body["success"] is True
     assert body["pm_number"] == "PM-200"
     assert body["locker_slot"] == 7
+
+    assert h.ctx.pending_tag_bind is not None
+    device = get_device(h, h.ctx.pending_tag_bind.device_id)
+    assert device is not None
+    assert device.pm_number == "PM-200"
+    assert device.locker_slot == 7
+    assert device.status is DeviceStatus.AVAILABLE
 
     flush_scheduled_writeback(timeout=10)
     assert _location_cell(path, "PM-200") == in_locker_token()

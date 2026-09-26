@@ -12,11 +12,13 @@ Notes: Event names follow tap_router._handle_idle / _handle_logged_in: an
        in-session variant), and any work card tapped during a session ends it
        (``session_ended`` reason=card_tap) rather than switching users. Both
        ``auth_success`` and ``session_ended`` clear admin_overlay_open and
-       pending_tag_bind in AppContext._dispatch_insert.
+       pending_tag_bind after the typed tap_router.dispatch_insert outcome is
+       applied by AppContext._dispatch_insert.
 """
 
-from smart_locker.api.app_context import PendingTagBind
+from smart_locker.api.app_context import PendingRegistration, PendingTagBind
 from smart_locker.database.models import User
+from smart_locker.nfc.reader_observer import ReaderEvent, ReaderEventType
 
 from tests.e2e.helpers import add_user
 
@@ -155,6 +157,47 @@ def test_session_end_clears_overlay_and_pending_tag_bind(e2e):
     payload = h.wait_event("session_ended")
     assert payload["reason"] == "card_tap"
     assert h.ctx.admin_overlay_open is False
+    assert h.ctx.pending_tag_bind is None
+    assert h.client.get("/api/session").json()["active"] is False
+
+
+def test_http_session_end_clears_all_pending_state(e2e):
+    h = e2e()
+    add_user(h, WORK_UID)
+    h.tap(WORK_UID)
+    h.wait_event("auth_success")
+    h.ctx.admin_overlay_open = True
+    h.ctx.pending_registration = PendingRegistration("Pending User")
+    h.ctx.pending_tag_bind = PendingTagBind(device_id=1, from_dashboard=True)
+
+    response = h.client.post("/api/session/end")
+
+    assert response.status_code == 200
+    assert h.wait_event("session_ended") == {
+        "event": "session_ended", "reason": "explicit"
+    }
+    assert h.ctx.admin_overlay_open is False
+    assert h.ctx.pending_registration is None
+    assert h.ctx.pending_tag_bind is None
+    assert h.client.get("/api/session").json()["active"] is False
+
+
+def test_reader_disconnect_ends_session_and_clears_pending_state(e2e):
+    h = e2e()
+    add_user(h, WORK_UID)
+    h.tap(WORK_UID)
+    h.wait_event("auth_success")
+    h.ctx.admin_overlay_open = True
+    h.ctx.pending_registration = PendingRegistration("Pending User")
+    h.ctx.pending_tag_bind = PendingTagBind(device_id=1, from_dashboard=True)
+
+    h.ctx.reader._event_queue.put(
+        ReaderEvent(ReaderEventType.DISCONNECTED, "fake-reader")
+    )
+
+    assert h.wait_event("reader_disconnected") == {"event": "reader_disconnected"}
+    assert h.ctx.admin_overlay_open is False
+    assert h.ctx.pending_registration is None
     assert h.ctx.pending_tag_bind is None
     assert h.client.get("/api/session").json()["active"] is False
 

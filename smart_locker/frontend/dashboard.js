@@ -221,19 +221,6 @@ function applyAssetLabel(label) {
   });
 }
 
-/**
- * Load SMART_LOCKER_ASSET_LABEL from the public config endpoint.
- * @returns {Promise<void>}
- */
-async function loadSiteConfig() {
-  try {
-    const res = await fetch('/api/config');
-    if (!res.ok) return;
-    const data = await res.json();
-    if (data && typeof data.asset_label === 'string') applyAssetLabel(data.asset_label);
-  } catch (_) { /* keep built-in column title */ }
-}
-
 
 /* ── Tabs ─────────────────────────────────────────────────────────────────── */
 
@@ -666,17 +653,6 @@ async function confirmOwnerEdit() {
 /**
  * Format the header clock as local HH:MM:SS.
  */
-function tickClock() {
-  const el = document.getElementById('dash-clock');
-  if (!el) return;
-  const now = new Date();
-  const hh = String(now.getHours()).padStart(2, '0');
-  const mm = String(now.getMinutes()).padStart(2, '0');
-  const ss = String(now.getSeconds()).padStart(2, '0');
-  el.textContent = `${hh}:${mm}:${ss}`;
-}
-
-
 /**
  * Record a tap on the header clock. Five taps within 3s opens admin.
  */
@@ -985,11 +961,9 @@ function initEvents() {
 
 document.addEventListener('DOMContentLoaded', () => {
   initEvents();
-  loadSiteConfig();
+  loadSharedSiteConfig();
   fetchTables();
   fetchDisplay();
-  tickClock();
-  setInterval(tickClock, 1000);
   setInterval(fetchTables, REFRESH_MS);
   setInterval(fetchDisplay, DISPLAY_MS);
   document.addEventListener('visibilitychange', () => {

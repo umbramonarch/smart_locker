@@ -20,14 +20,7 @@ from smartcard.ReaderMonitoring import ReaderMonitor
 from smartcard.System import readers as list_readers
 
 from config.settings import READER_NAME_FILTER
-from smart_locker.nfc.apdu import (
-    APDUResponse,
-    GET_FIRMWARE_VERSION,
-    DISABLE_BUZZER,
-    build_authenticate,
-    build_load_key,
-    build_read_binary,
-)
+from smart_locker.nfc.apdu import GET_FIRMWARE_VERSION, DISABLE_BUZZER
 from smart_locker.nfc.card_observer import CardEvent, LockerCardObserver
 from smart_locker.nfc.exceptions import (
     CardReadError,
@@ -147,52 +140,7 @@ class NFCReader:
         except queue.Empty:
             return None
 
-    def poll_event(self) -> Event | None:
-        """Non-blocking check for a pending event."""
-        try:
-            return self._event_queue.get_nowait()
-        except queue.Empty:
-            return None
-
     @property
     def is_running(self) -> bool:
         """Whether the NFC reader is currently monitoring for card events."""
         return self._running
-
-    @staticmethod
-    def read_mifare_block(connection, block: int, key: list[int] | None = None) -> bytes:
-        """Read a MIFARE Classic block (for future card data reading).
-
-        Args:
-            connection: An active pyscard connection.
-            block: Block number to read.
-            key: 6-byte MIFARE key. Defaults to factory key [0xFF]*6.
-
-        Returns:
-            16 bytes of block data.
-
-        Raises:
-            CardReadError: If authentication or read fails.
-        """
-        if key is None:
-            key = [0xFF] * 6
-
-        # Load key into reader slot 0
-        resp, sw1, sw2 = connection.transmit(build_load_key(key))
-        apdu = APDUResponse.from_raw(resp, sw1, sw2)
-        if not apdu.success:
-            raise CardReadError(f"LOAD KEY failed: {apdu}")
-
-        # Authenticate
-        resp, sw1, sw2 = connection.transmit(build_authenticate(block))
-        apdu = APDUResponse.from_raw(resp, sw1, sw2)
-        if not apdu.success:
-            raise CardReadError(f"AUTHENTICATE failed for block {block}: {apdu}")
-
-        # Read
-        resp, sw1, sw2 = connection.transmit(build_read_binary(block))
-        apdu = APDUResponse.from_raw(resp, sw1, sw2)
-        if not apdu.success:
-            raise CardReadError(f"READ BINARY failed for block {block}: {apdu}")
-
-        return apdu.data

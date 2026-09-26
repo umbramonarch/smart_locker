@@ -66,7 +66,7 @@ smart_locker/
 │   │   ├── session_manager.py   # Single-user session lifecycle + inactivity timeout
 │   │   └── tap_router.py        # Classify UID (work card / device tag / unknown); auto-intent
 │   ├── security/
-│   │   ├── encryption.py        # AES-256-GCM encrypt/decrypt
+│   │   ├── encryption.py        # AES-256-GCM encryption
 │   │   ├── hashing.py           # HMAC-SHA256 for card UID fingerprinting
 │   │   └── key_manager.py       # Key loading from environment
 │   ├── database/
@@ -99,8 +99,7 @@ smart_locker/
 │   ├── migrate_db.py            # Add columns/tables to an existing DB (run after schema changes)
 │   ├── enroll_card.py           # Enroll a new NFC card user (reader tap, or --uid HEX for no hardware)
 │   ├── enroll_device_tag.py     # Bind an NFC sticker to an existing device (--pm, optional --uid / --force)
-│   ├── import_devices.py        # Catalog refresh from Excel (English headers / aliases)
-│   ├── update_device.py         # Update device fields / match photos by PM number
+│   ├── update_device.py         # Update device fields / match photos by model
 │   ├── sync_source.py           # Manually trigger source Excel import
 │   └── copy_update.py           # Fill locker-updates/ and copy onto a USB stick
 ├── tests/                       # hardware-free pytest suite
@@ -257,9 +256,8 @@ Admins can also register anyone manually from the hidden admin panel (`POST /api
 ## Security Design
 
 - **Two separate 32-byte keys**: one for AES-256-GCM encryption, one for HMAC-SHA256.
-- **HMAC for database lookup**: a deterministic digest allows indexed O(1) card lookups without decrypting every row.
+- **HMAC for database lookup**: a deterministic digest allows indexed O(1) card lookups without scanning every encrypted row.
 - **AES-GCM for storage**: random nonce per encryption — the same UID produces different ciphertext each time.
-- **Admin-only decryption**: only admin users can view raw card UIDs.
 - **UID never logged**: card UIDs are never written to log files — events are logged as "Card inserted on \<reader\>" with no UID. UIDs are masked even in enrollment output (e.g. `04**********80`).
 
 ## Device Photos
@@ -278,12 +276,12 @@ A background **photo watcher** also auto-assigns photos by **device model**: dro
 
 ## NFC Device Tags
 
-Cheap NFC stickers on locker devices use the same ACR1252U as work cards (no USB barcode scanner).
+Cheap NFC stickers on locker devices use the same ACR1252U as work cards.
 
 - **Storage:** `devices.tag_hmac` (HMAC-SHA256 of the sticker UID, same key as work cards). The raw UID is never stored or logged.
 - **Flow:** tap work card → tap sticker (or pick on screen). Auto-intent from device status: borrow if available, return if you hold it. Session stays open for several devices. A work-card tap still logs out.
 - **Register Device** (hidden admin panel): **PM + free slot + NFC**. Catalog comes from Excel. Sync never inserts locker rows. The list shows **name + PM**. CLI bind: `python -m scripts.enroll_device_tag --pm PM-001` (or `--uid HEX`).
-- Excel barcode is unused leftover; re-import does **not** overwrite `tag_hmac`, locker status, or the current borrower.
+- Re-import does **not** overwrite `tag_hmac`, locker status, or the current borrower.
 - After borrow/return (and after Register Device / Sync), the Pi writes **only** Location in the catalog workbook (`SMART_LOCKER_IN_LOCKER_TOKEN` in the locker, borrower name when out). Catalog columns stay. A locked workbook is skipped, not a kiosk crash. Extra Excel header names: `SMART_LOCKER_ID_HEADERS` / `SMART_LOCKER_LOCATION_HEADERS`. On-screen noun: `SMART_LOCKER_ASSET_LABEL`.
 
 ## Running Tests

@@ -271,7 +271,7 @@ def test_session_tap_on_maintenance_tag_reports_borrow_failure(e2e):
 
     payload = h.wait_event("device_action")
     assert payload["success"] is False
-    assert payload["action"] == "borrow"
+    assert payload["action"] == "refused"
     assert payload["message"] == "Could not borrow In Repair."
     assert payload["device_id"] == device_id
     assert payload["locker_slot"] == 27

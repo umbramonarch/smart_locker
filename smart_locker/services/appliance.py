@@ -1,7 +1,7 @@
 """
 File: appliance.py
 Description: Raspberry Pi appliance actions for the hidden admin panel: stop
-             the Chromium kiosk (backend stays up) and power off the board.
+             the Chromium kiosk, launch an update, and power off the board.
 Project: smart_locker/services
 Notes: Exit kiosk sends SIGTERM only to processes whose command line contains
        the start-kiosk.sh profile marker (smart-locker-kiosk), not every
@@ -17,6 +17,7 @@ import os
 import shutil
 import signal
 import subprocess
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +26,7 @@ KIOSK_PROFILE_MARKER = "smart-locker-kiosk"
 
 # Exact argv the sudoers drop-in allows — no wildcard, no ``systemctl`` from PATH.
 _POWEROFF_CMD = ["sudo", "-n", "/usr/bin/systemctl", "poweroff"]
+SYSTEMD_RUN = shutil.which("systemd-run")
 
 
 class ApplianceUnavailable(Exception):
@@ -33,6 +35,29 @@ class ApplianceUnavailable(Exception):
 
 class ApplianceError(Exception):
     """The action was attempted on the Pi but the OS command failed."""
+
+
+def launch_update(base_dir: Path, systemd_run: str | None = SYSTEMD_RUN) -> None:
+    """Launch the update script in its own systemd unit, surviving service restart."""
+    script = base_dir / "deploy" / "install" / "update.sh"
+    if not script.exists():
+        raise ApplianceUnavailable("Update script not found on this host.")
+    if systemd_run is None:
+        raise ApplianceUnavailable(
+            "Software updates run on the Raspberry Pi appliance only."
+        )
+    cmd = [
+        "sudo", "-n", "systemd-run", "--collect",
+        "--unit=smart-locker-update",
+        "/bin/bash", str(script),
+    ]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=15)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as e:
+        detail = (getattr(e, "stderr", "") or str(e)).strip()
+        logger.error("Failed to launch update unit: %s", detail)
+        raise ApplianceError(f"Could not start update: {detail}") from e
+    logger.info("Software update launched.")
 
 
 def exit_kiosk() -> None:

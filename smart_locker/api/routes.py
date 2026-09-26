@@ -26,14 +26,12 @@ import ipaddress
 import json
 import logging
 import secrets
-import shutil
-import subprocess
 import time
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session
 
 import smart_locker.api.app_context as ctx_module
 from smart_locker.api.app_context import (
@@ -55,18 +53,22 @@ from sqlalchemy import select
 from smart_locker.database.models import (
     Device,
     DeviceStatus,
-    TransactionLog,
     User,
     UserRole,
 )
-from smart_locker.database.repositories import DeviceRepository, RegistrantRepository
+from smart_locker.database.repositories import (
+    DeviceRepository, RegistrantRepository, TransactionRepository, UserRepository,
+)
 from smart_locker.nfc.factory import fake_reader_enabled
 from smart_locker.services.appliance import (
     ApplianceError,
     ApplianceUnavailable,
+    SYSTEMD_RUN,
     exit_kiosk,
+    launch_update,
     shutdown as appliance_shutdown,
 )
+from smart_locker.services.device_catalog import device_record, unbind_device_tag as clear_device_tag
 from smart_locker.services.locker_service import LockerService
 from smart_locker.services.owner_edit import (
     CatalogUnavailable,
@@ -78,6 +80,7 @@ from smart_locker.services.owner_edit import (
 )
 from smart_locker.sync import sync_status
 from smart_locker.sync.inventory_reader import InventoryReadError, read_inventory
+from smart_locker.sync.workbook_adapter import configured_workbook
 
 logger = logging.getLogger(__name__)
 
@@ -110,7 +113,7 @@ def _last_update_status() -> dict | None:
 # systemd-run presence marks a real Pi/systemd host. The admin "Update now"
 # button is disabled (clean 503) anywhere this is absent (dev box / Windows).
 # Resolved once at import — it cannot change while the process runs.
-_SYSTEMD_RUN = shutil.which("systemd-run")
+_SYSTEMD_RUN = SYSTEMD_RUN
 
 
 # --- Page routes ------------------------------------------------------------
@@ -142,9 +145,9 @@ def public_config() -> dict:
     Returns:
         dict: ``asset_label`` from ``SMART_LOCKER_ASSET_LABEL``.
     """
-    from config.settings import asset_label
+    from config.settings import MAX_BORROWS, asset_label
 
-    return {"asset_label": asset_label()}
+    return {"asset_label": asset_label(), "max_borrows": MAX_BORROWS}
 
 
 @router.get("/api/health")
@@ -366,10 +369,7 @@ def _end_kiosk_session(*, sse_reason: str = "explicit") -> None:
     ctx = ctx_module.context
     if ctx is None:
         return
-    ctx.session_mgr.end_session()
-    ctx.admin_overlay_open = False
-    assign_pending_tag_bind(ctx, None)
-    _push_sse({"event": "session_ended", "reason": sse_reason})
+    ctx.end_kiosk_session(reason=sse_reason)
 
 
 def require_dashboard_admin(request: Request) -> None:
@@ -656,34 +656,11 @@ def list_devices(
     """
     devices = DeviceRepository.list_all(db)
     current_user_id = user_session.user.id
-    result = []
-
-    for d in devices:
-        borrower_name = None
-        if d.status == DeviceStatus.BORROWED and d.current_borrower_id is not None:
-            if d.current_borrower_id == current_user_id:
-                borrower_name = "You"
-            elif d.current_borrower is not None:
-                borrower_name = d.current_borrower.display_name
-
-        result.append({
-            "id": d.id,
-            "pm_number": d.pm_number,
-            "name": d.name,
-            "device_type": d.device_type,
-            "serial_number": d.serial_number,
-            "manufacturer": d.manufacturer,
-            "model": d.model,
-            "locker_slot": d.locker_slot,
-            "description": d.description,
-            "image_path": d.image_path,
-            "calibration_due": d.calibration_due.isoformat() if d.calibration_due else None,
-            "status": d.status.value,
-            "borrower_name": borrower_name,
-            "has_tag": d.tag_hmac is not None,
-        })
-
-    return result
+    return [
+        {"id": d.id, **device_record(d, current_user_id=current_user_id),
+         "image_path": d.image_path}
+        for d in devices
+    ]
 
 
 @router.post("/api/devices/{device_id}/borrow")
@@ -977,12 +954,7 @@ def get_registrants(db: Session = Depends(get_db)):
 
     # Build a set of names already registered (case-insensitive) so they can
     # be excluded from the list shown to new users.
-    registered_lower = {
-        name.lower()
-        for name in db.execute(
-            select(User.display_name).where(User.is_active.is_(True))
-        ).scalars()
-    }
+    registered_lower = UserRepository.active_names(db)
 
     # Filter out already-registered names and return the rest sorted
     names = [
@@ -1031,13 +1003,7 @@ def start_admin_session(
         raise HTTPException(status_code=503, detail="System not ready.")
 
     # Find the first active admin user in the database
-    stmt = (
-        select(User)
-        .where(User.role == UserRole.ADMIN, User.is_active.is_(True))
-        .order_by(User.id)
-        .limit(1)
-    )
-    admin_user = db.execute(stmt).scalars().first()
+    admin_user = UserRepository.first_active_admin(db)
     if ctx_module.context.session_mgr.has_active_session:
         session = ctx_module.context.session_mgr.current_session
         user = session.user if session is not None else None
@@ -1160,8 +1126,8 @@ def register_locker_device(
     if conflict:
         raise HTTPException(status_code=409, detail=conflict)
 
-    from config.settings import SOURCE_EXCEL_PATH
-    if not SOURCE_EXCEL_PATH:
+    workbook = configured_workbook()
+    if workbook is None:
         raise HTTPException(status_code=400, detail="Source Excel path not configured.")
 
     from smart_locker.services.device_registration import (
@@ -1175,7 +1141,7 @@ def register_locker_device(
 
     try:
         device = create_from_catalog(
-            db, SOURCE_EXCEL_PATH, body.pm_number, body.locker_slot,
+            db, workbook.path, body.pm_number, body.locker_slot,
         )
     except CatalogUnavailable as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
@@ -1194,7 +1160,7 @@ def register_locker_device(
         raise
     from smart_locker.sync.location_writeback import schedule_write_location
 
-    schedule_write_location()
+    schedule_write_location(workbook)
     assign_pending_tag_bind(
         ctx_module.context, PendingTagBind(device_id=device.id)
     )
@@ -1341,7 +1307,7 @@ def unbind_device_tag(
     if device is None:
         raise HTTPException(status_code=404, detail="Device not found.")
 
-    DeviceRepository.unbind_tag(db, device)
+    clear_device_tag(db, device)
     if ctx_module.context is not None:
         assign_pending_tag_bind(ctx_module.context, None)
     logger.info(
@@ -1367,8 +1333,8 @@ def trigger_source_sync(
         user_session: The active session (injected by ``require_session``).
 
     Returns:
-        dict: Import summary with ``imported``, ``updated``, ``unchanged``,
-              and ``errors`` counts.
+        dict: Import summary with ``updated``, ``unchanged``, and ``errors``
+              counts.
 
     Raises:
         HTTPException: 403 if not admin, 400 if source path not configured.
@@ -1376,8 +1342,8 @@ def trigger_source_sync(
     if user_session.user.role != UserRole.ADMIN:
         raise HTTPException(status_code=403, detail="Admin access required.")
 
-    from config.settings import SOURCE_EXCEL_PATH
-    if not SOURCE_EXCEL_PATH:
+    workbook = configured_workbook()
+    if workbook is None:
         raise HTTPException(status_code=400, detail="Source Excel path not configured.")
 
     from smart_locker.database.engine import get_engine
@@ -1385,7 +1351,7 @@ def trigger_source_sync(
 
     try:
         result = run_source_import_exclusive(
-            get_engine(), SOURCE_EXCEL_PATH, trigger="manual"
+            get_engine(), workbook.path, trigger="manual"
         )
     except ImportInProgress as e:
         raise HTTPException(
@@ -1398,7 +1364,6 @@ def trigger_source_sync(
         raise HTTPException(status_code=400, detail="Source Excel file not found.")
     return {
         "success": True,
-        "imported": result.imported,
         "updated": result.updated,
         "unchanged": result.unchanged,
         "errors": result.errors,
@@ -1419,8 +1384,8 @@ def preview_source_sync(
         user_session: The active session (injected by ``require_session``).
 
     Returns:
-        dict: ``imported`` (would-add), ``updated`` (would-change),
-              ``unchanged``, ``skipped`` (non-locker), and ``errors`` counts.
+        dict: ``updated`` (would-change), ``unchanged``, ``skipped``
+              (non-locker), and ``errors`` counts.
 
     Raises:
         HTTPException: 403 if not admin, 400 if source path not configured.
@@ -1428,17 +1393,16 @@ def preview_source_sync(
     if user_session.user.role != UserRole.ADMIN:
         raise HTTPException(status_code=403, detail="Admin access required.")
 
-    from config.settings import SOURCE_EXCEL_PATH
-    if not SOURCE_EXCEL_PATH:
+    workbook = configured_workbook()
+    if workbook is None:
         raise HTTPException(status_code=400, detail="Source Excel path not configured.")
 
     from smart_locker.database.engine import get_engine
     from smart_locker.sync.source_import import import_from_source_excel
 
-    result = import_from_source_excel(get_engine(), SOURCE_EXCEL_PATH, dry_run=True)
+    result = import_from_source_excel(get_engine(), workbook.path, dry_run=True)
     return {
         "preview": True,
-        "imported": result.imported,
         "updated": result.updated,
         "unchanged": result.unchanged,
         "skipped": result.non_locker_skipped,
@@ -1582,29 +1546,12 @@ def trigger_update(
     if user_session.user.role != UserRole.ADMIN:
         raise HTTPException(status_code=403, detail="Admin access required.")
 
-    script = BASE_DIR / "deploy" / "install" / "update.sh"
-    if not script.exists():
-        raise HTTPException(status_code=503, detail="Update script not found on this host.")
-    if _SYSTEMD_RUN is None:
-        raise HTTPException(
-            status_code=503,
-            detail="Software updates run on the Raspberry Pi appliance only.",
-        )
-
-    # Run in a transient unit so update.sh survives the service restart it
-    # triggers. Every argument is fixed and space-free so the sudoers rule can
-    # whitelist this exact command (no wildcard → no privilege-escalation gap).
-    cmd = [
-        "sudo", "-n", "systemd-run", "--collect",
-        "--unit=smart-locker-update",
-        "/bin/bash", str(script),
-    ]
     try:
-        subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=15)
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as e:
-        detail = (getattr(e, "stderr", "") or str(e)).strip()
-        logger.error("Failed to launch update unit: %s", detail)
-        raise HTTPException(status_code=500, detail=f"Could not start update: {detail}") from e
+        launch_update(BASE_DIR, _SYSTEMD_RUN)
+    except ApplianceUnavailable as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+    except ApplianceError as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
     logger.info("Software update launched by admin %s.", user_session.user.display_name)
     return {"started": True, "message": "Update started. The kiosk will restart briefly."}
@@ -1732,15 +1679,15 @@ def dashboard_inventory(db: Session = Depends(get_db)):
     Raises:
         HTTPException: 503 when the catalog path is empty or unreadable.
     """
-    from config.settings import SOURCE_EXCEL_PATH
     from smart_locker.sync.source_import import pm_match_key
 
-    if not SOURCE_EXCEL_PATH:
+    workbook = configured_workbook()
+    if workbook is None:
         raise HTTPException(
             status_code=503, detail="Catalog Excel is not configured."
         )
     try:
-        rows = read_inventory(SOURCE_EXCEL_PATH)
+        rows = read_inventory(workbook.path)
     except InventoryReadError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
     locker_keys = {
@@ -1779,33 +1726,7 @@ def dashboard_devices(db: Session = Depends(get_db)):
                     ``has_tag`` (bool). Sensitive fields (internal IDs,
                     image paths, ``tag_hmac``) are excluded.
     """
-    devices = db.execute(
-        select(Device).order_by(Device.locker_slot, Device.name)
-    ).scalars().all()
-
-    result = []
-    for d in devices:
-        # Resolve borrower display name from the relationship
-        borrower_name = None
-        if d.status == DeviceStatus.BORROWED and d.current_borrower is not None:
-            borrower_name = d.current_borrower.display_name
-
-        result.append({
-            "pm_number": d.pm_number,
-            "name": d.name,
-            "device_type": d.device_type,
-            "manufacturer": d.manufacturer,
-            "model": d.model,
-            "serial_number": d.serial_number,
-            "locker_slot": d.locker_slot,
-            "status": d.status.value,
-            "borrower_name": borrower_name,
-            "calibration_due": d.calibration_due.isoformat() if d.calibration_due else None,
-            "description": d.description,
-            "has_tag": d.tag_hmac is not None,
-        })
-
-    return result
+    return [device_record(d) for d in DeviceRepository.list_by_slot(db)]
 
 
 @router.get("/api/dashboard/owners")
@@ -1854,10 +1775,14 @@ def dashboard_set_owner(
         HTTPException: 401 without secret; 400 empty PM; 404 PM not in Excel;
                        409 locker PM; 503 share down.
     """
-    from config.settings import SOURCE_EXCEL_PATH
-
+    workbook = configured_workbook()
     try:
-        result = set_owner(db, SOURCE_EXCEL_PATH, body.pm_number, body.owner)
+        result = set_owner(
+            db,
+            workbook.path if workbook is not None else "",
+            body.pm_number,
+            body.owner,
+        )
     except InvalidOwnerRequest as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     except UnknownPm as e:
@@ -1960,7 +1885,7 @@ def dashboard_unbind_tag(
     if device is None:
         raise HTTPException(status_code=404, detail="Device not found.")
 
-    DeviceRepository.unbind_tag(db, device)
+    clear_device_tag(db, device)
     if ctx_module.context is not None:
         assign_pending_tag_bind(ctx_module.context, None)
     logger.info(
@@ -1989,16 +1914,7 @@ def dashboard_transactions(
         list[dict]: One dict per transaction with timestamp, user, device,
                     type, performed-by (for admin returns), and notes.
     """
-    transactions = db.execute(
-        select(TransactionLog)
-        .options(
-            selectinload(TransactionLog.user),
-            selectinload(TransactionLog.device),
-            selectinload(TransactionLog.performed_by),
-        )
-        .order_by(TransactionLog.timestamp.desc())
-        .limit(500)
-    ).scalars().all()
+    transactions = TransactionRepository.get_dashboard_history(db)
 
     result = []
     for t in transactions:
@@ -2032,9 +1948,7 @@ def dashboard_users(
         list[dict]: One dict per user with display name, role, active
                     status, and registration timestamp.
     """
-    users = db.execute(
-        select(User).order_by(User.display_name)
-    ).scalars().all()
+    users = UserRepository.list_all(db)
 
     result = []
     for u in users:

@@ -531,7 +531,7 @@ is Section 11 — this is the same information, walked through in the order it a
   before it touches the database. You just generated it above; paste it in as-is.
 - `SMART_LOCKER_HMAC_KEY` — a *separate* key used to compute a one-way fingerprint of each
   card UID, so the app can look up "have I seen this card before?" by comparing
-  fingerprints, without ever decrypting every stored UID to check. Also just generated.
+  fingerprints rather than scanning stored encrypted UIDs. Also just generated.
 - `SMART_LOCKER_DB_PATH` — where the SQLite database file lives. Leave this pointing at the
   Pi's local disk (the template already does) — never move it onto the locker share.
 - `SMART_LOCKER_READER_NAME` — a text filter used to pick the right reader if more than one
@@ -557,8 +557,7 @@ is Section 11 — this is the same information, walked through in the order it a
   lives on the dashboard and admin **Export Excel**). Existing Pi `.env` files
   keep their old value across `update.sh` — set this to `0` by hand if it is still `1`.
 - `SMART_LOCKER_SOURCE_SYNC_INTERVAL_HOURS` — hours between automatic re-imports from
-  the share (default `6`). Startup import and admin **Sync Source** still run. Older
-  `SMART_LOCKER_SOURCE_SYNC_HOUR` / `_MINUTE` / `_POLL_SECONDS` keys are ignored.
+  the share (default `6`). Startup import and admin **Sync Source** still run.
 - `SMART_LOCKER_LAST_SYNC_PATH` — JSON snapshot for the admin "Last sync" line. Empty
   stores `last_sync.json` next to the SQLite database (local disk, not the share).
   `update.sh` keeps that file across code swaps.
@@ -596,8 +595,8 @@ python -m scripts.enroll_card --name "Your Name" --role admin
 ```
 
 When you see `Place card on reader...`, tap your card and hold it steady for 1–2 seconds.
-The card UID is masked in the output (e.g. `A1****D4`) and stored encrypted — only admins
-can ever decrypt it. Enroll regular users the same way with `--role user`.
+The card UID is masked in the output (e.g. `A1****D4`) and stored encrypted. Enroll regular
+users the same way with `--role user`.
 
 To bind a sticker to a locker device after Register Device (optional CLI; the admin panel
 **Register Device** is the usual path):
@@ -616,7 +615,7 @@ python -m smart_locker.app
 
 You'll see the backend start, the NFC reader come up, and the web server bind to port 8000.
 Open `http://localhost:8000` in a browser on the Pi to see the kiosk UI. Press `Ctrl+C` to
-stop. (Use `python -m smart_locker.app --cli` for a console-only NFC loop with no web UI.)
+stop.
 At this point there's no real device data yet — that's expected, it comes in Section 6.
 
 When that works, make it permanent — Section 5.
@@ -724,10 +723,10 @@ Unknown PM or share down → error, no ghost row.
 
 ```bash
 # Preview catalog updates without writing:
-python -m scripts.import_devices --file "/mnt/locker/device-list.xlsx" --dry-run
+python -m scripts.sync_source --file "/mnt/locker/device-list.xlsx" --dry-run
 
 # Apply catalog updates for PMs already in the locker:
-python -m scripts.import_devices --file "/mnt/locker/device-list.xlsx"
+python -m scripts.sync_source --file "/mnt/locker/device-list.xlsx"
 ```
 
 | Excel column | German | Maps to | Required? |
@@ -744,7 +743,7 @@ If auto-detection picks the wrong column, override it, e.g.
 `--pm-col "Equipment" --type-col "Kategorie"`. Re-importing is safe — devices are matched by
 PM number. A re-import **never** inserts a locker row and **never** overwrites `locker_slot`,
 `image_path`, `description`, `status`, or the current borrower. Catalog fields (name, type,
-serial, manufacturer, model, calibration) still update. Barcode is not imported.
+serial, manufacturer, model, calibration) still update.
 
 Once running as a service, this same catalog refresh also happens **automatically**: once on
 startup, every 6 hours (configurable), and on demand from the hidden admin panel. (See
@@ -1314,8 +1313,7 @@ static files from `smart_locker/api/server.py`.
 
 Each locker device can have a cheap NFC sticker (NTAG213/215, same ACR1252U as work cards).
 The sticker UID is stored only as `devices.tag_hmac` (HMAC-SHA256, same key as work cards).
-The raw UID is never stored or logged. `devices.barcode` is an unused leftover column
-(not imported, not exported, not on the API).
+The raw UID is never stored or logged.
 
 **Flow:** tap work card → tap the sticker (or pick on screen). Auto-intent: available →
 borrow; borrowed by you → return; borrowed by someone else → fail for a normal user, or
@@ -1327,7 +1325,6 @@ sticker. Catalog (name, type, manufacturer, model, serial, cal) is copied from E
 Unknown PM or share down fails with no ghost row. Existing rows can bind / unbind /
 change slot. The list shows **name + PM**. CLI bind-only:
 `python -m scripts.enroll_device_tag --pm PM-001` (or `--uid HEX`, `--force` to replace).
-There is no USB barcode scanner and no `GET /api/devices/barcode/{barcode}`.
 
 ---
 

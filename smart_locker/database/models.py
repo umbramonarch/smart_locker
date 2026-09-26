@@ -33,8 +33,7 @@ class Base(DeclarativeBase):
 
 class UserRole(enum.Enum):
     """User authorization level — determines access to admin-only features
-    such as returning devices on behalf of other users and viewing decrypted
-    card UIDs.
+    such as returning devices on behalf of other users.
     """
 
     USER = "user"
@@ -75,8 +74,8 @@ class User(Base):
 
     Each user stores an HMAC-SHA256 digest of their card UID (for fast indexed
     lookups during authentication) and an AES-256-GCM encrypted copy of the
-    raw UID (accessible only to admins). The ``is_active`` flag allows soft
-    deactivation without deleting transaction history.
+    raw UID. The ``is_active`` flag allows soft deactivation without deleting
+    transaction history.
     """
 
     __tablename__ = "users"
@@ -168,7 +167,6 @@ class Device(Base):
     )
     manufacturer: Mapped[str | None] = mapped_column(String(100), nullable=True)
     model: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    # Unused leftover; not imported, exported, or shown.
     barcode: Mapped[str | None] = mapped_column(String(100), nullable=True)
     # HMAC-SHA256 of the sticker UID (never the raw UID).
     tag_hmac: Mapped[str | None] = mapped_column(String(64), nullable=True)

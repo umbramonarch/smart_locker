@@ -25,24 +25,8 @@ from config.logging_config import setup_logging
 from smart_locker.database.engine import get_session, init_db
 from smart_locker.security.key_manager import key_manager
 from smart_locker.services.user_service import UserService
-
-
-def _mask_uid(uid: str) -> str:
-    """Return a display-safe masked form of a card UID hex string.
-
-    Shows only the first two and last two hex characters; the middle is
-    replaced with asterisks so the raw UID never appears in console output
-    (the same masking the reader path uses).
-
-    Args:
-        uid: Raw card UID hex string.
-
-    Returns:
-        Masked UID (e.g. "AA****DD"). UIDs of 4 chars or fewer are fully masked.
-    """
-    if len(uid) <= 4:
-        return "*" * len(uid)
-    return uid[:2] + "*" * (len(uid) - 4) + uid[-2:]
+from scripts.uid_helpers import mask_uid as _mask_uid, normalize_uid as _shared_normalize_uid
+from scripts.uid_helpers import read_uid_from_reader
 
 
 def _normalize_uid(raw: str) -> str:
@@ -66,19 +50,7 @@ def _normalize_uid(raw: str) -> str:
         SystemExit: If the value is empty or not valid hexadecimal (this includes
             an odd number of hex digits, which ``bytes.fromhex`` rejects).
     """
-    cleaned = "".join(raw.split()).upper()
-    if not cleaned:
-        print("ERROR: --uid is empty.")
-        raise SystemExit(2)
-    try:
-        bytes.fromhex(cleaned)
-    except ValueError:
-        print(
-            f"ERROR: --uid '{raw}' is not valid hex "
-            "(expected an even number of hex digits, e.g. AABBCCDD)."
-        )
-        raise SystemExit(2)
-    return cleaned
+    return _shared_normalize_uid(raw)
 
 
 def _enroll(uid: str, name: str, role: str) -> None:
@@ -114,46 +86,12 @@ def _enroll(uid: str, name: str, role: str) -> None:
 
 
 def _read_uid_from_reader() -> str | None:
-    """Wait for a card tap on the NFC reader and return its UID hex.
-
-    pyscard and the reader modules are imported here (not at module load) so
-    the no-hardware ``--uid`` path never requires a PC/SC stack.
-
-    Returns:
-        The card UID hex string, or None on timeout or an unreadable card.
-    """
-    import time
-
-    from smart_locker.nfc.reader import NFCReader
-    from smart_locker.nfc.card_observer import CardEvent, CardEventType
-    from smart_locker.nfc.reader_observer import ReaderEvent
-
-    reader = NFCReader()
-    try:
-        reader_name = reader.start()
-        print(f"Reader: {reader_name}")
-        print("Place card on reader...")
-
-        # Wait for a CardEvent INSERTED, skipping ReaderEvents
-        # (ReaderMonitor fires CONNECTED immediately on start).
-        deadline = time.monotonic() + 30
-        while time.monotonic() < deadline:
-            remaining = deadline - time.monotonic()
-            evt = reader.wait_for_event(timeout=max(remaining, 0.1))
-            if evt is None:
-                break
-            if isinstance(evt, ReaderEvent):
-                continue  # Skip reader connect/disconnect events
-            if isinstance(evt, CardEvent) and evt.event_type == CardEventType.INSERTED:
-                if evt.uid is None:
-                    print("Could not read card UID. Hold card steady and try again.")
-                    return None
-                return evt.uid
-
-        print("Timeout — no card detected. Try again.")
-        return None
-    finally:
-        reader.stop()
+    """Wait for a work-card tap using the shared bench reader loop."""
+    return read_uid_from_reader(
+        "Place card on reader...",
+        "Could not read card UID. Hold card steady and try again.",
+        "Timeout — no card detected. Try again.",
+    )
 
 
 def main() -> None:

@@ -1,13 +1,11 @@
 """
 File: apdu.py
 Description: APDU command constants and response parsing for the ACR1252U NFC
-             reader. Defines GET_UID, buzzer control, firmware query, and MIFARE
-             Classic read commands, all using the PC/SC pseudo-APDU interface
-             (CLA=0xFF).
+             reader. Defines GET_UID, buzzer control and firmware query using
+             the PC/SC pseudo-APDU interface (CLA=0xFF).
 Project: smart_locker/nfc
 Notes: GET_UID works with all card types (MIFARE Classic, Ultralight, NTAG,
-       DESFire, etc.). MIFARE sector commands are defined but not yet wired
-       into the auth flow.
+       DESFire, etc.). Authentication reads only the UID.
 """
 
 from dataclasses import dataclass
@@ -28,40 +26,6 @@ ENABLE_BUZZER = [0xFF, 0x00, 0x52, 0xFF, 0x00]
 
 # Get firmware version
 GET_FIRMWARE_VERSION = [0xFF, 0x00, 0x48, 0x00, 0x00]
-
-# ── MIFARE Classic Commands (for future card-data access) ────────────────
-
-
-def build_load_key(key_bytes: list[int], key_slot: int = 0) -> list[int]:
-    """Build LOAD KEY command to store a MIFARE key in reader volatile memory.
-
-    Args:
-        key_bytes: 6-byte MIFARE key (e.g. [0xFF]*6 for factory default).
-        key_slot: Key slot 0x00 or 0x01 in reader memory.
-    """
-    return [0xFF, 0x82, 0x00, key_slot, 0x06] + key_bytes
-
-
-def build_authenticate(block: int, key_type: int = 0x60, key_slot: int = 0) -> list[int]:
-    """Build AUTHENTICATE command for a MIFARE Classic block.
-
-    Args:
-        block: Block number (0-255).
-        key_type: 0x60 for Key A, 0x61 for Key B.
-        key_slot: Key slot used in LOAD KEY.
-    """
-    return [0xFF, 0x86, 0x00, 0x00, 0x05, 0x01, 0x00, block, key_type, key_slot]
-
-
-def build_read_binary(block: int, length: int = 16) -> list[int]:
-    """Build READ BINARY command for a MIFARE Classic block.
-
-    Args:
-        block: Block number to read.
-        length: Bytes to read (16 for MIFARE Classic).
-    """
-    return [0xFF, 0xB0, 0x00, block, length]
-
 
 # ── Status Word Constants ────────────────────────────────────────────────
 

@@ -28,7 +28,6 @@ class _LastSync:
 
     at: str | None = None          # ISO-8601 UTC, second precision; None = never run
     trigger: str | None = None     # startup | interval | watch | manual
-    imported: int = 0
     updated: int = 0
     unchanged: int = 0
     errors: int = 0
@@ -115,7 +114,6 @@ def _load_unlocked() -> None:
     _last = _LastSync(
         at=data.get("at"),
         trigger=data.get("trigger"),
-        imported=int(data.get("imported") or 0),
         updated=int(data.get("updated") or 0),
         unchanged=int(data.get("unchanged") or 0),
         errors=int(data.get("errors") or 0),
@@ -145,12 +143,11 @@ def record_result(trigger: str, result) -> None:
 
     Args:
         trigger: Which mechanism ran the import (startup/interval/watch/manual).
-        result: An ``ImportResult`` with imported/updated/unchanged/errors counts.
+        result: An ``ImportResult`` with updated/unchanged/errors counts.
     """
     with _lock:
         _last.at = _now_iso()
         _last.trigger = trigger
-        _last.imported = result.imported
         _last.updated = result.updated
         _last.unchanged = result.unchanged
         _last.errors = result.errors
@@ -169,7 +166,7 @@ def record_error(trigger: str, message: str) -> None:
     with _lock:
         _last.at = _now_iso()
         _last.trigger = trigger
-        _last.imported = _last.updated = _last.unchanged = 0
+        _last.updated = _last.unchanged = 0
         _last.errors = 1
         _last.ok = False
         _last.message = message

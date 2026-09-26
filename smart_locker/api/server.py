@@ -16,8 +16,17 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 import smart_locker.api.app_context as ctx
+from config.settings import (
+    DASHBOARD_SHARE_PATH,
+    PHOTO_INPUT_PATH,
+    PHOTO_SERVE_DIR,
+    PUBLIC_URL,
+    SOURCE_SYNC_INTERVAL_HOURS,
+)
 from smart_locker.api.app_context import AppContext
+from smart_locker.database.engine import get_engine
 from smart_locker.api.routes import router
+from smart_locker.sync.workbook_adapter import configured_workbook
 
 logger = logging.getLogger(__name__)
 
@@ -25,13 +34,58 @@ logger = logging.getLogger(__name__)
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 
 
+def _start_background_sync() -> None:
+    """Start non-critical source and photo synchronization services.
+
+    Scheduler setup queues the potentially slow workbook import in its own
+    worker thread. Therefore this lifecycle work finishes before Uvicorn begins
+    serving without waiting for that import.
+    """
+    workbook = configured_workbook()
+    if workbook is not None:
+        try:
+            from smart_locker.sync.scheduler import start_scheduler
+
+            start_scheduler(
+                get_engine(), workbook.path, SOURCE_SYNC_INTERVAL_HOURS
+            )
+        except Exception:
+            logger.exception(
+                "Source-import scheduler failed to start — continuing without it. "
+                "The kiosk stays up; run the admin 'Sync source' once the share is back."
+            )
+
+    if PHOTO_INPUT_PATH:
+        try:
+            from smart_locker.sync.photo_watcher import start_photo_watcher
+
+            start_photo_watcher(get_engine(), PHOTO_INPUT_PATH, PHOTO_SERVE_DIR)
+        except Exception:
+            logger.exception(
+                "Photo watcher failed to start — continuing without it. "
+                "Photos can be applied later via 'python -m scripts.update_device --auto'."
+            )
+
+    try:
+        from smart_locker.sync.dashboard_launcher import write_dashboard_launcher
+
+        write_dashboard_launcher(DASHBOARD_SHARE_PATH, PUBLIC_URL)
+    except Exception:
+        logger.exception(
+            "Dashboard launcher failed to write — continuing without it. "
+            "Set SMART_LOCKER_PUBLIC_URL and SMART_LOCKER_DASHBOARD_SHARE_PATH "
+            "once the share is back."
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifecycle — start NFC reader on startup, stop on shutdown.
 
-    Creates the shared ``AppContext`` singleton, starts the NFC bridge loop,
-    and yields control to uvicorn. On shutdown, stops the NFC reader and
-    the APScheduler source-sync scheduler.
+    Creates the shared ``AppContext`` singleton, starts the NFC bridge loop and
+    sync services, then yields control to uvicorn. The source scheduler queues
+    its startup workbook import in the background, so health is available while
+    that import runs. On shutdown, stops the NFC reader and scheduler.
 
     Args:
         app: The FastAPI application instance (provided by the framework).
@@ -41,6 +95,7 @@ async def lifespan(app: FastAPI):
     """
     ctx.context = AppContext()
     await ctx.context.start()
+    _start_background_sync()
     logger.info("Smart Locker API started.")
     yield
     await ctx.context.stop()

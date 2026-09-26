@@ -2,7 +2,7 @@
 File: update_device.py
 Description: Update device fields (image, description, or any column) by PM
              number. Supports single-device updates, batch updates from a text
-             file, auto-matching photos by PM-numbered filenames, and listing
+             file, auto-matching photos by model-name filenames, and listing
              all devices with their current status.
 Project: smart_locker/scripts
 Notes: Usage: python -m scripts.update_device --list | --auto |
@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from config.logging_config import setup_logging
 from smart_locker.database.engine import get_session, init_db
 from smart_locker.database.models import Device
+from smart_locker.sync.photo_matcher import photo_matches_device
 from sqlalchemy import select
 
 
@@ -151,10 +152,10 @@ def batch_update(batch_file: str) -> None:
 
 
 def auto_match_images() -> None:
-    """Scan frontend/images/ for files named by PM number and link them automatically.
+    """Scan frontend/images/ for model-named photos and link them automatically.
 
     Iterates over image files in the frontend images directory, matches each
-    filename stem (case-insensitive) against device PM numbers in the database,
+    filename stem (case-insensitive) against device models in the database,
     and sets ``image_path`` for every match. Supports .jpg, .jpeg, .png, .webp.
 
     Returns:
@@ -178,22 +179,21 @@ def auto_match_images() -> None:
     init_db()
     with get_session() as session:
         devices = session.execute(select(Device)).scalars().all()
-        pm_to_device = {d.pm_number.lower(): d for d in devices if d.pm_number}
 
-    # Match files to PM numbers
+    # A single photo may match multiple units of the same model.
     matched = []
     unmatched = []
     for img_file in sorted(image_files):
-        stem = img_file.stem.lower()  # e.g. "pm-001"
-        if stem in pm_to_device:
-            matched.append((pm_to_device[stem].pm_number, img_file.name))
-        else:
+        matches = [device for device in devices if photo_matches_device(img_file.stem, device)]
+        if not matches:
             unmatched.append(img_file.name)
+        for device in matches:
+            matched.append((device.pm_number, img_file.name))
 
     if not matched:
-        print("No images matched any PM numbers.")
-        print(f"  Found {len(image_files)} image(s), but none matched device PM numbers.")
-        print("  Tip: name photos by PM number, e.g. PM-001.jpg, PM-002.png")
+        print("No images matched any device models.")
+        print(f"  Found {len(image_files)} image(s), but none matched device models.")
+        print("  Tip: name photos by model, e.g. 87V.jpg")
         return
 
     print(f"\nFound {len(matched)} match(es):\n")
@@ -229,7 +229,7 @@ def main() -> None:
     parser.add_argument("--value", help="Value to set (used with --field)")
     parser.add_argument("--list", action="store_true", help="List all devices")
     parser.add_argument("--batch", help="Batch update from a text file (PM field value per line)")
-    parser.add_argument("--auto", action="store_true", help="Auto-match images named by PM number (e.g. PM-001.jpg)")
+    parser.add_argument("--auto", action="store_true", help="Auto-match images named by model (e.g. 87V.jpg)")
     args = parser.parse_args()
 
     setup_logging()

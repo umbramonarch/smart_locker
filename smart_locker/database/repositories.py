@@ -14,7 +14,7 @@ import logging
 from datetime import date, datetime, timezone
 
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from smart_locker.database.models import (
     Device,
@@ -88,23 +88,6 @@ class UserRepository:
         return user
 
     @staticmethod
-    def find_by_display_name(session: Session, name: str) -> User | None:
-        """Case-insensitive lookup by display name.
-
-        Used by the source import to match borrower names from the
-        "Location" column to registered users.
-
-        Args:
-            session: Active database session.
-            name: Display name to search for (compared case-insensitively).
-
-        Returns:
-            User object or None if no match.
-        """
-        stmt = select(User).where(func.lower(User.display_name) == name.strip().lower())
-        return session.execute(stmt).scalar_one_or_none()
-
-    @staticmethod
     def list_all(session: Session) -> list[User]:
         """Return all users ordered by display name.
 
@@ -116,6 +99,25 @@ class UserRepository:
         """
         stmt = select(User).order_by(User.display_name)
         return list(session.execute(stmt).scalars().all())
+
+    @staticmethod
+    def active_names(session: Session) -> set[str]:
+        """Names already held by active card users for self-registration."""
+        stmt = select(User.display_name).where(User.is_active.is_(True))
+        return {name.lower() for name in session.execute(stmt).scalars()}
+
+    @staticmethod
+    def first_active_admin(session: Session) -> User | None:
+        """First active admin available to the existing kiosk overlay."""
+        from smart_locker.database.models import UserRole
+
+        stmt = (
+            select(User)
+            .where(User.role == UserRole.ADMIN, User.is_active.is_(True))
+            .order_by(User.id)
+            .limit(1)
+        )
+        return session.execute(stmt).scalars().first()
 
 
 class DeviceRepository:
@@ -223,7 +225,6 @@ class DeviceRepository:
         image_path: str | None = None,
         manufacturer: str | None = None,
         model: str | None = None,
-        barcode: str | None = None,
         calibration_due: date | None = None,
         status: str | None = None,
         current_borrower_id: int | None = None,
@@ -241,7 +242,6 @@ class DeviceRepository:
             image_path: Path to device photo relative to frontend/images/ (optional).
             manufacturer: Device manufacturer name (optional).
             model: Model/type designation (optional).
-            barcode: Unused leftover column (optional). Not imported or shown.
             calibration_due: Next calibration date (optional).
             status: Device status string (AVAILABLE, BORROWED, MAINTENANCE).
                 Defaults to AVAILABLE if not provided.
@@ -261,7 +261,6 @@ class DeviceRepository:
             image_path=image_path,
             manufacturer=manufacturer,
             model=model,
-            barcode=barcode,
             calibration_due=calibration_due,
         )
         # Apply optional status and borrower (used by source import when
@@ -441,6 +440,12 @@ class DeviceRepository:
         stmt = select(Device).order_by(Device.name)
         return list(session.execute(stmt).scalars().all())
 
+    @staticmethod
+    def list_by_slot(session: Session) -> list[Device]:
+        """Return locker rows in dashboard slot/name order."""
+        stmt = select(Device).order_by(Device.locker_slot, Device.name)
+        return list(session.execute(stmt).scalars().all())
+
 
 class TransactionRepository:
     """Data access layer for TransactionLog audit records.
@@ -517,26 +522,6 @@ class TransactionRepository:
         return txn
 
     @staticmethod
-    def get_user_history(
-        session: Session, user_id: int
-    ) -> list[TransactionLog]:
-        """Return all transactions for a user, most recent first.
-
-        Args:
-            session: Active database session.
-            user_id: ID of the user.
-
-        Returns:
-            List of TransactionLog entries ordered by timestamp descending.
-        """
-        stmt = (
-            select(TransactionLog)
-            .where(TransactionLog.user_id == user_id)
-            .order_by(TransactionLog.timestamp.desc())
-        )
-        return list(session.execute(stmt).scalars().all())
-
-    @staticmethod
     def get_device_history(
         session: Session, device_id: int
     ) -> list[TransactionLog]:
@@ -553,6 +538,31 @@ class TransactionRepository:
             select(TransactionLog)
             .where(TransactionLog.device_id == device_id)
             .order_by(TransactionLog.timestamp.desc())
+        )
+        return list(session.execute(stmt).scalars().all())
+
+    @staticmethod
+    def get_dashboard_history(session: Session) -> list[TransactionLog]:
+        """Return the 500 newest transactions with dashboard relationships.
+
+        Eager loading keeps the audit-feed route from issuing one query per
+        user, device, or admin performer while mapping the response JSON.
+
+        Args:
+            session: Active database session.
+
+        Returns:
+            Up to 500 transactions ordered by timestamp descending.
+        """
+        stmt = (
+            select(TransactionLog)
+            .options(
+                selectinload(TransactionLog.user),
+                selectinload(TransactionLog.device),
+                selectinload(TransactionLog.performed_by),
+            )
+            .order_by(TransactionLog.timestamp.desc())
+            .limit(500)
         )
         return list(session.execute(stmt).scalars().all())
 

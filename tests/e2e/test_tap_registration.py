@@ -10,11 +10,16 @@ Description: Registration and device-tag-bind E2E tests driven by real NFC
 Project: smart_locker/tests/e2e
 Notes: PendingRegistration / PendingTagBind live on the real AppContext
        (h.ctx). Bind-window intercept semantics come from
-       AppContext._dispatch_insert: a work card tapped during an armed bind
-       logs in when no session is active (auth_success clears the window) and
-       is ignored while a session is active; a borrowed-device tag performs an
-       unattended return and leaves the window armed.
+       tap_router.dispatch_insert, invoked by AppContext._dispatch_insert:
+       a work card tapped during an armed bind logs in when no session is
+       active (auth_success clears the window) and is ignored while a session
+       is active; a borrowed-device tag performs an unattended return and
+       leaves the window armed.
 """
+
+from contextlib import contextmanager
+
+import smart_locker.database.engine as engine_module
 
 from smart_locker.database.models import DeviceStatus
 from smart_locker.database.repositories import (
@@ -114,6 +119,34 @@ def test_self_registration_tap_enrolls_user(e2e):
     login = h.wait_event("auth_success")
     assert login["user"]["id"] == user_id
     assert login["user"]["name"] == "New Person"
+
+
+def test_self_registration_tap_uses_one_database_session(e2e, monkeypatch):
+    """The registration intercept classifies and enrolls in one transaction."""
+    session_entries = 0
+    original_get_session = engine_module.get_session
+
+    @contextmanager
+    def counting_get_session(*args, **kwargs):
+        nonlocal session_entries
+        session_entries += 1
+        with original_get_session(*args, **kwargs) as db_session:
+            yield db_session
+
+    # The NFC bridge imports get_session during app startup, so patch before
+    # booting the real bridge. Reset after the HTTP setup; only the tap counts.
+    monkeypatch.setattr(engine_module, "get_session", counting_get_session)
+    h = e2e()
+    _add_registrant(h, "New Person")
+    r = h.client.post("/api/register", json={"name": "New Person"})
+    assert r.status_code == 200
+    session_entries = 0
+
+    h.tap(NEW_CARD_UID)
+    payload = h.wait_event("registration_success")
+
+    assert payload["user"]["name"] == "New Person"
+    assert session_entries == 1
 
 
 def test_enrolled_card_tap_during_registration_fails(e2e):
