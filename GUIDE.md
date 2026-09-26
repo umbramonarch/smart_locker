@@ -739,8 +739,10 @@ python -m scripts.sync_source --file "/mnt/locker/device-list.xlsx"
 | Serial number | Hersteller-serialnummer | `serial_number` | No |
 | Calibration date | Datum der nächsten Kalibrierung | `calibration_due` | No |
 
-If auto-detection picks the wrong column, override it, e.g.
-`--pm-col "Equipment" --type-col "Kategorie"`. Re-importing is safe — devices are matched by
+If auto-detection picks the wrong column, add header aliases via
+`SMART_LOCKER_ID_HEADERS` (join key) or `SMART_LOCKER_LOCATION_HEADERS` (Location column)
+in `.env`, e.g. `SMART_LOCKER_ID_HEADERS=Equipment,Asset ID`. Re-importing is safe — devices
+are matched by
 PM number. A re-import **never** inserts a locker row and **never** overwrites `locker_slot`,
 `image_path`, `description`, `status`, or the current borrower. Catalog fields (name, type,
 serial, manufacturer, model, calibration) still update.
@@ -755,9 +757,9 @@ Photos make the touch UI easier to use. Two ways to attach them — both copy th
 `smart_locker/frontend/images/` and link it to the matching device(s):
 
 ```bash
-# By PM number — list devices, then assign:
+# List devices, assign by PM, or auto-match photos named after the model:
 python -m scripts.update_device --list
-python -m scripts.update_device --auto          # auto-match PM-001.jpg, PM-002.png, ...
+python -m scripts.update_device --auto          # auto-match 87V.jpg -> every model "87V" device
 python -m scripts.update_device --pm PM-042 --image scope.jpg --description "4-ch 500MHz scope"
 ```
 

@@ -49,6 +49,9 @@ def get_engine(url: str | None = None):
                 cursor = dbapi_conn.cursor()
                 cursor.execute("PRAGMA journal_mode=WAL")
                 cursor.execute("PRAGMA foreign_keys=ON")
+                # Writers retry a locked db instead of failing — the background
+                # source import can overlap tap and HTTP commits.
+                cursor.execute("PRAGMA busy_timeout=5000")
                 cursor.close()
 
         logger.info("Database engine created: %s", db_url)

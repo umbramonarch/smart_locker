@@ -238,19 +238,20 @@ async function apiCancelRegistration() {
  * Fetch the list of approved registrant names from the backend. These names
  * come from the Location column in the source Excel and are
  * stored in the registrants table. Already-registered users are excluded.
- * @returns {Promise<string[]>} Alphabetically sorted array of available names.
+ * `syncing` is true while a catalog import is still filling the table.
+ * @returns {Promise<{names: string[], syncing: boolean}>} Available names.
  */
 async function apiGetRegistrants() {
   if (USE_DEMO) {
     await sleep(300); // simulate API latency
-    return DEMO_REGISTRANTS;
+    return { names: DEMO_REGISTRANTS, syncing: false };
   }
   try {
     const res = await fetch('/api/registrants');
-    if (!res.ok) return [];
+    if (!res.ok) return { names: [], syncing: false };
     const data = await res.json();
-    return data.names || [];
-  } catch (_) { return []; }
+    return { names: data.names || [], syncing: !!data.syncing };
+  } catch (_) { return { names: [], syncing: false }; }
 }
 
 /**
@@ -1507,8 +1508,8 @@ async function openRegister() {
     document.getElementById('register-next-btn').disabled = true;
     showRegisterStep('register-step-name');
     navigate('register');
-    const names = await apiGetRegistrants();
-    populateNameList(names);
+    const { names, syncing } = await apiGetRegistrants();
+    populateNameList(names, syncing);
     setTimeout(() => document.getElementById('register-search').focus(), 800);
   }
 }
@@ -1519,15 +1520,19 @@ async function openRegister() {
  * Entrance stagger uses CSS --i / name-item-in (not transitionDelay), so
  * hover is not lagged after the list appears.
  * @param {string[]} names - Array of approved registrant names to display.
+ * @param {boolean} [syncing=false] - True while a catalog import is in flight;
+ *   an empty list then means "not loaded yet", not "not approved".
  */
-function populateNameList(names) {
+function populateNameList(names, syncing = false) {
   const list = document.getElementById('register-name-list');
   const noResults = document.getElementById('register-no-results');
   list.innerHTML = '';
 
   if (names.length === 0) {
     noResults.style.display = '';
-    noResults.textContent = 'No names available. Contact an admin for registration.';
+    noResults.textContent = syncing
+      ? 'Name list is still syncing — please wait a moment and try again.'
+      : 'No names available. Contact an admin for registration.';
     return;
   }
   noResults.style.display = 'none';

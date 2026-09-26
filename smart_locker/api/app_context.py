@@ -220,12 +220,30 @@ class AppContext:
     def end_kiosk_session(
         self, *, event: str = "session_ended", reason: str | None = None,
         emit: bool = True,
+        expected_pending: tuple[
+            PendingRegistration | None, PendingTagBind | None
+        ] | None = None,
     ) -> None:
-        """Clear all kiosk session-scoped state and optionally publish its end event."""
+        """Clear all kiosk session-scoped state and optionally publish its end event.
+
+        When ``expected_pending`` is given (the dispatch snapshot), a pending
+        window is cleared only if it is still that exact object — a window an
+        HTTP route armed after the snapshot survives. Without it, both pending
+        windows are cleared unconditionally (session end, timeout, reader
+        disconnect).
+        """
         self.session_mgr.end_session()
         self.admin_overlay_open = False
-        assign_pending_registration(self, None)
-        assign_pending_tag_bind(self, None)
+        if expected_pending is None:
+            assign_pending_registration(self, None)
+            assign_pending_tag_bind(self, None)
+        else:
+            exp_reg, exp_bind = expected_pending
+            with pending_state_lock:
+                if self.pending_registration is exp_reg:
+                    assign_pending_registration(self, None)
+                if self.pending_tag_bind is exp_bind:
+                    assign_pending_tag_bind(self, None)
         if emit:
             payload = {"event": event}
             if reason is not None:
@@ -276,9 +294,15 @@ class AppContext:
                     logger.warning("Card inserted but UID could not be read.")
                     continue
 
-                await self._dispatch_insert(
-                    event.uid, get_session, event.reader_name
-                )
+                try:
+                    await self._dispatch_insert(
+                        event.uid, get_session, event.reader_name
+                    )
+                except Exception:
+                    # A dispatch failure must never kill the bridge — the next
+                    # tap is still processed. The registration/bind paths report
+                    # their own *_failed SSE inside _dispatch_insert.
+                    logger.exception("NFC dispatch failed; bridge continues.")
 
             elif isinstance(event, ReaderEvent):
                 if event.event_type == ReaderEventType.DISCONNECTED:
@@ -311,6 +335,10 @@ class AppContext:
 
         if expired_reg:
             logger.info("Registration window expired.")
+            # An expired window also drops a leftover admin overlay (the old
+            # _end_leftover_session call site). dispatch_insert ends the
+            # session itself so this tap can still log in.
+            self.admin_overlay_open = False
         if expired_bind:
             logger.info("Device tag bind window expired.")
 
@@ -320,6 +348,7 @@ class AppContext:
         overlay = self.admin_overlay_open
         session_mgr = self.session_mgr
         hmac_key = key_manager.hmac_key
+        pending_snapshots = (pending_reg, pending_bind)
 
         def _run_insert():
             with get_session() as db_session:
@@ -327,7 +356,9 @@ class AppContext:
                     db_session,
                     uid,
                     hmac_key,
-                    key_manager.enc_key,
+                    # The AES key is needed only to enroll; resolving it lazily
+                    # keeps a missing SMART_LOCKER_ENC_KEY from failing taps.
+                    key_manager.enc_key if pending_reg is not None else None,
                     session_mgr,
                     registration_display_name=(
                         pending_reg.display_name if pending_reg is not None else None
@@ -340,7 +371,16 @@ class AppContext:
                     reader_name=reader_name,
                 )
 
-        outcome = await asyncio.to_thread(_run_insert)
+        try:
+            outcome = await asyncio.to_thread(_run_insert)
+        except Exception:
+            # Includes the get_session() auto-commit: a handler exception is
+            # rolled back inside dispatch_insert, but a commit-level failure
+            # (locked DB, IO error) lands here. The bridge must survive and the
+            # kiosk must not sit on "waiting for card" forever.
+            logger.exception("NFC tap dispatch failed; reporting to kiosk.")
+            self._report_dispatch_failure(pending_reg, pending_bind)
+            return
         result = outcome.result
 
         if outcome.clear_pending_registration:
@@ -353,10 +393,11 @@ class AppContext:
                     assign_pending_tag_bind(self, None)
 
         if outcome.end_leftover_session_silently:
-            self._end_leftover_session()
+            self._end_leftover_session(expected_pending=pending_snapshots)
         elif result.event == "session_ended":
             self.end_kiosk_session(
-                reason=result.payload.get("reason", "card_tap"), emit=False
+                reason=result.payload.get("reason", "card_tap"), emit=False,
+                expected_pending=pending_snapshots,
             )
         elif result.event == "auth_success":
             self.admin_overlay_open = False
@@ -365,14 +406,55 @@ class AppContext:
         if sse is not None:
             self.broadcast_sse(sse)
 
-    def _end_leftover_session(self) -> None:
+    def _report_dispatch_failure(
+        self,
+        pending_reg: PendingRegistration | None,
+        pending_bind: PendingTagBind | None,
+    ) -> None:
+        """Emit the same ``*_failed`` SSE the armed window's flow would produce.
+
+        Called when the dispatch transaction itself failed (commit error, key
+        load, unexpected fault). Without this the kiosk would sit on "waiting
+        for card" until the window expires, and the bridge would have died.
+        """
+        if pending_reg is not None:
+            self._end_leftover_session(
+                expected_pending=(pending_reg, pending_bind)
+            )
+            self.broadcast_sse({
+                "event": "registration_failed",
+                "reason": "Registration failed. Please try again.",
+            })
+        elif pending_bind is not None:
+            with pending_state_lock:
+                if self.pending_tag_bind is pending_bind:
+                    assign_pending_tag_bind(self, None)
+            self.broadcast_sse({
+                "event": "tag_bind_failed",
+                "reason": "Bind failed. Please try again.",
+            })
+        else:
+            self.broadcast_sse({
+                "event": "device_action",
+                "success": False,
+                "action": "error",
+                "message": "Something went wrong. Please try again.",
+            })
+
+    def _end_leftover_session(
+        self,
+        *,
+        expected_pending: tuple[
+            PendingRegistration | None, PendingTagBind | None
+        ] | None = None,
+    ) -> None:
         """Drop a leftover overlay session with no session_ended SSE.
 
         After admin Register User the overlay session must not remain, or
         the next work-card tap is logout instead of login. The register
         success/fail screen stays until the frontend navigates to idle.
         """
-        self.end_kiosk_session(emit=False)
+        self.end_kiosk_session(emit=False, expected_pending=expected_pending)
 
 
 

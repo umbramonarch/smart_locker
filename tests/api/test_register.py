@@ -142,6 +142,39 @@ class TestRegistrantEndpoints:
         assert mock_context.pending_tag_bind is not None
         assert mock_context.pending_tag_bind.from_dashboard is True
 
+    def test_register_while_import_running_returns_503(
+        self, client, mock_context
+    ):
+        """A name lookup during an in-flight catalog import is 503, not 403 —
+        'not yet imported' is not 'not approved'."""
+        from smart_locker.sync import scheduler
+
+        assert scheduler._import_lock.acquire(blocking=False)
+        try:
+            resp = client.post("/api/register", json={"name": "Not Yet Imported"})
+            assert resp.status_code == 503
+            assert "sync" in resp.json()["detail"].lower()
+        finally:
+            scheduler._import_lock.release()
+
+        resp = client.post("/api/register", json={"name": "Not Listed"})
+        assert resp.status_code == 403
+
+    def test_get_registrants_reports_syncing(self, client):
+        """GET /api/registrants exposes the in-flight import as syncing=true."""
+        from smart_locker.sync import scheduler
+
+        assert scheduler._import_lock.acquire(blocking=False)
+        try:
+            resp = client.get("/api/registrants")
+            assert resp.status_code == 200
+            assert resp.json()["syncing"] is True
+        finally:
+            scheduler._import_lock.release()
+
+        resp = client.get("/api/registrants")
+        assert resp.json()["syncing"] is False
+
 
 class TestRegisterDeviceApi:
     """Admin POST /api/admin/devices/register creates a locker row from Excel."""

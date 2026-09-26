@@ -63,6 +63,19 @@ class ImportInProgress(Exception):
     """A catalog import is already running in this process."""
 
 
+def import_in_progress() -> bool:
+    """Whether a source import holds the mutex right now.
+
+    Lets HTTP routes distinguish "name not in the approved list" from "the
+    catalog is still importing" — the startup import runs on a scheduler
+    thread, so the registrants table can lag boot by seconds on a slow share.
+    """
+    if _import_lock.acquire(blocking=False):
+        _import_lock.release()
+        return False
+    return True
+
+
 def run_source_import_exclusive(
     engine,
     source_path: str | Path,
@@ -293,6 +306,10 @@ def start_scheduler(
     if not source_path:
         logger.info("Source Excel path not configured — scheduler disabled.")
         return
+
+    # Re-arming replaces the previous pair instead of stacking a second
+    # scheduler/observer on the module globals.
+    stop_scheduler()
 
     try:
         hours = max(1, int(interval_hours))

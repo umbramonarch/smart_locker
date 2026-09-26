@@ -102,7 +102,7 @@ def handle_registration_tap(
     *,
     display_name: str,
     hmac_key: bytes,
-    enc_key: bytes,
+    enc_key: bytes | None,
 ) -> TapResult:
     """Enroll ``display_name`` from a fresh card tap.
 
@@ -292,7 +292,7 @@ def dispatch_insert(
     db_session: Session,
     card_uid_hex: str,
     hmac_key: bytes,
-    enc_key: bytes,
+    enc_key: bytes | None,
     session_mgr: SessionManager,
     *,
     registration_display_name: str | None = None,
@@ -307,6 +307,10 @@ def dispatch_insert(
     ``db_session``.  Pending values are scalar snapshots, never ORM rows.
     Expired registration ends an overlay session before normal classification
     so its tap can log in rather than log out, matching registration completion.
+    ``enc_key`` is required only when ``registration_display_name`` is set —
+    callers resolve it lazily so a missing ENC key cannot break plain taps.
+    Handler failures roll the session back before returning a failure result,
+    so the caller's auto-commit is a no-op instead of re-raising.
     """
     if registration_expired:
         session_mgr.end_session()
@@ -321,6 +325,9 @@ def dispatch_insert(
         return TapDispatchOutcome(
             result,
             clear_pending_registration=True,
+            # A work-card login during an expired window still consumes an
+            # armed bind, matching the plain-path behavior below.
+            clear_pending_tag_bind=result.event == "auth_success",
         )
 
     if registration_display_name is not None:
@@ -336,6 +343,9 @@ def dispatch_insert(
             logger.exception(
                 "Registration failed for '%s'.", registration_display_name
             )
+            # A failed flush leaves the session dirty; without rollback the
+            # caller's auto-commit re-raises and the failure SSE never ships.
+            db_session.rollback()
             result = TapResult(
                 event="registration_failed",
                 payload={"reason": "Registration failed. Please try again."},
@@ -364,6 +374,7 @@ def dispatch_insert(
             logger.exception(
                 "Device tag bind failed for device_id=%d.", tag_bind_device_id
             )
+            db_session.rollback()
             result = TapResult(
                 event="tag_bind_failed",
                 payload={"reason": "Bind failed. Please try again."},

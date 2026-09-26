@@ -6,6 +6,7 @@ Project: smart_locker
 Notes: Run via 'python -m smart_locker.app' (web server on port 8000).
 """
 
+import argparse
 import logging
 import sys
 from pathlib import Path
@@ -19,13 +20,27 @@ from smart_locker.database.engine import init_db
 logger = logging.getLogger(__name__)
 
 
-def run_server() -> None:
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Reject stray flags instead of silently starting the server.
+
+    The old ``--cli`` console mode was removed; an unrecognized argument now
+    errors (exit 2) rather than launching the wrong mode on muscle memory.
+    """
+    parser = argparse.ArgumentParser(
+        prog="smart_locker.app",
+        description="Start the Smart Locker web server (kiosk UI + API).",
+    )
+    return parser.parse_args(argv)
+
+
+def run_server(argv: list[str] | None = None) -> None:
     """Start the FastAPI and Uvicorn web server.
 
     Initializes logging and the database, then creates and runs the FastAPI
     application. Lifecycle-owned synchronization starts after the NFC API
     context is ready; its startup import runs asynchronously.
     """
+    _parse_args(argv)
     import uvicorn
 
     from config.settings import API_HOST, API_PORT

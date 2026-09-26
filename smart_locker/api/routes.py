@@ -883,9 +883,18 @@ def start_registration(
     if conflict:
         raise HTTPException(status_code=409, detail=conflict)
 
-    # Validate name against the approved registrants list
+    # Validate name against the approved registrants list. While a source
+    # import is still running (startup import is a background thread), a
+    # missing name may just be "not yet imported" — say so instead of 403.
     registrant = RegistrantRepository.find_by_name(db, body.name.strip())
     if registrant is None:
+        from smart_locker.sync.scheduler import import_in_progress
+
+        if import_in_progress():
+            raise HTTPException(
+                status_code=503,
+                detail="Catalog sync is still running — try again shortly.",
+            )
         raise HTTPException(
             status_code=403,
             detail="Name not found in approved list. Contact an admin for manual registration.",
@@ -950,6 +959,8 @@ def get_registrants(db: Session = Depends(get_db)):
         dict: ``{"names": list[str]}`` — alphabetically sorted list of names
               that have not yet registered.
     """
+    from smart_locker.sync.scheduler import import_in_progress
+
     registrants = RegistrantRepository.get_all(db)
 
     # Build a set of names already registered (case-insensitive) so they can
@@ -962,7 +973,7 @@ def get_registrants(db: Session = Depends(get_db)):
         for r in registrants
         if r.display_name.lower() not in registered_lower
     ]
-    return {"names": names}
+    return {"names": names, "syncing": import_in_progress()}
 
 
 # --- Admin Endpoints --------------------------------------------------------

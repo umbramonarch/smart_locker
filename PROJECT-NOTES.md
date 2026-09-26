@@ -71,7 +71,7 @@ sudo bash deploy/install/install.sh
 - **Asset label:** `SMART_LOCKER_ASSET_LABEL` (default `PM number`) is the kiosk/dashboard noun. Storage and JSON stay `pm_number`. Public `GET /api/config` returns `{ "asset_label": ... }`.
 - **NFC device tags:** same ACR1252U as work cards. Store `devices.tag_hmac` only (same HMAC key as `users.uid_hmac`). Kiosk `GET /api/devices` and dashboard Locker JSON may expose `has_tag: bool`, never the digest; Excel export is Tagged Yes/No. Idle tap of a **borrowed** sticker returns it (no work card; slot overlay); available tags do not borrow from idle.
 - **Excel auto-export** only if `SMART_LOCKER_EXCEL_AUTO_EXPORT=1` (off in the Pi template; admin Export Excel stays).
-- **Photos:** filename stem = device **model**. `scripts/update_device.py --auto` matches **PM number** — different scheme.
+- **Photos:** filename stem = device **model**. `scripts/update_device.py --auto` matches the **model** too (87V.jpg → every "87V" unit); `--pm`/`--batch` stay PM-keyed.
 - **Pi updates:** `python -m scripts.copy_update` (optional `--dest D:\\`) writes gitignored
   `locker-updates/` and copies it onto a USB stick. Hidden-admin **Software Update** applies
   `$APP_DIR/locker-updates` (USB `locker-updates/` is copied there first). That is the only

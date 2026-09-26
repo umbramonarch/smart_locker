@@ -130,7 +130,7 @@ smart_locker/
 | Source import | ✅ Done | Startup + 6h interval + file-watch on local FS; catalog-only, no insert |
 | Location write-back | ✅ Done | Pi writes Location by PM (`Locker` / borrower); locked file skipped |
 | Device import | ✅ Done | English Excel headers and aliases, PM-based catalog update, no auto locker insert |
-| Photo import | ✅ Done | By PM number (`update_device`) or by model (photo watcher) |
+| Photo import | ✅ Done | By model (`update_device --auto`, photo watcher); `--pm` for one device |
 | Web dashboard | ✅ Done | `/dashboard` — public Inventory/Locker GET; owner/bind/unbind + users/tx/owners need admin secret; 5-tap is UI reveal |
 | Frontend UI | ✅ Done | 6-screen kiosk UI + overlays |
 | Unit tests | ✅ Done | ~371 tests, hardware-free |
@@ -265,11 +265,11 @@ Admins can also register anyone manually from the hidden admin panel (`POST /api
 Two ways to attach device photos (both copy into `smart_locker/frontend/images/` and update the device's `image_path`):
 
 ```bash
-# By PM number (manual / batch / auto) — primary CLI:
+# Manual/batch by PM number; --auto matches photos named after the device model:
 python -m scripts.update_device --list                       # list devices + image status
 python -m scripts.update_device --pm PM-042 --image scope.jpg --description "4-ch 500MHz scope"
-python -m scripts.update_device --auto                        # auto-match PM-001.jpg, PM-002.png, …
-python -m scripts.update_device --batch updates.txt           # batch from file
+python -m scripts.update_device --auto                        # auto-match 87V.jpg → every model "87V" unit
+python -m scripts.update_device --batch updates.txt           # batch from file (PM field value per line)
 ```
 
 A background **photo watcher** also auto-assigns photos by **device model**: drop an image named exactly after the model (e.g. `87V.jpg` matches every model "87V" device) into the folder set by `SMART_LOCKER_PHOTO_INPUT_PATH`. The watcher is disabled when that variable is empty.
