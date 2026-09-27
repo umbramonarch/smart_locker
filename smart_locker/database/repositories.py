@@ -124,8 +124,9 @@ class DeviceRepository:
     """Data access layer for Device entities.
 
     Provides lookup by ID and PM number, availability and borrower queries,
-    borrow/return state transitions, metadata updates from source imports,
-    and device creation with full field support.
+    borrow/return state transitions, catalog metadata updates (dashboard
+    editor and mirror apply/adopt), and device creation with full field
+    support.
     """
 
     @staticmethod
@@ -263,8 +264,8 @@ class DeviceRepository:
             model=model,
             calibration_due=calibration_due,
         )
-        # Apply optional status and borrower (used by source import when
-        # the "Location" column indicates a device is checked out)
+        # Apply optional status and borrower (used by tests/fixtures that
+        # create a device in a non-default state)
         if status is not None:
             device.status = DeviceStatus(status)
         if current_borrower_id is not None:
@@ -293,7 +294,7 @@ class DeviceRepository:
         ).scalar_one_or_none()
         if found is not None:
             return found
-        from smart_locker.sync.source_import import pm_match_key
+        from smart_locker.sync.catalog_sheet import pm_match_key
 
         key = pm_match_key(want)
         return session.execute(
@@ -379,12 +380,12 @@ class DeviceRepository:
 
     @staticmethod
     def update_metadata(session: Session, device: Device, **kwargs) -> bool:
-        """Update source-managed metadata fields on a device.
+        """Update catalog-managed metadata fields on a device.
 
         Only updates fields that differ from the current value. Restricted
         to the ALLOWED set — slot, image, description, tag_hmac, status, and
-        current_borrower_id are never overwritten by source imports (locker
-        borrow state and tag bindings are locker-local).
+        current_borrower_id are never overwritten here (locker borrow state
+        and tag bindings are locker-local).
 
         Args:
             session: Active database session.
@@ -442,8 +443,12 @@ class DeviceRepository:
 
     @staticmethod
     def list_by_slot(session: Session) -> list[Device]:
-        """Return locker rows in dashboard slot/name order."""
-        stmt = select(Device).order_by(Device.locker_slot, Device.name)
+        """Return locker rows (slot assigned) in dashboard slot/name order."""
+        stmt = (
+            select(Device)
+            .where(Device.locker_slot.is_not(None))
+            .order_by(Device.locker_slot, Device.name)
+        )
         return list(session.execute(stmt).scalars().all())
 
 
@@ -522,6 +527,22 @@ class TransactionRepository:
         return txn
 
     @staticmethod
+    def count_for_device(session: Session, device_id: int) -> int:
+        """Return how many audit rows reference one device.
+
+        Args:
+            session: Active database session.
+            device_id: ID of the device.
+
+        Returns:
+            Transaction count; >0 means the row carries borrow history.
+        """
+        stmt = select(func.count()).select_from(TransactionLog).where(
+            TransactionLog.device_id == device_id
+        )
+        return session.execute(stmt).scalar_one()
+
+    @staticmethod
     def get_device_history(
         session: Session, device_id: int
     ) -> list[TransactionLog]:
@@ -571,11 +592,11 @@ class RegistrantRepository:
     """Data access layer for Registrant entities.
 
     Manages the approved-names list used by the self-service registration
-    screen. Names originate from the "Location" column of the
-    source Excel and are synced into the ``registrants`` table
-    during each source import (add new names, delete names that left
-    Location). The repository provides methods for retrieving the sorted
-    name list, replacing the list from Excel, bulk-adding names
+    screen. Person names seeded from the sheet's "Location" column land in
+    the ``registrants`` table once — when the mirror adopts an existing
+    catalog sheet (add new names, delete names that left). After that the
+    list lives in the database. The repository provides methods for
+    retrieving the sorted name list, replacing the list, bulk-adding names
     (skipping duplicates), and case-insensitive name lookup.
     """
 
@@ -633,8 +654,8 @@ class RegistrantRepository:
 
         Performs a case-insensitive check for each name against the existing
         registrants table. Only names not already present are inserted. This
-        makes the operation safe to call repeatedly (idempotent) — successive
-        source imports will not create duplicate rows.
+        makes the operation safe to call repeatedly (idempotent) — repeated
+        calls will not create duplicate rows.
 
         Args:
             session: Active database session.

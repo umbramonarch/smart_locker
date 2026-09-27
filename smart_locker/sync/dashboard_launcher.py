@@ -107,6 +107,14 @@ def write_dashboard_launcher(
         )
         return False
     try:
+        if url_path.read_text(encoding="utf-8") == _url_shortcut(target):
+            # Already points at this dashboard — the per-tick retry is a
+            # no-op, so skip the share write and the log line.
+            return True
+    except OSError:
+        pass
+
+    try:
         _atomic_write(url_path, _url_shortcut(target))
     except OSError:
         logger.exception("Dashboard launcher could not be written to %s.", parent)

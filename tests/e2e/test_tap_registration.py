@@ -47,7 +47,7 @@ DASHBOARD_SECRET = "s3cret"
 
 
 def _add_registrant(h, name: str) -> None:
-    """Seed one approved name in the registrants table (Excel Location list)."""
+    """Seed one approved name in the registrants table (the approved name list)."""
     with h.db() as db:
         RegistrantRepository.add_names(db, {name})
         db.commit()

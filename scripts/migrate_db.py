@@ -99,6 +99,7 @@ def migrate() -> None:
         ("devices", "barcode", "VARCHAR(100)"),
         ("devices", "calibration_due", "DATE"),
         ("devices", "tag_hmac", "VARCHAR(64)"),
+        ("devices", "location", "VARCHAR(200)"),
     ]
 
     for table, column, col_type in migrations:

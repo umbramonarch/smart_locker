@@ -1,14 +1,11 @@
 """
-File: source_import.py
-Description: Source Excel import — reads the device catalog spreadsheet and
-             refreshes catalog metadata on locker devices already in SQLite.
-             Never inserts a locker row (Register Device does that). Column
-             headers are matched by common English names (and a few aliases).
+File: catalog_sheet.py
+Description: Catalog workbook parsing — header auto-detection (English names
+             plus aliases), row→catalog-field mapping, and the PM join-key
+             normalizers shared by the mirror writer and the adoption reader.
 Project: smart_locker/sync
-Notes: Called by the scheduler, ``python -m scripts.sync_source``, or
-       POST /api/admin/sync-source. Status, borrower, slot, image,
-       description, and tag_hmac are never overwritten.
-       lookup_catalog_by_pm is the Register Device lookup.
+Notes: Pure parsing helpers — no database or policy here. The mirror decides
+       what a cell means; this module only turns sheet text into fields.
 """
 
 import logging
@@ -18,7 +15,6 @@ from datetime import date, datetime
 from pathlib import Path
 
 from config.settings import id_header_extras, in_locker_token, location_header_extras
-from smart_locker.database.repositories import DeviceRepository
 from smart_locker.sync.workbook_adapter import WorkbookAdapter
 
 logger = logging.getLogger(__name__)
@@ -56,6 +52,13 @@ LOCATION_CANDIDATES = [
     "assigned to", "held by",
 ]
 
+# Canonical headers the mirror writes — every one is accepted by the
+# candidate lists above so a regenerated sheet always parses back.
+MIRROR_HEADERS = [
+    "PM Number", "Name", "Type", "Manufacturer", "Model",
+    "Serial Number", "Calibration Due", "Location",
+]
+
 # Whole-word in-locker markers (not substrings — "locker" is not in "blocker").
 _IN_LOCKER_MARKERS = ("locker", "cabinet")
 
@@ -84,7 +87,7 @@ def pm_candidates() -> list[str]:
     """Join-key header names: built-in English aliases plus env extras.
 
     Returns:
-        Candidate list used by import, Register Device, and Location write-back.
+        Candidate list used by the mirror reader and writer.
     """
     return _merge_aliases(PM_CANDIDATES, id_header_extras())
 
@@ -93,37 +96,17 @@ def location_candidates() -> list[str]:
     """Location-column header names: built-in aliases plus env extras.
 
     Returns:
-        Candidate list used by import (registrants) and Location write-back.
+        Candidate list used by the mirror reader and writer.
     """
     return _merge_aliases(LOCATION_CANDIDATES, location_header_extras())
 
 
-# ---------------------------------------------------------------------------
-# Result dataclass
-# ---------------------------------------------------------------------------
-
-@dataclass
-class ImportResult:
-    """Summary of a source import run with per-category counts.
-
-    Sync never inserts locker rows. ``non_locker_skipped`` is Excel PMs that
-    are not already in SQLite. Also replaces the registrant list with person
-    names currently in the Location column.
-    """
-    updated: int = 0
-    unchanged: int = 0
-    non_locker_skipped: int = 0
-    errors: int = 0
-    error_details: list[str] = field(default_factory=list)
-    registrants_added: int = 0
-
-
 @dataclass(frozen=True)
 class CatalogRow:
-    """Catalog fields copied from one Excel PM row into a locker device.
+    """Catalog fields parsed from one workbook row.
 
-    ``present`` names the catalog fields whose Excel columns exist on this
-    sheet so import can skip missing columns instead of wiping SQLite.
+    ``present`` names the catalog fields whose columns exist on this
+    sheet so callers can skip missing columns instead of wiping fields.
     """
 
     pm_number: str
@@ -133,11 +116,12 @@ class CatalogRow:
     manufacturer: str | None
     model: str | None
     calibration_due: date | None
+    location: str | None = None
     present: frozenset[str] = field(default_factory=frozenset)
 
 
 class CatalogReadError(Exception):
-    """Source Excel is missing, locked, or has no PM column."""
+    """The workbook is missing, locked, or has no PM column."""
 
 
 # ---------------------------------------------------------------------------
@@ -172,7 +156,7 @@ def normalize_pm(value) -> str:
 
 
 def pm_match_key(value) -> str:
-    """Case-folded join key for Inventory / write-back / import.
+    """Case-folded join key for catalog row matching.
 
     Args:
         value: Raw PM cell or SQLite ``pm_number``.
@@ -187,7 +171,8 @@ def is_in_locker_location(value: str) -> bool:
     """Return True when a Location cell means the device is in the locker.
 
     Exact ``in_locker_token()`` match, or a whole-word locker/cabinet marker.
-    ``"Blocker"`` is not in-locker.
+    ``"Blocker"`` is not in-locker. Used when *reading* a sheet that was not
+    written by the Pi; values the Pi writes itself use canonical tokens.
 
     Args:
         value: Location cell text.
@@ -262,7 +247,7 @@ def parse_date(value) -> date | None:
     return None
 
 
-def _detect_columns(
+def detect_columns(
     headers: list[str],
     overrides: dict[str, str] | None = None,
 ) -> dict[str, int | None]:
@@ -296,6 +281,10 @@ def _detect_columns(
 def _cell_str(row, idx: int | None) -> str | None:
     """Read a cell as a stripped string, or None.
 
+    Uses ``stored_cell_text`` so a value the Pi wrote with a text-indicator
+    apostrophe (``safe_cell_value`` on formula-marker text) reads back as
+    the stored text — not the escaped form.
+
     Args:
         row: A tuple of cell values from openpyxl (one row of data).
         idx: Column index to read, or None to skip.
@@ -306,11 +295,68 @@ def _cell_str(row, idx: int | None) -> str | None:
     """
     if idx is None or row[idx] is None:
         return None
-    val = str(row[idx]).strip()
+    val = stored_cell_text(row[idx])
     return val if val else None
 
 
-def _load_rows(
+def cell_text(value) -> str:
+    """Normalize an Excel cell to a stripped string.
+
+    Args:
+        value: Raw openpyxl cell value.
+
+    Returns:
+        Stripped text, or empty string when the cell is empty.
+        Integer-valued floats lose the ``.0`` tail (Excel PM cells).
+    """
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return str(value).strip()
+    if isinstance(value, float) and value == int(value):
+        return str(int(value))
+    return str(value).strip()
+
+
+_FORMULA_MARKERS = frozenset("=+-@")
+
+
+def stored_cell_text(value) -> str:
+    """Normalize a cell, stripping a leading text-indicator apostrophe.
+
+    Args:
+        value: Raw openpyxl cell value.
+
+    Returns:
+        Stripped text comparable to a wanted string.
+    """
+    text = cell_text(value)
+    if len(text) >= 2 and text[0] == "'" and text[1] in _FORMULA_MARKERS:
+        return text[1:]
+    return text
+
+
+def safe_cell_value(value):
+    """Return a workbook-safe value: text that cannot become a formula.
+
+    Args:
+        value: String (or None) to store.
+
+    Returns:
+        ``None`` for empty text, a ``date`` untouched, or the string with a
+        leading apostrophe when it starts with a formula marker.
+    """
+    if isinstance(value, date):
+        return value
+    text = cell_text(value)
+    if not text:
+        return None
+    if text[:1] in _FORMULA_MARKERS:
+        text = "'" + text
+    return text
+
+
+def load_rows(
     path: Path,
     sheet_name: str | None = None,
 ) -> tuple[list | None, str | None]:
@@ -329,7 +375,7 @@ def _load_rows(
     return read.rows, read.error
 
 
-def _catalog_from_row(
+def catalog_from_row(
     row,
     cols: dict[str, int | None],
     compose_name: bool,
@@ -339,7 +385,7 @@ def _catalog_from_row(
 
     Args:
         row: Tuple of cell values.
-        cols: Column index map from ``_detect_columns``.
+        cols: Column index map from ``detect_columns``.
         compose_name: True when the sheet has no name column (use manufacturer + model).
         default_type: Fallback device_type.
 
@@ -393,220 +439,41 @@ def _catalog_from_row(
         manufacturer=manufacturer,
         model=model_val,
         calibration_due=calibration_due,
+        location=_cell_str(row, cols["location"]),
         present=frozenset(present),
     )
 
 
-def lookup_catalog_by_pm(
-    source_path: str | Path,
-    pm_number: str,
+def read_catalog_rows(
+    path: Path,
     sheet_name: str | None = None,
-    default_type: str = "general",
     column_overrides: dict[str, str] | None = None,
-) -> CatalogRow | None:
-    """Return catalog fields for one PM from the source Excel, or None.
+) -> tuple[list[CatalogRow], str | None]:
+    """Parse a workbook's active sheet into catalog rows.
 
     Args:
-        source_path: Path to ``device-list.xlsx``.
-        pm_number: Equipment number to match (stripped; compared as stored).
-        sheet_name: Sheet to read (default: active sheet).
-        default_type: Device type when the sheet has no category column.
+        path: Workbook path.
+        sheet_name: Sheet to read, or None for the active sheet.
         column_overrides: Optional header-name overrides.
 
     Returns:
-        CatalogRow if the PM is on the sheet, otherwise None.
-
-    Raises:
-        CatalogReadError: File missing, locked, empty, or no PM column.
+        ``(rows, None)`` on success, or ``([], error_message)`` when the
+        file is missing, locked, empty, or has no PM column.
     """
-    path = Path(source_path)
-    rows, err = _load_rows(path, sheet_name)
+    rows, err = load_rows(Path(path), sheet_name)
     if err:
-        raise CatalogReadError(err)
-    if not rows or len(rows) < 2:
-        raise CatalogReadError("Source Excel has no data rows.")
-
+        return [], err
+    if not rows:
+        return [], "Workbook is empty."
     headers = [str(h).strip() if h else "" for h in rows[0]]
-    cols = _detect_columns(headers, column_overrides)
+    cols = detect_columns(headers, column_overrides)
     if cols["pm"] is None:
-        raise CatalogReadError(f"Could not find PM/equipment column. Headers: {headers}")
-
-    want = pm_match_key(pm_number)
+        return [], f"Could not find PM/equipment column. Headers: {headers}"
+    if len(rows) < 2:
+        return [], None
     compose_name = cols["name"] is None
-    for row in rows[1:]:
-        catalog = _catalog_from_row(row, cols, compose_name, default_type)
-        if catalog is not None and pm_match_key(catalog.pm_number) == want:
-            return catalog
-    return None
-
-
-# ---------------------------------------------------------------------------
-# Main import function
-# ---------------------------------------------------------------------------
-
-def import_from_source_excel(
-    engine,
-    source_path: str | Path,
-    sheet_name: str | None = None,
-    dry_run: bool = False,
-    default_type: str = "general",
-    column_overrides: dict[str, str] | None = None,
-) -> ImportResult:
-    """Refresh catalog metadata on locker devices that already exist in SQLite.
-
-    Excel PMs that are not already locker rows are counted as skipped and
-    never inserted. Status, borrower,
-    locker_slot, image_path, description, and tag_hmac are never overwritten.
-
-    Args:
-        engine: SQLAlchemy engine.
-        source_path: Path to the .xlsx file.
-        sheet_name: Specific sheet to read (default: active sheet).
-        dry_run: If True, parse and report but don't write to DB.
-        default_type: Default device_type when no type column is found.
-        column_overrides: Dict mapping field names to header strings for manual column mapping.
-
-    Returns:
-        ImportResult with counts.
-    """
-    result = ImportResult()
-    path = Path(source_path)
-
-    logger.info("Reading source Excel: %s", path)
-    rows, err = _load_rows(path, sheet_name)
-    if err:
-        logger.warning("%s", err)
-        result.errors = 1
-        result.error_details.append(err)
-        return result
-
-    if not rows or len(rows) < 2:
-        logger.warning("Source Excel has no data rows.")
-        return result
-
-    headers = [str(h).strip() if h else "" for h in rows[0]]
-    cols = _detect_columns(headers, column_overrides)
-
-    if cols["pm"] is None:
-        result.errors = 1
-        result.error_details.append(f"Could not find PM/equipment column. Headers: {headers}")
-        return result
-
-    compose_name = cols["name"] is None
-
-    # --- Registrant extraction: collect unique person names from ALL rows ---
-    registrant_names: set[str] = set()
-    if cols["location"] is not None:
-        for row in rows[1:]:
-            location = _cell_str(row, cols["location"])
-            if location and not is_in_locker_location(location):
-                registrant_names.add(location.strip())
-
-    if registrant_names:
-        logger.info(
-            "Found %d unique registrant name(s) in the Location column.",
-            len(registrant_names),
-        )
-
-    parsed: list[CatalogRow] = []
-    for row in rows[1:]:
-        catalog = _catalog_from_row(row, cols, compose_name, default_type)
-        if catalog is None:
-            continue
-        parsed.append(catalog)
-
-    logger.info("Parsed %d Excel PM row(s).", len(parsed))
-
-    from sqlalchemy.orm import Session as EngineSession
-
-    from smart_locker.sync.excel_sync import export_to_excel
-
-    if engine is None:
-        result.errors += 1
-        result.error_details.append("No database engine.")
-        return result
-
-    session = EngineSession(engine)
-    try:
-        for catalog in parsed:
-            try:
-                existing = DeviceRepository.find_by_pm(session, catalog.pm_number)
-                if existing is None:
-                    result.non_locker_skipped += 1
-                    continue
-                serial = catalog.serial_number
-                if "serial_number" in catalog.present and serial:
-                    holder = DeviceRepository.find_by_serial(session, serial)
-                    if holder is not None and holder.id != existing.id:
-                        serial = None
-                updates: dict = {}
-                if "name" in catalog.present:
-                    updates["name"] = catalog.name
-                if "device_type" in catalog.present and catalog.device_type:
-                    updates["device_type"] = catalog.device_type
-                if "serial_number" in catalog.present and serial:
-                    updates["serial_number"] = serial
-                if "manufacturer" in catalog.present and catalog.manufacturer:
-                    updates["manufacturer"] = catalog.manufacturer
-                if "model" in catalog.present and catalog.model:
-                    updates["model"] = catalog.model
-                if "calibration_due" in catalog.present and catalog.calibration_due is not None:
-                    updates["calibration_due"] = catalog.calibration_due
-                changed = DeviceRepository.update_metadata(
-                    session,
-                    existing,
-                    **updates,
-                )
-                if changed:
-                    result.updated += 1
-                else:
-                    result.unchanged += 1
-                if dry_run:
-                    session.rollback()
-                else:
-                    session.commit()
-            except Exception as e:
-                session.rollback()
-                result.errors += 1
-                result.error_details.append(f"PM {catalog.pm_number}: {e}")
-                logger.error("Import error for PM %s: %s", catalog.pm_number, e)
-    finally:
-        session.close()
-
-    if dry_run:
-        logger.info(
-            "Source import DRY RUN: %d would update, %d unchanged, "
-            "%d not in locker, %d errors (nothing written).",
-            result.updated, result.unchanged, result.non_locker_skipped, result.errors,
-        )
-        return result
-
-    if cols["location"] is not None:
-        from smart_locker.database.repositories import RegistrantRepository
-
-        try:
-            with EngineSession(engine) as reg_session:
-                added = RegistrantRepository.sync_names(reg_session, registrant_names)
-                result.registrants_added = added
-                reg_session.commit()
-        except Exception as e:
-            logger.warning("Registrant name sync failed: %s", e)
-            result.errors += 1
-            result.error_details.append(f"Registrant sync: {e}")
-
-    if result.updated > 0:
-        from config.settings import EXCEL_AUTO_EXPORT, EXCEL_SYNC_PATH
-        if EXCEL_AUTO_EXPORT:
-            try:
-                export_to_excel(engine, EXCEL_SYNC_PATH)
-            except Exception as e:
-                logger.warning("Excel sync after import failed: %s", e)
-
-    logger.info(
-        "Source import done: %d updated, %d unchanged, %d not in locker, %d errors, "
-        "%d registrants added.",
-        result.updated, result.unchanged, result.non_locker_skipped, result.errors,
-        result.registrants_added,
-    )
-    return result
-
+    parsed = [
+        catalog_from_row(row, cols, compose_name, "general")
+        for row in rows[1:]
+    ]
+    return [r for r in parsed if r is not None], None

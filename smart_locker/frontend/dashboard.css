@@ -6,8 +6,9 @@
  * Project: smart_locker/frontend
  * Notes: Tabs for Inventory / Locker / Display. Status badges stay
  *        colour-coded. Inventory owner edit (non-locker PMs) uses a
- *        confirm dialog. 5-tap header clock opens users / logs / NFC
- *        unbind and arm-bind. Responsive down to ~600px.
+ *        confirm dialog. The header Admin button opens the catalog
+ *        editor, mirror diffs, users / logs, and NFC bind. Responsive
+ *        down to ~600px.
  */
 
 /* --- Reset & base -------------------------------------------------------- */
@@ -123,6 +124,62 @@ body {
   color: var(--text);
   user-select: none;
   cursor: default;
+}
+
+.admin-open-btn {
+  font-family: var(--font-body);
+  font-size: 0.85rem;
+  font-weight: 600;
+  padding: 0.4rem 0.9rem;
+  border-radius: 4px;
+  cursor: pointer;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+
+.admin-open-btn:hover {
+  filter: brightness(1.1);
+}
+
+/* --- Mirror warning banner ------------------------------------------------- */
+.mirror-banner {
+  background: #4d3b00;
+  border-bottom: 1px solid var(--border);
+  color: #ffd45e;
+  font-size: 0.85rem;
+  padding: 0.45rem 2rem;
+  text-align: center;
+}
+
+.mirror-banner[hidden] {
+  display: none;
+}
+
+/* --- Sheet diffs + device editor ------------------------------------------- */
+.sheet-diff-actions {
+  margin-top: 0.6rem;
+}
+
+.device-dialog-card {
+  width: min(480px, 92vw);
+}
+
+.device-form {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.3rem;
+  margin-bottom: 0.9rem;
+}
+
+.device-form .search-input {
+  width: 100%;
+  min-width: 0;
+}
+
+.device-form .search-input[disabled] {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 /* --- Tabs ---------------------------------------------------------------- */
@@ -617,7 +674,7 @@ body {
   color: #fff;
 }
 
-/* --- 5-tap admin overlay ------------------------------------------------- */
+/* --- Admin overlay ------------------------------------------------------- */
 .admin-overlay {
   position: fixed;
   inset: 0;

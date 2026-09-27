@@ -135,6 +135,15 @@ def e2e(monkeypatch):
     yield boot
 
     stack.close()
+    # Drain scheduled mirror-flush workers and any in-flight scheduler tick
+    # before the engine goes away — a late tick on a disposed in-memory
+    # engine crashes the test process.
+    from smart_locker.sync import mirror, scheduler
+
+    mirror.flush_scheduled()
+    deadline = time.monotonic() + 10
+    while scheduler.sync_in_progress() and time.monotonic() < deadline:
+        time.sleep(0.05)
     eng_mod.reset_engine()
     ctx_module.context = None
 

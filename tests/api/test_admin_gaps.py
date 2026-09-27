@@ -1,11 +1,10 @@
 """
 File: test_admin_gaps.py
-Description: Coverage-gap tests for admin and probe endpoints -- the Excel
-             export download (xlsx body + headers), populated update-status
-             marker merge, software-update launch and failure mapping,
-             change-slot guards, registration gating (active session / no
-             context), the public health payload, and the dry-run sync
-             preview that must write nothing.
+Description: Coverage-gap tests for admin and probe endpoints -- the removed
+             Excel export route, populated update-status marker merge,
+             software-update launch and failure mapping, change-slot guards,
+             registration gating (active session / no context), the public
+             health payload, and the mirror sync preview that writes nothing.
 Project: smart_locker/tests/api
 Notes: Run with: python -m pytest tests/api/test_admin_gaps.py -v
        BASE_DIR is patched per test so update-status.json / VERSION /
@@ -13,10 +12,8 @@ Notes: Run with: python -m pytest tests/api/test_admin_gaps.py -v
 """
 import json
 import subprocess
-from io import BytesIO
 
 import pytest
-from openpyxl import load_workbook
 from sqlalchemy import select
 
 import smart_locker.api.app_context as ctx_module
@@ -26,7 +23,6 @@ from smart_locker.database.repositories import (
     DeviceRepository,
     RegistrantRepository,
 )
-from tests.api.helpers import catalog_workbook
 
 
 def _enable_update_host(tmp_path, monkeypatch):
@@ -45,47 +41,14 @@ def _enable_update_host(tmp_path, monkeypatch):
     return script
 
 
-class TestExportExcelApi:
-    """GET /api/admin/export-excel -- session + admin gate, real xlsx bytes."""
+class TestExportExcelRemoved:
+    """The whole-database export is gone -- the workbook is a hidden mirror."""
 
-    def test_export_requires_session(self, client, mock_context):
-        """No kiosk session -> 401 before any workbook is built."""
-        resp = client.get("/api/admin/export-excel")
-        assert resp.status_code == 401
-
-    def test_export_rejects_non_admin(self, client, mock_context, test_user):
-        """A normal user session cannot download the database export."""
-        mock_context.session_mgr.start_session(test_user)
-        resp = client.get("/api/admin/export-excel")
-        assert resp.status_code == 403
-
-    def test_export_admin_gets_valid_workbook(
-        self, client, mock_context, admin_user, test_devices
-    ):
-        """Admin gets a real .xlsx attachment with the three export sheets."""
+    def test_export_excel_route_is_gone(self, client, mock_context, admin_user):
+        """GET /api/admin/export-excel no longer exists (404, not a gate)."""
         mock_context.session_mgr.start_session(admin_user)
         resp = client.get("/api/admin/export-excel")
-        assert resp.status_code == 200
-        assert "spreadsheetml.sheet" in resp.headers["content-type"]
-        disposition = resp.headers.get("content-disposition", "")
-        assert "attachment" in disposition
-        assert "smart_locker_data.xlsx" in disposition
-
-        wb = load_workbook(BytesIO(resp.content))
-        assert wb.sheetnames == ["Devices", "Transactions", "Users"]
-        # Seeded devices land on the Devices sheet (header + one row each).
-        devices_ws = wb["Devices"]
-        assert devices_ws.max_row == 1 + len(test_devices)
-        pms = {
-            row[0] for row in devices_ws.iter_rows(min_row=2, values_only=True)
-        }
-        assert {d.pm_number for d in test_devices} <= pms
-        # The admin user shows up on the Users sheet.
-        users_ws = wb["Users"]
-        names = {
-            row[1] for row in users_ws.iter_rows(min_row=2, values_only=True)
-        }
-        assert "Admin User" in names
+        assert resp.status_code == 404
 
 
 class TestUpdateStatusPopulated:
@@ -282,12 +245,15 @@ class TestHealthGaps:
 
 
 class TestSyncPreviewGaps:
-    """POST /api/admin/sync-preview -- unset path and dry-run read-only."""
+    """POST /api/admin/sync-preview -- dry-run diff read, never a crash."""
 
-    def test_sync_preview_unconfigured_path_is_400(
+    def test_sync_preview_unconfigured_mirror_is_empty(
         self, client, mock_context, admin_user
     ):
-        """Empty SOURCE_EXCEL_PATH is a 400, not a crash or empty preview."""
+        """No mirror configured is an empty diff plus an error note, 200."""
         mock_context.session_mgr.start_session(admin_user)
         resp = client.post("/api/admin/sync-preview")
-        assert resp.status_code == 400
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["diffs"] == []
+        assert body["error"] is not None

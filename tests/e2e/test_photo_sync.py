@@ -10,8 +10,7 @@ Description: End-to-end coverage of the photo sync pipeline and the dashboard
 Project: smart_locker/tests/e2e
 Notes: The photo watcher keeps a module-level Observer singleton — every
        watcher test stops it in a finally so no thread leaks into the next
-       test. EXCEL_AUTO_EXPORT is pinned off per test so a developer .env
-       cannot trigger a side-effect export during photo processing.
+       test.
 """
 
 import time
@@ -46,7 +45,6 @@ def _input_photo(tmp_path, name: str, content: bytes = JPEG_BYTES):
 def test_process_photo_updates_every_matching_model(e2e, tmp_path, monkeypatch):
     """A photo named after a model covers ALL units of that model — filename
     stem matching is case-insensitive against the stored model string."""
-    monkeypatch.setattr("config.settings.EXCEL_AUTO_EXPORT", False)
     h = e2e()
     cam_a = add_device(
         h, name="Cam A", pm_number="PM-300", locker_slot=11, model="CamX"
@@ -69,8 +67,9 @@ def test_process_photo_updates_every_matching_model(e2e, tmp_path, monkeypatch):
     assert get_device(h, other).image_path is None
 
 
-def test_auto_photo_command_matches_model_and_exports(e2e, tmp_path, monkeypatch):
-    """The bench --auto command updates every model match, not the PM match."""
+def test_auto_photo_command_matches_model_and_mirrors(e2e, tmp_path, monkeypatch):
+    """The bench --auto command updates every model match, and the mirror
+    catches up on the same call — the sheet shows the matched PM rows."""
     h = e2e()
     first = add_device(h, name="First", pm_number="PM-340", locker_slot=31, model="CamX")
     second = add_device(h, name="Second", pm_number="PM-341", locker_slot=32, model="camx")
@@ -78,18 +77,18 @@ def test_auto_photo_command_matches_model_and_exports(e2e, tmp_path, monkeypatch
     images = tmp_path / "smart_locker" / "frontend" / "images"
     images.mkdir(parents=True)
     (images / "CAMX.jpg").write_bytes(JPEG_BYTES)
-    export = tmp_path / "export.xlsx"
+    mirror_path = tmp_path / "mirror.xlsx"
     monkeypatch.setattr(update_script, "__file__", str(tmp_path / "scripts" / "update_device.py"))
-    monkeypatch.setattr("config.settings.EXCEL_SYNC_PATH", str(export))
+    monkeypatch.setenv("SMART_LOCKER_MIRROR_PATH", str(mirror_path))
 
     update_script.auto_match_images()
 
     assert get_device(h, first).image_path == "images/CAMX.jpg"
     assert get_device(h, second).image_path == "images/CAMX.jpg"
     assert get_device(h, other).image_path is None
-    workbook = load_workbook(export, read_only=True)
+    workbook = load_workbook(mirror_path, read_only=True)
     try:
-        rows = list(workbook["Devices"].values)
+        rows = list(workbook.active.values)
     finally:
         workbook.close()
     assert {(row[0], row[4]) for row in rows[1:]} >= {
@@ -102,7 +101,6 @@ def test_process_photo_without_matching_model_touches_no_device(
 ):
     """A filename that matches no model is still copied to the serve dir but
     leaves every device row unchanged."""
-    monkeypatch.setattr("config.settings.EXCEL_AUTO_EXPORT", False)
     h = e2e()
     device_id = add_device(
         h, name="Cam", pm_number="PM-303", locker_slot=14, model="CamX"
@@ -130,7 +128,6 @@ def test_process_photo_missing_file_returns_zero(e2e, tmp_path):
 def test_photo_watcher_scans_existing_photo_on_start(e2e, tmp_path, monkeypatch):
     """The startup scan applies photos already in the input folder — no
     filesystem event or debounce wait needed (deterministic)."""
-    monkeypatch.setattr("config.settings.EXCEL_AUTO_EXPORT", False)
     h = e2e()
     device_id = add_device(
         h, name="Scanner Cam", pm_number="PM-310", locker_slot=16, model="ScanCam"
@@ -150,7 +147,6 @@ def test_photo_watcher_scans_existing_photo_on_start(e2e, tmp_path, monkeypatch)
 def test_photo_watcher_applies_dropped_photo(e2e, tmp_path, monkeypatch):
     """Live watch: a file dropped into the input folder fires the watchdog,
     waits out the 2s debounce, then copies and stamps matching devices."""
-    monkeypatch.setattr("config.settings.EXCEL_AUTO_EXPORT", False)
     h = e2e()
     device_id = add_device(
         h, name="Drop Cam", pm_number="PM-311", locker_slot=17, model="DropCam"

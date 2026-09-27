@@ -1,13 +1,13 @@
 """
 File: sync_status.py
-Description: Thread-safe record of the most recent source-Excel import — when it
-             ran, what triggered it, and the per-category counts. Written by
-             every import path (startup, interval, file watcher, and the manual
-             admin "Sync now" action) and read by GET /api/admin/sync-status so
-             the kiosk admin footer can show a "last synced …" line.
+Description: Thread-safe record of the most recent catalog-mirror tick — when
+             it ran, what triggered it, and whether it wrote. Written by every
+             tick path (startup, interval, and the manual admin "Sync Sheet"
+             action) and read by GET /api/admin/sync-status so the kiosk admin
+             footer can show a "last synced …" line.
 Project: smart_locker/sync
 Notes: Persisted to a small JSON file next to the SQLite database (local disk,
-       never the CIFS share) so a restart or a skipped startup import (share
+       never the CIFS share) so a restart or a skipped startup tick (share
        down) does not show "never". Override path with SMART_LOCKER_LAST_SYNC_PATH.
 """
 
@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class _LastSync:
-    """Snapshot of the latest source import (see module docstring)."""
+    """Snapshot of the latest mirror tick (see module docstring)."""
 
     at: str | None = None          # ISO-8601 UTC, second precision; None = never run
     trigger: str | None = None     # startup | interval | watch | manual
@@ -139,11 +139,11 @@ def _save_unlocked() -> None:
 
 
 def record_result(trigger: str, result) -> None:
-    """Record a successful (or partially-errored) import run.
+    """Record a successful (or partially-errored) tick run.
 
     Args:
-        trigger: Which mechanism ran the import (startup/interval/watch/manual).
-        result: An ``ImportResult`` with updated/unchanged/errors counts.
+        trigger: Which mechanism ran the tick (startup/interval/manual).
+        result: Object with updated/unchanged/errors counts.
     """
     with _lock:
         _last.at = _now_iso()
@@ -157,10 +157,10 @@ def record_result(trigger: str, result) -> None:
 
 
 def record_error(trigger: str, message: str) -> None:
-    """Record an import run that raised before producing a result.
+    """Record a tick run that raised before producing a result.
 
     Args:
-        trigger: Which mechanism attempted the import.
+        trigger: Which mechanism attempted the tick.
         message: Short error description (exception text).
     """
     with _lock:
@@ -174,7 +174,7 @@ def record_error(trigger: str, message: str) -> None:
 
 
 def get() -> dict:
-    """Return a snapshot of the last import as a plain dict (JSON-serialisable).
+    """Return a snapshot of the last tick as a plain dict (JSON-serialisable).
 
     Includes ``at_local`` and ``ago`` for the admin footer (local clock + relative).
     """

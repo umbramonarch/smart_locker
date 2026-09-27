@@ -75,31 +75,53 @@ MAX_LOCKER_SLOT = 48
 API_HOST = os.getenv("SMART_LOCKER_API_HOST", "0.0.0.0")
 API_PORT = _env_int("SMART_LOCKER_API_PORT", 8000)
 
-# --- Excel export ---
-# Path for the exported workbook (Devices / Transactions / Users sheets). On the
-# Raspberry Pi this points at the locker share (e.g.
-# /mnt/locker/smart_locker_data.xlsx) so the export lands where colleagues read it.
-EXCEL_SYNC_PATH = os.getenv("SMART_LOCKER_EXCEL_PATH") or str(
-    BASE_DIR / "smart_locker_data.xlsx"
-)
-
-# Auto-write the export to EXCEL_SYNC_PATH after each source import and photo change.
-# Off by default (export stays on-demand via admin Export Excel). Set to 1 only if
-# you still want smart_locker_data.xlsx refreshed on the locker share automatically.
-EXCEL_AUTO_EXPORT = os.getenv("SMART_LOCKER_EXCEL_AUTO_EXPORT", "").strip().lower() in {
-    "1", "true", "yes", "on",
-}
-
-# --- Source Excel ---
-# Catalog spreadsheet on the locker share (SMB/CIFS mount) — on the Pi this
-# is the mounted path, e.g. /mnt/locker/device-list.xlsx. Empty disables auto-import.
+# --- Catalog mirror ---
+# The workbook the Pi writes. The SQLite devices table is the catalog; the
+# .xlsx is a hidden mirror of it (catalog columns + Location), regenerated
+# whenever the file can be written. SMART_LOCKER_MIRROR_PATH wins;
+# SMART_LOCKER_SOURCE_EXCEL_PATH is kept as the legacy name so a preserved
+# Pi .env still points the mirror at the share file it used to import.
+# With neither set, the mirror lives next to the database on the Pi.
 SOURCE_EXCEL_PATH = os.getenv("SMART_LOCKER_SOURCE_EXCEL_PATH", "")
 
-# Hours between automatic source imports (startup import + admin Sync still run).
-# Minimum 1. Values below 1 are raised to 1 so a zero env cannot spin the importer.
-SOURCE_SYNC_INTERVAL_HOURS = _env_int(
-    "SMART_LOCKER_SOURCE_SYNC_INTERVAL_HOURS", 6, minimum=1
+
+def mirror_path() -> Path | None:
+    """Path of the Pi-written catalog mirror workbook, or None when disabled.
+
+    ``SMART_LOCKER_MIRROR_PATH`` wins, then the legacy
+    ``SMART_LOCKER_SOURCE_EXCEL_PATH``, then a default file next to the
+    database. An in-memory or unset database path yields None (tests and
+    dev harnesses opt in by configuring a path).
+    """
+    override = (os.getenv("SMART_LOCKER_MIRROR_PATH") or "").strip()
+    if override:
+        return Path(override)
+    legacy = (SOURCE_EXCEL_PATH or "").strip()
+    if legacy:
+        return Path(legacy)
+    if not DB_PATH or DB_PATH == ":memory:":
+        return None
+    return Path(DB_PATH).with_name("smart_locker_catalog.xlsx")
+
+
+# Seconds between mirror ticks (pending-write flush + external-edit check).
+MIRROR_SYNC_SECONDS = _env_int(
+    "SMART_LOCKER_MIRROR_SYNC_SECONDS", 60, minimum=5
 )
+
+# Env override for the mirror-state JSON path (tests point it at a temp
+# path). Default: ``mirror_state.json`` next to the database.
+MIRROR_STATE_PATH_ENV_VAR = "SMART_LOCKER_MIRROR_STATE_PATH"
+
+
+def mirror_state_path() -> Path:
+    """JSON file holding the mirror writer's persisted state."""
+    override = (os.getenv(MIRROR_STATE_PATH_ENV_VAR) or "").strip()
+    if override:
+        return Path(override)
+    if not DB_PATH or DB_PATH == ":memory:":
+        return BASE_DIR / "logs" / "mirror_state.json"
+    return Path(DB_PATH).with_name("mirror_state.json")
 
 # Site overlay: display name and extra Excel header aliases. Storage/API stay
 # pm_number. Extra headers are merged with the built-in English lists.
@@ -134,6 +156,17 @@ def in_locker_token() -> str:
         Token from ``SMART_LOCKER_IN_LOCKER_TOKEN``, or ``Locker``.
     """
     return (os.getenv("SMART_LOCKER_IN_LOCKER_TOKEN") or "Locker").strip() or "Locker"
+
+
+def maintenance_token() -> str:
+    """Location cell written for a device that is in maintenance.
+
+    Returns:
+        Token from ``SMART_LOCKER_MAINTENANCE_TOKEN``, or ``Maintenance``.
+    """
+    return (
+        os.getenv("SMART_LOCKER_MAINTENANCE_TOKEN") or "Maintenance"
+    ).strip() or "Maintenance"
 
 
 def id_header_extras() -> list[str]:

@@ -1,17 +1,17 @@
 <!--
   File: dashboard.html
-  Description: Network dashboard. Three tabs: Inventory (live Excel),
-               Locker (SQLite), Display (what the kiosk is showing).
-               Inventory and Locker GETs are public. Owner change on
-               Inventory (confirm) needs X-Smart-Locker-Admin; not for
-               locker PMs. 5-tap the header clock reveals users, logs,
-               and NFC unbind / arm-bind — it is not authorization.
+  Description: Network dashboard. Three tabs: Inventory (SQLite catalog),
+               Locker (cabinet units), Display (what the kiosk is showing).
+               Inventory and Locker GETs are public, and owner change on a
+               non-cabinet row is public too. The Admin button opens the
+               catalog editor, sheet-change review, users, logs, and NFC
+               unbind / arm-bind behind X-Smart-Locker-Admin.
                Locker shows Tagged / No tag.
   Project: smart_locker/frontend
   Notes: Kiosk colours (#181d24 / #009641) with a normal desktop cursor,
          text selection, and scroll. dashboard.js polls Inventory/Locker
-         every 30s and Display more often. Dashboard 5-tap does not start
-         a kiosk admin session and is not auth.
+         every 30s and Display more often. The workbook is a hidden
+         Pi-written mirror; a banner reports pending writes and hand edits.
 -->
 <!DOCTYPE html>
 <html lang="en">
@@ -35,8 +35,13 @@
       </span>
       <span class="last-updated" id="last-updated"></span>
       <span class="clock" id="dash-clock"></span>
+      <button type="button" class="admin-open-btn" id="admin-open">Admin</button>
     </div>
   </header>
+
+  <div class="mirror-banner" id="mirror-banner" hidden>
+    <span class="mirror-banner-text" id="mirror-banner-text"></span>
+  </div>
 
   <nav class="tabs" role="tablist">
     <button class="tab-btn active" id="tab-inventory" role="tab" aria-selected="true" data-tab="inventory">Inventory</button>
@@ -184,6 +189,54 @@
         <button type="button" class="admin-overlay-close" id="admin-overlay-close">Close</button>
       </div>
 
+      <section class="admin-section" id="admin-sheet-section" hidden>
+        <h3 class="admin-section-title">Sheet changes</h3>
+        <p class="admin-hint">The spreadsheet was edited by hand. Apply the sheet edits to the database, or keep the database and overwrite the sheet.</p>
+        <p class="error-msg" id="sheet-diff-error" style="display:none"></p>
+        <div class="table-wrap">
+          <table class="data-table" id="sheet-diff-table">
+            <thead>
+              <tr>
+                <th>PM Number</th>
+                <th>Change</th>
+                <th>Field</th>
+                <th>Sheet</th>
+                <th>Database</th>
+              </tr>
+            </thead>
+            <tbody id="sheet-diff-tbody"></tbody>
+          </table>
+        </div>
+        <div class="sheet-diff-actions">
+          <button type="button" class="admin-tag-btn" id="sheet-keep">Keep database</button>
+          <button type="button" class="admin-tag-btn admin-tag-bind" id="sheet-apply">Apply sheet edits</button>
+        </div>
+        <p class="admin-tag-status" id="sheet-diff-status"></p>
+      </section>
+
+      <section class="admin-section">
+        <h3 class="admin-section-title">Catalog</h3>
+        <p class="admin-hint">Add, edit, or remove catalog devices. A borrowed unit cannot be removed. Cabinet rows keep their place from borrow/return.</p>
+        <p class="admin-tag-status" id="admin-catalog-status"></p>
+        <button type="button" class="admin-tag-btn admin-tag-bind" id="catalog-add-open">Add device</button>
+        <div class="table-wrap">
+          <table class="data-table" id="admin-catalog-table">
+            <thead>
+              <tr>
+                <th>PM Number</th>
+                <th>Name</th>
+                <th>Type</th>
+                <th>Serial</th>
+                <th>Location</th>
+                <th>In locker</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="admin-catalog-tbody"></tbody>
+          </table>
+        </div>
+      </section>
+
       <section class="admin-section">
         <h3 class="admin-section-title">NFC tags</h3>
         <p class="admin-hint">Unbind here. Bind / Replace tag arms the kiosk — tap the sticker on the locker reader within 60 seconds.</p>
@@ -239,6 +292,35 @@
           </table>
         </div>
       </section>
+    </div>
+  </div>
+
+  <div class="owner-dialog" id="device-dialog" hidden>
+    <div class="owner-dialog-card device-dialog-card" role="dialog" aria-labelledby="device-dialog-title">
+      <h3 class="owner-dialog-title" id="device-dialog-title">Add device</h3>
+      <p class="error-msg" id="device-dialog-error" style="display:none"></p>
+      <div class="device-form">
+        <label class="owner-dialog-label" for="device-pm" id="device-pm-label">PM Number</label>
+        <input type="text" class="search-input" id="device-pm" autocomplete="off">
+        <label class="owner-dialog-label" for="device-name">Name</label>
+        <input type="text" class="search-input" id="device-name" autocomplete="off">
+        <label class="owner-dialog-label" for="device-type">Type</label>
+        <input type="text" class="search-input" id="device-type" autocomplete="off">
+        <label class="owner-dialog-label" for="device-serial">Serial</label>
+        <input type="text" class="search-input" id="device-serial" autocomplete="off">
+        <label class="owner-dialog-label" for="device-manufacturer">Manufacturer</label>
+        <input type="text" class="search-input" id="device-manufacturer" autocomplete="off">
+        <label class="owner-dialog-label" for="device-model">Model</label>
+        <input type="text" class="search-input" id="device-model" autocomplete="off">
+        <label class="owner-dialog-label" for="device-calibration">Calibration due</label>
+        <input type="date" class="search-input" id="device-calibration">
+        <label class="owner-dialog-label" for="device-location" id="device-location-label">Location</label>
+        <input type="text" class="search-input" id="device-location" autocomplete="off">
+      </div>
+      <div class="owner-dialog-actions">
+        <button type="button" class="owner-cancel" id="device-cancel">Cancel</button>
+        <button type="button" class="owner-confirm" id="device-confirm">Save</button>
+      </div>
     </div>
   </div>
 

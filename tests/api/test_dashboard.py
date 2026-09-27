@@ -1,7 +1,8 @@
 """
 File: test_dashboard.py
-Description: Tests for public Inventory/Locker/Display GETs, admin-secret
-             owner edit, and dashboard NFC bind/unbind.
+Description: Tests for public Inventory/Locker/Display GETs, the public
+             owner edit on non-cabinet rows, catalog CRUD, mirror endpoints,
+             and dashboard NFC bind/unbind.
 Project: smart_locker/tests/api
 Notes: Run with: python -m pytest tests/api/test_dashboard.py -v
 """
@@ -19,21 +20,33 @@ from smart_locker.database.repositories import DeviceRepository, RegistrantRepos
 from smart_locker.security.hashing import compute_uid_hmac
 
 import smart_locker.api.app_context as ctx_module
-from tests.api.helpers import catalog_workbook, dashboard_admin_headers
+from tests.api.helpers import dashboard_admin_headers
+
+
+@pytest.fixture()
+def catalog_device(db_session):
+    """One non-locker catalog row (locker_slot NULL, stored place)."""
+    device = DeviceRepository.create(
+        db_session,
+        name="Van kit",
+        device_type="Tool",
+        pm_number="PM-999",
+        manufacturer="Fluke",
+        model="87V",
+        serial_number="SN-9",
+    )
+    device.location = "Workshop"
+    db_session.commit()
+    return device
+
 
 class TestDashboardInventoryAndDisplay:
-    """Inventory is Excel; Locker is SQLite; Display is a kiosk snapshot."""
+    """Inventory and Locker are both SQLite now; Display is a kiosk snapshot."""
 
-    def test_inventory_is_excel_not_sqlite(
-        self, client, test_devices, tmp_path, monkeypatch
+    def test_inventory_is_sqlite_catalog(
+        self, client, test_devices, catalog_device
     ):
-        """Inventory includes Excel-only PMs that are not locker rows."""
-        path = catalog_workbook(tmp_path, [
-            ["PM", "Name", "Manufacturer", "Model", "Serial", "Location", "Calibration due"],
-            ["PM-001", "Scope", "Keysight", "DSOX", "SN-1", "Locker", "2026-01-01"],
-            ["PM-999", "Van kit", "Fluke", "87V", "SN-9", "Workshop", None],
-        ])
-        monkeypatch.setattr("config.settings.SOURCE_EXCEL_PATH", str(path))
+        """Inventory returns every catalog row, locker and non-locker alike."""
         resp = client.get("/api/dashboard/inventory")
         assert resp.status_code == 200
         rows = resp.json()
@@ -46,20 +59,15 @@ class TestDashboardInventoryAndDisplay:
         assert van["in_locker"] is False
         locker = next(r for r in rows if r["pm_number"] == "PM-001")
         assert locker["in_locker"] is True
-        assert "status" not in van
+        assert locker["location"] == "Locker"
         assert "locker_slot" not in van
         assert "tag_hmac" not in van
+        assert "uid_hmac" not in van
 
-    def test_locker_stays_sqlite_only(
-        self, client, test_devices, tmp_path, monkeypatch
+    def test_locker_stays_registered_only(
+        self, client, test_devices, catalog_device
     ):
-        """Locker tab JSON is SQLite devices; Excel-only PMs are absent."""
-        path = catalog_workbook(tmp_path, [
-            ["PM", "Name", "Location"],
-            ["PM-001", "Scope", "Locker"],
-            ["PM-999", "Van kit", "Workshop"],
-        ])
-        monkeypatch.setattr("config.settings.SOURCE_EXCEL_PATH", str(path))
+        """Locker tab JSON is cabinet units; catalog-only rows are absent."""
         resp = client.get("/api/dashboard/devices")
         assert resp.status_code == 200
         pms = {r["pm_number"] for r in resp.json()}
@@ -69,24 +77,24 @@ class TestDashboardInventoryAndDisplay:
         assert "locker_slot" in row
         assert "status" in row
 
-    def test_inventory_share_down_does_not_break_locker(
+    def test_inventory_mirror_down_does_not_break_reads(
         self, client, test_devices, tmp_path, monkeypatch
     ):
-        """Missing catalog → Inventory errors; Locker still answers."""
-        monkeypatch.setattr(
-            "config.settings.SOURCE_EXCEL_PATH", str(tmp_path / "missing.xlsx")
+        """A missing mirror file does not touch SQLite-backed reads."""
+        monkeypatch.setenv(
+            "SMART_LOCKER_MIRROR_PATH", str(tmp_path / "missing.xlsx")
         )
         inv = client.get("/api/dashboard/inventory")
-        assert inv.status_code == 503
+        assert inv.status_code == 200
         locker = client.get("/api/dashboard/devices")
         assert locker.status_code == 200
         assert locker.json()
 
-    def test_inventory_unconfigured_is_error(self, client, monkeypatch):
-        """Empty SOURCE_EXCEL_PATH is an Inventory error, not an empty catalog."""
-        monkeypatch.setattr("config.settings.SOURCE_EXCEL_PATH", "")
+    def test_inventory_unconfigured_mirror_still_answers(self, client, test_devices):
+        """No mirror configured is not an Inventory error — SQLite answers."""
         resp = client.get("/api/dashboard/inventory")
-        assert resp.status_code == 503
+        assert resp.status_code == 200
+        assert len(resp.json()) == len(test_devices)
 
     def test_display_idle_has_no_user(self, client, mock_context):
         """Idle kiosk reports Idle occupancy without a person name."""
@@ -159,76 +167,46 @@ class TestDashboardInventoryAndDisplay:
 
 
 class TestDashboardOwnerEditApi:
-    """POST /api/dashboard/owner requires the dashboard admin secret."""
+    """POST /api/dashboard/owner is public — holder of a non-cabinet row."""
 
-    def test_owner_change_without_secret_is_401(
-        self, client, tmp_path, monkeypatch
+    def test_owner_change_is_public(
+        self, client, catalog_device, db_session
     ):
-        """Unauthenticated owner write is 401, not 200."""
-        path = catalog_workbook(tmp_path, [
-            ["Equipment", "Name", "Location"],
-            ["PM-VAN", "Van kit", "Workshop"],
-        ])
-        monkeypatch.setattr("config.settings.SOURCE_EXCEL_PATH", str(path))
+        """No secret, no session: a non-cabinet row's owner just updates."""
         resp = client.post(
             "/api/dashboard/owner",
-            json={"pm_number": "PM-VAN", "owner": "Alex"},
-        )
-        assert resp.status_code == 401
-
-    def test_owner_change_with_secret(
-        self, client, tmp_path, monkeypatch, dashboard_secret
-    ):
-        """Authorized owner write still does not need a kiosk work-card session."""
-        path = catalog_workbook(tmp_path, [
-            ["Equipment", "Name", "Location"],
-            ["PM-VAN", "Van kit", "Workshop"],
-        ])
-        monkeypatch.setattr("config.settings.SOURCE_EXCEL_PATH", str(path))
-        resp = client.post(
-            "/api/dashboard/owner",
-            json={"pm_number": "PM-VAN", "owner": "Alex"},
-            headers=dashboard_admin_headers(dashboard_secret),
+            json={"pm_number": "PM-999", "owner": "Alex"},
         )
         assert resp.status_code == 200
         body = resp.json()
         assert body["ok"] is True
         assert body["locker"] is False
+        db_session.expire_all()
+        assert catalog_device.location == "Alex"
 
-    def test_non_locker_does_not_create_sqlite_row(
-        self, client, db_session, tmp_path, monkeypatch, dashboard_secret
+    def test_owner_change_from_lan_is_public(
+        self, lan_client, catalog_device, db_session
     ):
-        """Excel-only PMs stay off the Pi after an Inventory owner edit."""
-        path = catalog_workbook(tmp_path, [
-            ["Equipment", "Name", "Location"],
-            ["PM-VAN", "Van kit", "Workshop"],
-        ])
-        monkeypatch.setattr("config.settings.SOURCE_EXCEL_PATH", str(path))
-        client.post(
+        """Owner edit stays open for LAN staff — that is the plan's choice."""
+        resp = lan_client.post(
             "/api/dashboard/owner",
-            json={"pm_number": "PM-VAN", "owner": "Alex"},
-            headers=dashboard_admin_headers(dashboard_secret),
+            json={"pm_number": "PM-999", "owner": "Workshop"},
         )
-        assert DeviceRepository.find_by_pm(db_session, "PM-VAN") is None
+        assert resp.status_code == 200
+        db_session.expire_all()
+        assert catalog_device.location == "Workshop"
 
     def test_locker_pm_is_refused(
-        self, client, test_user, test_devices, tmp_path, monkeypatch, db_session,
-        dashboard_secret,
+        self, client, test_user, test_devices, db_session,
     ):
         """Locker PMs cannot have owner changed from the dashboard."""
         from smart_locker.database.models import TransactionLog
         from sqlalchemy import select
 
-        path = catalog_workbook(tmp_path, [
-            ["Equipment", "Name", "Location"],
-            ["PM-001", "Camera", "Locker"],
-        ])
-        monkeypatch.setattr("config.settings.SOURCE_EXCEL_PATH", str(path))
         db_session.commit()
         resp = client.post(
             "/api/dashboard/owner",
             json={"pm_number": "PM-001", "owner": "Test User"},
-            headers=dashboard_admin_headers(dashboard_secret),
         )
         assert resp.status_code == 409
         db_session.expire_all()
@@ -238,25 +216,13 @@ class TestDashboardOwnerEditApi:
         logs = db_session.execute(select(TransactionLog)).scalars().all()
         assert logs == []
 
-    def test_owners_list_requires_secret(
+    def test_owners_list_is_public(
         self, client, test_user, db_session
     ):
-        """GET /api/dashboard/owners is not public."""
+        """GET /api/dashboard/owners is public — the owner dialog needs it."""
         RegistrantRepository.add_names(db_session, {"Bob Field"})
         db_session.commit()
         resp = client.get("/api/dashboard/owners")
-        assert resp.status_code == 401
-
-    def test_owners_list_with_secret(
-        self, client, test_user, db_session, dashboard_secret
-    ):
-        """Dropdown names: registered users + registrants."""
-        RegistrantRepository.add_names(db_session, {"Bob Field"})
-        db_session.commit()
-        resp = client.get(
-            "/api/dashboard/owners",
-            headers=dashboard_admin_headers(dashboard_secret),
-        )
         assert resp.status_code == 200
         names = resp.json()["names"]
         assert "Test User" in names
@@ -286,17 +252,20 @@ class TestDashboardOwnerEditApi:
         assert tx.status_code == 200
         assert isinstance(tx.json(), list)
 
-    def test_share_down_is_error(self, client, monkeypatch, tmp_path, dashboard_secret):
-        """Missing catalog Excel is 503; does not invent a locker row."""
-        monkeypatch.setattr(
-            "config.settings.SOURCE_EXCEL_PATH", str(tmp_path / "missing.xlsx")
+    def test_mirror_down_owner_edit_still_writes(
+        self, client, catalog_device, db_session, tmp_path, monkeypatch
+    ):
+        """An unavailable mirror never blocks the SQLite-backed owner edit."""
+        monkeypatch.setenv(
+            "SMART_LOCKER_MIRROR_PATH", str(tmp_path / "missing.xlsx")
         )
         resp = client.post(
             "/api/dashboard/owner",
-            json={"pm_number": "PM-001", "owner": "Alex"},
-            headers=dashboard_admin_headers(dashboard_secret),
+            json={"pm_number": "PM-999", "owner": "Alex"},
         )
-        assert resp.status_code == 503
+        assert resp.status_code == 200
+        db_session.expire_all()
+        assert catalog_device.location == "Alex"
 
 
 class TestDashboardTagApi:
@@ -477,4 +446,343 @@ class TestDashboardTagApi:
         )
         assert resp.status_code == 404
         assert mock_context.pending_tag_bind is None
+
+    def test_non_locker_row_bind_is_404(
+        self, client, mock_context, catalog_device, dashboard_secret
+    ):
+        """Tag bind/unbind apply to cabinet units only — catalog rows 404."""
+        resp = client.post(
+            "/api/dashboard/bind-tag",
+            json={"pm_number": "PM-999"},
+            headers=dashboard_admin_headers(dashboard_secret),
+        )
+        assert resp.status_code == 404
+        assert mock_context.pending_tag_bind is None
+        resp = client.post(
+            "/api/dashboard/unbind-tag",
+            json={"pm_number": "PM-999"},
+            headers=dashboard_admin_headers(dashboard_secret),
+        )
+        assert resp.status_code == 404
+
+
+class TestDashboardCatalogEditor:
+    """Dashboard catalog CRUD — admin secret on mutations, public reads."""
+
+    def test_add_device_requires_secret(self, client):
+        """POST /api/dashboard/devices is 401 when the secret is unset."""
+        resp = client.post(
+            "/api/dashboard/devices",
+            json={"pm_number": "PM-500", "name": "Crimpers"},
+        )
+        assert resp.status_code == 401
+
+    def test_add_device_creates_catalog_row(
+        self, client, db_session, dashboard_secret
+    ):
+        """An added device lands in SQLite, not in a slot, and is listed."""
+        resp = client.post(
+            "/api/dashboard/devices",
+            json={
+                "pm_number": "PM-500",
+                "name": "Crimpers",
+                "device_type": "Tool",
+                "serial_number": "SN-500",
+                "location": "Workshop",
+            },
+            headers=dashboard_admin_headers(dashboard_secret),
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["ok"] is True
+        assert body["device"]["pm_number"] == "PM-500"
+        assert body["device"]["in_locker"] is False
+        db_session.expire_all()
+        row = DeviceRepository.find_by_pm(db_session, "PM-500")
+        assert row is not None
+        assert row.locker_slot is None
+        inventory = client.get("/api/dashboard/inventory").json()
+        assert "PM-500" in {r["pm_number"] for r in inventory}
+
+    def test_add_duplicate_pm_is_409(
+        self, client, catalog_device, dashboard_secret
+    ):
+        """Adding an id that is already cataloged is a conflict."""
+        resp = client.post(
+            "/api/dashboard/devices",
+            json={"pm_number": "PM-999", "name": "Second van kit"},
+            headers=dashboard_admin_headers(dashboard_secret),
+        )
+        assert resp.status_code == 409
+
+    def test_add_blank_name_is_422(self, client, dashboard_secret):
+        """Name is required — an empty one is a validation failure."""
+        resp = client.post(
+            "/api/dashboard/devices",
+            json={"pm_number": "PM-501", "name": "   "},
+            headers=dashboard_admin_headers(dashboard_secret),
+        )
+        assert resp.status_code == 422
+
+    def test_edit_device_fields(
+        self, client, catalog_device, db_session, dashboard_secret
+    ):
+        """PATCH updates catalog fields and the stored place."""
+        resp = client.patch(
+            "/api/dashboard/devices/PM-999",
+            json={"name": "Kit van", "location": "Field", "manufacturer": "Fluke"},
+            headers=dashboard_admin_headers(dashboard_secret),
+        )
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
+        db_session.expire_all()
+        assert catalog_device.name == "Kit van"
+        assert catalog_device.location == "Field"
+
+    def test_edit_location_on_locker_row_is_409(
+        self, client, test_devices, dashboard_secret
+    ):
+        """Place on a cabinet unit belongs to borrow/return — refuse."""
+        resp = client.patch(
+            "/api/dashboard/devices/PM-001",
+            json={"location": "Workshop"},
+            headers=dashboard_admin_headers(dashboard_secret),
+        )
+        assert resp.status_code == 409
+
+    def test_edit_metadata_on_locker_row_is_ok(
+        self, client, test_devices, db_session, dashboard_secret
+    ):
+        """Name/serial edits stay allowed on cabinet units — only place is owned."""
+        resp = client.patch(
+            "/api/dashboard/devices/PM-001",
+            json={"name": "Cam A"},
+            headers=dashboard_admin_headers(dashboard_secret),
+        )
+        assert resp.status_code == 200
+        db_session.expire_all()
+        assert test_devices[0].name == "Cam A"
+
+    def test_edit_unknown_pm_is_404(self, client, dashboard_secret):
+        resp = client.patch(
+            "/api/dashboard/devices/PM-NOPE",
+            json={"name": "x"},
+            headers=dashboard_admin_headers(dashboard_secret),
+        )
+        assert resp.status_code == 404
+
+    def test_remove_device(
+        self, client, catalog_device, db_session, dashboard_secret
+    ):
+        """DELETE removes a non-borrowed row from the catalog."""
+        resp = client.delete(
+            "/api/dashboard/devices/PM-999",
+            headers=dashboard_admin_headers(dashboard_secret),
+        )
+        assert resp.status_code == 200
+        db_session.expire_all()
+        assert DeviceRepository.find_by_pm(db_session, "PM-999") is None
+
+    def test_remove_borrowed_is_409(
+        self, client, mock_context, test_user, test_devices, db_session,
+        dashboard_secret,
+    ):
+        """A borrowed unit cannot be deleted — return it first."""
+        from smart_locker.services.locker_service import LockerService
+
+        user_session = mock_context.session_mgr.start_session(test_user)
+        LockerService.borrow_device(db_session, user_session, test_devices[0].id)
+        db_session.commit()
+        resp = client.delete(
+            "/api/dashboard/devices/PM-001",
+            headers=dashboard_admin_headers(dashboard_secret),
+        )
+        assert resp.status_code == 409
+        db_session.expire_all()
+        assert DeviceRepository.find_by_pm(db_session, "PM-001") is not None
+
+    def test_remove_device_with_history_is_409(
+        self, client, mock_context, test_user, test_devices, db_session,
+        dashboard_secret,
+    ):
+        """A returned unit keeps its audit rows — removal is refused, not 500."""
+        from smart_locker.services.locker_service import LockerService
+
+        user_session = mock_context.session_mgr.start_session(test_user)
+        LockerService.borrow_device(db_session, user_session, test_devices[0].id)
+        db_session.commit()
+        LockerService.return_device(db_session, user_session, test_devices[0].id)
+        db_session.commit()
+        resp = client.delete(
+            "/api/dashboard/devices/PM-001",
+            headers=dashboard_admin_headers(dashboard_secret),
+        )
+        assert resp.status_code == 409
+        db_session.expire_all()
+        assert DeviceRepository.find_by_pm(db_session, "PM-001") is not None
+
+    def test_remove_unknown_pm_is_404(self, client, dashboard_secret):
+        resp = client.delete(
+            "/api/dashboard/devices/PM-NOPE",
+            headers=dashboard_admin_headers(dashboard_secret),
+        )
+        assert resp.status_code == 404
+
+    def test_mutations_require_secret_even_when_set(self, client, dashboard_secret):
+        """A wrong header value on CRUD is still 401."""
+        resp = client.post(
+            "/api/dashboard/devices",
+            json={"pm_number": "PM-500", "name": "Crimpers"},
+            headers=dashboard_admin_headers("wrong-secret"),
+        )
+        assert resp.status_code == 401
+        resp = client.delete(
+            "/api/dashboard/devices/PM-500",
+            headers=dashboard_admin_headers("wrong-secret"),
+        )
+        assert resp.status_code == 401
+
+
+class TestDashboardMirrorApi:
+    """Mirror status/diffs/apply/dismiss endpoints."""
+
+    def _configure_mirror(self, monkeypatch, tmp_path, path):
+        monkeypatch.setenv("SMART_LOCKER_MIRROR_PATH", str(path))
+
+    def test_mirror_status_public_unconfigured(self, client):
+        """GET /api/dashboard/mirror is public and reports unconfigured."""
+        resp = client.get("/api/dashboard/mirror")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["configured"] is False
+        assert body["state"] == "unconfigured"
+
+    def test_mirror_diffs_requires_secret(self, client):
+        resp = client.get("/api/dashboard/mirror/diffs")
+        assert resp.status_code == 401
+
+    def test_mirror_apply_requires_secret(self, client):
+        resp = client.post("/api/dashboard/mirror/apply")
+        assert resp.status_code == 401
+
+    def test_mirror_dismiss_requires_secret(self, client):
+        resp = client.post("/api/dashboard/mirror/dismiss")
+        assert resp.status_code == 401
+
+    def test_mirror_apply_unavailable_is_503(
+        self, client, tmp_path, monkeypatch, dashboard_secret
+    ):
+        """Applying with no readable mirror file maps to 503."""
+        self._configure_mirror(monkeypatch, tmp_path, tmp_path / "gone.xlsx")
+        resp = client.post(
+            "/api/dashboard/mirror/apply",
+            headers=dashboard_admin_headers(dashboard_secret),
+        )
+        assert resp.status_code == 503
+
+    def test_external_edit_detected_and_dismissed(
+        self, client, catalog_device, db_session, tmp_path, monkeypatch,
+        dashboard_secret,
+    ):
+        """A hand edit flips external_changes; dismiss keeps the database."""
+        from smart_locker.database.engine import get_engine
+        from smart_locker.sync import mirror
+        from openpyxl import load_workbook
+
+        path = tmp_path / "mirror.xlsx"
+        self._configure_mirror(monkeypatch, tmp_path, path)
+        engine = get_engine()
+        # First tick adopts/seeds; pending write flushes the catalog out.
+        mirror.tick(engine, trigger="manual")
+        assert path.exists()
+        # Hand-edit the file: change the catalog row's Location cell.
+        wb = load_workbook(path)
+        ws = wb.active
+        ws.cell(row=2, column=8, value="Edited by hand")
+        wb.save(path)
+        mirror.tick(engine, trigger="manual")
+        status = client.get("/api/dashboard/mirror").json()
+        assert status["external_changes"] is True
+        diffs = client.get(
+            "/api/dashboard/mirror/diffs",
+            headers=dashboard_admin_headers(dashboard_secret),
+        ).json()["diffs"]
+        assert any(d["kind"] == "changed" for d in diffs)
+        resp = client.post(
+            "/api/dashboard/mirror/dismiss",
+            headers=dashboard_admin_headers(dashboard_secret),
+        )
+        assert resp.status_code == 200
+        db_session.expire_all()
+        assert catalog_device.location == "Workshop"
+        status = client.get("/api/dashboard/mirror").json()
+        assert status["external_changes"] is False
+
+        # Dismissed edits do not stay in the file: the scheduled flush
+        # rewrites the sheet from the database.
+        mirror.flush_scheduled()
+        mirror.tick(engine, trigger="manual")
+        wb = load_workbook(path, read_only=True)
+        try:
+            row = list(wb.active.iter_rows(min_row=2, values_only=True))[0]
+        finally:
+            wb.close()
+        assert row[7] == "Workshop"
+
+    def test_apply_added_row_onto_existing_device_commits(
+        self, client, db_session, tmp_path, monkeypatch, dashboard_secret
+    ):
+        """A sheet row whose PM exists in SQLite but not in the last write
+        is an 'added' diff onto an existing row — the update must commit."""
+        from smart_locker.database.engine import get_engine
+        from smart_locker.sync import mirror
+        from openpyxl import load_workbook
+
+        path = tmp_path / "mirror.xlsx"
+        self._configure_mirror(monkeypatch, tmp_path, path)
+        engine = get_engine()
+
+        # Baseline: empty catalog writes headers only (last_write_rows = []).
+        mirror.tick(engine, trigger="manual")
+        assert path.exists()
+
+        # DB row created after the baseline (raw create marks nothing dirty)
+        # — its PM is in SQLite but not in the mirror baseline.
+        DeviceRepository.create(
+            db_session,
+            name="Old name",
+            device_type="Tool",
+            pm_number="PM-555",
+            manufacturer="Old Mfr",
+            model="X1",
+        )
+        db_session.commit()
+
+        # Hand-add the same PM to the sheet with different fields.
+        wb = load_workbook(path)
+        ws = wb.active
+        ws.append(["PM-555", "Sheet name", "Tool", "Sheet Mfr",
+                   "X1", "", "", "Bench"])
+        wb.save(path)
+        wb.close()
+
+        mirror.tick(engine, trigger="manual")
+        diffs = client.get(
+            "/api/dashboard/mirror/diffs",
+            headers=dashboard_admin_headers(dashboard_secret),
+        ).json()["diffs"]
+        assert any(d["kind"] == "added" for d in diffs)
+
+        resp = client.post(
+            "/api/dashboard/mirror/apply",
+            headers=dashboard_admin_headers(dashboard_secret),
+        )
+        assert resp.status_code == 200
+        assert resp.json()["applied"] >= 1
+
+        db_session.expire_all()
+        device = DeviceRepository.find_by_pm(db_session, "PM-555")
+        assert device.name == "Sheet name"
+        assert device.manufacturer == "Sheet Mfr"
+        assert device.location == "Bench"
 

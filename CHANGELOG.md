@@ -9,6 +9,17 @@ Work on `main` after the `v0.2.0` tag. Merging to `main` is not a release; the n
 ### Added
 
 - `POST /api/admin/exit-kiosk` is kept as an alias of Stop system so cached older kiosk pages still work after an update.
+- SQLite is now the device catalog of record: every device is a `devices` row and `locker_slot` marks the cabinet units. Dashboard Inventory and Locker both read the database — a down share no longer breaks either tab.
+- The catalog sheet on the share is now a hidden, Pi-written **mirror** (`SMART_LOCKER_MIRROR_PATH`, default `smart_locker_catalog.xlsx` next to the DB). The Pi rewrites it after every catalog change; a locked or missing file defers the write and the tick retries — the kiosk never waits on workbook I/O. An existing sheet is adopted into SQLite on first sight.
+- Hand edits to the mirror are detected and held for review: the dashboard shows a banner plus a diff list, and an admin chooses **Apply** (sheet → SQLite) or **Keep database** (the next write overwrites the sheet). Nothing is merged silently.
+- Dashboard **Admin** button in the header (secret-prompted): catalog editor (add / edit / remove device), mirror diff review, users, transactions, and NFC bind/unbind. The dashboard 5-tap is gone; the kiosk's own 5-tap stays.
+- Owner change on a **non-locker** device from dashboard Inventory is now public — no admin password. Location on a locker unit is derived from borrow state and cannot be edited anywhere.
+- Register Device promotes a registerable catalog row (no slot, place = in-locker word) into a free slot; the kiosk list offers the registerable rows.
+- Mirror status/diff endpoints under `/api/dashboard/mirror*` and `GET /api/admin/devices/registerable`; `POST /api/admin/sync-source` now runs one mirror tick.
+
+### Removed
+
+- Excel export (`GET /api/admin/export-excel`), `SMART_LOCKER_EXCEL_AUTO_EXPORT`, the `smart_locker_data.xlsx` export workbook, and the 6-hour source-import interval — replaced by the mirror tick (`SMART_LOCKER_MIRROR_SYNC_SECONDS`).
 
 ### Fixed
 

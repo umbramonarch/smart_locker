@@ -1,20 +1,18 @@
 """
 File: owner_edit.py
-Description: Admin-secret-gated dashboard owner change on Inventory. Writes
-             the Location cell in the catalog Excel for PMs that are not
-             locker devices. Never inserts a locker row. Locker PMs are
-             refused — borrow and return stay on the kiosk.
+Description: Public dashboard holder change on Inventory. Writes the stored
+             place on a catalog row that is not in the cabinet and marks the
+             mirror dirty. Cabinet units are refused — holder follows the
+             kiosk borrow/return.
 Project: smart_locker/services
-Notes: POST /api/dashboard/owner uses require_dashboard_admin
-       (X-Smart-Locker-Admin). Inventory/Locker GETs stay public.
-       This module is the Excel write.
+Notes: POST /api/dashboard/owner is public per the plan — changing the
+       holder of a device that is not in the cabinet has no password.
 """
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from pathlib import Path
 
 from sqlalchemy.orm import Session
 
@@ -24,7 +22,7 @@ from smart_locker.database.repositories import (
     RegistrantRepository,
     UserRepository,
 )
-from smart_locker.sync.location_writeback import write_location_value
+from smart_locker.services.device_catalog import LockerOwned, set_place
 
 logger = logging.getLogger(__name__)
 
@@ -33,25 +31,17 @@ class OwnerEditError(Exception):
     """Base for owner-edit failures the API maps to HTTP errors."""
 
 
-class CatalogUnavailable(OwnerEditError):
-    """Source Excel is missing, locked, or unreadable."""
-
-
 class UnknownPm(OwnerEditError):
-    """The PM is not a row in the catalog Excel."""
+    """The id is not a row in the catalog."""
 
 
 class InvalidOwnerRequest(OwnerEditError):
-    """PM number was empty."""
-
-
-class LockerOwned(OwnerEditError):
-    """This PM is a locker device; owner is set at the kiosk."""
+    """id was empty."""
 
 
 @dataclass(frozen=True)
 class OwnerEditResult:
-    """Outcome of one admin-secret-gated owner change."""
+    """Outcome of one owner change."""
 
     pm_number: str
     owner: str
@@ -93,50 +83,32 @@ def owner_choices(session: Session) -> list[str]:
 
 def set_owner(
     session: Session,
-    source_path: str | Path,
     pm_number: str,
     owner: str,
 ) -> OwnerEditResult:
-    """Change Location for one non-locker PM in Excel only.
+    """Change the holder of one non-cabinet catalog row.
 
     Args:
         session: Active database session (caller commits).
-        source_path: Path to ``device-list.xlsx``.
-        pm_number: Equipment number to match in Excel.
-        owner: New owner / location text (registered user, registrant, or free text).
+        pm_number: Device id to change.
+        owner: New holder/place text (registered user, registrant, or free text).
 
     Returns:
         OwnerEditResult (``locker`` is always False on success).
 
     Raises:
-        InvalidOwnerRequest: Empty PM number.
-        LockerOwned: PM is already a locker device.
-        CatalogUnavailable: Workbook missing, locked, or unreadable.
-        UnknownPm: PM is not in the catalog sheet.
+        InvalidOwnerRequest: Empty id.
+        LockerOwned: The row is a cabinet unit.
+        UnknownPm: id is not in the catalog.
     """
     pm = (pm_number or "").strip()
     if not pm:
-        raise InvalidOwnerRequest("PM number is required.")
+        raise InvalidOwnerRequest("Device id is required.")
     name = (owner or "").strip()
 
-    path = Path(source_path) if source_path else None
-    if path is None or not str(source_path).strip():
-        raise CatalogUnavailable("Catalog Excel is not configured.")
+    device = DeviceRepository.find_by_pm(session, pm)
+    if device is None:
+        raise UnknownPm(f"{pm} is not in the catalog.")
 
-    if DeviceRepository.find_by_pm(session, pm) is not None:
-        raise LockerOwned(
-            "This device is in the locker. Change owner at the kiosk."
-        )
-
-    written = write_location_value(path, pm, name)
-    if written.error:
-        raise CatalogUnavailable(
-            "Catalog Excel is not available."
-            if written.error in ("missing", "unconfigured", "unavailable")
-            else f"Catalog Excel could not be written ({written.error})."
-        )
-    if written.skipped and written.written == 0 and written.unchanged == 0:
-        raise UnknownPm(f"{pm} is not in the catalog Excel.")
-
-    logger.info("Dashboard owner: %s → %s.", pm, name)
-    return OwnerEditResult(pm_number=pm, owner=name, locker=False)
+    stored = set_place(session, device, name)
+    return OwnerEditResult(pm_number=device.pm_number, owner=stored, locker=False)

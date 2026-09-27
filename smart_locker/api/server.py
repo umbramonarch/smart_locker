@@ -18,15 +18,14 @@ from fastapi.staticfiles import StaticFiles
 import smart_locker.api.app_context as ctx
 from config.settings import (
     DASHBOARD_SHARE_PATH,
+    MIRROR_SYNC_SECONDS,
     PHOTO_INPUT_PATH,
     PHOTO_SERVE_DIR,
     PUBLIC_URL,
-    SOURCE_SYNC_INTERVAL_HOURS,
 )
 from smart_locker.api.app_context import AppContext
 from smart_locker.database.engine import get_engine
 from smart_locker.api.routes import router
-from smart_locker.sync.workbook_adapter import configured_workbook
 
 logger = logging.getLogger(__name__)
 
@@ -35,25 +34,21 @@ FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 
 
 def _start_background_sync() -> None:
-    """Start non-critical source and photo synchronization services.
+    """Start non-critical catalog-mirror and photo synchronization services.
 
-    Scheduler setup queues the potentially slow workbook import in its own
-    worker thread. Therefore this lifecycle work finishes before Uvicorn begins
-    serving without waiting for that import.
+    Scheduler setup queues the potentially slow workbook tick in its own
+    worker thread. Therefore this lifecycle work finishes before Uvicorn
+    begins serving without waiting for it.
     """
-    workbook = configured_workbook()
-    if workbook is not None:
-        try:
-            from smart_locker.sync.scheduler import start_scheduler
+    try:
+        from smart_locker.sync.scheduler import start_scheduler
 
-            start_scheduler(
-                get_engine(), workbook.path, SOURCE_SYNC_INTERVAL_HOURS
-            )
-        except Exception:
-            logger.exception(
-                "Source-import scheduler failed to start — continuing without it. "
-                "The kiosk stays up; run the admin 'Sync source' once the share is back."
-            )
+        start_scheduler(get_engine(), MIRROR_SYNC_SECONDS)
+    except Exception:
+        logger.exception(
+            "Mirror scheduler failed to start — continuing without it. "
+            "The kiosk stays up; the mirror catches up on the next change."
+        )
 
     if PHOTO_INPUT_PATH:
         try:
@@ -83,9 +78,9 @@ async def lifespan(app: FastAPI):
     """Manage application lifecycle — start NFC reader on startup, stop on shutdown.
 
     Creates the shared ``AppContext`` singleton, starts the NFC bridge loop and
-    sync services, then yields control to uvicorn. The source scheduler queues
-    its startup workbook import in the background, so health is available while
-    that import runs. On shutdown, stops the NFC reader and scheduler.
+    sync services, then yields control to uvicorn. The mirror scheduler runs
+    its startup tick on a worker thread, so health is available while the
+    tick runs. On shutdown, stops the NFC reader and scheduler.
 
     Args:
         app: The FastAPI application instance (provided by the framework).

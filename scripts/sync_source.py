@@ -1,12 +1,14 @@
 """
 File: sync_source.py
-Description: Manually trigger source Excel import from the device catalog
-             spreadsheet, then write locker Location back.
-             Updates catalog metadata on existing locker devices; never
-             inserts new locker rows. Dry-run skips both DB and Excel writes.
+Description: Run one catalog-mirror tick by hand — adopt the sheet on first
+             sight, detect hand edits, and flush pending writes. The SQLite
+             catalog is the source of truth; this just forces the cycle the
+             background scheduler already runs.
 Project: smart_locker/scripts
-Notes: Usage: python -m scripts.sync_source [--file path] [--dry-run]
-       Defaults to SMART_LOCKER_SOURCE_EXCEL_PATH from .env if --file is omitted.
+Notes: Usage: python -m scripts.sync_source [--diffs]
+       The mirror path comes from SMART_LOCKER_MIRROR_PATH, the legacy
+       SMART_LOCKER_SOURCE_EXCEL_PATH, or smart_locker_catalog.xlsx next to
+       the database.
 """
 
 import argparse
@@ -16,58 +18,43 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from config.logging_config import setup_logging
-from config.settings import SOURCE_EXCEL_PATH
 from smart_locker.database.engine import get_engine, init_db
-from smart_locker.sync.source_import import import_from_source_excel
 
 
 def main() -> None:
-    """Parse CLI arguments and trigger a source Excel import.
-
-    Reads the device catalog spreadsheet (from ``--file`` or the
-    ``SMART_LOCKER_SOURCE_EXCEL_PATH`` env var) and updates catalog
-    metadata on locker devices already in SQLite. Supports dry-run preview.
+    """Parse CLI arguments and run a mirror tick (or list sheet diffs).
 
     Returns:
-        None. Import summary is printed to stdout.
+        None. The tick summary is printed to stdout.
     """
-    parser = argparse.ArgumentParser(description="Update locker catalog from source Excel.")
-    parser.add_argument("--file", default=None, help="Path to source Excel (default: from env)")
-    parser.add_argument("--sheet", default=None, help="Sheet name (default: first sheet)")
-    parser.add_argument("--dry-run", action="store_true", help="Preview without writing")
+    parser = argparse.ArgumentParser(description="Sync the catalog mirror workbook.")
+    parser.add_argument(
+        "--diffs",
+        action="store_true",
+        help="List hand edits found in the sheet instead of syncing",
+    )
     args = parser.parse_args()
 
     setup_logging()
-
-    source_path = args.file or SOURCE_EXCEL_PATH
-    if not source_path:
-        print("ERROR: No source path. Use --file or set SMART_LOCKER_SOURCE_EXCEL_PATH.")
-        return
-
     init_db()
 
-    print(f"Importing from: {source_path}")
-    result = import_from_source_excel(
-        engine=get_engine(),
-        source_path=source_path,
-        sheet_name=args.sheet,
-        dry_run=args.dry_run,
-    )
+    from smart_locker.sync import mirror
 
-    if args.dry_run:
-        print("[DRY RUN] No changes written to database.")
-    else:
-        from smart_locker.sync.location_writeback import write_location_with_engine
+    if args.diffs:
+        diffs, err = mirror.external_diffs()
+        if err:
+            print(f"Mirror unavailable: {err}")
+            return
+        if not diffs:
+            print("No hand edits pending.")
+            return
+        for diff in diffs:
+            print(f"  {diff['kind']}: {diff['pm_number']} "
+                  f"{diff.get('field', '')} sheet={diff.get('sheet')} db={diff.get('database')}")
+        return
 
-        write_location_with_engine(get_engine(), source_path)
-
-    print(
-        f"\nDone: {result.updated} updated, {result.unchanged} unchanged, "
-        f"{result.non_locker_skipped} not in locker, "
-        f"{result.errors} errors."
-    )
-    for detail in result.error_details:
-        print(f"  ERROR: {detail}")
+    result = mirror.tick(get_engine(), trigger="manual")
+    print(f"Mirror tick: {result}")
 
 
 if __name__ == "__main__":

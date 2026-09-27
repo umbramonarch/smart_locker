@@ -1,12 +1,12 @@
 """
 File: device_registration.py
-Description: Admin Register Device — look up a PM in the catalog Excel,
-             assign a unique locker slot, and insert one SQLite row. Sync never
-             creates locker devices; this module is the only insert path.
+Description: Admin Register Device — promote a catalog row into a cabinet
+             unit by assigning a free locker slot. The SQLite catalog is the
+             lookup; the NFC bind is armed by the API afterward.
 Project: smart_locker/services
-Notes: Unknown PM or a missing/locked workbook leaves the database unchanged.
-       New rows start AVAILABLE. NFC bind is armed by the API after insert.
-       After insert, the API commits SQLite then schedules Location write-back.
+Notes: Unknown id or a taken slot leaves the database unchanged. The row
+       keeps its catalog fields; registering only assigns the slot.
+       After the API commits SQLite it marks the mirror dirty.
 """
 
 from __future__ import annotations
@@ -17,19 +17,14 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from config.settings import MAX_LOCKER_SLOT, asset_label
-from smart_locker.database.models import Device, DeviceStatus
+from smart_locker.database.models import Device
 from smart_locker.database.repositories import DeviceRepository
-from smart_locker.sync.source_import import CatalogReadError, lookup_catalog_by_pm
 
 logger = logging.getLogger(__name__)
 
 
-class CatalogUnavailable(Exception):
-    """Source Excel is missing, locked, or unreadable (share down)."""
-
-
 class UnknownPm(Exception):
-    """The PM number is not in the catalog spreadsheet."""
+    """The id is not in the SQLite catalog."""
 
 
 class SlotTaken(Exception):
@@ -37,7 +32,7 @@ class SlotTaken(Exception):
 
 
 class AlreadyRegistered(Exception):
-    """This PM is already a locker device."""
+    """This id is already a locker device."""
 
 
 class InvalidSlot(Exception):
@@ -65,25 +60,22 @@ def _require_free_slot(session: Session, locker_slot: int, ignore_id: int | None
 
 def register_locker_device(
     session: Session,
-    source_path: str,
     pm_number: str,
     locker_slot: int,
 ) -> Device:
-    """Insert one locker device from the Excel catalog into a free slot.
+    """Put one catalog device into a free locker slot.
 
     Args:
         session: Active database session.
-        source_path: Path to ``device-list.xlsx``.
-        pm_number: Equipment number to look up.
+        pm_number: Catalog id to promote.
         locker_slot: Physical cabinet slot (unique, >= 1).
 
     Returns:
-        The new Device row (AVAILABLE, no tag yet).
+        The same Device row, now a cabinet unit (AVAILABLE, no tag yet).
 
     Raises:
-        CatalogUnavailable: Workbook missing, locked, or unreadable.
-        UnknownPm: PM not in the sheet.
-        AlreadyRegistered: PM already in SQLite.
+        UnknownPm: id not in the catalog.
+        AlreadyRegistered: id already has a locker slot.
         InvalidSlot: Slot is not >= 1.
         SlotTaken: Slot occupied.
     """
@@ -91,46 +83,25 @@ def register_locker_device(
     if not pm:
         raise UnknownPm(f"{asset_label()} is empty.")
 
-    existing = DeviceRepository.find_by_pm(session, pm)
-    if existing is not None:
+    device = DeviceRepository.find_by_pm(session, pm)
+    if device is None:
+        raise UnknownPm(f"{asset_label()} '{pm}' is not in the catalog.")
+    if device.locker_slot is not None:
         raise AlreadyRegistered(f"{pm} is already in the locker.")
 
     _require_free_slot(session, locker_slot)
 
     try:
-        catalog = lookup_catalog_by_pm(source_path, pm)
-    except CatalogReadError as e:
-        raise CatalogUnavailable(str(e)) from e
-
-    if catalog is None:
-        raise UnknownPm(f"{asset_label()} '{pm}' was not found in the source Excel.")
-
-    serial = catalog.serial_number
-    if serial and DeviceRepository.find_by_serial(session, serial) is not None:
-        logger.warning("Serial %s already in locker — omitting it for %s.", serial, pm)
-        serial = None
-
-    try:
-        device = DeviceRepository.create(
-            session,
-            name=catalog.name,
-            device_type=catalog.device_type,
-            pm_number=catalog.pm_number,
-            serial_number=serial,
-            locker_slot=locker_slot,
-            manufacturer=catalog.manufacturer,
-            model=catalog.model,
-            calibration_due=catalog.calibration_due,
-            status=DeviceStatus.AVAILABLE.value,
-        )
+        DeviceRepository.set_locker_slot(session, device, locker_slot)
     except IntegrityError as e:
         session.rollback()
         raise SlotTaken(f"Slot {locker_slot} is already used.") from e
 
-    if catalog.model:
-        for sib in DeviceRepository.find_by_model(session, catalog.model):
+    if device.model and not device.image_path:
+        for sib in DeviceRepository.find_by_model(session, device.model):
             if sib.id != device.id and sib.image_path:
                 device.image_path = sib.image_path
+                session.flush()
                 break
 
     logger.info(

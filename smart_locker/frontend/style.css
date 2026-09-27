@@ -2138,6 +2138,27 @@ body::after {
   background: var(--surface-3);
   color: var(--text-muted);
 }
+.bind-registerable-list {
+  max-height: 22vh;
+}
+.bind-registerable {
+  font-family: var(--font-display);
+  font-size: 0.82rem;
+  font-weight: 600;
+  text-align: left;
+  padding: 0.6rem 0.85rem;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+}
+.bind-registerable.selected {
+  border-color: var(--border-accent);
+  color: var(--accent);
+}
+.bind-registerable:only-child:empty { display: none; }
+.bind-registerable-list:empty { display: none; }
 .bind-row-actions { display: flex; gap: 0.4rem; flex-shrink: 0; }
 .bind-row-actions button {
   font-family: var(--font-display);

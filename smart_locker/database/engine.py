@@ -35,7 +35,7 @@ def get_engine(url: str | None = None):
         db_url = url or DATABASE_URL
         engine_kwargs: dict = {"echo": False}
         if db_url.startswith("sqlite"):
-            # NFC dispatch and Location write-back run on worker threads.
+            # NFC dispatch and mirror writes run on worker threads.
             engine_kwargs["connect_args"] = {"check_same_thread": False}
             if ":memory:" in db_url:
                 engine_kwargs["poolclass"] = StaticPool
@@ -50,7 +50,7 @@ def get_engine(url: str | None = None):
                 cursor.execute("PRAGMA journal_mode=WAL")
                 cursor.execute("PRAGMA foreign_keys=ON")
                 # Writers retry a locked db instead of failing — the background
-                # source import can overlap tap and HTTP commits.
+                # mirror tick can overlap tap and HTTP commits.
                 cursor.execute("PRAGMA busy_timeout=5000")
                 cursor.close()
 

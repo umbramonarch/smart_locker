@@ -41,12 +41,12 @@ function applyAssetLabel(label) {
   const listHint = document.getElementById('bind-list-hint');
   if (listHint) {
     listHint.textContent =
-      `Add a unit from the Excel list (${text} + free slot), then tap its sticker. Existing rows can bind, unbind, or change slot.`;
+      `Add a catalog unit (${text} + free slot), then tap its sticker. Existing rows can bind, unbind, or change slot.`;
   }
   const addHint = document.getElementById('bind-add-hint');
   if (addHint) {
     addHint.textContent =
-      `Enter the ${text} from the catalog spreadsheet, pick a free slot, then continue to tap the sticker.`;
+      `Pick a catalog unit (or type its ${text}), choose a free slot, then continue to tap the sticker.`;
   }
   const search = document.getElementById('bind-search');
   if (search) search.placeholder = `Search name or ${text}…`;
@@ -235,10 +235,10 @@ async function apiCancelRegistration() {
 }
 
 /**
- * Fetch the list of approved registrant names from the backend. These names
- * come from the Location column in the source Excel and are
- * stored in the registrants table. Already-registered users are excluded.
- * `syncing` is true while a catalog import is still filling the table.
+ * Fetch the list of approved registrant names from the backend. Person names
+ * seed the registrants table when the mirror adopts an existing catalog
+ * sheet. Already-registered users are excluded.
+ * `syncing` is true while a mirror tick is still filling the table.
  * @returns {Promise<{names: string[], syncing: boolean}>} Available names.
  */
 async function apiGetRegistrants() {
@@ -1520,7 +1520,7 @@ async function openRegister() {
  * Entrance stagger uses CSS --i / name-item-in (not transitionDelay), so
  * hover is not lagged after the list appears.
  * @param {string[]} names - Array of approved registrant names to display.
- * @param {boolean} [syncing=false] - True while a catalog import is in flight;
+ * @param {boolean} [syncing=false] - True while a mirror tick is in flight;
  *   an empty list then means "not loaded yet", not "not approved".
  */
 function populateNameList(names, syncing = false) {
@@ -1950,8 +1950,8 @@ async function openAdminPanel() {
   requestAnimationFrame(() => requestAnimationFrame(() => {
     overlay.classList.add('visible');
   }));
-  // Establish the backend admin session up front so EVERY panel action (sync
-  // status/preview/commit, export, software update) is authorized the moment
+  // Establish the backend admin session up front so EVERY panel action (mirror
+  // sync, register, bind/unbind, software update) is authorized the moment
   // the panel opens — not only after the admin happens to use the Borrow/Return
   // shortcuts (which were previously the only callers of adminStartSession).
   await adminStartSession();
@@ -2058,9 +2058,6 @@ async function adminGotoReturn() {
   armIdle();
 }
 
-/** @type {{timer:number, origDesc:string}|null} Pending sync confirmation, if any. */
-let _syncPreview = null;
-
 /**
  * Render the "Last sync: …" line in the admin footer from /api/admin/sync-status.
  * @returns {Promise<void>}
@@ -2072,125 +2069,54 @@ async function refreshSyncStatus() {
     const res = await fetch('/api/admin/sync-status');
     if (!res.ok) return;
     const s = await res.json();
-    if (!s.at) { el.textContent = 'Last sync: never'; return; }
+    let suffix = '';
+    if (s.mirror && s.mirror.external_changes) {
+      suffix = ' — sheet edited by hand (review on the dashboard)';
+    } else if (s.mirror && s.mirror.pending_writes) {
+      suffix = ' — sheet write pending';
+    }
+    if (!s.at) { el.textContent = `Last sync: never${suffix}`; return; }
     const when = s.at_local
       ? `${s.at_local}${s.ago ? ' (' + s.ago + ')' : ''}`
       : new Date(s.at).toLocaleString();
-    const verdict = s.ok ? `${s.updated} updated` : `failed${s.message ? ': ' + s.message : ''}`;
-    el.textContent = `Last sync: ${when} (${s.trigger}) — ${verdict}`;
+    const verdict = s.ok ? `${s.updated} written` : `failed${s.message ? ': ' + s.message : ''}`;
+    el.textContent = `Last sync: ${when} (${s.trigger}) — ${verdict}${suffix}`;
   } catch (_) { /* status unavailable — leave the line as-is */ }
 }
 
 /**
- * Admin source sync with a preview-then-confirm flow. The first tap runs a
- * dry-run preview (/api/admin/sync-preview) and shows the add/update/skip diff
- * on the button; a second tap within the confirm window commits the import
- * (/api/admin/sync-source). Avoids native dialogs so it works in kiosk Chromium.
+ * Admin sheet sync: run one mirror tick — flush a pending write and detect
+ * hand edits. Sheet edits are reviewed on the dashboard, not applied here.
  * @returns {Promise<void>}
  */
 async function adminSyncSource() {
   const btn = document.getElementById('admin-sync-source');
   const label = btn.querySelector('.admin-btn-label');
-  const desc = btn.querySelector('.admin-btn-desc');
 
-  const reset = (origDesc) => {
-    label.textContent = 'Sync Source';
-    if (origDesc !== undefined) desc.textContent = origDesc;
-    btn.classList.remove('confirm');
-    btn.style.pointerEvents = '';
-  };
-
-  // Second tap within the confirm window -> commit the import.
-  if (_syncPreview) {
-    const p = _syncPreview;
-    _syncPreview = null;
-    clearTimeout(p.timer);
-    label.textContent = 'Syncing…';
-    btn.style.pointerEvents = 'none';
-    try {
-      const res = await fetch('/api/admin/sync-source', { method: 'POST' });
-      const data = await res.json();
-      if (res.ok) showToast(`Synced: ${data.updated} updated`, 'success');
-      else showToast(data.detail || 'Sync failed', 'error');
-    } catch (_) {
-      showToast('Sync request failed', 'error');
-    }
-    reset(p.origDesc);
-    refreshSyncStatus();
-    return;
-  }
-
-  // First tap -> dry-run preview.
-  const origDesc = desc.textContent;
-  label.textContent = 'Checking…';
+  label.textContent = 'Syncing…';
   btn.style.pointerEvents = 'none';
   try {
-    const res = await fetch('/api/admin/sync-preview', { method: 'POST' });
-    const data = await res.json();
+    const res = await fetch('/api/admin/sync-source', { method: 'POST' });
+    const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      showToast(data.detail || 'Preview failed', 'error');
-      reset();
-      return;
+      showToast(data.detail || 'Sync failed', 'error');
+    } else if (data.external) {
+      showToast('Sheet was edited by hand — review it on the dashboard', 'error');
+    } else if (data.flushed) {
+      showToast(`Sheet updated (${data.written} rows)`, 'success');
+    } else if (data.error) {
+      showToast(`Sheet not writable: ${data.error}`, 'error');
+    } else {
+      showToast('Sheet is up to date', 'success');
     }
-    const changes = data.updated;
-    if (changes === 0) {
-      showToast(`Up to date — ${data.unchanged} unchanged, ${data.skipped} skipped`, 'success');
-      reset();
-      refreshSyncStatus();
-      return;
-    }
-    label.textContent = `Apply ${changes} change${changes === 1 ? '' : 's'}?`;
-    desc.textContent = `${data.updated} upd · ${data.unchanged} same · ${data.skipped} skip — tap to apply`;
-    btn.classList.add('confirm');
-    btn.style.pointerEvents = '';
-    const timer = setTimeout(() => { _syncPreview = null; reset(origDesc); }, 8000);
-    _syncPreview = { timer, origDesc };
   } catch (_) {
-    showToast('Preview request failed', 'error');
-    reset();
+    showToast('Sync request failed', 'error');
   }
+  label.textContent = 'Sync Sheet';
+  btn.style.pointerEvents = '';
+  refreshSyncStatus();
 }
 
-/**
- * Download the full database as an Excel workbook from the admin panel.
- * Fetches the binary .xlsx from the admin export endpoint, creates a
- * temporary blob URL, and triggers a browser download. Shows progress
- * feedback on the button and a toast on completion or failure.
- * @returns {Promise<void>}
- */
-async function adminExportExcel() {
-  const btn = document.getElementById('admin-export-excel');
-  const label = btn.querySelector('.admin-btn-label');
-  const origText = label.textContent;
-  label.textContent = 'Downloading\u2026';
-  btn.style.pointerEvents = 'none';
-
-  try {
-    const res = await fetch('/api/admin/export-excel');
-    if (!res.ok) {
-      const data = await res.json();
-      showToast(data.detail || 'Export failed', 'error');
-      return;
-    }
-    /* Convert the response body to a blob, create a temporary download
-       link, click it to trigger the browser's save dialog, then clean up. */
-    const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'smart_locker_data.xlsx';
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
-    showToast('Excel exported', 'success');
-  } catch (_) {
-    showToast('Export request failed', 'error');
-  } finally {
-    label.textContent = origText;
-    btn.style.pointerEvents = '';
-  }
-}
 
 /** @type {number} Bumped to cancel in-flight update / health polling. */
 let updatePollGen = 0;
@@ -2527,7 +2453,7 @@ function closeRegisterDevice() {
 }
 
 /**
- * Open the admin Register Device overlay (add from Excel, or bind an existing row).
+ * Open the admin Register Device overlay (add a catalog unit, or bind an existing row).
  * @returns {Promise<void>}
  */
 async function adminRegisterDevice() {
@@ -2672,7 +2598,7 @@ const SLOT_GRID_MIN = 12;
 /** Same cap as the Register Device / change-slot API (MAX_LOCKER_SLOT). */
 const SLOT_GRID_MAX = 48;
 
-/** @type {number|null} Slot chosen on the Add from Excel step. */
+/** @type {number|null} Slot chosen on the add-a-unit step. */
 let selectedAddSlot = null;
 
 /** @type {Object|null} Device being moved in the change-slot step. */
@@ -2726,7 +2652,7 @@ function renderSlotGrid(containerId, occupied, selected, onPick) {
 }
 
 /**
- * 60s countdown on the tap-sticker step. Shared by Bind and Add from Excel.
+ * 60s countdown on the tap-sticker step. Shared by Bind and add-a-unit.
  */
 function startBindCountdown() {
   clearInterval(bindCountdownTimer);
@@ -2751,11 +2677,42 @@ function startBindCountdown() {
 }
 
 /**
- * Open the Add from Excel step (PM + free slot).
+ * Fetch the catalog rows eligible for Register Device (place = locker word,
+ * no slot yet) and render them as pickable rows on the add step.
+ * @returns {Promise<void>}
  */
-function openAddFromExcel() {
+async function loadRegisterableList() {
+  const list = document.getElementById('bind-registerable-list');
+  if (!list) return;
+  list.innerHTML = '';
+  let rows = [];
+  try {
+    const res = await fetch('/api/admin/devices/registerable');
+    if (res.ok) rows = await res.json();
+  } catch (_) { /* leave the typed-PM fallback */ }
+  rows.forEach(row => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'bind-registerable';
+    btn.textContent = `${row.name} (${row.pm_number})`;
+    btn.addEventListener('click', () => {
+      clickSound();
+      document.getElementById('bind-pm-input').value = row.pm_number;
+      list.querySelectorAll('.bind-registerable').forEach(b =>
+        b.classList.toggle('selected', b === btn)
+      );
+    });
+    list.appendChild(btn);
+  });
+}
+
+
+/**
+ * Open the Add device step (catalog unit + free slot).
+ */
+function openAddCatalogUnit() {
   if (USE_DEMO) {
-    showToast('Add from Excel is Pi only', 'error');
+    showToast('Register Device is Pi only', 'error');
     return;
   }
   document.getElementById('bind-pm-input').value = '';
@@ -2769,6 +2726,7 @@ function openAddFromExcel() {
   };
   paint();
   showBindStep('bind-step-add');
+  loadRegisterableList();
 }
 
 /**
@@ -2777,7 +2735,7 @@ function openAddFromExcel() {
  */
 async function submitRegisterDevice() {
   if (USE_DEMO) {
-    showToast('Add from Excel is Pi only', 'error');
+    showToast('Register Device is Pi only', 'error');
     return;
   }
   const pm = (document.getElementById('bind-pm-input').value || '').trim();
@@ -3148,12 +3106,11 @@ document.getElementById('bind-search').addEventListener('input', () => {
   clearTimeout(bindSearchTimer);
   bindSearchTimer = setTimeout(() => { populateBindList(false); }, 200);
 });
-document.getElementById('bind-add-open').addEventListener('click', () => { clickSound(); openAddFromExcel(); });
+document.getElementById('bind-add-open').addEventListener('click', () => { clickSound(); openAddCatalogUnit(); });
 document.getElementById('bind-add-back').addEventListener('click', () => { clickSound(); showBindStep('bind-step-list'); populateBindList(); });
 document.getElementById('bind-add-submit').addEventListener('click', () => { clickSound(); submitRegisterDevice(); });
 document.getElementById('bind-slot-back').addEventListener('click', () => { clickSound(); showBindStep('bind-step-list'); });
 document.getElementById('bind-slot-submit').addEventListener('click', () => { clickSound(); submitChangeSlot(); });
-document.getElementById('admin-export-excel').addEventListener('click', () => { clickSound(); adminExportExcel(); });
 document.getElementById('admin-update').addEventListener('click', () => { clickSound(); adminUpdate(); });
 document.getElementById('admin-stop-system').addEventListener('click', () => { clickSound(); adminStopSystem(); });
 document.getElementById('admin-shutdown').addEventListener('click', () => { clickSound(); adminShutdown(); });

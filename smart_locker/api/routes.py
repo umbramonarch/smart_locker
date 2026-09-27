@@ -4,12 +4,11 @@ Description: REST API endpoints and SSE event stream for the Smart Locker kiosk.
              Provides session management, device listing, borrow/return operations,
              user self-registration (with registrant name validation), admin-only
              manual registration, Register Device (PM + slot + NFC), device-tag
-             bind/unbind, registrant list retrieval, source sync, dashboard
-             (public Inventory from Excel and Locker from SQLite, Display
-             snapshot without person names, admin-secret owner edit and 5-tap
-             unbind / arm-bind), an admin-only Excel export download, admin
-             Stop system / Shut down, first-boot Setup (enroll the first admin
-             via a cabinet card tap), and source sync that writes Location back.
+             bind/unbind, registrant list retrieval, catalog mirror sync,
+             dashboard (public Inventory/Locker/Display from SQLite, public
+             owner edit for non-cabinet devices, admin-secret device editor and
+             mirror review), admin Stop system / Shut down, and first-boot
+             Setup (enroll the first admin via a cabinet card tap).
 Project: smart_locker/api
 Notes: Kiosk session mutations require an active session AND a loopback
        client (require_session). LAN browsers must not ride the process-global
@@ -17,9 +16,11 @@ Notes: Kiosk session mutations require an active session AND a loopback
        polls public GETs; it does not use EventSource). Self-registration
        validates against the approved registrants list; admin registration
        bypasses this check. Catalog GETs
-       under /api/dashboard/ stay public. Dashboard mutations require
-       SMART_LOCKER_DASHBOARD_ADMIN_SECRET (header X-Smart-Locker-Admin), not
-       loopback. Appliance session/shutdown/stop-system are kiosk-loopback
+       under /api/dashboard/ stay public, and changing the holder of a
+       non-cabinet device is public per the plan. Other dashboard mutations
+       require SMART_LOCKER_DASHBOARD_ADMIN_SECRET (header
+       X-Smart-Locker-Admin), not loopback. Appliance
+       session/shutdown/stop-system are kiosk-loopback
        only. Software update accepts the admin session, the dashboard secret,
        or — on a first boot with neither — the open Setup gate.
 """
@@ -37,7 +38,6 @@ from fastapi import (
     Depends,
     HTTPException,
     Request,
-    Response,
 )
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
@@ -82,10 +82,14 @@ from smart_locker.services.appliance import (
     shutdown as appliance_shutdown,
     stop_system,
 )
-from smart_locker.services.device_catalog import device_record, unbind_device_tag as clear_device_tag
+from smart_locker.services.device_catalog import (
+    catalog_record,
+    device_record,
+    is_registered,
+    unbind_device_tag as clear_device_tag,
+)
 from smart_locker.services.locker_service import LockerService
 from smart_locker.services.owner_edit import (
-    CatalogUnavailable,
     InvalidOwnerRequest,
     LockerOwned,
     UnknownPm,
@@ -94,8 +98,6 @@ from smart_locker.services.owner_edit import (
 )
 from smart_locker.services.setup_service import setup_needed, write_dashboard_secret
 from smart_locker.sync import sync_status
-from smart_locker.sync.inventory_reader import InventoryReadError, read_inventory
-from smart_locker.sync.workbook_adapter import configured_workbook
 
 logger = logging.getLogger(__name__)
 
@@ -175,7 +177,7 @@ def health() -> dict:
     Returns a small JSON snapshot a remote operator can open in any browser —
     no SSH, no Linux — to confirm the appliance is alive and see at a glance
     whether the database answers, the NFC reader is running, when the last
-    source sync ran, and whether Location write-back last succeeded. Every
+    mirror tick ran, and whether the last mirror write succeeded. Every
     probe is individually guarded so this endpoint can NEVER raise and take
     the server down; it always returns HTTP 200, and the ``status`` field is
     ``"ok"`` or ``"degraded"``.
@@ -215,7 +217,7 @@ def health() -> dict:
         last_sync = None
 
     try:
-        from smart_locker.sync.location_writeback import last_writeback as _last_wb
+        from smart_locker.sync.mirror import last_write as _last_wb
 
         last_writeback = _last_wb()
     except Exception:
@@ -411,8 +413,8 @@ def _secret_matches(provided: str, expected: str) -> bool:
 def require_dashboard_admin(request: Request) -> None:
     """Require the dashboard admin secret header. Fail closed if unset.
 
-    The 5-tap overlay is client-only and is not authorization. An admin
-    row in SQLite is also not authorization.
+    The Admin button reveal is client-only and is not authorization. An
+    admin row in SQLite is also not authorization.
 
     Args:
         request: Incoming ASGI request.
@@ -685,7 +687,7 @@ def list_devices(
     Returns:
         list[dict]: One dict per device with id, name, status, borrower_name, etc.
     """
-    devices = DeviceRepository.list_all(db)
+    devices = DeviceRepository.list_by_slot(db)
     current_user_id = user_session.user.id
     return [
         {"id": d.id, **device_record(d, current_user_id=current_user_id),
@@ -761,8 +763,8 @@ def transfer_device(
     """Transfer responsibility for a borrowed device to the current user.
 
     Delegates to ``LockerService.transfer_device`` which records a return for
-    the original borrower, a borrow for the new user, and triggers the Excel
-    Location write-back. The device stays borrowed; only the current holder
+    the original borrower, a borrow for the new user, and marks the catalog
+    mirror dirty. The device stays borrowed; only the current holder
     changes.
 
     Args:
@@ -795,7 +797,7 @@ class RegisterRequest(BaseModel):
 
 
 class RegisterDeviceRequest(BaseModel):
-    """Admin Register Device: PM from Excel plus a free locker slot."""
+    """Admin Register Device: catalog PM plus a free locker slot."""
 
     pm_number: str = Field(..., min_length=1, max_length=50)
     locker_slot: int = Field(..., ge=1, le=MAX_LOCKER_SLOT)
@@ -814,18 +816,44 @@ class KioskDisplayBody(BaseModel):
 
 
 class OwnerEditBody(BaseModel):
-    """Admin-secret-gated dashboard owner change for one catalog PM.
+    """Public dashboard owner change for one non-cabinet catalog PM.
 
-    Inventory/Locker GETs stay public. This POST requires
-    ``X-Smart-Locker-Admin``; clock 5-tap is not authorization.
+    Changing the holder of a device that is not in the cabinet has no admin
+    password per the plan. Cabinet units are refused — their holder follows
+    kiosk borrow/return.
     """
 
     pm_number: str = Field(..., min_length=1, max_length=50)
     owner: str = Field("", max_length=100)
 
 
+class DeviceAddBody(BaseModel):
+    """Dashboard editor: add one device to the catalog."""
+
+    pm_number: str = Field(..., min_length=1, max_length=50)
+    name: str = Field(..., min_length=1, max_length=100)
+    device_type: str | None = Field(None, max_length=50)
+    serial_number: str | None = Field(None, max_length=100)
+    manufacturer: str | None = Field(None, max_length=100)
+    model: str | None = Field(None, max_length=100)
+    calibration_due: str | None = Field(None, max_length=20)
+    location: str | None = Field(None, max_length=200)
+
+
+class DeviceEditBody(BaseModel):
+    """Dashboard editor: edit catalog fields on one device."""
+
+    name: str | None = Field(None, max_length=100)
+    device_type: str | None = Field(None, max_length=50)
+    serial_number: str | None = Field(None, max_length=100)
+    manufacturer: str | None = Field(None, max_length=100)
+    model: str | None = Field(None, max_length=100)
+    calibration_due: str | None = Field(None, max_length=20)
+    location: str | None = Field(None, max_length=200)
+
+
 class TagActionBody(BaseModel):
-    """Dashboard 5-tap overlay: unbind or arm-bind one locker PM."""
+    """Dashboard admin actions: unbind or arm-bind one locker PM."""
 
     pm_number: str = Field(..., min_length=1, max_length=50)
 
@@ -887,11 +915,12 @@ def start_registration(
 ):
     """Begin self-registration: validate name against approved list, await NFC tap.
 
-    The submitted name must exist in the ``registrants`` table (populated from
-    the "Location" column during source Excel import). If the name
-    is not found, the request is rejected with 403 — the user must contact an
-    admin for manual registration. Creates a ``PendingRegistration`` that the
-    NFC bridge loop will detect on the next card tap.
+    The submitted name must exist in the ``registrants`` table (seeded from
+    the "Location" column when the mirror adopts an existing sheet). If the
+    name is not found, the request is rejected with 403 — the user must
+    contact an admin for manual registration. Creates a
+    ``PendingRegistration`` that the NFC bridge loop will detect on the next
+    card tap.
 
     Args:
         body: Request body with the user's display name.
@@ -918,14 +947,14 @@ def start_registration(
     if conflict:
         raise HTTPException(status_code=409, detail=conflict)
 
-    # Validate name against the approved registrants list. While a source
-    # import is still running (startup import is a background thread), a
-    # missing name may just be "not yet imported" — say so instead of 403.
+    # Validate name against the approved registrants list. While the startup
+    # mirror tick is still adopting the sheet (background thread), a missing
+    # name may just be "not yet imported" — say so instead of 403.
     registrant = RegistrantRepository.find_by_name(db, name)
     if registrant is None:
-        from smart_locker.sync.scheduler import import_in_progress
+        from smart_locker.sync.scheduler import sync_in_progress
 
-        if import_in_progress():
+        if sync_in_progress():
             raise HTTPException(
                 status_code=503,
                 detail="Catalog sync is still running — try again shortly.",
@@ -982,10 +1011,10 @@ def cancel_registration(_: None = Depends(require_loopback)):
 def get_registrants(db: Session = Depends(get_db)):
     """Return the list of approved names available for self-registration.
 
-    Reads the ``registrants`` table (populated from the "Location"
-    column during source Excel import) and filters out names that already have
-    an active User record — those people are already registered and do not need
-    to appear in the selection list. No session required; this is a public
+    Reads the ``registrants`` table (seeded from the sheet's Location
+    column when the mirror first adopts it) and filters out names that already
+    have an active User record — those people are already registered and do not
+    need to appear in the selection list. No session required; this is a public
     endpoint called from the idle/registration screen.
 
     Args:
@@ -995,7 +1024,7 @@ def get_registrants(db: Session = Depends(get_db)):
         dict: ``{"names": list[str]}`` — alphabetically sorted list of names
               that have not yet registered.
     """
-    from smart_locker.sync.scheduler import import_in_progress
+    from smart_locker.sync.scheduler import sync_in_progress
 
     registrants = RegistrantRepository.get_all(db)
 
@@ -1009,7 +1038,7 @@ def get_registrants(db: Session = Depends(get_db)):
         for r in registrants
         if r.display_name.lower() not in registered_lower
     ]
-    return {"names": names, "syncing": import_in_progress()}
+    return {"names": names, "syncing": sync_in_progress()}
 
 
 # --- First-boot Setup -------------------------------------------------------
@@ -1031,8 +1060,8 @@ class SetupRequest(BaseModel):
 def setup_state(db: Session = Depends(get_db)) -> dict:
     """Report whether first-boot Setup is open (no active admin enrolled).
 
-    Public: the kiosk (5-tap) and the dashboard (Admin button / 5-tap) both
-    poll this to decide between Setup and the normal admin path. Exposes only
+    Public: the kiosk (5-tap) and the dashboard (Admin button) both poll
+    this to decide between Setup and the normal admin path. Exposes only
     ``needed`` and whether an admin password is already stored — never user
     rows, UIDs, or the secret.
 
@@ -1233,7 +1262,7 @@ def start_admin_registration(
     is active (the admin is already logged in). The NFC bridge loop will
     enroll the next card tap as a new user with the provided name.
 
-    Use case: when someone's name is not in the source Excel and they
+    Use case: when someone's name is not in the registrants table and they
     cannot self-register, an admin uses the "Register User" button in the
     admin panel to manually enroll them.
 
@@ -1274,16 +1303,48 @@ def start_admin_registration(
     return {"success": True, "message": "Tap the new user's NFC card to complete registration."}
 
 
+@router.get("/api/admin/devices/registerable")
+def list_registerable_devices(
+    db: Session = Depends(get_db),
+    user_session: UserSession = Depends(require_session),
+):
+    """Catalog rows the kiosk Register Device screen can offer (admin).
+
+    Rows whose place is the in-locker word and which have no cabinet slot
+    yet — the SQLite catalog is the lookup, so the screen no longer waits
+    on a share file.
+
+    Args:
+        db: Database session (injected by ``get_db``).
+        user_session: The active admin session (injected by ``require_session``).
+
+    Returns:
+        list[dict]: ``pm_number`` and ``name`` per eligible row.
+
+    Raises:
+        HTTPException: 403 if not admin.
+    """
+    if user_session.user.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Admin access required.")
+
+    from smart_locker.services.device_catalog import registerable_devices
+
+    return [
+        {"pm_number": d.pm_number, "name": d.name}
+        for d in registerable_devices(db)
+    ]
+
+
 @router.post("/api/admin/devices/register")
 def register_locker_device(
     body: RegisterDeviceRequest,
     db: Session = Depends(get_db),
     user_session: UserSession = Depends(require_session),
 ):
-    """Create a locker row from Excel catalog (PM + free slot) and arm NFC bind.
+    """Promote a catalog row into a locker slot (PM + free slot) and arm NFC bind.
 
-    Looks up the PM in ``device-list.xlsx``, copies catalog fields, assigns the
-    chosen slot, then waits for the sticker tap (same window as bind-tag).
+    Looks up the PM in the SQLite catalog, assigns the chosen slot, then
+    waits for the sticker tap (same window as bind-tag).
 
     Args:
         body: PM number and locker slot.
@@ -1294,8 +1355,8 @@ def register_locker_device(
         dict: ``success``, ``device_id``, ``name``, ``pm_number``, ``locker_slot``.
 
     Raises:
-        HTTPException: 503 if not ready / share down, 403 if not admin,
-            400 if source path unset, 404 if PM unknown, 409 if PM or slot taken.
+        HTTPException: 503 if not ready, 403 if not admin,
+            404 if PM unknown, 409 if PM or slot taken.
     """
     if ctx_module.context is None:
         raise HTTPException(status_code=503, detail="System not ready.")
@@ -1307,13 +1368,8 @@ def register_locker_device(
     if conflict:
         raise HTTPException(status_code=409, detail=conflict)
 
-    workbook = configured_workbook()
-    if workbook is None:
-        raise HTTPException(status_code=400, detail="Source Excel path not configured.")
-
     from smart_locker.services.device_registration import (
         AlreadyRegistered,
-        CatalogUnavailable,
         InvalidSlot,
         SlotTaken,
         UnknownPm,
@@ -1321,11 +1377,7 @@ def register_locker_device(
     )
 
     try:
-        device = create_from_catalog(
-            db, workbook.path, body.pm_number, body.locker_slot,
-        )
-    except CatalogUnavailable as e:
-        raise HTTPException(status_code=503, detail=str(e)) from e
+        device = create_from_catalog(db, body.pm_number, body.locker_slot)
     except UnknownPm as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
     except (SlotTaken, AlreadyRegistered) as e:
@@ -1334,19 +1386,24 @@ def register_locker_device(
         raise HTTPException(status_code=422, detail=str(e)) from e
 
     db.flush()
-    try:
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
-    from smart_locker.sync.location_writeback import schedule_write_location
-
-    schedule_write_location(workbook)
+    # Arm before committing: a bind conflict rolls the slot assignment back
+    # so a 409 never leaves the registration half-applied.
     conflict = arm_pending_tag_bind(
         ctx_module.context, PendingTagBind(device_id=device.id)
     )
     if conflict:
+        db.rollback()
         raise HTTPException(status_code=409, detail=conflict)
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        assign_pending_tag_bind(ctx_module.context, None)
+        raise
+    from smart_locker.sync import mirror
+
+    mirror.mark_dirty()
+    mirror.schedule_flush()
     logger.info(
         "Locker device registered %s (pm=%s, slot=%s) by admin %s. Awaiting sticker.",
         device.name,
@@ -1506,147 +1563,88 @@ def unbind_device_tag(
 def trigger_source_sync(
     user_session: UserSession = Depends(require_session),
 ):
-    """Manually trigger source Excel import then Location write-back (admin only).
+    """Run one mirror tick now (admin only).
 
-    Reads the device catalog spreadsheet and updates catalog fields on locker
-    devices already in SQLite. After the import, locker locations are written
-    back into Location. Only users with ADMIN role may invoke this.
+    The SQLite catalog is the source of truth — the tick detects hand edits
+    in the mirror file and flushes any pending write. Only users with ADMIN
+    role may invoke this.
 
     Args:
         user_session: The active session (injected by ``require_session``).
 
     Returns:
-        dict: Import summary with ``updated``, ``unchanged``, and ``errors``
-              counts.
+        dict: Tick summary — ``flushed``, ``written``, ``external``,
+              ``skipped``, ``error``.
 
     Raises:
-        HTTPException: 403 if not admin, 400 if source path not configured.
+        HTTPException: 403 if not admin, 409 if a tick is already running.
     """
     if user_session.user.role != UserRole.ADMIN:
         raise HTTPException(status_code=403, detail="Admin access required.")
 
-    workbook = configured_workbook()
-    if workbook is None:
-        raise HTTPException(status_code=400, detail="Source Excel path not configured.")
-
     from smart_locker.database.engine import get_engine
-    from smart_locker.sync.scheduler import ImportInProgress, run_source_import_exclusive
+    from smart_locker.sync.scheduler import run_mirror_tick
 
-    try:
-        result = run_source_import_exclusive(
-            get_engine(), workbook.path, trigger="manual"
-        )
-    except ImportInProgress as e:
+    result = run_mirror_tick(get_engine(), trigger="manual")
+    if result.get("skipped") == "in_progress":
         raise HTTPException(
-            status_code=409, detail="A catalog import is already running."
-        ) from e
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Import failed: {e}") from e
-
-    if result is None:
-        raise HTTPException(status_code=400, detail="Source Excel file not found.")
-    return {
-        "success": True,
-        "updated": result.updated,
-        "unchanged": result.unchanged,
-        "errors": result.errors,
-    }
+            status_code=409, detail="A mirror sync is already running."
+        )
+    return {"success": result.get("error") is None, **result}
 
 
 @router.post("/api/admin/sync-preview")
 def preview_source_sync(
     user_session: UserSession = Depends(require_session),
 ):
-    """Preview the source import diff without writing anything (admin only).
+    """List hand edits found in the mirror file (admin only).
 
-    Runs the import in dry-run mode so the admin sees how many locker PMs
-    would be updated, left unchanged, or skipped (not in the locker) before
-    committing. Sync never inserts locker rows.
-
-    Args:
-        user_session: The active session (injected by ``require_session``).
-
-    Returns:
-        dict: ``updated`` (would-change), ``unchanged``, ``skipped``
-              (non-locker), and ``errors`` counts.
-
-    Raises:
-        HTTPException: 403 if not admin, 400 if source path not configured.
-    """
-    if user_session.user.role != UserRole.ADMIN:
-        raise HTTPException(status_code=403, detail="Admin access required.")
-
-    workbook = configured_workbook()
-    if workbook is None:
-        raise HTTPException(status_code=400, detail="Source Excel path not configured.")
-
-    from smart_locker.database.engine import get_engine
-    from smart_locker.sync.source_import import import_from_source_excel
-
-    result = import_from_source_excel(get_engine(), workbook.path, dry_run=True)
-    return {
-        "preview": True,
-        "updated": result.updated,
-        "unchanged": result.unchanged,
-        "skipped": result.non_locker_skipped,
-        "errors": result.errors,
-    }
-
-
-@router.get("/api/admin/sync-status")
-def get_sync_status(user_session: UserSession = Depends(require_session)):
-    """Return the most recent source-import outcome (admin only).
-
-    Powers the dashboard "last synced …" line. Reports when the last import
-    ran, what triggered it (startup/interval/watch/manual), the
-    per-category counts, and whether it succeeded. Includes ``at_local``
-    and ``ago`` for the admin footer clock.
+    The Pi never merges sheet edits silently — this previews the differences
+    an admin would apply with ``POST /api/dashboard/mirror/apply``.
 
     Args:
         user_session: The active session (injected by ``require_session``).
 
     Returns:
-        dict: The last-sync snapshot (``at`` is null if no import has run yet).
+        dict: ``preview`` plus ``diffs`` (per-field sheet-vs-database
+              differences) or ``error`` when the file cannot be read.
 
     Raises:
         HTTPException: 403 if not admin.
     """
     if user_session.user.role != UserRole.ADMIN:
         raise HTTPException(status_code=403, detail="Admin access required.")
-    return sync_status.get()
+
+    from smart_locker.database.engine import get_engine
+    from smart_locker.sync import mirror
+
+    diffs, err = mirror.external_diffs()
+    return {"preview": True, "diffs": diffs, "count": len(diffs), "error": err}
 
 
-@router.get("/api/admin/export-excel")
-def export_excel(user_session: UserSession = Depends(require_session)):
-    """Download the full database as an Excel workbook (admin only).
+@router.get("/api/admin/sync-status")
+def get_sync_status(user_session: UserSession = Depends(require_session)):
+    """Return the most recent mirror-tick outcome plus mirror state (admin only).
 
-    Generates a three-sheet ``.xlsx`` file (Devices, Transactions, Users) in
-    memory and returns it as an HTTP file download. No file is written to disk,
-    so there are no Windows file-locking issues. This replaces the old automatic
-    Excel sync that wrote to ``SMART_LOCKER_EXCEL_PATH`` on every DB change.
+    Powers the dashboard "last synced …" line. Reports when the last tick
+    ran, what triggered it (startup/interval/change/manual), whether it
+    succeeded, and the mirror's pending/external state. Includes ``at_local``
+    and ``ago`` for the admin footer clock.
 
     Args:
-        user_session: The active admin session (injected by ``require_session``).
+        user_session: The active session (injected by ``require_session``).
 
     Returns:
-        Response: Binary ``.xlsx`` content with ``Content-Disposition: attachment``
-                  header so the browser triggers a file download.
+        dict: The last-sync snapshot plus a ``mirror`` status block.
 
     Raises:
-        HTTPException: 403 if the caller is not an admin.
+        HTTPException: 403 if not admin.
     """
     if user_session.user.role != UserRole.ADMIN:
         raise HTTPException(status_code=403, detail="Admin access required.")
+    from smart_locker.sync import mirror
 
-    from smart_locker.database.engine import get_engine
-    from smart_locker.sync.excel_sync import export_to_excel_bytes
-
-    xlsx_bytes = export_to_excel_bytes(get_engine())
-    return Response(
-        content=xlsx_bytes,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": "attachment; filename=smart_locker_data.xlsx"},
-    )
+    return {**sync_status.get(), "mirror": mirror.mirror_status()}
 
 
 # --- Software update (admin only) -------------------------------------------
@@ -1904,51 +1902,19 @@ def dashboard_display() -> dict:
 
 @router.get("/api/dashboard/inventory")
 def dashboard_inventory(db: Session = Depends(get_db)):
-    """Public company catalog from the live Excel file (not SQLite).
+    """Public company catalog from SQLite — the workbook is only a mirror.
 
-    Share down or an unreadable workbook is HTTP 503 so the Inventory tab
-    can error while the Locker tab still uses ``/api/dashboard/devices``.
-    ``in_locker`` marks PMs that already have a SQLite locker row so the
-    Inventory tab does not offer owner edit for them.
+    Every catalog row is returned, cabinet units included. ``in_locker``
+    marks rows with a locker slot so the Inventory tab offers owner edit
+    only for non-cabinet devices.
 
     Args:
         db: Active database session (injected by ``get_db``).
 
     Returns:
-        list[dict]: One dict per Excel PM row.
-
-    Raises:
-        HTTPException: 503 when the catalog path is empty or unreadable.
+        list[dict]: One dict per catalog device.
     """
-    from smart_locker.sync.source_import import pm_match_key
-
-    workbook = configured_workbook()
-    if workbook is None:
-        raise HTTPException(
-            status_code=503, detail="Catalog Excel is not configured."
-        )
-    try:
-        rows = read_inventory(workbook.path)
-    except InventoryReadError as e:
-        raise HTTPException(status_code=503, detail=str(e)) from e
-    locker_keys = {
-        pm_match_key(d.pm_number)
-        for d in DeviceRepository.list_all(db)
-        if d.pm_number
-    }
-    return [
-        {
-            "pm_number": r.pm_number,
-            "name": r.name,
-            "manufacturer": r.manufacturer,
-            "model": r.model,
-            "serial_number": r.serial_number,
-            "location": r.location,
-            "calibration_due": r.calibration_due,
-            "in_locker": pm_match_key(r.pm_number) in locker_keys,
-        }
-        for r in rows
-    ]
+    return [catalog_record(d) for d in DeviceRepository.list_all(db)]
 
 
 @router.get("/api/dashboard/devices")
@@ -1971,11 +1937,8 @@ def dashboard_devices(db: Session = Depends(get_db)):
 
 
 @router.get("/api/dashboard/owners")
-def dashboard_owners(
-    db: Session = Depends(get_db),
-    _: None = Depends(require_dashboard_admin),
-):
-    """Names for the owner-edit dropdown (dashboard admin secret required).
+def dashboard_owners(db: Session = Depends(get_db)):
+    """Names for the owner-edit dropdown (public — owner edit has no password).
 
     Combines the in-locker token, registered users, and registrant names
     so the Inventory owner dialog can offer the same list plus free text.
@@ -1998,12 +1961,12 @@ def dashboard_owners(
 def dashboard_set_owner(
     body: OwnerEditBody,
     db: Session = Depends(get_db),
-    _: None = Depends(require_dashboard_admin),
 ):
-    """Change owner for one non-locker PM (dashboard admin secret required).
+    """Change owner for one non-cabinet PM — public, no admin password.
 
-    Writes the catalog Excel Location cell. Locker devices are refused
-    (owner stays with kiosk borrow/return). Does not insert locker rows.
+    Updates the stored place in SQLite; the mirror catches up when the file
+    can be written. Cabinet units are refused (owner stays with kiosk
+    borrow/return).
 
     Args:
         body: PM number and new owner text.
@@ -2013,31 +1976,246 @@ def dashboard_set_owner(
         dict: ``ok``, ``pm_number``, ``owner``, ``locker``.
 
     Raises:
-        HTTPException: 401 without secret; 400 empty PM; 404 PM not in Excel;
-                       409 locker PM; 503 share down.
+        HTTPException: 400 empty PM; 404 PM not in the catalog;
+                       409 locker PM.
     """
-    workbook = configured_workbook()
     try:
-        result = set_owner(
-            db,
-            workbook.path if workbook is not None else "",
-            body.pm_number,
-            body.owner,
-        )
+        result = set_owner(db, body.pm_number, body.owner)
     except InvalidOwnerRequest as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     except UnknownPm as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
     except LockerOwned as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
-    except CatalogUnavailable as e:
-        raise HTTPException(status_code=503, detail=str(e)) from e
     return {
         "ok": True,
         "pm_number": result.pm_number,
         "owner": result.owner,
         "locker": result.locker,
     }
+
+
+def _parse_calibration(raw: str | None) -> "date | None":
+    """Convert a dashboard date field to a ``date`` (422 on garbage)."""
+    from smart_locker.sync.catalog_sheet import parse_date
+
+    text = (raw or "").strip()
+    if not text:
+        return None
+    parsed = parse_date(text)
+    if parsed is None:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Calibration date '{text}' is not a date (YYYY-MM-DD).",
+        )
+    return parsed
+
+
+@router.post("/api/dashboard/devices")
+def dashboard_add_device(
+    body: DeviceAddBody,
+    db: Session = Depends(get_db),
+    _: None = Depends(require_dashboard_admin),
+):
+    """Add one device to the catalog (dashboard admin secret required).
+
+    The row lands in SQLite immediately; the mirror catches up when the file
+    can be written. The new row is not a cabinet unit — Register Device on
+    the kiosk puts it into a slot.
+
+    Args:
+        body: Catalog fields; ``pm_number`` and ``name`` are required.
+        db: Active database session (injected by ``get_db``).
+
+    Returns:
+        dict: ``ok`` plus the stored ``catalog_record``.
+
+    Raises:
+        HTTPException: 401 without secret; 422 for empty id/name or a bad
+                       date; 409 when the id is already cataloged.
+    """
+    from smart_locker.services.device_catalog import (
+        DuplicatePm,
+        DuplicateSerial,
+        InvalidCatalogField,
+        add_device,
+    )
+
+    try:
+        device = add_device(
+            db,
+            pm_number=body.pm_number,
+            name=body.name,
+            device_type=body.device_type,
+            serial_number=body.serial_number,
+            manufacturer=body.manufacturer,
+            model=body.model,
+            calibration_due=_parse_calibration(body.calibration_due),
+            location=body.location,
+        )
+    except InvalidCatalogField as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    except (DuplicatePm, DuplicateSerial) as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    return {"ok": True, "device": catalog_record(device)}
+
+
+@router.patch("/api/dashboard/devices/{pm_number}")
+def dashboard_edit_device(
+    pm_number: str,
+    body: DeviceEditBody,
+    db: Session = Depends(get_db),
+    _: None = Depends(require_dashboard_admin),
+):
+    """Edit catalog fields on one device (dashboard admin secret required).
+
+    Editable: name, device_type, serial_number, manufacturer, model,
+    calibration_due — plus ``location`` while the row is not a cabinet unit.
+
+    Args:
+        pm_number: Catalog id of the device.
+        body: Fields to change; absent fields are left alone.
+        db: Active database session (injected by ``get_db``).
+
+    Returns:
+        dict: ``ok``, ``changed``, plus the stored ``catalog_record``.
+
+    Raises:
+        HTTPException: 401 without secret; 404 unknown PM; 422 invalid
+                       field; 409 when location is sent for a cabinet unit
+                       or the serial is already held by another row.
+    """
+    from smart_locker.services.device_catalog import (
+        DuplicateSerial,
+        InvalidCatalogField,
+        LockerOwned,
+        update_device_fields,
+    )
+
+    device = DeviceRepository.find_by_pm(db, pm_number.strip())
+    if device is None:
+        raise HTTPException(status_code=404, detail="Device not found.")
+
+    fields = body.model_dump(exclude_unset=True)
+    if "calibration_due" in fields:
+        fields["calibration_due"] = _parse_calibration(fields["calibration_due"])
+    try:
+        changed = update_device_fields(db, device, fields)
+    except (LockerOwned, DuplicateSerial) as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    except InvalidCatalogField as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    return {"ok": True, "changed": changed, "device": catalog_record(device)}
+
+
+@router.delete("/api/dashboard/devices/{pm_number}")
+def dashboard_remove_device(
+    pm_number: str,
+    db: Session = Depends(get_db),
+    _: None = Depends(require_dashboard_admin),
+):
+    """Remove one device from the catalog (dashboard admin secret required).
+
+    A borrowed unit is refused — return it at the kiosk first. A unit with
+    audit history is refused too — the borrow trail is kept, so only
+    never-used rows can be removed.
+
+    Args:
+        pm_number: Catalog id of the device.
+        db: Active database session (injected by ``get_db``).
+
+    Returns:
+        dict: ``ok`` and ``pm_number``.
+
+    Raises:
+        HTTPException: 401 without secret; 404 unknown PM; 409 borrowed or
+                       history-bearing.
+    """
+    from smart_locker.services.device_catalog import (
+        DeviceBorrowed,
+        DeviceHasHistory,
+        remove_device,
+    )
+
+    device = DeviceRepository.find_by_pm(db, pm_number.strip())
+    if device is None:
+        raise HTTPException(status_code=404, detail="Device not found.")
+    try:
+        remove_device(db, device)
+    except (DeviceBorrowed, DeviceHasHistory) as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    return {"ok": True, "pm_number": device.pm_number}
+
+
+@router.get("/api/dashboard/mirror")
+def dashboard_mirror_status() -> dict:
+    """Public mirror status for the dashboard warning line.
+
+    The workbook is a hidden Pi-written mirror — this reports whether a
+    write is pending, the file is unavailable, or hand edits wait for an
+    admin decision. Never raises; an unconfigured mirror reports
+    ``configured: false``.
+    """
+    from smart_locker.sync import mirror
+
+    return mirror.mirror_status()
+
+
+@router.get("/api/dashboard/mirror/diffs")
+def dashboard_mirror_diffs(
+    _: None = Depends(require_dashboard_admin),
+):
+    """Hand edits found in the mirror file (dashboard admin secret required).
+
+    Returns:
+        dict: ``diffs`` — one entry per sheet/database difference.
+    """
+    from smart_locker.database.engine import get_engine
+    from smart_locker.sync import mirror
+
+    diffs, err = mirror.external_diffs()
+    return {"diffs": diffs, "error": err}
+
+
+@router.post("/api/dashboard/mirror/apply")
+def dashboard_mirror_apply(
+    _: None = Depends(require_dashboard_admin),
+):
+    """Apply the sheet's hand edits to the database (admin secret required).
+
+    Added rows insert, changed cells update catalog fields, removed rows
+    delete when the unit is neither in the cabinet nor borrowed. The mirror
+    then converges on the next write.
+
+    Returns:
+        dict: ``ok``, ``applied``, ``skipped`` counts.
+
+    Raises:
+        HTTPException: 401 without secret; 503 when the file cannot be read.
+    """
+    from smart_locker.database.engine import get_engine
+    from smart_locker.sync import mirror
+
+    try:
+        result = mirror.apply_external(get_engine())
+    except mirror.MirrorUnavailable as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+    return {"ok": True, **result}
+
+
+@router.post("/api/dashboard/mirror/dismiss")
+def dashboard_mirror_dismiss(
+    _: None = Depends(require_dashboard_admin),
+):
+    """Keep the database and overwrite the sheet edits (admin secret required).
+
+    Returns:
+        dict: ``ok``.
+    """
+    from smart_locker.sync import mirror
+
+    mirror.dismiss_external()
+    return {"ok": True}
 
 
 @router.post("/api/dashboard/bind-tag")
@@ -2080,7 +2258,7 @@ def dashboard_bind_tag(
 
     pm = body.pm_number.strip()
     device = DeviceRepository.find_by_pm(db, pm)
-    if device is None:
+    if device is None or not is_registered(device):
         raise HTTPException(status_code=404, detail="Device not found.")
 
     conflict = arm_pending_tag_bind(
@@ -2125,7 +2303,7 @@ def dashboard_unbind_tag(
     """
     pm = body.pm_number.strip()
     device = DeviceRepository.find_by_pm(db, pm)
-    if device is None:
+    if device is None or not is_registered(device):
         raise HTTPException(status_code=404, detail="Device not found.")
 
     clear_device_tag(db, device)
@@ -2147,8 +2325,8 @@ def dashboard_transactions(
     """Transaction history for the network dashboard (admin secret).
 
     Returns the most recent 500 borrow/return transactions in reverse
-    chronological order. Requires ``X-Smart-Locker-Admin``. The 5-tap
-    overlay is not authorization.
+    chronological order. Requires ``X-Smart-Locker-Admin``. The Admin
+    button reveal is not authorization.
 
     Args:
         db: Active database session (injected by ``get_db``).
@@ -2182,7 +2360,7 @@ def dashboard_users(
 
     Returns all registered users with their role and registration date.
     Sensitive fields (uid_hmac, encrypted_card_uid) are never included.
-    Requires ``X-Smart-Locker-Admin``. The 5-tap overlay is not authorization.
+    Requires ``X-Smart-Locker-Admin``. The Admin button is not authorization.
 
     Args:
         db: Active database session (injected by ``get_db``).

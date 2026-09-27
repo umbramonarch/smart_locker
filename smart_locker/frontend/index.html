@@ -531,8 +531,8 @@
             <svg viewBox="0 0 24 24"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>
           </div>
           <div class="admin-btn-text">
-            <span class="admin-btn-label">Sync Source</span>
-            <span class="admin-btn-desc">Preview &amp; import from the M: share</span>
+            <span class="admin-btn-label">Sync Sheet</span>
+            <span class="admin-btn-desc">Write the catalog to the spreadsheet</span>
           </div>
         </button>
 
@@ -553,20 +553,6 @@
           <div class="admin-btn-text">
             <span class="admin-btn-label">Register Device</span>
             <span class="admin-btn-desc" id="admin-register-device-desc">PM, slot, then tap NFC</span>
-          </div>
-        </button>
-
-        <button class="admin-action-btn" id="admin-export-excel">
-          <div class="admin-btn-icon">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
-              <polyline points="7 10 12 15 17 10"/>
-              <line x1="12" y1="15" x2="12" y2="3"/>
-            </svg>
-          </div>
-          <div class="admin-btn-text">
-            <span class="admin-btn-label">Export Excel</span>
-            <span class="admin-btn-desc">Download data as spreadsheet</span>
           </div>
         </button>
 
@@ -646,8 +632,8 @@
       </div>
 
       <div class="bind-step" id="bind-step-list">
-        <p class="bind-hint" id="bind-list-hint">Add a unit from the Excel list (PM + free slot), then tap its sticker. Existing rows can bind, unbind, or change slot.</p>
-        <button type="button" class="bind-add-open" id="bind-add-open">Add from Excel</button>
+        <p class="bind-hint" id="bind-list-hint">Add a catalog unit (PM + free slot), then tap its sticker. Existing rows can bind, unbind, or change slot.</p>
+        <button type="button" class="bind-add-open" id="bind-add-open">Add device</button>
         <div class="register-search-group bind-search-group">
           <svg class="register-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
           <input type="text" id="bind-search" class="register-input register-search-input" placeholder="Search name or PM…" autocomplete="off" spellcheck="false">
@@ -657,7 +643,8 @@
       </div>
 
       <div class="bind-step hidden" id="bind-step-add">
-        <p class="bind-hint" id="bind-add-hint">Enter the PM number from the catalog spreadsheet, pick a free slot, then continue to tap the sticker.</p>
+        <p class="bind-hint" id="bind-add-hint">Pick a catalog unit (or type its PM), choose a free slot, then continue to tap the sticker.</p>
+        <div class="bind-device-list bind-registerable-list" id="bind-registerable-list"></div>
         <div class="register-input-group bind-pm-group">
           <input type="text" id="bind-pm-input" class="register-input" placeholder="PM number" maxlength="50" autocomplete="off" spellcheck="false">
           <div class="register-input-glow"></div>

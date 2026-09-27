@@ -3,13 +3,13 @@ File: locker_service.py
 Description: Borrow/return business logic for the Smart Locker system. Enforces
              per-user borrow limits, device availability checks, ownership rules,
              admin return-on-behalf, and unattended idle return with full
-             transaction logging. After a successful location change, writes
-             Location back into the catalog Excel (best-effort).
+             transaction logging. After a successful location change, the
+             catalog mirror is marked dirty (best-effort write-back).
 Project: smart_locker/services
 Notes: The borrow limit is configured via MAX_BORROWS in config/settings.py
        (default 5). Admins can return any device on behalf of the original
        borrower. Idle sticker taps use return_unattended (no work card).
-       Excel write-back never raises; SQLite remains the locker source of truth.
+       The mirror write never raises; SQLite remains the source of truth.
 """
 
 import logging
@@ -26,25 +26,23 @@ logger = logging.getLogger(__name__)
 
 
 def _write_location(db_session: Session) -> None:
-    """Mark a changed loan for write-back after its caller commits SQLite."""
-    db_session.info["location_writeback_pending"] = True
+    """Mark a changed loan for a mirror write after its caller commits SQLite."""
+    db_session.info["mirror_dirty_pending"] = True
 
 
 @event.listens_for(Session, "after_commit")
 def _schedule_committed_location(session: Session) -> None:
     """Only committed loan changes can trigger a workbook write."""
-    if session.info.pop("location_writeback_pending", False):
-        from smart_locker.sync.location_writeback import schedule_write_location
-        from smart_locker.sync.workbook_adapter import configured_workbook
+    if session.info.pop("mirror_dirty_pending", False):
+        from smart_locker.sync import mirror
 
-        workbook = configured_workbook()
-        if workbook is not None:
-            schedule_write_location(workbook)
+        mirror.mark_dirty()
+        mirror.schedule_flush()
 
 
 @event.listens_for(Session, "after_rollback")
 def _discard_uncommitted_location(session: Session) -> None:
-    session.info.pop("location_writeback_pending", None)
+    session.info.pop("mirror_dirty_pending", None)
 
 
 class LockerService:
@@ -81,7 +79,8 @@ class LockerService:
         user = user_session.user
 
         device = DeviceRepository.find_by_id(db_session, device_id)
-        if device is None:
+        if device is None or device.locker_slot is None:
+            # Catalog-only rows are not in the cabinet — they cannot be borrowed.
             logger.warning("Borrow failed: device %d not found.", device_id)
             return False
 

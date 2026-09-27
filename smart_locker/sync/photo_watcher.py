@@ -114,17 +114,6 @@ def process_photo(photo_path: Path, serve_dir: Path, engine) -> int:
             photo_path.name, updated, model,
         )
 
-        # Trigger Excel export so the image_path change is reflected on the locker share.
-        # Only when an export path is explicitly configured (EXCEL_AUTO_EXPORT); the
-        # default on-demand-only behaviour is preserved otherwise.
-        from config.settings import EXCEL_AUTO_EXPORT, EXCEL_SYNC_PATH
-        if EXCEL_AUTO_EXPORT:
-            try:
-                from smart_locker.sync.excel_sync import export_to_excel
-                export_to_excel(engine, EXCEL_SYNC_PATH)
-            except Exception as e:
-                logger.warning("Excel sync after photo import failed: %s", e)
-
     return updated
 
 

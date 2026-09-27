@@ -1,24 +1,28 @@
 /**
- * @fileoverview Public dashboard: Inventory (Excel), Locker (SQLite), and
- *               Display (kiosk snapshot). Sort, search, status filter, and
- *               polling. Owner change is Inventory only (not locker PMs).
- *               5-tap the header clock for users, logs, and NFC unbind /
- *               arm-bind. No login. No remote control of the kiosk.
+ * @fileoverview Public dashboard: Inventory (SQLite catalog), Locker
+ *               (cabinet units), and Display (kiosk snapshot). Sort, search,
+ *               status filter, and polling. Owner change on a non-cabinet
+ *               row is public. The Admin button opens the catalog editor,
+ *               sheet-change review, users, logs, and NFC unbind / arm-bind
+ *               behind the admin secret. No login. No remote control of the
+ *               kiosk.
  * @project smart_locker/frontend
- * @description Tabs switch locally. Inventory errors (share down) leave
- *              the Locker tab usable. Asset-label text comes from /api/config.
- *              Dashboard 5-tap is not authorization; bind/unbind send
- *              X-Smart-Locker-Admin from a prompted secret.
+ * @description Tabs switch locally. The workbook is a hidden Pi-written
+ *              mirror — a banner reports pending writes and hand edits.
+ *              Asset-label text comes from /api/config. Admin mutations
+ *              send X-Smart-Locker-Admin from a prompted secret.
  */
 
 /* ── State ────────────────────────────────────────────────────────────────── */
 
-/** Cached Inventory rows from the last successful Excel fetch. */
+/** Cached Inventory rows from the SQLite catalog. */
 let inventoryData = [];
 /** Cached Locker rows from SQLite. */
 let devicesData = [];
-/** True when Inventory last failed (share down / unreadable Excel). */
+/** Error text when the Inventory fetch last failed. */
 let inventoryError = '';
+/** Last mirror status payload (configured, state, pending_writes…). */
+let mirrorStatus = null;
 
 /** Current sort configuration per table. */
 const sortState = {
@@ -53,14 +57,12 @@ let ownerNames = [];
 /** PM currently open in the owner dialog, or ''. */
 let ownerEditPm = '';
 
-/** Cached registered users for the 5-tap overlay. */
+/** Cached registered users for the admin overlay. */
 let usersData = [];
-/** Cached transaction rows for the 5-tap overlay. */
+/** Cached transaction rows for the admin overlay. */
 let txData = [];
-
-const adminTaps = [];
-const ADMIN_TAP_COUNT = 5;
-const ADMIN_TAP_WINDOW = 3000;
+/** Cached sheet-diff rows for the admin overlay. */
+let sheetDiffs = [];
 
 /** sessionStorage key for the dashboard admin secret (header value). */
 const ADMIN_SECRET_KEY = 'smartLockerAdminSecret';
@@ -381,8 +383,8 @@ function activeTabName() {
 /* ── Data fetching ────────────────────────────────────────────────────────── */
 
 /**
- * Fetch Locker (SQLite) and Inventory (Excel) independently so a down share
- * only fails Inventory. Skips overlapping polls and hidden-tab Excel copies.
+ * Fetch Locker, Inventory, and mirror status independently. Skips
+ * overlapping polls and hidden tabs.
  *
  * @returns {Promise<void>}
  */
@@ -395,7 +397,7 @@ async function fetchTables() {
 
 
 /**
- * Parallel Locker + optional Inventory GETs for the visible tab.
+ * Parallel Locker + optional Inventory + mirror-status GETs.
  *
  * @returns {Promise<void>}
  */
@@ -415,7 +417,7 @@ async function _fetchTablesWork() {
           inventoryError = '';
         } else {
           inventoryData = [];
-          let detail = 'Catalog Excel is not available.';
+          let detail = 'Catalog is not available.';
           try {
             const body = await res.json();
             if (body && body.detail) detail = String(body.detail);
@@ -424,10 +426,16 @@ async function _fetchTablesWork() {
         }
       })
       .catch(() => {
-        inventoryError = 'Catalog Excel is not available.';
+        inventoryError = 'Catalog is not available.';
       })
     : Promise.resolve();
-  await Promise.all([devicesP, inventoryP]);
+  const mirrorP = fetch('/api/dashboard/mirror')
+    .then(async (res) => {
+      if (res.ok) mirrorStatus = await res.json();
+    })
+    .catch(() => { /* keep last mirror status */ });
+  await Promise.all([devicesP, inventoryP, mirrorP]);
+  renderMirrorBanner();
   renderDevices();
   if (wantInventory) renderInventory();
   updateTimestamp();
@@ -435,14 +443,35 @@ async function _fetchTablesWork() {
 
 
 /**
+ * Show the mirror warning line: pending write, unavailable file, or hand
+ * edits waiting for an admin decision. Hidden when everything is fine.
+ */
+function renderMirrorBanner() {
+  const banner = document.getElementById('mirror-banner');
+  const text = document.getElementById('mirror-banner-text');
+  if (!banner || !text) return;
+  let message = '';
+  if (mirrorStatus && mirrorStatus.configured !== false) {
+    if (mirrorStatus.external_changes) {
+      message = 'The spreadsheet was edited by hand. Review the changes in Admin.';
+    } else if (mirrorStatus.pending_writes) {
+      message = 'The spreadsheet will catch up — it cannot be written right now.';
+    } else if (mirrorStatus.state === 'error') {
+      message = `The spreadsheet could not be written (${mirrorStatus.last_error || 'error'}). It keeps retrying.`;
+    }
+  }
+  text.textContent = message;
+  banner.hidden = !message;
+}
+
+
+/**
  * Load dropdown names (registered users + registrants + in-locker token).
- * Requires the dashboard admin secret header.
+ * Public — owner edit on a non-cabinet device has no password.
  */
 async function fetchOwners() {
   try {
-    const res = await fetch('/api/dashboard/owners', {
-      headers: dashboardAdminHeaders(),
-    });
+    const res = await fetch('/api/dashboard/owners');
     if (!res.ok) return;
     const data = await res.json();
     ownerNames = Array.isArray(data.names) ? data.names : [];
@@ -553,7 +582,7 @@ function handleSort(table, key) {
 /* ── Rendering ────────────────────────────────────────────────────────────── */
 
 /**
- * Render Inventory from cached Excel rows, applying search and sort.
+ * Render Inventory from cached catalog rows, applying search and sort.
  */
 function renderInventory() {
   const errorEl = document.getElementById('inventory-error');
@@ -742,20 +771,15 @@ async function confirmOwnerEdit() {
   try {
     const res = await fetch('/api/dashboard/owner', {
       method: 'POST',
-      headers: dashboardAdminHeaders(),
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ pm_number: pm, owner }),
     });
     if (!res.ok) {
       let detail = 'Could not change owner.';
-      if (res.status === 401) {
-        sessionStorage.removeItem(ADMIN_SECRET_KEY);
-        detail = 'Admin authorization failed. Tap the clock 5 times to enter the secret.';
-      } else {
-        try {
-          const body = await res.json();
-          if (body && body.detail) detail = String(body.detail);
-        } catch (_) { /* keep default */ }
-      }
+      try {
+        const body = await res.json();
+        if (body && body.detail) detail = String(body.detail);
+      } catch (_) { /* keep default */ }
       if (err) {
         err.textContent = detail;
         err.style.display = '';
@@ -776,34 +800,22 @@ async function confirmOwnerEdit() {
 
 
 /**
- * Format the header clock as local HH:MM:SS.
+ * Admin button: open the admin overlay, or first-boot Setup while no admin
+ * is enrolled (there may be no secret to check yet).
  */
-/**
- * Record a tap on the header clock. Five taps within 3s opens admin.
- */
-async function checkAdminTapSequence() {
-  const now = Date.now();
-  adminTaps.push(now);
-  while (adminTaps.length > 0 && (now - adminTaps[0]) > ADMIN_TAP_WINDOW) {
-    adminTaps.shift();
+async function openAdmin() {
+  const overlay = document.getElementById('admin-overlay');
+  if (overlay && !overlay.hidden) {
+    closeAdminOverlay();
+    return;
   }
-  if (adminTaps.length >= ADMIN_TAP_COUNT) {
-    adminTaps.length = 0;
-    const overlay = document.getElementById('admin-overlay');
-    if (overlay && !overlay.hidden) {
-      closeAdminOverlay();
-      return;
-    }
-    // First boot: no admin enrolled — the 5-tap opens Setup, not the
-    // secret prompt (there may be no secret to check yet).
-    if (await dashboardSetupNeeded()) openSetupDialog();
-    else await openAdminOverlay();
-  }
+  if (await dashboardSetupNeeded()) openSetupDialog();
+  else await openAdminOverlay();
 }
 
 
 /**
- * Show the 5-tap overlay and load users, logs, and locker tags.
+ * Show the admin overlay and load users, logs, catalog, and locker tags.
  * The admin secret is validated first; the overlay only opens on success.
  */
 async function openAdminOverlay() {
@@ -818,7 +830,7 @@ async function openAdminOverlay() {
 
 
 /**
- * Hide the 5-tap overlay.
+ * Hide the admin overlay.
  */
 function closeAdminOverlay() {
   const overlay = document.getElementById('admin-overlay');
@@ -827,15 +839,20 @@ function closeAdminOverlay() {
 
 
 /**
- * Load users, transactions, and locker rows for the overlay.
- * Does not re-copy Inventory Excel (the overlay does not show that table).
+ * Load users, transactions, locker rows, the full catalog, and any pending
+ * sheet edits for the overlay.
  */
 async function fetchAdminTables() {
   const headers = dashboardAdminHeaders();
-  const [usersRes, txRes, devicesRes] = await Promise.all([
+  const wantDiffs = !!(mirrorStatus && mirrorStatus.external_changes);
+  const [usersRes, txRes, devicesRes, inventoryRes, diffsRes] = await Promise.all([
     fetch('/api/dashboard/users', { headers }).catch(() => null),
     fetch('/api/dashboard/transactions', { headers }).catch(() => null),
     fetch('/api/dashboard/devices').catch(() => null),
+    fetch('/api/dashboard/inventory').catch(() => null),
+    wantDiffs
+      ? fetch('/api/dashboard/mirror/diffs', { headers }).catch(() => null)
+      : Promise.resolve(null),
   ]);
   try {
     usersData = usersRes && usersRes.ok ? await usersRes.json() : [];
@@ -858,12 +875,23 @@ async function fetchAdminTables() {
   try {
     if (devicesRes && devicesRes.ok) devicesData = await devicesRes.json();
   } catch (_) { /* keep cached locker rows */ }
+  try {
+    if (inventoryRes && inventoryRes.ok) inventoryData = await inventoryRes.json();
+  } catch (_) { /* keep cached catalog rows */ }
+  sheetDiffs = [];
+  if (diffsRes && diffsRes.ok) {
+    try {
+      const body = await diffsRes.json();
+      sheetDiffs = Array.isArray(body.diffs) ? body.diffs : [];
+    } catch (_) { /* no diffs */ }
+  }
   renderAdminOverlay();
 }
 
 
 /**
- * Render users, transactions, and NFC actions in the 5-tap overlay.
+ * Render users, transactions, catalog, sheet diffs, and NFC actions in the
+ * admin overlay.
  */
 function renderAdminOverlay() {
   const usersBody = document.getElementById('admin-users-tbody');
@@ -892,6 +920,45 @@ function renderAdminOverlay() {
     `).join('');
   }
 
+  const sheetSection = document.getElementById('admin-sheet-section');
+  if (sheetSection) {
+    sheetSection.hidden = sheetDiffs.length === 0;
+    const diffBody = document.getElementById('sheet-diff-tbody');
+    if (diffBody) {
+      diffBody.innerHTML = sheetDiffs.map(d => {
+        const sheetVal = Array.isArray(d.sheet) ? d.sheet.join(' · ') : (d.sheet ?? '');
+        const dbVal = Array.isArray(d.database) ? d.database.join(' · ') : (d.database ?? '');
+        return `
+          <tr>
+            <td>${esc(d.pm_number)}</td>
+            <td>${esc(d.kind)}</td>
+            <td>${esc(d.field || '')}</td>
+            <td>${esc(sheetVal)}</td>
+            <td>${esc(dbVal)}</td>
+          </tr>
+        `;
+      }).join('');
+    }
+  }
+
+  const catalogBody = document.getElementById('admin-catalog-tbody');
+  if (catalogBody) {
+    catalogBody.innerHTML = inventoryData.map(d => `
+      <tr>
+        <td>${esc(d.pm_number)}</td>
+        <td>${esc(d.name)}</td>
+        <td>${esc(d.device_type ?? '')}</td>
+        <td>${esc(d.serial_number ?? '')}</td>
+        <td>${esc(d.location ?? '')}</td>
+        <td>${d.in_locker ? 'Yes' : 'No'}</td>
+        <td>
+          <button type="button" class="admin-tag-btn" data-edit-pm="${esc(d.pm_number)}">Edit</button>
+          <button type="button" class="admin-tag-btn" data-remove-pm="${esc(d.pm_number)}">Remove</button>
+        </td>
+      </tr>
+    `).join('');
+  }
+
   const tagsBody = document.getElementById('admin-tags-tbody');
   if (!tagsBody) return;
   tagsBody.innerHTML = devicesData.map(d => {
@@ -916,6 +983,245 @@ function renderAdminOverlay() {
 }
 
 
+/** PM of the catalog row open in the device dialog ('' = add mode). */
+let deviceDialogPm = '';
+
+
+/**
+ * Open the device editor. ``pm`` empty → add mode; otherwise prefill from
+ * the cached catalog row and lock the id field.
+ *
+ * @param {string} pm - Catalog PM to edit, or '' to add.
+ */
+function openDeviceDialog(pm) {
+  deviceDialogPm = pm || '';
+  const row = pm ? inventoryData.find(d => d.pm_number === pm) : null;
+  const title = document.getElementById('device-dialog-title');
+  const err = document.getElementById('device-dialog-error');
+  const pmInput = document.getElementById('device-pm');
+  const locLabel = document.getElementById('device-location-label');
+  const locInput = document.getElementById('device-location');
+  const fields = {
+    'device-pm': row ? row.pm_number : '',
+    'device-name': row ? (row.name || '') : '',
+    'device-type': row ? (row.device_type || '') : '',
+    'device-serial': row ? (row.serial_number || '') : '',
+    'device-manufacturer': row ? (row.manufacturer || '') : '',
+    'device-model': row ? (row.model || '') : '',
+    'device-calibration': row ? (row.calibration_due || '') : '',
+    'device-location': row ? (row.location || '') : '',
+  };
+  Object.entries(fields).forEach(([id, value]) => {
+    const el = document.getElementById(id);
+    if (el) el.value = value;
+  });
+  if (title) title.textContent = row ? `Edit ${row.pm_number}` : 'Add device';
+  if (pmInput) pmInput.disabled = !!row;
+  // A cabinet unit's place is owned by borrow/return — hide the field.
+  const inLocker = !!(row && row.in_locker);
+  if (locInput) locInput.disabled = inLocker;
+  if (locLabel) locLabel.style.display = inLocker ? 'none' : '';
+  if (locInput) locInput.style.display = inLocker ? 'none' : '';
+  if (err) {
+    err.textContent = '';
+    err.style.display = 'none';
+  }
+  const dialog = document.getElementById('device-dialog');
+  if (dialog) dialog.hidden = false;
+  const first = row ? document.getElementById('device-name') : pmInput;
+  if (first) first.focus();
+}
+
+
+/**
+ * Hide the device editor without saving.
+ */
+function closeDeviceDialog() {
+  deviceDialogPm = '';
+  const dialog = document.getElementById('device-dialog');
+  if (dialog) dialog.hidden = true;
+}
+
+
+/**
+ * Save the device dialog: POST for add, PATCH for edit.
+ */
+async function submitDeviceDialog() {
+  const err = document.getElementById('device-dialog-error');
+  const btn = document.getElementById('device-confirm');
+  const value = (id) => {
+    const el = document.getElementById(id);
+    return el ? el.value.trim() : '';
+  };
+  const fields = {
+    name: value('device-name'),
+    device_type: value('device-type'),
+    serial_number: value('device-serial'),
+    manufacturer: value('device-manufacturer'),
+    model: value('device-model'),
+    calibration_due: value('device-calibration'),
+    location: value('device-location'),
+  };
+  if (btn) btn.disabled = true;
+  if (err) {
+    err.textContent = '';
+    err.style.display = 'none';
+  }
+  try {
+    let res;
+    if (deviceDialogPm) {
+      res = await fetch(`/api/dashboard/devices/${encodeURIComponent(deviceDialogPm)}`, {
+        method: 'PATCH',
+        headers: dashboardAdminHeaders(),
+        body: JSON.stringify(fields),
+      });
+    } else {
+      res = await fetch('/api/dashboard/devices', {
+        method: 'POST',
+        headers: dashboardAdminHeaders(),
+        body: JSON.stringify({ pm_number: value('device-pm'), ...fields }),
+      });
+    }
+    if (!res.ok) {
+      let detail = 'Could not save the device.';
+      if (res.status === 401) {
+        sessionStorage.removeItem(ADMIN_SECRET_KEY);
+        detail = 'Admin authorization failed. Open Admin again and re-enter the secret.';
+      } else {
+        try {
+          const body = await res.json();
+          if (body && body.detail) detail = String(body.detail);
+        } catch (_) { /* keep default */ }
+      }
+      if (err) {
+        err.textContent = detail;
+        err.style.display = '';
+      }
+      return;
+    }
+    closeDeviceDialog();
+    await fetchTables();
+    fetchAdminTables();
+  } catch (_) {
+    if (err) {
+      err.textContent = 'Could not save the device.';
+      err.style.display = '';
+    }
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+
+/**
+ * Remove a catalog device after confirming in-place on the row's button.
+ * A borrowed unit is refused by the API with 409.
+ *
+ * @param {string} pm - Catalog PM to remove.
+ * @param {HTMLElement} btn - The Remove button clicked.
+ */
+async function removeCatalogDevice(pm, btn) {
+  const status = document.getElementById('admin-catalog-status');
+  if (btn.dataset.armed !== '1') {
+    btn.dataset.armed = '1';
+    const orig = btn.textContent;
+    btn.textContent = 'Sure?';
+    setTimeout(() => { btn.dataset.armed = ''; btn.textContent = orig; }, 3000);
+    return;
+  }
+  try {
+    const res = await fetch(`/api/dashboard/devices/${encodeURIComponent(pm)}`, {
+      method: 'DELETE',
+      headers: dashboardAdminHeaders(),
+    });
+    if (!res.ok) {
+      let detail = 'Could not remove the device.';
+      if (res.status === 401) {
+        sessionStorage.removeItem(ADMIN_SECRET_KEY);
+        detail = 'Admin authorization failed. Open Admin again and re-enter the secret.';
+      } else {
+        try {
+          const body = await res.json();
+          if (body && body.detail) detail = String(body.detail);
+        } catch (_) { /* keep default */ }
+      }
+      if (status) status.textContent = detail;
+      return;
+    }
+    if (status) status.textContent = `Removed ${pm}.`;
+    await fetchTables();
+    fetchAdminTables();
+  } catch (_) {
+    if (status) status.textContent = 'Could not remove the device.';
+  }
+}
+
+
+/**
+ * Apply the sheet's hand edits to the database.
+ */
+async function applySheetEdits() {
+  const status = document.getElementById('sheet-diff-status');
+  try {
+    const res = await fetch('/api/dashboard/mirror/apply', {
+      method: 'POST',
+      headers: dashboardAdminHeaders(),
+    });
+    if (!res.ok) {
+      let detail = 'Could not apply the sheet edits.';
+      if (res.status === 401) {
+        sessionStorage.removeItem(ADMIN_SECRET_KEY);
+        detail = 'Admin authorization failed. Open Admin again and re-enter the secret.';
+      } else {
+        try {
+          const body = await res.json();
+          if (body && body.detail) detail = String(body.detail);
+        } catch (_) { /* keep default */ }
+      }
+      if (status) status.textContent = detail;
+      return;
+    }
+    const body = await res.json();
+    if (status) status.textContent =
+      `Applied ${body.applied} change(s)${body.skipped ? `, skipped ${body.skipped}` : ''}.`;
+    sheetDiffs = [];
+    await fetchTables();
+    fetchAdminTables();
+  } catch (_) {
+    if (status) status.textContent = 'Could not apply the sheet edits.';
+  }
+}
+
+
+/**
+ * Keep the database and overwrite the hand edits on the next mirror write.
+ */
+async function dismissSheetEdits() {
+  const status = document.getElementById('sheet-diff-status');
+  try {
+    const res = await fetch('/api/dashboard/mirror/dismiss', {
+      method: 'POST',
+      headers: dashboardAdminHeaders(),
+    });
+    if (!res.ok) {
+      let detail = 'Could not dismiss the sheet edits.';
+      if (res.status === 401) {
+        sessionStorage.removeItem(ADMIN_SECRET_KEY);
+        detail = 'Admin authorization failed. Open Admin again and re-enter the secret.';
+      }
+      if (status) status.textContent = detail;
+      return;
+    }
+    if (status) status.textContent = 'Kept the database — the sheet will be overwritten.';
+    sheetDiffs = [];
+    await fetchTables();
+    fetchAdminTables();
+  } catch (_) {
+    if (status) status.textContent = 'Could not dismiss the sheet edits.';
+  }
+}
+
+
 /**
  * Arm a 60s bind window on the Pi; the sticker must be tapped at the kiosk.
  *
@@ -932,7 +1238,7 @@ async function armBind(pm) {
     });
     if (res.status === 401) {
       sessionStorage.removeItem(ADMIN_SECRET_KEY);
-      if (status) status.textContent = 'Admin authorization failed. Tap the clock 5 times to enter the secret.';
+      if (status) status.textContent = 'Admin authorization failed. Open Admin to enter the secret.';
       return;
     }
     let detail = 'Could not arm bind.';
@@ -968,7 +1274,7 @@ async function unbindTag(pm) {
       let detail = 'Could not unbind.';
       if (res.status === 401) {
         sessionStorage.removeItem(ADMIN_SECRET_KEY);
-        detail = 'Admin authorization failed. Tap the clock 5 times to enter the secret.';
+        detail = 'Admin authorization failed. Open Admin to enter the secret.';
       } else {
         try {
           const body = await res.json();
@@ -1033,6 +1339,10 @@ function initEvents() {
     if (bindBtn) armBind(bindBtn.dataset.bindPm || '');
     const unbindBtn = e.target.closest('[data-unbind-pm]');
     if (unbindBtn) unbindTag(unbindBtn.dataset.unbindPm || '');
+    const editBtn = e.target.closest('[data-edit-pm]');
+    if (editBtn) openDeviceDialog(editBtn.dataset.editPm || '');
+    const removeBtn = e.target.closest('[data-remove-pm]');
+    if (removeBtn) removeCatalogDevice(removeBtn.dataset.removePm || '', removeBtn);
   });
 
   const cancel = document.getElementById('owner-cancel');
@@ -1048,13 +1358,30 @@ function initEvents() {
     });
   }
 
-  const clock = document.getElementById('dash-clock');
-  if (clock) {
-    clock.addEventListener('click', (e) => {
-      e.stopPropagation();
-      checkAdminTapSequence();
+  const adminOpen = document.getElementById('admin-open');
+  if (adminOpen) adminOpen.addEventListener('click', () => { openAdmin(); });
+
+  const catalogAdd = document.getElementById('catalog-add-open');
+  if (catalogAdd) catalogAdd.addEventListener('click', () => openDeviceDialog(''));
+
+  const deviceCancel = document.getElementById('device-cancel');
+  if (deviceCancel) deviceCancel.addEventListener('click', closeDeviceDialog);
+
+  const deviceConfirm = document.getElementById('device-confirm');
+  if (deviceConfirm) deviceConfirm.addEventListener('click', () => submitDeviceDialog());
+
+  const deviceDialog = document.getElementById('device-dialog');
+  if (deviceDialog) {
+    deviceDialog.addEventListener('click', (e) => {
+      if (e.target === deviceDialog) closeDeviceDialog();
     });
   }
+
+  const sheetApply = document.getElementById('sheet-apply');
+  if (sheetApply) sheetApply.addEventListener('click', () => applySheetEdits());
+
+  const sheetKeep = document.getElementById('sheet-keep');
+  if (sheetKeep) sheetKeep.addEventListener('click', () => dismissSheetEdits());
 
   const adminClose = document.getElementById('admin-overlay-close');
   if (adminClose) adminClose.addEventListener('click', closeAdminOverlay);

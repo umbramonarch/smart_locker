@@ -52,29 +52,28 @@ table at the end.
 - [ ] Touch targets respond on the first tap; no ghost/double taps.
 - [ ] If any jank is seen even in lite mode, note it — that is a real-hardware-only finding.
 
-## 5. locker share & source import
+## 5. locker share & catalog mirror
 
-- [ ] `mount | grep /mnt/locker` shows the CIFS mount; the workbook is readable.
-- [ ] Admin panel → **Sync Source** → preview shows add/update/skip counts → confirm → counts applied.
-- [ ] Edit a catalog field (name / manufacturer / model) in the workbook on the share from
-      another PC → **Sync Source** (or wait for the 6-hour interval) imports the catalog
-      change (check `journalctl` for source import). **Location** on locker PMs
-      is not taken from Excel; the Pi writes it back instead.
+- [ ] `mount | grep /mnt/locker` shows the CIFS mount; the mirror workbook is writable.
+- [ ] Admin panel → **Sync Sheet** runs a mirror tick; the sheet on the share is
+      rewritten from the SQLite catalog. Check `journalctl` for the mirror write.
 - [ ] Borrow or return on the kiosk updates **Location** in
       `device-list.xlsx` for that PM (`Locker` when in the locker, borrower name
-      when out). Other columns stay. If Excel has the file open, the kiosk still
-      works; the cell updates on the next sync or the next successful write.
+      when out, `Maintenance` for a maintenance unit). If the file is open
+      elsewhere, the kiosk still works; the write lands on the next tick.
+- [ ] Edit a catalog field in the workbook from another PC → the next tick
+      flags a hand edit; the dashboard banner and Admin overlay show the diff.
+      **Apply** writes the sheet edits into SQLite; **Keep database** dismisses
+      them and the next write overwrites the sheet.
 - [ ] Reboot with the share **unavailable** → boot still completes (nofail), service starts, kiosk loads.
-      Admin last-sync line is not "never" if a previous import was recorded.
-- [ ] Auto-export of `smart_locker_data.xlsx` is off unless `SMART_LOCKER_EXCEL_AUTO_EXPORT=1`.
-      Admin **Export Excel** still downloads a snapshot.
+      Admin last-sync line is not "never" if a previous tick was recorded.
 - [ ] Software update from USB `locker-updates/` (`python -m scripts.copy_update` on Windows): admin **Software Update** overlay, or SSH `sudo bash deploy/install/update.sh`. Do not overlay the stick onto `/home/locker/smart_locker` in the file manager.
-- [ ] Admin **Register Device**: Add from Excel (PM in the sheet + free slot) creates the locker row and waits for the sticker; unknown PM / share down does not create a row. Existing rows Bind / **Replace tag** / Unbind / Slot still work. **Sync Source** updates catalog only (does not add locker devices).
+- [ ] Admin **Register Device**: pick a registerable catalog row (or type its PM) + free slot → the row gets the slot and waits for the sticker; unknown PM is refused. Existing rows Bind / **Replace tag** / Unbind / Slot still work.
 - [ ] On a **blank** database: `GET /api/setup` reports `needed:true`; kiosk 5× clock tap opens **First Admin Setup** (name + required dashboard password → tap card within 60 s → admin enrolled, `needed:false`). The typed password lands in `dashboard.secret` (mode `640`, owned by `locker` — **not** `.env`, which stays root-owned). **Software Update** works from that screen with no admin enrolled; from a LAN browser `POST /api/admin/update` is refused until the secret exists. A `POST /api/setup` from the LAN returns 403.
 - [ ] Chromium starts without a browser keyring/password prompt (`--password-store=basic` in `start-kiosk.sh`).
 - [ ] Admin **Stop system** (confirm) closes Chromium, stops any in-flight `smart-locker-update` unit, then stops `smart-locker` (`systemctl status smart-locker` → `inactive`, still `enabled`). Dashboard on `:8000` stops answering; the Pi stays powered on. The next boot starts the service and kiosk normally.
 - [ ] Admin **Shut down** (confirm) powers the Pi off. After the first update of this feature, if the button errors, SSH `sudo bash deploy/install/apply-sudoers.sh` once.
-- [ ] From another PC, open `http://<pi>:8000/dashboard`. **Inventory** lists the full Excel catalog (share down → error on that tab only). Owner click works for PMs that are **not** in the locker; locker PMs are not editable. **Locker** lists SQLite locker devices (Tagged / No tag; no owner edit). **Display** follows the kiosk screen (idle / main menu / locker / return / admin) and shows the signed-in user. Tap the dashboard clock 5× within 3 s: users, logs, Unbind / Replace tag. Cursor and scroll work; the page is kiosk colours, not a second kiosk. If `SMART_LOCKER_PUBLIC_URL` and `SMART_LOCKER_DASHBOARD_SHARE_PATH` are set, `dashboard.url` on the share opens the live page.
+- [ ] From another PC, open `http://<pi>:8000/dashboard`. **Inventory** lists the full SQLite catalog (share down does **not** break the tab). Owner click works for PMs that are **not** in the locker (public); locker PMs are not editable. **Locker** lists SQLite locker devices (Tagged / No tag; no owner edit). **Display** follows the kiosk screen (idle / main menu / locker / return / admin) and shows the signed-in user. The **Admin** button in the header opens the overlay: catalog editor, mirror diffs, users, logs, Unbind / Replace tag. Cursor and scroll work; the page is kiosk colours, not a second kiosk. If `SMART_LOCKER_PUBLIC_URL` and `SMART_LOCKER_DASHBOARD_SHARE_PATH` are set, `dashboard.url` on the share opens the live page.
 
 ## 6. Sign-off
 

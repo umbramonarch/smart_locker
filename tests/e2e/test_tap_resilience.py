@@ -144,7 +144,7 @@ def test_commit_failure_on_borrow_reports_error_and_next_tap_works(e2e, monkeypa
     assert payload["success"] is False
 
     # The failed borrow rolled back — the device is still available and the
-    # write-back flag was discarded with the transaction.
+    # mirror-dirty flag was discarded with the transaction.
     device = get_device(h, device_id)
     assert device.status == DeviceStatus.AVAILABLE
     assert device.current_borrower_id is None

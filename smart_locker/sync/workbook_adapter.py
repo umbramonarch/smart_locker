@@ -83,21 +83,30 @@ class WorkbookAdapter:
         except OSError as exc:
             return WorkbookRows(None, f"Source file unavailable: {self.path} ({exc})")
 
-    def edit_active_sheet(self, edit: Callable[[object], bool]) -> bool:
+    def edit_active_sheet(
+        self,
+        edit: Callable[[object], bool],
+        expected_mtime: float | None = None,
+    ) -> bool:
         """Copy, edit, and atomically replace the workbook when ``edit`` changes it.
 
         Args:
             edit: Receives the active worksheet and returns True when it changed.
+            expected_mtime: When given, the current mtime must match — binds
+                the copy to an earlier detection stat.
 
         Returns:
             True when a changed workbook was saved and replaced; False when
             ``edit`` made no changes.
 
         Raises:
-            WorkbookStaleError: The source changed after it was copied.
+            WorkbookStaleError: The source changed after it was copied, or
+                does not match ``expected_mtime``.
             OSError: The workbook could not be copied, loaded, saved, or replaced.
         """
         mtime = self.path.stat().st_mtime
+        if expected_mtime is not None and mtime != expected_mtime:
+            raise WorkbookStaleError()
         dest_path: Path | None = None
         wb = None
         try:
@@ -131,6 +140,75 @@ class WorkbookAdapter:
             if dest_path is not None:
                 dest_path.unlink(missing_ok=True)
 
+    def write_sheet(
+        self,
+        headers: list,
+        rows: list[list],
+        expected_mtime: float | None = None,
+    ) -> bool:
+        """Rewrite the active sheet to exactly ``headers`` + ``rows``.
+
+        The mirror owns this file: the active sheet is cleared and rewritten;
+        other sheets are preserved. A missing file is created.
+
+        Args:
+            headers: Header row cell values.
+            rows: Data rows; each a list of cell values (str/date/None).
+            expected_mtime: When given, the file's current mtime must match —
+                a changed file is refused so a hand edit is never rewritten
+                unreviewed.
+
+        Returns:
+            True when the workbook was saved and replaced.
+
+        Raises:
+            WorkbookStaleError: The source changed after it was copied, or
+                does not match ``expected_mtime``.
+            OSError: The workbook could not be copied, loaded, saved, or replaced.
+        """
+        from smart_locker.sync.catalog_sheet import safe_cell_value
+
+        if expected_mtime is not None:
+            try:
+                if self.path.stat().st_mtime != expected_mtime:
+                    raise WorkbookStaleError()
+            except FileNotFoundError:
+                raise WorkbookStaleError() from None
+
+        def _fill(ws) -> None:
+            ws.append([safe_cell_value(h) for h in headers])
+            for row in rows:
+                ws.append([safe_cell_value(v) for v in row])
+
+        if not self.path.exists():
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            from openpyxl import Workbook
+
+            wb = Workbook()
+            _fill(wb.active)
+            dest_fd, dest_str = tempfile.mkstemp(
+                suffix=".xlsx", dir=self.path.parent
+            )
+            os.close(dest_fd)
+            dest_path = Path(dest_str)
+            try:
+                wb.save(dest_path)
+                wb.close()
+                self._replace_into(dest_path)
+                dest_path = None
+                return True
+            finally:
+                if dest_path is not None:
+                    dest_path.unlink(missing_ok=True)
+
+        def edit(ws) -> bool:
+            if ws.max_row:
+                ws.delete_rows(1, ws.max_row)
+            _fill(ws)
+            return True
+
+        return self.edit_active_sheet(edit, expected_mtime=expected_mtime)
+
     def _replace_into(self, staged_path: Path) -> None:
         """Replace the source workbook with a staged file, retrying a file lock."""
         for attempt in range(1, WRITE_RETRY_ATTEMPTS + 1):
@@ -153,19 +231,3 @@ class WorkbookAdapter:
             yield work_path
         finally:
             work_path.unlink(missing_ok=True)
-
-
-def configured_workbook() -> WorkbookAdapter | None:
-    """Build an adapter for the currently configured source workbook.
-
-    The setting is deliberately read when a boundary starts workbook work,
-    rather than when this module is imported. This preserves live configuration
-    selection and lets tests point it at a temporary workbook.
-
-    Returns:
-        Adapter for the configured workbook, or None when no source is set.
-    """
-    import config.settings as settings
-
-    path = settings.SOURCE_EXCEL_PATH
-    return WorkbookAdapter(path) if path else None

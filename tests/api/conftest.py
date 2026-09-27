@@ -61,6 +61,11 @@ def _db_setup():
 
     yield scoped
 
+    # Drain scheduled mirror-flush workers before the engine goes away — a
+    # late tick on a disposed in-memory engine crashes the test process.
+    from smart_locker.sync import mirror
+    mirror.flush_scheduled()
+
     scoped.remove()
     eng_mod.reset_engine()
 

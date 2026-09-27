@@ -19,7 +19,6 @@ from smart_locker.database.repositories import DeviceRepository, RegistrantRepos
 from smart_locker.security.hashing import compute_uid_hmac
 
 import smart_locker.api.app_context as ctx_module
-from tests.api.helpers import catalog_workbook
 
 class TestRegistrantEndpoints:
     """Tests for the registrant list and registration validation API endpoints."""
@@ -142,42 +141,42 @@ class TestRegistrantEndpoints:
         assert mock_context.pending_tag_bind is not None
         assert mock_context.pending_tag_bind.from_dashboard is True
 
-    def test_register_while_import_running_returns_503(
+    def test_register_while_sync_running_returns_503(
         self, client, mock_context
     ):
-        """A name lookup during an in-flight catalog import is 503, not 403 —
-        'not yet imported' is not 'not approved'."""
-        from smart_locker.sync import scheduler
+        """A name lookup during an in-flight mirror tick is 503, not 403 —
+        'not yet adopted' is not 'not approved'."""
+        from smart_locker.sync import mirror
 
-        assert scheduler._import_lock.acquire(blocking=False)
+        assert mirror._tick_lock.acquire(blocking=False)
         try:
             resp = client.post("/api/register", json={"name": "Not Yet Imported"})
             assert resp.status_code == 503
             assert "sync" in resp.json()["detail"].lower()
         finally:
-            scheduler._import_lock.release()
+            mirror._tick_lock.release()
 
         resp = client.post("/api/register", json={"name": "Not Listed"})
         assert resp.status_code == 403
 
     def test_get_registrants_reports_syncing(self, client):
-        """GET /api/registrants exposes the in-flight import as syncing=true."""
-        from smart_locker.sync import scheduler
+        """GET /api/registrants exposes the in-flight tick as syncing=true."""
+        from smart_locker.sync import mirror
 
-        assert scheduler._import_lock.acquire(blocking=False)
+        assert mirror._tick_lock.acquire(blocking=False)
         try:
             resp = client.get("/api/registrants")
             assert resp.status_code == 200
             assert resp.json()["syncing"] is True
         finally:
-            scheduler._import_lock.release()
+            mirror._tick_lock.release()
 
         resp = client.get("/api/registrants")
         assert resp.json()["syncing"] is False
 
 
 class TestRegisterDeviceApi:
-    """Admin POST /api/admin/devices/register creates a locker row from Excel."""
+    """Admin POST /api/admin/devices/register promotes a catalog row."""
 
     def test_register_requires_session(self, client, mock_context):
         resp = client.post(
@@ -195,13 +194,8 @@ class TestRegisterDeviceApi:
         assert resp.status_code == 403
 
     def test_register_unknown_pm(
-        self, client, mock_context, admin_user, db_session, tmp_path, monkeypatch
+        self, client, mock_context, admin_user, db_session
     ):
-        path = catalog_workbook(tmp_path, [
-            ["Equipment", "Manufacturer"],
-            ["PM-001", "Fluke"],
-        ])
-        monkeypatch.setattr("config.settings.SOURCE_EXCEL_PATH", str(path))
         mock_context.session_mgr.start_session(admin_user)
         resp = client.post(
             "/api/admin/devices/register",
@@ -210,14 +204,53 @@ class TestRegisterDeviceApi:
         assert resp.status_code == 404
         assert DeviceRepository.find_by_pm(db_session, "PM-MISSING") is None
 
-    def test_register_duplicate_slot(
-        self, client, mock_context, admin_user, test_devices, tmp_path, monkeypatch
+    def test_register_promotes_catalog_row(
+        self, client, mock_context, admin_user, db_session
     ):
-        path = catalog_workbook(tmp_path, [
-            ["Equipment", "Manufacturer"],
-            ["PM-NEW", "Keysight"],
-        ])
-        monkeypatch.setattr("config.settings.SOURCE_EXCEL_PATH", str(path))
+        """A catalog-only row gains a slot and arms the sticker bind."""
+        device = DeviceRepository.create(
+            db_session,
+            name="Van kit",
+            device_type="Tool",
+            pm_number="PM-NEW",
+        )
+        db_session.commit()
+        mock_context.session_mgr.start_session(admin_user)
+        resp = client.post(
+            "/api/admin/devices/register",
+            json={"pm_number": "PM-NEW", "locker_slot": 7},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["success"] is True
+        assert body["locker_slot"] == 7
+        db_session.expire_all()
+        assert device.locker_slot == 7
+        listed = client.get("/api/dashboard/devices").json()
+        assert "PM-NEW" in {d["pm_number"] for d in listed}
+
+    def test_register_already_registered_is_409(
+        self, client, mock_context, admin_user, test_devices, db_session
+    ):
+        """A PM that is already a cabinet unit cannot re-register."""
+        db_session.commit()
+        mock_context.session_mgr.start_session(admin_user)
+        resp = client.post(
+            "/api/admin/devices/register",
+            json={"pm_number": test_devices[0].pm_number, "locker_slot": 9},
+        )
+        assert resp.status_code == 409
+
+    def test_register_duplicate_slot(
+        self, client, mock_context, admin_user, test_devices, db_session
+    ):
+        device = DeviceRepository.create(
+            db_session,
+            name="Scope",
+            device_type="Tool",
+            pm_number="PM-NEW",
+        )
+        db_session.commit()
         mock_context.session_mgr.start_session(admin_user)
         resp = client.post(
             "/api/admin/devices/register",

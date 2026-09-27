@@ -8,7 +8,7 @@ Project: smart_locker/scripts
 Notes: Usage: python -m scripts.update_device --list | --auto |
        --pm PM-042 --image photo.jpg --description "..." |
        --batch updates.txt
-       Changes are automatically synced to the output Excel file.
+       Changes are mirrored to the catalog workbook on the next tick.
 """
 
 import argparse
@@ -64,7 +64,7 @@ def update_device(pm_number: str, updates: dict) -> None:
     """Update a single device's fields by PM number.
 
     Looks up the device, applies each field update (skipping non-updatable
-    fields), flushes to the database, and triggers an Excel sync export.
+    fields), flushes to the database, and runs one mirror tick.
 
     Args:
         pm_number: The PM number identifying the device (e.g. ``"PM-042"``).
@@ -100,12 +100,14 @@ def update_device(pm_number: str, updates: dict) -> None:
         session.flush()
         print(f"Updated: {device.pm_number} ({device.name})")
 
-    # Trigger Excel sync
-    from config.settings import EXCEL_SYNC_PATH
+    # The workbook is a Pi-written mirror — flag the change and write it now.
     from smart_locker.database.engine import get_engine
-    from smart_locker.sync.excel_sync import export_to_excel
-    export_to_excel(get_engine(), EXCEL_SYNC_PATH)
-    print(f"Excel sync: {EXCEL_SYNC_PATH}")
+    from smart_locker.sync import mirror
+
+    mirror.mark_dirty()
+    result = mirror.tick(get_engine(), trigger="manual")
+    if result.get("error"):
+        print(f"Mirror write deferred: {result['error']} (retries on the next tick)")
 
 
 def batch_update(batch_file: str) -> None:

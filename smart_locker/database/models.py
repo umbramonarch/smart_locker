@@ -114,10 +114,11 @@ class User(Base):
 class Registrant(Base):
     """Approved name for self-service NFC card registration.
 
-    Stores unique person names extracted from the source Excel file
-    (specifically the Location column). During source import, every value
-    that is not an in-locker token is treated as a person's name and the
-    table is replaced to match that set.
+    Stores unique person names seeded from the catalog sheet's Location
+    column when the mirror adopts an existing workbook — every value that
+    is not an in-locker token is treated as a person's name and the table
+    is replaced to match that set. After adoption the list lives in the
+    database.
 
     The kiosk registration screen presents these names as a selectable list.
     Users whose names appear here may self-register by selecting their name
@@ -171,6 +172,9 @@ class Device(Base):
     # HMAC-SHA256 of the sticker UID (never the raw UID).
     tag_hmac: Mapped[str | None] = mapped_column(String(64), nullable=True)
     locker_slot: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Place/owner text for catalog rows not in the cabinet (locker_slot NULL).
+    # Registered devices derive Location from status/borrower instead.
+    location: Mapped[str | None] = mapped_column(String(200), nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     image_path: Mapped[str | None] = mapped_column(String(255), nullable=True)
     calibration_due: Mapped[date | None] = mapped_column(Date, nullable=True)

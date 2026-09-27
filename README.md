@@ -51,9 +51,9 @@ smart_locker/
 │   │   ├── index.html           # Kiosk UI — 6 screens + overlays
 │   │   ├── style.css            # kiosk theme (#009641 on #181d24)
 │   │   ├── app.js               # Kiosk state machine, API calls, NFC-driven navigation
-│   │   ├── dashboard.html       # Network dashboard: tabs + 5-tap UI overlay
+│   │   ├── dashboard.html       # Network dashboard: tabs + Admin-button overlay
 │   │   ├── dashboard.css        # Dashboard styling (kiosk colours, desktop cursor)
-│   │   ├── dashboard.js         # Tabs, Excel/SQLite fetch, Display poll, owner edit (admin secret)
+│   │   ├── dashboard.js         # Tabs, SQLite fetch, mirror status/diffs, catalog editor
 │   │   └── images/              # Device photos + hero background
 │   ├── nfc/                     # NFC reader interface (pyscard + APDU)
 │   │   ├── apdu.py              # APDU command definitions + response parsing
@@ -75,16 +75,21 @@ smart_locker/
 │   │   └── repositories.py      # CRUD: User / Registrant / Device / Transaction repositories
 │   ├── services/
 │   │   ├── locker_service.py    # Borrow/return rules (per-user limit, admin overrides)
-│   │   ├── owner_edit.py        # Dashboard Inventory owner change (Excel; not locker PMs)
+│   │   ├── device_catalog.py    # Catalog editor: add/edit/remove, place/register, registerable list
+│   │   ├── device_registration.py # Register Device: promote a catalog row into a slot
+│   │   ├── owner_edit.py        # Public owner change on non-locker devices (SQLite)
+│   │   ├── setup_service.py     # First-boot admin enrollment (empty DB)
+│   │   ├── appliance.py         # Stop system / shut down appliance helpers
 │   │   └── user_service.py      # User enrollment, public/admin views
 │   └── sync/
-│       ├── excel_sync.py        # On-demand / auto Excel export (Devices / Transactions / Users)
-│       ├── source_import.py     # Catalog refresh for locker PMs (no insert, English headers)
-│       ├── location_writeback.py    # Pi → Excel: Location by PM only
-│       ├── inventory_reader.py  # Dashboard Inventory tab: live Excel, not SQLite
+│       ├── mirror.py            # Pi-written mirror: adopt, hand-edit diffs, deferred writes
+│       ├── catalog_sheet.py     # Mirror sheet row parsing / column detection
+│       ├── workbook_adapter.py  # openpyxl I/O: read rows, atomic write_sheet, lock detection
+│       ├── scheduler.py         # Mirror tick: startup + interval; share launcher retry
+│       ├── sync_status.py       # Persisted "last sync" line for the admin overlay
 │       ├── dashboard_launcher.py # Share HTML + .url redirect to live /dashboard
-│       ├── scheduler.py         # Source import + write-back: startup + 6h interval (+ local FS watch)
 │       ├── photo_watcher.py     # Auto-assign device photos by model number
+│       ├── photo_matcher.py     # Photo filename → model matching
 │       └── fs_utils.py          # Detect network (CIFS/NFS) paths so watchers skip unreliable inotify
 ├── deploy/                      # Raspberry Pi provisioning: systemd, CIFS mount, kiosk, offline install
 │   ├── install/                 # install.sh (one-shot setup) + build-wheelhouse.sh (offline wheels)
@@ -100,7 +105,7 @@ smart_locker/
 │   ├── enroll_card.py           # Enroll a new NFC card user (reader tap, or --uid HEX for no hardware)
 │   ├── enroll_device_tag.py     # Bind an NFC sticker to an existing device (--pm, optional --uid / --force)
 │   ├── update_device.py         # Update device fields / match photos by model
-│   ├── sync_source.py           # Manually trigger source Excel import
+│   ├── sync_source.py           # Manually trigger a mirror tick (adopt/detect/flush)
 │   └── copy_update.py           # Fill locker-updates/ and copy onto a USB stick
 ├── tests/                       # hardware-free pytest suite
 ├── docs/adr/                    # architecture decision records
@@ -126,14 +131,14 @@ smart_locker/
 | Business logic | ✅ Done | Borrow/return rules, admin overrides, per-user borrow limit |
 | FastAPI REST API | ✅ Done | Session, device, registration, admin, dashboard endpoints + SSE |
 | Self-registration | ✅ Done | Approved-name list + NFC tap; admin manual registration |
-| Excel export | ✅ Done | On-demand `.xlsx` (Devices + Transactions + Users) — replaces old auto-sync |
-| Source import | ✅ Done | Startup + 6h interval + file-watch on local FS; catalog-only, no insert |
-| Location write-back | ✅ Done | Pi writes Location by PM (`Locker` / borrower); locked file skipped |
-| Device import | ✅ Done | English Excel headers and aliases, PM-based catalog update, no auto locker insert |
+| Catalog mirror | ✅ Done | Sheet on the share is a Pi-written mirror of SQLite; hand edits held for admin apply/keep |
+| Catalog editor | ✅ Done | Dashboard Admin: add/edit/remove device, mirror diff review, software update |
+| Location mirror | ✅ Done | Pi derives Location by PM (`Locker` / borrower / `Maintenance`); locked file defers |
+| First-sight adoption | ✅ Done | An existing catalog sheet seeds SQLite once; person names seed registrants |
 | Photo import | ✅ Done | By model (`update_device --auto`, photo watcher); `--pm` for one device |
-| Web dashboard | ✅ Done | `/dashboard` — public Inventory/Locker GET; owner/bind/unbind + users/tx/owners need admin secret; 5-tap is UI reveal |
+| Web dashboard | ✅ Done | `/dashboard` — public Inventory/Locker GET + non-locker owner POST; catalog editor, mirror diffs, bind/unbind + users/tx/owners need admin secret; Admin button reveals UI |
 | Frontend UI | ✅ Done | 6-screen kiosk UI + overlays |
-| Unit tests | ✅ Done | ~371 tests, hardware-free |
+| Unit tests | ✅ Done | ~300 tests, hardware-free |
 | NFC device tags | ✅ Done | Same ACR1252U; `devices.tag_hmac`; auto borrow/return after login |
 | Calibration alerts | 🔲 Future | Calibration dates stored; notification system not yet built |
 | Kiosk deployment | ✅ Done | Raspberry Pi appliance: systemd service, CIFS mount, Chromium kiosk, offline install (`deploy/`) |
@@ -181,7 +186,7 @@ git renders this mermaid flowchart (three tiers: clients, FastAPI, then SQLite /
 flowchart TB
     subgraph client["Client"]
         kiosk["Touch Display — Chromium kiosk<br/>frontend/, index.html, app.js<br/>6 screens, green theme"]
-        dash["Any browser — Dashboard /dashboard<br/>tabs, 5-tap reveal, public catalog GET"]
+        dash["Any browser — Dashboard /dashboard<br/>tabs, Admin button, public catalog GET"]
     end
 
     subgraph application["Application"]
@@ -191,7 +196,7 @@ flowchart TB
     subgraph hardware["Data and hardware"]
         sqlite["SQLite + ORM<br/>users, devices, registrants, transaction_logs"]
         nfc["NFC ACR1252U<br/>background listener<br/>tap, HMAC, auth"]
-        excel["Excel sync<br/>catalog import, Location write-back<br/>on-demand export"]
+        excel["Catalog mirror<br/>Pi-written sheet from SQLite<br/>adopt on first sight, hand-edit review"]
     end
 
     kiosk -->|"REST fetch + SSE NFC/session"| api
@@ -223,20 +228,20 @@ The system runs as a kiosk: FastAPI serves the frontend as static files in a ful
 5. **Locker** — availability overlay; IN / OUT / YOURS / MAINT; PM number on each card; screen-pick borrow still works
 6. **Return** — device grid with PM on each card; the user's borrowed items highlighted
 
-Overlays: **device detail** (photo, PM, type, serial, confirm), **return slot** (put in slot N), **inactivity** countdown, and a **hidden admin panel** (5× tap on the clock) with Locker/Return/Sync/Register User/**Register Device**/Export/**Stop system**/**Shut down**/End-Session shortcuts. Register Device uses **Replace tag** when a sticker is already bound.
+Overlays: **device detail** (photo, PM, type, serial, confirm), **return slot** (put in slot N), **inactivity** countdown, and a **hidden admin panel** (5× tap on the clock) with Locker/Return/Sync Sheet/Register User/**Register Device**/**Stop system**/**Shut down**/End-Session shortcuts. Register Device uses **Replace tag** when a sticker is already bound.
 
 **Theme:** green (`#009641`) on dark charcoal (`#181d24`).
 
 ## Web Dashboard
 
-A dashboard is served at **`/dashboard`**. Public GET Inventory and Locker catalog stay unauthenticated. Dashboard mutations (owner POST, bind/unbind) and gated users/tx/owners GETs need `SMART_LOCKER_DASHBOARD_ADMIN_SECRET` (header `X-Smart-Locker-Admin`); 401 if unset (fail closed). The 5-tap overlay is a client UI reveal, not authorization (`overlay=true` is not auth).
+A dashboard is served at **`/dashboard`**. Public GET Inventory and Locker catalog stay unauthenticated, and owner change on a **non-locker** PM is public too. Catalog mutations (add/edit/remove, mirror apply/dismiss, bind/unbind) and gated users/tx/owners GETs need `SMART_LOCKER_DASHBOARD_ADMIN_SECRET` (header `X-Smart-Locker-Admin`); 401 if unset (fail closed). The **Admin** button is a client UI reveal, not authorization (`overlay=true` is not auth).
 Three tabs:
 
-- **Inventory** — live `device-list.xlsx` (full catalog). Search and sort. Click owner to change it (confirm) for PMs that are **not** in the locker — that POST needs the admin secret. Share down shows an error here only.
+- **Inventory** — the SQLite catalog (every device, locker units included and marked). Search and sort. Click owner to change it (confirm) for PMs that are **not** in the locker — that POST is public. A down share no longer breaks the tab.
 - **Locker** — SQLite devices registered into a slot (status, borrower, slot, Tagged / No tag). Owner is set at the kiosk (borrow/return), not here.
 - **Display** — what the kiosk is showing right now, plus the signed-in user. View only.
 
-Tap the header clock **5× within 3 s** (same gesture as the kiosk) to reveal registered users, the last 500 transactions, and NFC **Unbind** / **Bind** / **Replace tag**. Those GETs/POSTs still need the admin secret. Arm-bind waits for the sticker on the ACR1252U; the dashboard does not start a kiosk admin session.
+The header **Admin** button asks for the admin secret, then reveals the catalog editor (add / edit / remove device), mirror hand-edit diffs (apply / keep database), registered users, the last 500 transactions, and NFC **Unbind** / **Bind** / **Replace tag**. Those GETs/POSTs still need the admin secret. Arm-bind waits for the sticker on the ACR1252U; the dashboard does not start a kiosk admin session.
 
 Colleagues can double-click `dashboard.url` on the locker share if the Pi is configured with `SMART_LOCKER_PUBLIC_URL` and `SMART_LOCKER_DASHBOARD_SHARE_PATH` (startup writes that file). The live page is still `GET /dashboard`.
 

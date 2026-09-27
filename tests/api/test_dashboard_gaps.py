@@ -16,7 +16,7 @@ from smart_locker.database.repositories import (
     RegistrantRepository,
     TransactionRepository,
 )
-from tests.api.helpers import catalog_workbook, dashboard_admin_headers
+from tests.api.helpers import dashboard_admin_headers
 
 
 class TestDashboardTransactionsPopulated:
@@ -78,46 +78,27 @@ class TestDashboardTransactionsPopulated:
 class TestDashboardOwnerGaps:
     """POST /api/dashboard/owner -- validation and catalog-miss mapping."""
 
-    def test_owner_whitespace_pm_is_400(
-        self, client, tmp_path, monkeypatch, dashboard_secret
-    ):
+    def test_owner_whitespace_pm_is_400(self, client):
         """A whitespace-only PM survives pydantic then fails set_owner -> 400."""
-        path = catalog_workbook(tmp_path, [
-            ["Equipment", "Name", "Location"],
-            ["PM-VAN", "Van kit", "Workshop"],
-        ])
-        monkeypatch.setattr("config.settings.SOURCE_EXCEL_PATH", str(path))
         resp = client.post(
             "/api/dashboard/owner",
             json={"pm_number": "   ", "owner": "Alex"},
-            headers=dashboard_admin_headers(dashboard_secret),
         )
         assert resp.status_code == 400
 
-    def test_owner_missing_pm_field_is_422(
-        self, client, dashboard_secret
-    ):
+    def test_owner_missing_pm_field_is_422(self, client):
         """A body without pm_number fails pydantic validation -> 422."""
         resp = client.post(
             "/api/dashboard/owner",
             json={"owner": "Alex"},
-            headers=dashboard_admin_headers(dashboard_secret),
         )
         assert resp.status_code == 422
 
-    def test_owner_pm_not_in_catalog_is_404(
-        self, client, tmp_path, monkeypatch, dashboard_secret
-    ):
-        """A PM absent from the Excel catalog maps UnknownPm -> 404."""
-        path = catalog_workbook(tmp_path, [
-            ["Equipment", "Name", "Location"],
-            ["PM-VAN", "Van kit", "Workshop"],
-        ])
-        monkeypatch.setattr("config.settings.SOURCE_EXCEL_PATH", str(path))
+    def test_owner_pm_not_in_catalog_is_404(self, client):
+        """A PM absent from the SQLite catalog maps UnknownPm -> 404."""
         resp = client.post(
             "/api/dashboard/owner",
             json={"pm_number": "PM-ABSENT", "owner": "Alex"},
-            headers=dashboard_admin_headers(dashboard_secret),
         )
         assert resp.status_code == 404
 

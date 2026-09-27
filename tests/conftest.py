@@ -26,18 +26,47 @@ def _set_test_keys(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _disable_location_writeback(monkeypatch):
-    """Do not write a developer SOURCE_EXCEL_PATH during tests.
+def _disable_mirror(monkeypatch):
+    """Keep the catalog mirror unconfigured during tests.
 
-    Borrow/return schedule Location write-back against settings. Tests that
-    need write-back monkeypatch SOURCE_EXCEL_PATH onto a temp workbook.
+    Borrow/return and dashboard edits schedule a mirror flush against
+    ``mirror_path()``. Tests that exercise the mirror point a path at a
+    temp workbook on purpose. DB_PATH is faked to :memory: (the test
+    engines are) so the "mirror next to the database" default resolves
+    to None instead of a file inside the repo.
     """
     monkeypatch.setattr("config.settings.SOURCE_EXCEL_PATH", "")
+    monkeypatch.setattr("config.settings.DB_PATH", ":memory:")
+    monkeypatch.delenv("SMART_LOCKER_MIRROR_PATH", raising=False)
+    monkeypatch.delenv("SMART_LOCKER_SOURCE_EXCEL_PATH", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_mirror_state(tmp_path, monkeypatch):
+    """Keep mirror_state.json off the repo disk for every test."""
+    monkeypatch.setenv(
+        "SMART_LOCKER_MIRROR_STATE_PATH", str(tmp_path / "mirror_state.json")
+    )
+
+
+@pytest.fixture(autouse=True)
+def _join_mirror_flushers():
+    """Join scheduled mirror-flush threads before/after each test.
+
+    A worker spawned by ``schedule_flush`` that outlives its test would run
+    workbook I/O against the next test's (or a disposed) database — and on
+    Windows a query on a torn-down in-memory engine is a hard crash.
+    """
+    from smart_locker.sync import mirror
+
+    mirror.flush_scheduled()
+    yield
+    mirror.flush_scheduled()
 
 
 @pytest.fixture(autouse=True)
 def _default_site_overlay(monkeypatch):
-    """Ignore a developer .env overlay so tests see built-in Excel/UI defaults."""
+    """Ignore a developer .env overlay so tests see built-in catalog/UI defaults."""
     monkeypatch.delenv("SMART_LOCKER_ASSET_LABEL", raising=False)
     monkeypatch.delenv("SMART_LOCKER_ID_HEADERS", raising=False)
     monkeypatch.delenv("SMART_LOCKER_LOCATION_HEADERS", raising=False)

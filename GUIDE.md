@@ -28,9 +28,11 @@ Three things are worth understanding up front:
 
 - **No internet at runtime.** The Pi only needs the company LAN to reach the locker file
   share. Everything else runs locally. Installation comes from the USB stick, not the web.
-- **The share is both source and destination.** The Pi imports catalog fields from
-  `device-list.xlsx` and writes locker **Location** back into that same file.
-  Download Excel (`smart_locker_data.xlsx`) is an on-demand snapshot.
+- **The database is the catalog; the sheet is a mirror.** Every catalog device is a
+  row in SQLite. The Pi regenerates `device-list.xlsx` on the share from that
+  database — a hidden mirror you can open, not a source anyone edits. An existing
+  catalog sheet is adopted into the database on first sight; after that the Pi owns
+  the file.
 - **The database stays on the Pi.** SQLite lives on the SD card. Do not put it on the
   network share — locking over CIFS is unreliable.
 
@@ -381,7 +383,7 @@ data) comes **last**, once everything else is verified working.
 ## 4. Step-by-step setup (manual)
 
 These steps assume a terminal on the Pi and the project at `~/smart_locker`. **Notice what's
-*not* here:** connecting the locker share and importing real device data — that's Section 6,
+*not* here:** connecting the locker share and loading real device data — that's Section 6,
 deliberately done last, after the kiosk itself is proven working. This matches how the
 share typically gets provisioned in practice: IT connects it once everything else is ready,
 not before.
@@ -518,9 +520,9 @@ cp deploy/.env.pi.example .env
 nano .env          # paste SMART_LOCKER_ENC_KEY and SMART_LOCKER_HMAC_KEY
 ```
 
-The template already points the Excel paths at /mnt/locker (`/mnt/locker/...`, connected
+The template already points the mirror workbook at /mnt/locker (`/mnt/locker/...`, connected
 later in Section 6) and keeps the database local. Adjust the
-`SMART_LOCKER_SOURCE_EXCEL_PATH` filename to match your real workbook. **Keep `.env`
+`SMART_LOCKER_MIRROR_PATH` filename to match your real workbook. **Keep `.env`
 secret** — it holds the encryption keys (it is already gitignored).
 
 **Every line in `.env`, explained** (the full authoritative reference, with every default,
@@ -546,29 +548,52 @@ is Section 11 — this is the same information, walked through in the order it a
   on. `0.0.0.0:8000` (the default) means "every network interface, port 8000" — this is
   what lets you reach `http://<pi-address>:8000/dashboard` from another computer on the
   same network. You almost never need to change this.
-- `SMART_LOCKER_SOURCE_EXCEL_PATH` — the company device master list to **import from** the share.
-  Empty disables automatic import entirely. Point this at the real filename once you know
-  it (Section 6.2) — until then it can stay as the template's placeholder.
-- `SMART_LOCKER_EXCEL_PATH` — the workbook the app **writes back to** the share (devices,
-  transactions, users). Different from the line above — one is read-from, this one is
-  written-to.
-- `SMART_LOCKER_EXCEL_AUTO_EXPORT` — `1` means "refresh that exported workbook
-  automatically after every import/photo change." Off in the Pi template (status
-  lives on the dashboard and admin **Export Excel**). Existing Pi `.env` files
-  keep their old value across `update.sh` — set this to `0` by hand if it is still `1`.
-- `SMART_LOCKER_SOURCE_SYNC_INTERVAL_HOURS` — hours between automatic re-imports from
-  the share (default `6`). Startup import and admin **Sync Source** still run.
+- `SMART_LOCKER_MIRROR_PATH` — the catalog workbook the Pi **writes** on the share.
+  SQLite is the catalog; this `.xlsx` is a mirror of it, regenerated whenever the
+  catalog changes. Point it at the real filename once you know it (Section 6.2) —
+  a pre-existing company sheet at that path is adopted into the database on first
+  sight, then the Pi owns the file. With neither path set, the mirror lives next to
+  the database on the Pi.
+- `SMART_LOCKER_SOURCE_EXCEL_PATH` — legacy name for the mirror path, commented out in
+  the template. Kept so a preserved `.env` still points the mirror at the share file
+  it used to import; `SMART_LOCKER_MIRROR_PATH` wins when both are set.
+- `SMART_LOCKER_MIRROR_SYNC_SECONDS` — seconds between mirror ticks (default `60`,
+  minimum `5`). Each tick checks the sheet for hand edits and retries any write that
+  was deferred while the file was locked or the share was down.
 - `SMART_LOCKER_LAST_SYNC_PATH` — JSON snapshot for the admin "Last sync" line. Empty
   stores `last_sync.json` next to the SQLite database (local disk, not the share).
   `update.sh` keeps that file across code swaps.
+- `SMART_LOCKER_MIRROR_STATE_PATH` — the mirror's own state file (pending writes, the
+  last Pi-written baseline hand edits are compared against). Empty stores
+  `mirror_state.json` next to the database — keep it on local disk too.
+- `SMART_LOCKER_PHOTO_INPUT_PATH` — a folder (can be on the share or local) the app scans for
+  device photos, matched by filename to the device model. Empty disables photo import
+  entirely.
+- `SMART_LOCKER_ASSET_LABEL` — the display noun for the device identifier on the kiosk
+  and dashboard (default `PM number`). Storage and JSON stay `pm_number`.
+- `SMART_LOCKER_ID_HEADERS` / `SMART_LOCKER_LOCATION_HEADERS` — extra column-header
+  aliases (comma-separated, commented out in the template) used when the mirror
+  **reads** an existing sheet for adoption or a hand-edit diff — e.g.
+  `SMART_LOCKER_ID_HEADERS=Equipment,Asset ID`. The sheet the Pi writes always uses
+  the canonical English headers.
+- `SMART_LOCKER_IN_LOCKER_TOKEN` — the Location text the mirror writes for a locker
+  unit that is available (default `Locker`). Borrowed shows the borrower's name, so
+  this token is also what marks a catalog row as registerable.
+- `SMART_LOCKER_MAINTENANCE_TOKEN` — Location for a locker unit in maintenance
+  (default `Maintenance`; commented out in the template).
 - `SMART_LOCKER_PUBLIC_URL` — this Pi as other PCs see it, e.g. `http://192.168.1.10:8000`.
   Together with the next line, startup writes a double-click launcher on the share.
 - `SMART_LOCKER_DASHBOARD_SHARE_PATH` — folder on the share (or a `.html` path) for
   `dashboard.url`. Empty skips the launcher. After `update.sh`,
   set these in the live `.env` (the incoming tree does not overwrite `.env`).
-- `SMART_LOCKER_PHOTO_INPUT_PATH` — a folder (can be on the share or local) the app scans for
-  device photos, matched by filename to the device model. Empty disables photo import
-  entirely.
+- `SMART_LOCKER_DASHBOARD_ADMIN_SECRET` — the shared secret LAN browsers send as header
+  `X-Smart-Locker-Admin` for dashboard admin calls (commented out in the template).
+  You usually do not set it here: first-boot Setup on the kiosk requires a password
+  and stores it in `dashboard.secret` (service-owned, mode `640` — the app cannot
+  write this root-owned `.env`). A value set here wins over the file. **If no secret
+  exists at all, gated dashboard calls return 401** — fail closed.
+- `SMART_LOCKER_DASHBOARD_SECRET_PATH` — where the Setup-typed password file lives
+  (not in the template; default `dashboard.secret` next to `.env`).
 - `SMART_LOCKER_KEEP_BACKUPS` — how many old code+database backup pairs `update.sh` keeps
   under `./backups` before deleting the oldest. `5` by default.
 
@@ -605,11 +630,11 @@ The kiosk does this itself — no SSH needed. On a fresh database:
    `locker-updates/` stick before any admin exists (kiosk only; the LAN POST is
    refused until the secret exists).
 
-On the dashboard, a 5-tap on the header clock while Setup is open shows the steps
-above and waits for the kiosk ceremony to finish — a LAN browser can never arm
-Setup (`POST /api/setup` is loopback-only), so the password and the card window
-stay under physical control. Once the admin exists the dashboard asks for the
-password that was chosen at the kiosk.
+On the dashboard, the **Admin** button opens the same Setup panel while no admin
+exists — it shows the steps above and waits for the kiosk ceremony to finish. A
+LAN browser can never arm Setup (`POST /api/setup` is loopback-only), so the
+password and the card window stay under physical control. Once the admin exists
+the **Admin** button asks for the password that was chosen at the kiosk.
 
 Setup closes for good the moment one active admin exists (`GET /api/setup` reports
 `needed:false`; the POST then returns 404).
@@ -694,20 +719,21 @@ Everything up to here works with **zero** network access. This section is the on
 Pi needs the company network — and it's deliberately the *last* thing you set up, matching
 how the share is usually actually provisioned (IT connects it once the appliance itself is
 proven working, not before). The mount is a **soft dependency**: if the share is ever down
-after this point, borrow/return keeps working from the local database — only import/export
-pause until it's back (see Section 5's systemd unit comments, and Section 9).
+after this point, borrow/return keeps working from the local database — only the mirror
+sheet and photo scan pause until it's back (see Section 5's systemd unit comments, and
+Section 9).
 
 ### 6.1 Mount the locker share (CIFS)
 
 The Pi mounts the locker file share at `/mnt/locker` (CIFS/SMB). On a Windows PC that is
-whatever drive letter or UNC path IT mapped for this locker. Keep the Excel file and photos
+whatever drive letter or UNC path IT mapped for this locker. Keep the workbook and photos
 in the **root of that share**, not inside a git working copy.
 
 ```
 /mnt/locker/                    (same folder your PC sees as the locker share)
-  device-list.xlsx          import — device master list
+  device-list.xlsx              catalog mirror — written by the Pi; an existing
+                                sheet is adopted into the database on first sight
   photos/                       optional; filename = model, e.g. 87V.jpg
-  smart_locker_data.xlsx        written by the Pi; open it, don't edit it
 ```
 
 1. Create the mount point and a root-only credentials file (skip if `install.sh` already
@@ -733,49 +759,68 @@ in the **root of that share**, not inside a git working copy.
    ```
 
 The line uses `nofail` and `x-systemd.automount`, so the Pi still boots and the kiosk still
-works even if the share is temporarily unreachable — it just can't import/export until the
-share comes back.
+works even if the share is temporarily unreachable — the mirror write is simply deferred
+and retried until the share comes back.
 
-### 6.2 Load devices from the Excel list
+### 6.2 Load your catalog
 
-The company device master list lives on the share. **Sync does not put devices in the
-locker.** It only refreshes catalog fields (name, type, serial, manufacturer, model,
-calibration) for PMs that are **already** locker rows. Platz/Schrank is unused.
+The catalog lives in SQLite — every catalog device is a row in the `devices` table,
+and a row becomes a physical locker unit only when it has a slot. There are three
+ways catalog rows arrive:
 
-A device enters the locker when an admin uses **Register Device**: enter the **PM**
-number, pick a **free slot**, tap the NFC sticker. The Pi looks up that PM in
-`device-list.xlsx` and copies name / type / manufacturer / model / serial / cal.
-Unknown PM or share down → error, no ghost row.
+- **Adopt the existing company sheet.** If the share already has your device list,
+  point `SMART_LOCKER_MIRROR_PATH` at it. On first sight the mirror adopts the
+  sheet's rows into the database — person names in the Location column seed the
+  self-register list at the kiosk. After that the Pi owns the file: it rewrites
+  the sheet from the database whenever the catalog changes, so from then on the
+  workbook is a view, not the source.
+- **Add rows on the dashboard.** The **Admin** overlay (header button + admin
+  secret, see Section 8) has a catalog editor — add, edit, remove.
+- **Register a locker unit.** A catalog row becomes a locker device when an admin
+  uses **Register Device** at the kiosk: pick a registerable row (no slot yet,
+  Location = the in-locker word) or type its **PM**, pick a **free slot**, tap the
+  NFC sticker. Unknown PM or a taken slot → error, no ghost row.
+
+Hand edits to the sheet are never merged silently — Section 8 covers how the
+dashboard flags them and what **Apply** / **Keep database** do.
 
 ```bash
-# Preview catalog updates without writing:
-python -m scripts.sync_source --file "/mnt/locker/device-list.xlsx" --dry-run
+# Run one mirror tick by hand (adopt / detect / flush):
+python -m scripts.sync_source
 
-# Apply catalog updates for PMs already in the locker:
-python -m scripts.sync_source --file "/mnt/locker/device-list.xlsx"
+# List hand edits waiting for an admin decision:
+python -m scripts.sync_source --diffs
 ```
 
-| Excel column | German | Maps to | Required? |
-|---|---|---|---|
-| Equipment | Equipment | `pm_number` | **Yes** — the device identifier |
-| Category | Kategorie | `device_type` | No |
-| Description | Beschreibung | `description` | No |
-| Manufacturer | Hersteller | `manufacturer` | No |
-| Type designation | Typbezeichnung | `model` | No |
-| Serial number | Hersteller-serialnummer | `serial_number` | No |
-| Calibration date | Datum der nächsten Kalibrierung | `calibration_due` | No |
+(The sheet path comes from `SMART_LOCKER_MIRROR_PATH` — there is no `--file` flag.)
 
-If auto-detection picks the wrong column, add header aliases via
-`SMART_LOCKER_ID_HEADERS` (join key) or `SMART_LOCKER_LOCATION_HEADERS` (Location column)
-in `.env`, e.g. `SMART_LOCKER_ID_HEADERS=Equipment,Asset ID`. Re-importing is safe — devices
-are matched by
-PM number. A re-import **never** inserts a locker row and **never** overwrites `locker_slot`,
-`image_path`, `description`, `status`, or the current borrower. Catalog fields (name, type,
-serial, manufacturer, model, calibration) still update.
+| Sheet column (aliases) | Maps to | Required? |
+|---|---|---|
+| PM Number (Equipment, Asset…) | `pm_number` | **Yes** — the device identifier |
+| Name (Device, Item…) | `name` | No |
+| Type (Category, Kind…) | `device_type` | No |
+| Manufacturer (Make, Brand) | `manufacturer` | No |
+| Model (Type designation) | `model` | No |
+| Serial Number (S/N) | `serial_number` | No |
+| Calibration Due (Next calibration) | `calibration_due` | No |
+| Location (Owner, Assigned to…) | `location` | No — person names seed the register list |
 
-Once running as a service, this same catalog refresh also happens **automatically**: once on
-startup, every 6 hours (configurable), and on demand from the hidden admin panel. (See
-Section 8 for why the live "watch the file" mode is off for network shares.)
+Header names are auto-detected when the mirror **reads** an existing sheet (for
+adoption or a hand-edit diff); the Pi always writes the canonical English headers
+above. If your sheet uses a header the detector misses, add aliases via
+`SMART_LOCKER_ID_HEADERS` (join key) or `SMART_LOCKER_LOCATION_HEADERS` (Location
+column) in `.env`, e.g. `SMART_LOCKER_ID_HEADERS=Equipment,Asset ID`.
+
+Applying sheet edits is safe the same way adoption is: it updates catalog fields,
+inserts new rows, and removes only rows that are neither in the cabinet nor
+borrowed. It **never** inserts a locker row and **never** overwrites `locker_slot`,
+`image_path`, `description`, `status`, or the current borrower.
+
+Once running as a service, the mirror keeps itself current: a tick runs at startup
+and every `SMART_LOCKER_MIRROR_SYNC_SECONDS` (default 60 s), and any catalog change
+flushes to the sheet on a worker thread — the kiosk never waits on workbook I/O.
+Admin **Sync Sheet** runs a tick on demand. (See Section 8 for the hand-edit
+banner and the pending-write retry.)
 
 ### 6.3 Add device photos
 
@@ -840,7 +885,7 @@ it still asks for a work card first.
 - **Return slot** (overlay) — after any successful return: device name and **Put in slot N**.
 - **Inactivity warning** (overlay) — a countdown with a "Stay Active" button.
 - **Hidden admin panel** (overlay) — opened by tapping the idle clock 5 times. Shortcuts for
-  Locker, Return, **Sync source**, Register user, **Register Device**, **Export to Excel**,
+  Locker, Return, **Sync Sheet**, Register user, **Register Device**,
   **Software Update**, **Stop system**, **Shut down**, End Session.
 
 ### The rules
@@ -866,15 +911,16 @@ Pi on the LAN can use them — the lock is **physical access**, not a password.
    Setup** screen opens instead (see 4.6).
 4. What the buttons do:
    - **Locker / Return Screen** — jump into the availability overlay or return grid as that admin.
-   - **Sync Source** — first tap *previews* Excel changes from the share; second tap *applies* them.
+   - **Sync Sheet** — runs one mirror tick now: adopts a first-seen sheet, detects
+     hand edits, and retries a write that was deferred while the file was locked.
    - **Register User** — type any name, then tap a card (skips the approved-name list).
      After success, timeout, or cancel the kiosk returns to idle; the next
      work-card tap logs that user in (a leftover admin session must not
      treat the tap as logout).
-   - **Register Device** — add a locker unit: **PM + free slot + NFC tap** (catalog
-     comes from Excel). Existing rows can bind / unbind / change slot. The list shows
-     **name + PM** (and slot).
-   - **Export to Excel** — download a snapshot of devices / transactions / users.
+   - **Register Device** — promote a catalog row into a locker unit: pick a
+     registerable row (no slot, Location = the in-locker word) or type its **PM**,
+     pick a **free slot**, tap the sticker. Existing rows can bind / unbind /
+     change slot. The list shows **name + PM** (and slot).
    - **Software Update** — plug in the USB stick (`locker-updates/` from
      `python -m scripts.copy_update`), then apply. Full-screen overlay, then the kiosk
      reloads. Do not copy onto `/home/locker/smart_locker` in the file manager.
@@ -894,7 +940,7 @@ Pi on the LAN can use them — the lock is **physical access**, not a password.
 
 | What | URL |
 |---|---|
-| Inventory / Locker / Display (public GET); owner/bind/unbind + users/tx/owners need admin secret; 5-tap is UI reveal | `http://<pi-address>:8000/dashboard` |
+| Inventory / Locker / Display (public GET; non-locker owner edit is public too); **Admin** button opens catalog editor, sheet-change review, users, logs, NFC bind/unbind (admin secret) | `http://<pi-address>:8000/dashboard` |
 | Is the appliance alive? | `http://<pi-address>:8000/api/health` |
 | Kiosk UI (only needed if Chromium is not already fullscreen) | `http://localhost:8000/?lite` on the Pi |
 
@@ -904,75 +950,88 @@ Pi on the LAN can use them — the lock is **physical access**, not a password.
 
 ## 8. Excel, the locker share, and the dashboard
 
-There are two ways to see live data — a web dashboard and the Excel workbook on the share.
+There are two ways to see the catalog — a web dashboard and the Excel workbook on the
+share, which the Pi writes as a mirror of the database.
 
-### How the locker reads Excel
+### How the mirror works
 
-The Pi does not keep Excel open. On each import it copies the `.xlsx` to a temp file, then
-reads that copy (`openpyxl`). If someone has the workbook open on a PC, the copy still
-usually succeeds.
+The Pi does not keep Excel open. Reads copy the `.xlsx` to a temp file first (so an
+open share file usually still reads); writes go through a staged replace that retries
+a file lock. Workbook I/O runs on a worker thread with a timeout — the kiosk never
+waits on it.
 
-1. `.env` names the file:
+1. `.env` names the mirror file:
 
-   `SMART_LOCKER_SOURCE_EXCEL_PATH=/mnt/locker/device-list.xlsx`
+   `SMART_LOCKER_MIRROR_PATH=/mnt/locker/device-list.xlsx`
 
-   That is the master list sitting in the locker share root. Change the filename in `.env`
-   if yours is different.
+   The legacy `SMART_LOCKER_SOURCE_EXCEL_PATH` still works — a preserved `.env`
+   points the mirror at the same file. Change the filename in `.env` if yours is
+   different.
 
-2. Import runs when the service starts, every 6 hours (`SMART_LOCKER_SOURCE_SYNC_INTERVAL_HOURS`),
-   and when you use **Sync Source** in the admin panel. Linux cannot see "file changed"
-   events for a file another computer wrote on a CIFS share, so there is no 30-second poll.
+2. **SQLite is the catalog.** The mirror rewrites the whole sheet from `devices`
+   whenever the catalog changes — borrow/return, registration, a dashboard edit —
+   with the catalog columns (PM Number, Name, Type, Manufacturer, Model, Serial
+   Number, Calibration Due, Location).
 
-3. Sync **never inserts** locker devices. It updates catalog fields for PMs already
-   in SQLite. A device enters the locker only via admin **Register Device**
-   (PM + free slot + NFC). Platz/Schrank is unused.
+3. **First sight adopts an existing sheet.** A pre-existing catalog workbook's rows
+   land in SQLite on the first tick, and person names in its Location column become
+   the self-register list. From then on the Pi owns the file — the sheet is a view,
+   not the source.
 
-4. After that import, the Pi writes **Location** for locker PMs
-   back into the same workbook (available → `Locker`, borrowed → the borrower's
-   name). Other columns and sheets are left alone. If someone has the file open
-   in Excel, the write is skipped and retried on the next borrow/return or
-   sync — the kiosk keeps running. **Do not edit Location in Excel**
-   for locker devices; the Pi owns that cell. Add new PMs and fix catalog
-   columns (name, type, manufacturer, model, serial, calibration) in Excel as usual.
+4. **A locked or missing file just waits.** The write is deferred
+   (`pending_writes` in `mirror_state.json`) and retried by the periodic tick —
+   every `SMART_LOCKER_MIRROR_SYNC_SECONDS` (default `60`, min `5`). If someone has
+   the workbook open on a PC, the kiosk keeps running and the sheet catches up.
 
-5. Values in **Location** that are not locker/cabinet locations are treated as person
-   names and become the self-register list. Names that leave Location are removed.
+5. **Hand edits are never merged silently.** If someone edits the workbook
+   directly, the next tick detects the difference against the last Pi-written
+   baseline and flags it on the dashboard — a banner plus a diff list in the
+   **Admin** overlay. An admin explicitly chooses **Apply sheet edits** (write the
+   sheet changes into SQLite — added rows insert, changed cells update, removed
+   rows delete when the unit is neither in the cabinet nor borrowed) or
+   **Keep database** (dismiss; the next write overwrites the sheet). Applying
+   never touches `locker_slot`, `image_path`, `description`, `status`, or the
+   current borrower.
 
-6. If `SMART_LOCKER_EXCEL_AUTO_EXPORT=1`, after a real import the Pi writes
-   `smart_locker_data.xlsx` next to the source file (Devices, Transactions, Users). Don't
-   edit that file by hand.
-
-Re-import matches devices by PM number. It leaves `locker_slot`, `image_path`,
-`description`, `status`, and the current borrower alone. Catalog fields still update.
-Excel never inserts a locker row. After import, the Pi writes locker Location
-back into the sheet.
+6. **Locker Location is derived, not editable.** Available → the
+   `SMART_LOCKER_IN_LOCKER_TOKEN` word (default `Locker`), borrowed → the
+   borrower's name, maintenance → `SMART_LOCKER_MAINTENANCE_TOKEN` (default
+   `Maintenance`). Non-locker rows carry their editable location into the sheet.
 
 **Web dashboard** — open `http://<pi-address>:8000/dashboard` from any browser on the
-network. Public GET **Inventory** (live `device-list.xlsx`, search/sort) and **Locker**
-stay unauthenticated. Click owner to change it for PMs that are **not** in the locker —
-confirm writes Excel and needs `SMART_LOCKER_DASHBOARD_ADMIN_SECRET` (header
-`X-Smart-Locker-Admin`; 401 if unset, fail closed). Locker PMs are not editable here;
-share down errors that tab only. **Locker** (SQLite slot/status/borrower plus Tagged /
-No tag; owner is set at the kiosk), **Display** (what the Riverdi is showing, plus the
-signed-in user — view only). Kiosk colours, desktop cursor and scroll. Tap the dashboard
-clock **5× within 3 s** to reveal registered users, the last 500 transactions, and NFC
-unbind / arm-bind in the client — that gesture is not authorization (`overlay=true` is
-not auth). Those GETs/POSTs still need the admin secret (tap the sticker on the locker
-reader). If `SMART_LOCKER_PUBLIC_URL` and `SMART_LOCKER_DASHBOARD_SHARE_PATH` are set,
-startup writes `dashboard.url` on the share so a double-click opens the live page.
+network. Public GET **Inventory** (the SQLite catalog, search/sort — locker units
+included, marked `in_locker`), **Locker** (slot/status/borrower plus Tagged /
+No tag; owner is set at the kiosk), and **Display** (what the Riverdi is showing,
+plus the signed-in user — view only) stay unauthenticated. Click owner to change it
+for PMs that are **not** in the locker — that POST is public too and writes SQLite;
+the mirror catches up on the sheet. Locker PMs are not editable — their location is
+derived. A down share no longer breaks any tab: everything reads the local
+database, and the mirror banner simply reports the file is unreachable.
 
-**Status workbook on the share:** the Pi can write `smart_locker_data.xlsx`
-at `SMART_LOCKER_EXCEL_PATH` (Devices + Transactions + Users) when
-`SMART_LOCKER_EXCEL_AUTO_EXPORT=1`. The Pi template leaves this **off** — live status is
-the dashboard, and you can download a snapshot any time from the admin panel's
-**Export Excel**. After `update.sh`, set `SMART_LOCKER_EXCEL_AUTO_EXPORT=0` in the live
-`.env` if it is still `1` (the incoming tree does not overwrite `.env`).
+The **Admin** button in the header opens the admin overlay after the dashboard
+admin secret: the **catalog editor** (add / edit / remove device), **sheet-change
+review** (the pending hand-edit diff with Apply / Keep database), **registered
+users**, the **last 500 transactions**, and **NFC** unbind / arm-bind (tap the
+sticker on the locker reader within 60 seconds). The button reveals UI — it is not
+authorization: those calls still need `SMART_LOCKER_DASHBOARD_ADMIN_SECRET` (or the
+`dashboard.secret` file kiosk Setup writes), sent as header `X-Smart-Locker-Admin`,
+and they return 401 when no secret exists (fail closed). The dashboard's old
+5-tap-on-the-clock reveal is gone — the **Admin** button replaced it (the kiosk's
+own hidden admin panel still uses the 5-tap gesture). If
+`SMART_LOCKER_PUBLIC_URL` and `SMART_LOCKER_DASHBOARD_SHARE_PATH` are set, startup
+writes `dashboard.url` on the share so a double-click opens the live page.
 
-**Why the import is scheduled, not instant:** the Pi can't reliably get a "file changed"
+**Gone:** the `smart_locker_data.xlsx` export workbook and its auto-export, the
+6-hour source import, and the admin **Export Excel** snapshot — along with their
+`.env` keys. A preserved `.env` that still carries the old keys is harmless: the
+mirror path and tick interval above replaced them.
+
+**Why the mirror polls, not watches:** the Pi can't reliably get a "file changed"
 notification for a file that lives on a network share (the Linux mechanism for this,
-*inotify*, doesn't see edits made by other computers on a CIFS/SMB mount). So instead of a
-live file-watch, the system imports on startup and every 6 hours. To pull changes in
-immediately, use **Sync source** in the admin panel, or run
+*inotify*, doesn't see edits made by other computers on a CIFS/SMB mount). So the
+tick stats the file every `SMART_LOCKER_MIRROR_SYNC_SECONDS` — cheap, and it works
+over CIFS — and any catalog change also flushes right away on a worker thread. To
+force a cycle by hand, use **Sync Sheet** in the admin panel, or run
 `python -m scripts.sync_source`.
 
 ---
@@ -1045,16 +1104,16 @@ The Pi lives in the locker, far from you, so it is built to heal itself:
   retrying *forever* — a transient fault clears itself with no one on site. It also starts on boot
   and after a power cut.
 - **A down locker share doesn't stop the kiosk.** The share is a *soft* dependency: borrow/return keep
-  working from the local database; only import/export pause until the share returns.
-- **Sync never crashes the app.** If the Excel file is left open/locked, or the share drops, the
-  import/export is logged and skipped — the kiosk stays up and the next scheduled or manual sync
-  retries.
+  working from the local database; only mirror writes and the photo scan pause until the share returns.
+- **Mirror writes never crash the app.** If the workbook is left open/locked, or the share drops, the
+  write is logged, deferred (`pending_writes` in `mirror_state.json`), and retried by the next tick —
+  the kiosk stays up the whole time.
 
 ### Is it alive? Check from any browser — no SSH, no Linux
 
 - **Health:** open `http://<pi-address>:8000/api/health`. It returns a small JSON you can bookmark:
   `status` (`ok`/`degraded`), `uptime_seconds`, `database`, `nfc_reader`, and the last sync result.
-- **Dashboard:** open `http://<pi-address>:8000/dashboard` for Inventory / Locker / Display (public catalog GET; owner edit and 5-tap users/logs/NFC need `SMART_LOCKER_DASHBOARD_ADMIN_SECRET`; 5-tap is a UI reveal, not auth).
+- **Dashboard:** open `http://<pi-address>:8000/dashboard` for Inventory / Locker / Display (public catalog GET; non-locker owner edit is public; the **Admin** button opens users/logs/NFC/catalog behind `SMART_LOCKER_DASHBOARD_ADMIN_SECRET`).
 - If `/api/health` doesn't load at all, the Pi is off or off the network (power / cable / Wi-Fi) —
   the one situation that needs someone physically there.
 
@@ -1092,7 +1151,7 @@ Plug the stick in. Hidden admin (idle clock 5×) → **Software Update**. `updat
 looks for `locker-updates/` on USB (`/media/*/*`), copies it to
 `/home/locker/smart_locker/locker-updates` (so you can unplug), then stop / backup /
 rsync-preserve / pip from the existing Pi wheelhouse / migrate / health / rollback.
-CIFS is Excel and photos only — not a software-update drop.
+CIFS is the mirror sheet and photos only — not a software-update drop.
 
 If pip cannot install from the wheelhouse, the update **rolls back**. The overlay does
 not refuse solely because wheels were missing; the Windows script already warned.
@@ -1172,14 +1231,21 @@ All settings live in `.env` (loaded by `config/settings.py`). The Pi template
 | `SMART_LOCKER_MAX_BORROWS` | `5` | Max devices a user can hold at once |
 | `SMART_LOCKER_API_HOST` | `0.0.0.0` | Web server bind address |
 | `SMART_LOCKER_API_PORT` | `8000` | Web server port |
-| `SMART_LOCKER_SOURCE_EXCEL_PATH` | (empty) | Device master list on the share to import; empty disables auto-import |
-| `SMART_LOCKER_EXCEL_PATH` | `smart_locker_data.xlsx` | Where the exported workbook is written (the share path on the Pi) |
-| `SMART_LOCKER_EXCEL_AUTO_EXPORT` | (off) | `1` = auto-refresh the exported workbook after each import/photo change |
-| `SMART_LOCKER_SOURCE_SYNC_INTERVAL_HOURS` | `6` | Hours between automatic source imports (startup + admin Sync still run) |
+| `SMART_LOCKER_MIRROR_PATH` | `smart_locker_catalog.xlsx` next to the DB | Catalog workbook the Pi rewrites from SQLite; an existing sheet is adopted on first sight |
+| `SMART_LOCKER_SOURCE_EXCEL_PATH` | (empty) | Legacy name for the mirror path — preserved `.env` files still work; `MIRROR_PATH` wins |
+| `SMART_LOCKER_MIRROR_SYNC_SECONDS` | `60` | Seconds between mirror ticks — hand-edit detection + deferred-write retry (min `5`) |
+| `SMART_LOCKER_MIRROR_STATE_PATH` | `mirror_state.json` next to the DB | Mirror state (pending writes, last-written baseline); keep on the Pi's local disk |
 | `SMART_LOCKER_LAST_SYNC_PATH` | `last_sync.json` next to the DB | Admin last-sync snapshot; keep on the Pi's local disk |
+| `SMART_LOCKER_PHOTO_INPUT_PATH` | (empty) | Folder scanned for device photos (filename = model); empty disables |
+| `SMART_LOCKER_ASSET_LABEL` | `PM number` | Display noun for the device identifier on kiosk + dashboard (JSON/DB stay `pm_number`) |
+| `SMART_LOCKER_ID_HEADERS` | (empty) | Extra join-key header aliases (comma-separated) for reading an existing sheet |
+| `SMART_LOCKER_LOCATION_HEADERS` | (empty) | Extra Location-column header aliases for reading an existing sheet |
+| `SMART_LOCKER_IN_LOCKER_TOKEN` | `Locker` | Location the mirror writes for an available locker unit (also marks registerable rows) |
+| `SMART_LOCKER_MAINTENANCE_TOKEN` | `Maintenance` | Location the mirror writes for a locker unit in maintenance |
 | `SMART_LOCKER_PUBLIC_URL` | (empty) | Origin of this Pi as other PCs see it (e.g. `http://192.168.1.10:8000`); with the share path, startup writes a dashboard launcher |
 | `SMART_LOCKER_DASHBOARD_SHARE_PATH` | (empty) | Folder (or `.html` path) on the locker share for `dashboard.url`; empty skips the launcher |
-| `SMART_LOCKER_PHOTO_INPUT_PATH` | (empty) | Folder watched for device photos; empty disables |
+| `SMART_LOCKER_DASHBOARD_ADMIN_SECRET` | (empty) | Secret for header `X-Smart-Locker-Admin` on dashboard admin calls; wins over `dashboard.secret`; **401 when unset** |
+| `SMART_LOCKER_DASHBOARD_SECRET_PATH` | `dashboard.secret` next to `.env` | Where the Setup-typed dashboard password file lives |
 | `SMART_LOCKER_KEEP_BACKUPS` | `5` | How many old code+DB backup pairs `update.sh` keeps under `./backups` before pruning |
 
 ---
@@ -1189,9 +1255,13 @@ All settings live in `.env` (loaded by `config/settings.py`). The Pi template
 **Built:** NFC enrollment & authentication (AES-256-GCM + HMAC), single-user sessions with
 timeout, device tracking with the full schema, NFC **device tags** (same ACR1252U; auto
 borrow/return after login), borrow/return with admin overrides and per-user limits,
-self-service registration, Excel catalog refresh (no locker insert), Location
-write-back into `device-list.xlsx`, on-demand/auto export, photo assignment, the
-`/dashboard` (Inventory / Locker / Display; public catalog GET; owner/bind/unbind and users/tx/owners need the admin secret; 5-tap is UI reveal; share launcher), the FastAPI REST API + SSE bridge, the
+self-service registration, the SQLite catalog with a Pi-written Excel mirror
+(first-sight adoption, deferred writes, hand-edit review on the dashboard), photo
+assignment, the
+`/dashboard` (Inventory / Locker / Display — public GETs plus public non-locker owner edit;
+the **Admin** button opens the catalog editor, sheet-change review, users, last-500
+transactions, and NFC bind/unbind behind the admin secret; share launcher), the FastAPI
+REST API + SSE bridge, the
 6-screen kiosk UI, **Raspberry Pi appliance deployment** (systemd service, CIFS mount,
 Chromium kiosk, fully offline install including the no-PyPI-wheel `pyscard` case), and a
 hardware-free pytest suite.
@@ -1322,27 +1392,38 @@ that bridges card taps to the browser.
 | `GET` | `/api/registrants` | Approved names for self-registration |
 | `POST` | `/api/admin/session` | Start the hidden admin-panel session |
 | `POST` | `/api/admin/register` | Admin manual enrolment (skips name check) |
+| `GET` | `/api/admin/devices/registerable` | Catalog rows the Register Device screen can offer (admin; kiosk loopback) |
+| `POST` | `/api/admin/devices/register` | Promote a catalog row into a locker slot + arm NFC bind (admin) |
+| `POST` | `/api/admin/devices/{id}/slot` | Change a locker device's slot (admin) |
 | `POST` | `/api/admin/devices/{id}/bind-tag` | 60s window to bind the next sticker to that device |
 | `POST` | `/api/admin/devices/{id}/unbind-tag` | Clear the sticker HMAC on that device |
-| `POST` | `/api/admin/sync-source` | Trigger the source Excel import now |
-| `GET` | `/api/admin/export-excel` | Download the full database as `.xlsx` |
+| `POST` | `/api/admin/sync-source` | Run one mirror tick now — adopt / detect / flush (admin) |
+| `POST` | `/api/admin/sync-preview` | Pending hand-edit diff in the mirror sheet (admin) |
+| `GET` | `/api/admin/sync-status` | Last mirror tick outcome + mirror state (admin) |
 | `GET` | `/api/dashboard/devices` | Public locker inventory (SQLite, no auth) |
-| `GET` | `/api/dashboard/inventory` | Public company catalog (live Excel, no auth) |
+| `GET` | `/api/dashboard/inventory` | Public company catalog (SQLite, no auth) |
 | `GET` | `/api/dashboard/display` | Public kiosk screen snapshot (no person names; no auth) |
-| `GET` | `/api/dashboard/owners` | Owner dropdown names (users + registrants + in-locker token); admin secret |
-| `POST` | `/api/dashboard/owner` | Change owner of a non-locker PM (Excel only; 409 if in locker); admin secret |
+| `GET` | `/api/dashboard/owners` | Owner dropdown names (users + registrants + in-locker token); public |
+| `POST` | `/api/dashboard/owner` | Change owner of a non-locker PM (SQLite; 409 if in locker); public |
+| `POST` | `/api/dashboard/devices` | Add a catalog device (admin secret) |
+| `PATCH` | `/api/dashboard/devices/{pm_number}` | Edit catalog fields (admin secret; 409 on locker location) |
+| `DELETE` | `/api/dashboard/devices/{pm_number}` | Remove a catalog device (admin secret; 409 if borrowed) |
+| `GET` | `/api/dashboard/mirror` | Public mirror status for the dashboard banner |
+| `GET` | `/api/dashboard/mirror/diffs` | Pending hand-edit diff (admin secret) |
+| `POST` | `/api/dashboard/mirror/apply` | Write the sheet's hand edits into SQLite (admin secret) |
+| `POST` | `/api/dashboard/mirror/dismiss` | Keep database; next write overwrites the sheet (admin secret) |
 | `POST` | `/api/dashboard/bind-tag` | Arm 60s NFC bind for a locker PM (admin secret; tap at the reader) |
 | `POST` | `/api/dashboard/unbind-tag` | Clear sticker HMAC on a locker PM (admin secret) |
 | `POST` | `/api/kiosk/display` | Kiosk heartbeat of the current screen |
-| `GET` | `/api/dashboard/transactions` | Transaction history, last 500 (gated; 5-tap overlay is not auth) |
-| `GET` | `/api/dashboard/users` | Registered-users list (gated; 5-tap overlay is not auth) |
+| `GET` | `/api/dashboard/transactions` | Transaction history, last 500 (admin secret; the Admin button reveal is not auth) |
+| `GET` | `/api/dashboard/users` | Registered-users list (admin secret; the Admin button reveal is not auth) |
 | `GET` | `/api/events` | SSE stream — card-tap, auth, and session events (kiosk loopback only) |
 
 `GET /api/devices` returns per device: `id`, `pm_number`, `name`, `device_type`,
 `serial_number`, `manufacturer`, `model`, `locker_slot`, `description`,
 `image_path`, `calibration_due`, `status`, `borrower_name`, `has_tag` (bool — no HMAC
-digest). Device-tag HMAC is never on this payload, the public dashboard, or Excel export
-(export uses Tagged Yes/No). `GET /api/dashboard/devices` also includes `has_tag`.
+digest). Device-tag HMAC is never on this payload, the public dashboard, or the
+mirror sheet. `GET /api/dashboard/devices` also includes `has_tag`.
 
 **The NFC → browser bridge:** the background NFC listener detects a tap and puts an event on
 a queue; `GET /api/events` streams it to the kiosk browser (loopback only), which then runs
@@ -1362,10 +1443,11 @@ borrow; borrowed by you → return; borrowed by someone else → fail for a norm
 admin return-on-behalf; maintenance → fail. The session stays open. A **work-card** tap
 still logs out; a device tag does not. An unknown UID while logged in stays logged in.
 
-**Register Device** (hidden admin panel): enter **PM**, pick a **free slot**, tap the
-sticker. Catalog (name, type, manufacturer, model, serial, cal) is copied from Excel.
-Unknown PM or share down fails with no ghost row. Existing rows can bind / unbind /
-change slot. The list shows **name + PM**. CLI bind-only:
+**Register Device** (hidden admin panel): pick a registerable catalog row (no slot,
+Location = the in-locker word) or enter its **PM**, pick a **free slot**, tap the
+sticker. The row is already in SQLite — registering assigns the slot, nothing is
+copied from a file. Unknown PM or a taken slot fails with no ghost row. Existing
+rows can bind / unbind / change slot. The list shows **name + PM**. CLI bind-only:
 `python -m scripts.enroll_device_tag --pm PM-001` (or `--uid HEX`, `--force` to replace).
 
 ---
@@ -1373,7 +1455,7 @@ change slot. The list shows **name + PM**. CLI bind-only:
 ## 16. Future improvements
 
 - **Calibration-due notifications** — calibration dates are stored; a reminder system is not.
-- **Full admin web panel** — edit users/devices from the browser (today: dashboard owner edit behind the admin secret, 5-tap UI reveal for users/logs/NFC, + the kiosk's hidden admin panel).
+- **Full admin web panel** — user editing from the browser (today: the dashboard **Admin** overlay already edits the catalog, reviews sheet edits, and lists users/logs/NFC behind the admin secret; user changes still live at the kiosk or CLI).
 - **MIFARE sector reading** — APDU commands exist in `nfc/apdu.py` but aren't wired in.
 - **Multi-reader support** — currently the first matching reader is used.
 - **Email / webhook alerts** — overdue devices, borrow-limit hits.

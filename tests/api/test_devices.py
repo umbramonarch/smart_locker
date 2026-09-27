@@ -96,32 +96,19 @@ class TestBorrowReturn:
         assert data["success"] is True
         assert "Camera" in data["message"]
 
-    def test_http_borrow_returns_before_excel_io(
-        self, client, mock_context, test_user, test_devices, tmp_path, monkeypatch
+    def test_http_borrow_returns_before_mirror_io(
+        self, client, mock_context, test_user, test_devices, monkeypatch
     ):
-        """POST /api/devices/{id}/borrow returns before Excel write-back I/O."""
+        """POST /api/devices/{id}/borrow returns before mirror workbook I/O."""
         import time
 
-        from openpyxl import Workbook
+        from smart_locker.sync import mirror
 
-        from smart_locker.sync import location_writeback as wb
-        from smart_locker.sync.location_writeback import (
-            WritebackResult,
-            flush_scheduled_writeback,
-        )
-
-        path = tmp_path / "device-list.xlsx"
-        book = Workbook()
-        book.active.append(["Equipment", "Location"])
-        book.active.append(["PM-001", "Locker"])
-        book.save(path)
-        monkeypatch.setattr("config.settings.SOURCE_EXCEL_PATH", str(path))
-
-        def slow_write(engine, source_path):
+        def slow_tick(engine, trigger="interval"):
             time.sleep(0.4)
-            return WritebackResult()
+            return {}
 
-        monkeypatch.setattr(wb, "write_location_with_engine", slow_write)
+        monkeypatch.setattr(mirror, "tick", slow_tick)
         mock_context.session_mgr.start_session(test_user)
         t0 = time.monotonic()
         resp = client.post(f"/api/devices/{test_devices[0].id}/borrow")
@@ -129,7 +116,7 @@ class TestBorrowReturn:
         assert resp.status_code == 200
         assert resp.json()["success"] is True
         assert elapsed < 0.25
-        flush_scheduled_writeback()
+        mirror.flush_scheduled()
 
     def test_borrow_no_session(self, client, test_devices):
         """Verify borrow returns 401 when no session exists."""
