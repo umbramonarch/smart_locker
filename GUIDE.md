@@ -940,7 +940,7 @@ Pi on the LAN can use them — the lock is **physical access**, not a password.
 
 | What | URL |
 |---|---|
-| Inventory / Locker / Display (public GET; non-locker owner edit is public too); **Admin** button opens catalog editor, sheet-change review, users, logs, NFC bind/unbind (admin secret) | `http://<pi-address>:8000/dashboard` |
+| Inventory / Locker / Display (public GET; non-locker owner edit is public too); **Admin** button opens catalog editor, sheet-change review, users, logs, NFC bind/unbind, maintenance actions (admin secret) | `http://<pi-address>:8000/dashboard` |
 | Is the appliance alive? | `http://<pi-address>:8000/api/health` |
 | Kiosk UI (only needed if Chromium is not already fullscreen) | `http://localhost:8000/?lite` on the Pi |
 
@@ -990,8 +990,10 @@ waits on it.
    sheet changes into SQLite — added rows insert, changed cells update, removed
    rows delete when the unit is neither in the cabinet nor borrowed) or
    **Keep database** (dismiss; the next write overwrites the sheet). Applying
-   never touches `locker_slot`, `image_path`, `description`, `status`, or the
-   current borrower.
+   never touches `locker_slot`, `image_path`, `description`, or the current
+   borrower. The one `status` exception is the maintenance word: writing it over
+   a cabinet unit's Location cell puts the unit into maintenance — the same
+   thing as the dashboard action (skipped while the unit is borrowed).
 
 6. **Locker Location is derived, not editable.** Available → the
    `SMART_LOCKER_IN_LOCKER_TOKEN` word (default `Locker`), borrowed → the
@@ -1007,6 +1009,15 @@ for PMs that are **not** in the locker — that POST is public too and writes SQ
 the mirror catches up on the sheet. Locker PMs are not editable — their location is
 derived. A down share no longer breaks any tab: everything reads the local
 database, and the mirror banner simply reports the file is unreachable.
+
+**Maintenance.** In the **Admin** overlay's catalog table, an available cabinet
+unit offers **To maintenance** — it cannot be borrowed until it is back (the
+kiosk shows *Under Maintenance* and its mirror Location becomes the maintenance
+token). A borrowed unit cannot be marked — return it first. A maintenance unit
+offers **Back in service**, which requires the new calibration date and saves
+it; if that date is not in the future, the calibration gate keeps the unit
+unborrowable. Typing the maintenance word into a cabinet unit's sheet Location
+cell (applied via the sheet-change review) does the same thing as the button.
 
 The **Admin** button in the header opens the admin overlay after the dashboard
 admin secret: the **catalog editor** (add / edit / remove device), **sheet-change
@@ -1408,6 +1419,8 @@ that bridges card taps to the browser.
 | `POST` | `/api/dashboard/devices` | Add a catalog device (admin secret) |
 | `PATCH` | `/api/dashboard/devices/{pm_number}` | Edit catalog fields (admin secret; 409 on locker location) |
 | `DELETE` | `/api/dashboard/devices/{pm_number}` | Remove a catalog device (admin secret; 409 if borrowed) |
+| `POST` | `/api/dashboard/devices/{pm_number}/maintenance` | Take a cabinet unit out of service (admin secret; 409 if borrowed or not a cabinet unit) |
+| `POST` | `/api/dashboard/devices/{pm_number}/back-in-service` | Return a maintenance unit to service — body `calibration_due` required (admin secret; 422 without a date; 409 if not in maintenance) |
 | `GET` | `/api/dashboard/mirror` | Public mirror status for the dashboard banner |
 | `GET` | `/api/dashboard/mirror/diffs` | Pending hand-edit diff (admin secret) |
 | `POST` | `/api/dashboard/mirror/apply` | Write the sheet's hand edits into SQLite (admin secret) |

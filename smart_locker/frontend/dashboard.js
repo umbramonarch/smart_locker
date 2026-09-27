@@ -958,7 +958,16 @@ function renderAdminOverlay() {
 
   const catalogBody = document.getElementById('admin-catalog-tbody');
   if (catalogBody) {
-    catalogBody.innerHTML = inventoryData.map(d => `
+    catalogBody.innerHTML = inventoryData.map(d => {
+      // Maintenance lifecycle applies to cabinet units only — a borrowed
+      // unit is refused by the API, so the row offers no dead button.
+      let serviceBtn = '';
+      if (d.in_locker && d.status === 'available') {
+        serviceBtn = `<button type="button" class="admin-tag-btn" data-maint-pm="${esc(d.pm_number)}">To maintenance</button>`;
+      } else if (d.in_locker && d.status === 'maintenance') {
+        serviceBtn = `<button type="button" class="admin-tag-btn admin-tag-bind" data-service-pm="${esc(d.pm_number)}">Back in service</button>`;
+      }
+      return `
       <tr>
         <td>${esc(d.pm_number)}</td>
         <td>${esc(d.name)}</td>
@@ -968,10 +977,12 @@ function renderAdminOverlay() {
         <td>${d.in_locker ? 'Yes' : 'No'}</td>
         <td>
           <button type="button" class="admin-tag-btn" data-edit-pm="${esc(d.pm_number)}">Edit</button>
+          ${serviceBtn}
           <button type="button" class="admin-tag-btn" data-remove-pm="${esc(d.pm_number)}">Remove</button>
         </td>
       </tr>
-    `).join('');
+    `;
+    }).join('');
   }
 
   const tagsBody = document.getElementById('admin-tags-tbody');
@@ -1182,6 +1193,148 @@ async function removeCatalogDevice(pm, btn) {
 
 
 /**
+ * Take one cabinet unit out of service ("To maintenance" row action).
+ *
+ * @param {string} pm - Locker PM number.
+ * @param {HTMLElement} btn - The button clicked (disabled while in flight).
+ */
+async function toMaintenance(pm, btn) {
+  const status = document.getElementById('admin-catalog-status');
+  if (btn) btn.disabled = true;
+  try {
+    const res = await fetch(
+      `/api/dashboard/devices/${encodeURIComponent(pm)}/maintenance`,
+      { method: 'POST', headers: dashboardAdminHeaders() }
+    );
+    if (!res.ok) {
+      let detail = 'Could not mark maintenance.';
+      if (res.status === 401) {
+        sessionStorage.removeItem(ADMIN_SECRET_KEY);
+        detail = 'Admin authorization failed. Open Admin again and re-enter the secret.';
+      } else {
+        try {
+          const body = await res.json();
+          if (body && body.detail) detail = String(body.detail);
+        } catch (_) { /* keep default */ }
+      }
+      if (status) status.textContent = detail;
+      return;
+    }
+    if (status) status.textContent = `${pm} is in maintenance.`;
+    await fetchTables();
+    fetchAdminTables();
+  } catch (_) {
+    if (status) status.textContent = 'Could not mark maintenance.';
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+
+/** PM of the cabinet unit open in the back-in-service dialog. */
+let serviceDialogPm = '';
+
+
+/**
+ * Open the back-in-service dialog: the new calibration date is required.
+ *
+ * @param {string} pm - Locker PM number of a unit in maintenance.
+ */
+function openServiceDialog(pm) {
+  serviceDialogPm = pm || '';
+  const row = inventoryData.find(d => d.pm_number === pm);
+  const pmEl = document.getElementById('service-dialog-pm');
+  const input = document.getElementById('service-calibration');
+  const err = document.getElementById('service-dialog-error');
+  if (pmEl) pmEl.textContent = row ? `${row.pm_number} — ${row.name}` : pm;
+  if (input) input.value = row && row.calibration_due ? row.calibration_due : '';
+  if (err) {
+    err.textContent = '';
+    err.style.display = 'none';
+  }
+  const dialog = document.getElementById('service-dialog');
+  if (dialog) dialog.hidden = false;
+  if (input) input.focus();
+}
+
+
+/**
+ * Hide the back-in-service dialog without saving.
+ */
+function closeServiceDialog() {
+  serviceDialogPm = '';
+  const dialog = document.getElementById('service-dialog');
+  if (dialog) dialog.hidden = true;
+}
+
+
+/**
+ * Confirm back-in-service: POST the new calibration date.
+ */
+async function submitServiceDialog() {
+  const pm = serviceDialogPm;
+  const input = document.getElementById('service-calibration');
+  const err = document.getElementById('service-dialog-error');
+  const btn = document.getElementById('service-confirm');
+  const status = document.getElementById('admin-catalog-status');
+  if (!pm || !input) return;
+  // Back in service without a new calibration date is refused — say so
+  // here instead of surfacing the API's 422 payload.
+  if (!input.value.trim()) {
+    if (err) {
+      err.textContent = 'Pick the new calibration date.';
+      err.style.display = '';
+    }
+    input.focus();
+    return;
+  }
+  if (btn) btn.disabled = true;
+  if (err) {
+    err.textContent = '';
+    err.style.display = 'none';
+  }
+  try {
+    const res = await fetch(
+      `/api/dashboard/devices/${encodeURIComponent(pm)}/back-in-service`,
+      {
+        method: 'POST',
+        headers: dashboardAdminHeaders(),
+        body: JSON.stringify({ calibration_due: input.value.trim() }),
+      }
+    );
+    if (!res.ok) {
+      let detail = 'Could not return the unit to service.';
+      if (res.status === 401) {
+        sessionStorage.removeItem(ADMIN_SECRET_KEY);
+        detail = 'Admin authorization failed. Open Admin again and re-enter the secret.';
+      } else {
+        try {
+          const body = await res.json();
+          if (body && body.detail) detail = String(body.detail);
+        } catch (_) { /* keep default */ }
+      }
+      if (err) {
+        err.textContent = detail;
+        err.style.display = '';
+      }
+      return;
+    }
+    closeServiceDialog();
+    if (status) status.textContent = `${pm} is back in service.`;
+    await fetchTables();
+    fetchAdminTables();
+  } catch (_) {
+    if (err) {
+      err.textContent = 'Could not return the unit to service.';
+      err.style.display = '';
+    }
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+
+/**
  * Apply the sheet's hand edits to the database.
  */
 async function applySheetEdits() {
@@ -1381,6 +1534,10 @@ function initEvents() {
     if (unbindBtn) unbindTag(unbindBtn.dataset.unbindPm || '', unbindBtn);
     const editBtn = e.target.closest('[data-edit-pm]');
     if (editBtn) openDeviceDialog(editBtn.dataset.editPm || '');
+    const maintBtn = e.target.closest('[data-maint-pm]');
+    if (maintBtn) toMaintenance(maintBtn.dataset.maintPm || '', maintBtn);
+    const serviceBtn = e.target.closest('[data-service-pm]');
+    if (serviceBtn) openServiceDialog(serviceBtn.dataset.servicePm || '');
     const removeBtn = e.target.closest('[data-remove-pm]');
     if (removeBtn) removeCatalogDevice(removeBtn.dataset.removePm || '', removeBtn);
   });
@@ -1414,6 +1571,19 @@ function initEvents() {
   if (deviceDialog) {
     deviceDialog.addEventListener('click', (e) => {
       if (e.target === deviceDialog) closeDeviceDialog();
+    });
+  }
+
+  const serviceCancel = document.getElementById('service-cancel');
+  if (serviceCancel) serviceCancel.addEventListener('click', closeServiceDialog);
+
+  const serviceConfirm = document.getElementById('service-confirm');
+  if (serviceConfirm) serviceConfirm.addEventListener('click', () => submitServiceDialog());
+
+  const serviceDialog = document.getElementById('service-dialog');
+  if (serviceDialog) {
+    serviceDialog.addEventListener('click', (e) => {
+      if (e.target === serviceDialog) closeServiceDialog();
     });
   }
 

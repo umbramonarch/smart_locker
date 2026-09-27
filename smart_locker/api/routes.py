@@ -872,6 +872,16 @@ class TagActionBody(BaseModel):
     pm_number: str = Field(..., min_length=1, max_length=50)
 
 
+class ServiceReturnBody(BaseModel):
+    """Dashboard admin action: return a maintenance unit to service.
+
+    ``calibration_due`` is required — a unit coming back from maintenance
+    always carries its new calibration date.
+    """
+
+    calibration_due: str = Field(..., min_length=1, max_length=20)
+
+
 # Labels for GET /api/dashboard/display. Unknown ids are title-cased.
 _KIOSK_SCREEN_LABELS = {
     "idle": "Idle",
@@ -2200,6 +2210,92 @@ def dashboard_remove_device(
             detail=f"{pm} cannot be removed while records reference it.",
         ) from e
     return {"ok": True, "pm_number": pm}
+
+
+@router.post("/api/dashboard/devices/{pm_number}/maintenance")
+def dashboard_to_maintenance(
+    pm_number: str,
+    db: Session = Depends(get_db),
+    _: None = Depends(require_dashboard_admin),
+):
+    """Take one cabinet unit out of service (dashboard admin secret required).
+
+    The unit cannot be borrowed while in maintenance; its Location cell in
+    the mirror becomes the maintenance token on the next write. Refused
+    while borrowed — return it at the kiosk first.
+
+    Args:
+        pm_number: Catalog id of the device.
+        db: Active database session (injected by ``get_db``).
+
+    Returns:
+        dict: ``ok``, ``changed``, plus the stored ``catalog_record``.
+
+    Raises:
+        HTTPException: 401 without secret; 404 unknown PM; 409 non-cabinet
+                       row or borrowed unit.
+    """
+    from smart_locker.services.device_catalog import (
+        DeviceBorrowed,
+        NotCabinetUnit,
+        to_maintenance,
+    )
+
+    device = DeviceRepository.find_by_pm(db, pm_number.strip())
+    if device is None:
+        raise HTTPException(status_code=404, detail="Device not found.")
+    try:
+        changed = to_maintenance(db, device)
+    except (NotCabinetUnit, DeviceBorrowed) as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    return {"ok": True, "changed": changed, "device": catalog_record(device)}
+
+
+@router.post("/api/dashboard/devices/{pm_number}/back-in-service")
+def dashboard_back_in_service(
+    pm_number: str,
+    body: ServiceReturnBody,
+    db: Session = Depends(get_db),
+    _: None = Depends(require_dashboard_admin),
+):
+    """Return a maintenance unit to service (dashboard admin secret required).
+
+    Saves the new calibration date and clears the maintenance status. A
+    date that is not in the future is stored but keeps the unit
+    unborrowable through the normal calibration gate.
+
+    Args:
+        pm_number: Catalog id of the device.
+        body: ``calibration_due`` — the new calibration date (required).
+        db: Active database session (injected by ``get_db``).
+
+    Returns:
+        dict: ``ok`` plus the stored ``catalog_record``.
+
+    Raises:
+        HTTPException: 401 without secret; 404 unknown PM; 422 missing or
+                       unparseable date; 409 non-cabinet row or a unit not
+                       in maintenance.
+    """
+    from smart_locker.services.device_catalog import (
+        InvalidCatalogField,
+        NotCabinetUnit,
+        NotInMaintenance,
+        back_in_service,
+    )
+
+    device = DeviceRepository.find_by_pm(db, pm_number.strip())
+    if device is None:
+        raise HTTPException(status_code=404, detail="Device not found.")
+    try:
+        changed = back_in_service(
+            db, device, _parse_calibration(body.calibration_due)
+        )
+    except InvalidCatalogField as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    except (NotCabinetUnit, NotInMaintenance) as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    return {"ok": True, "changed": changed, "device": catalog_record(device)}
 
 
 @router.get("/api/dashboard/mirror")

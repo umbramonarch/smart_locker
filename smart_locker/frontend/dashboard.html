@@ -215,7 +215,7 @@
 
       <section class="admin-section">
         <h3 class="admin-section-title">Catalog</h3>
-        <p class="admin-hint">Add, edit, or remove catalog devices. A borrowed unit cannot be removed. Cabinet rows keep their place from borrow/return.</p>
+        <p class="admin-hint">Add, edit, or remove catalog devices; take a cabinet unit to maintenance or bring it back (with a new calibration date). A borrowed unit cannot be removed or sent to maintenance.</p>
         <p class="admin-tag-status" id="admin-catalog-status"></p>
         <button type="button" class="admin-tag-btn admin-tag-bind" id="catalog-add-open">Add device</button>
         <div class="table-wrap">
@@ -319,6 +319,20 @@
       <div class="owner-dialog-actions">
         <button type="button" class="owner-cancel" id="device-cancel">Cancel</button>
         <button type="button" class="owner-confirm" id="device-confirm">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="owner-dialog" id="service-dialog" hidden>
+    <div class="owner-dialog-card" role="dialog" aria-labelledby="service-dialog-title">
+      <h3 class="owner-dialog-title" id="service-dialog-title">Back in service</h3>
+      <p class="owner-dialog-pm" id="service-dialog-pm"></p>
+      <label class="owner-dialog-label" for="service-calibration">New calibration due</label>
+      <input type="date" class="search-input" id="service-calibration">
+      <p class="error-msg" id="service-dialog-error" style="display:none"></p>
+      <div class="owner-dialog-actions">
+        <button type="button" class="owner-cancel" id="service-cancel">Cancel</button>
+        <button type="button" class="owner-confirm" id="service-confirm">Confirm</button>
       </div>
     </div>
   </div>

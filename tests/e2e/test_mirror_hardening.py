@@ -28,6 +28,7 @@ from sqlalchemy.orm import Session
 
 from config.settings import in_locker_token, maintenance_token
 from smart_locker.database.engine import get_engine
+from smart_locker.database.models import DeviceStatus
 from smart_locker.database.repositories import DeviceRepository, RegistrantRepository
 from smart_locker.services.device_catalog import registerable_devices
 from smart_locker.sync import mirror, scheduler, sync_status
@@ -37,6 +38,7 @@ from tests.api.helpers import catalog_workbook
 from tests.e2e.helpers import add_device
 from tests.e2e.test_mirror import (
     CATALOG_HEADERS,
+    _drain_mirror,
     _mirror_cell,
     _point_mirror_at,
     _tick_now,
@@ -480,6 +482,106 @@ def test_external_diffs_missing_file_reports_via_read(tmp_path, monkeypatch):
     diffs, err = mirror.external_diffs()
     assert diffs == []
     assert "file not found" in err.lower()
+
+
+def _edit_location(path, pm_number: str, value: str) -> None:
+    """Hand-edit one row's Location cell in the mirror workbook."""
+    wb = load_workbook(path)
+    try:
+        ws = wb.active
+        headers = [str(c.value).strip() if c.value else "" for c in ws[1]]
+        pm_col = headers.index("PM Number") + 1
+        loc_col = headers.index("Location") + 1
+        for row in ws.iter_rows(min_row=2):
+            if str(row[pm_col - 1].value).strip() == pm_number:
+                ws.cell(row=row[0].row, column=loc_col, value=value)
+                return
+        raise AssertionError(f"PM {pm_number} not in sheet {path}")
+    finally:
+        wb.save(path)
+        wb.close()
+
+
+def test_maintenance_word_on_cabinet_unit_marks_maintenance(
+    e2e, tmp_path, monkeypatch
+):
+    """A hand edit writing the maintenance word over a cabinet unit's
+    derived Location does the same thing as the dashboard action."""
+    _no_scheduler(monkeypatch)
+    path = tmp_path / "mirror.xlsx"
+    _point_mirror_at(monkeypatch, path)
+    h = e2e()
+    device_id = add_device(h, name="Scope", pm_number="PM-100", locker_slot=1)
+
+    result = _tick_now()
+    assert result["error"] is None
+    assert _mirror_cell(path, "PM-100") == in_locker_token()
+
+    # Operator hand-edits the unit's cell to the maintenance word.
+    _edit_location(path, "PM-100", "maintenance")
+    result = _tick_now()
+    assert result["external"] is True
+
+    outcome = mirror.apply_external(get_engine())
+    assert outcome["applied"] >= 1
+    with h.db() as db:
+        device = DeviceRepository.find_by_id(db, device_id)
+        assert device.status == DeviceStatus.MAINTENANCE
+
+    # The next flush writes the canonical token — sheet and DB converge.
+    _drain_mirror()
+    assert _mirror_cell(path, "PM-100") == maintenance_token()
+
+
+def test_maintenance_word_skipped_while_borrowed(
+    e2e, tmp_path, monkeypatch
+):
+    """The maintenance word is refused while the unit is borrowed — the
+    loan owns the row, and the mirror rewrites the borrower on flush."""
+    _no_scheduler(monkeypatch)
+    path = tmp_path / "mirror.xlsx"
+    _point_mirror_at(monkeypatch, path)
+    h = e2e()
+    device_id = add_device(
+        h, name="Scope", pm_number="PM-100", locker_slot=1, status="borrowed"
+    )
+
+    result = _tick_now()
+    assert result["error"] is None
+
+    _edit_location(path, "PM-100", "Maintenance")
+    result = _tick_now()
+    assert result["external"] is True
+
+    outcome = mirror.apply_external(get_engine())
+    assert outcome["skipped"] >= 1
+    with h.db() as db:
+        device = DeviceRepository.find_by_id(db, device_id)
+        assert device.status == DeviceStatus.BORROWED
+
+
+def test_adoption_honors_maintenance_word_on_registered_row(
+    e2e, tmp_path, monkeypatch
+):
+    """First-sight adoption: a registered unit whose sheet Location says
+    the maintenance word adopts into maintenance, not availability."""
+    _no_scheduler(monkeypatch)
+    path = catalog_workbook(tmp_path, [
+        CATALOG_HEADERS,
+        ["PM-100", "Scope", "Tool", "M", "Mod", "SN-1", "maintenance"],
+    ])
+    _point_mirror_at(monkeypatch, path)
+    h = e2e()
+    device_id = add_device(h, name="Scope", pm_number="PM-100", locker_slot=1)
+
+    result = _tick_now()
+    assert result["error"] is None
+    assert result["seeded"] is True
+    with h.db() as db:
+        device = DeviceRepository.find_by_id(db, device_id)
+        assert device.status == DeviceStatus.MAINTENANCE
+    # The regenerated sheet writes the canonical token.
+    assert _mirror_cell(path, "PM-100") == maintenance_token()
 
 
 def test_apply_external_missing_file_raises_unavailable(

@@ -36,6 +36,7 @@ from smart_locker.database.repositories import (
     TransactionRepository,
 )
 from smart_locker.services.device_catalog import (
+    apply_place_word,
     canonical_place,
     display_location,
     is_registered,
@@ -432,6 +433,9 @@ def _adopt(engine, parsed: list[CatalogRow]) -> int:
                     updates["calibration_due"] = row.calibration_due
                 try:
                     DeviceRepository.update_metadata(session, existing, **updates)
+                    # The maintenance word on a cabinet unit does the same
+                    # thing as the dashboard action, adoption included.
+                    apply_place_word(session, existing, row.location)
                     session.commit()
                 except IntegrityError:
                     # One bad row must not abort the whole adoption (and be
@@ -732,7 +736,9 @@ def _apply_field(session: Session, device: Device, field: str, row: CatalogRow) 
         return False
     if attr == "location":
         if is_registered(device):
-            return False
+            # A cabinet unit's place is derived — except the maintenance
+            # word, which does the same thing as the dashboard action.
+            return apply_place_word(session, device, row.location)
         device.location = _stored_place(row.location)
         session.flush()
         return True

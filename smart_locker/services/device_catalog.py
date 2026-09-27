@@ -56,6 +56,14 @@ class LockerOwned(CatalogError):
     """This unit is in the cabinet; place is owned by borrow/return."""
 
 
+class NotCabinetUnit(CatalogError):
+    """The row has no cabinet slot; the maintenance lifecycle does not apply."""
+
+
+class NotInMaintenance(CatalogError):
+    """Only a maintenance unit can return to service."""
+
+
 class InvalidCatalogField(CatalogError):
     """A required field was empty or a field may not be edited on this row."""
 
@@ -402,6 +410,111 @@ def remove_device(session: Session, device: Device) -> None:
     session.delete(device)
     session.flush()
     _mark_mirror_dirty(session)
+
+
+# --- Maintenance -------------------------------------------------------------
+#
+# "To maintenance" and the maintenance word in the mirror do the same thing:
+# a cabinet unit out of service cannot be borrowed (LockerService refuses),
+# and its derived Location cell becomes the maintenance token. Refused while
+# borrowed — the loan owns the row. "Back in service" always carries the new
+# calibration date; when that date is not in the future the calibration gate
+# keeps borrow closed anyway.
+
+def to_maintenance(session: Session, device: Device) -> bool:
+    """Take a cabinet unit out of service.
+
+    Args:
+        session: Active database session (caller commits).
+        device: A cabinet unit (``locker_slot`` set).
+
+    Returns:
+        True when the status changed, False when it already was maintenance.
+
+    Raises:
+        NotCabinetUnit: The row is not a cabinet unit.
+        DeviceBorrowed: The unit is borrowed right now.
+    """
+    if not is_registered(device):
+        raise NotCabinetUnit(f"{device.pm_number} is not a cabinet unit.")
+    if device.status == DeviceStatus.BORROWED:
+        raise DeviceBorrowed(f"{device.pm_number} is borrowed — return it first.")
+    if device.status == DeviceStatus.MAINTENANCE:
+        return False
+    device.status = DeviceStatus.MAINTENANCE
+    session.flush()
+    _mark_mirror_dirty(session)
+    logger.info("To maintenance: %s (pm=%s).", device.name, device.pm_number)
+    return True
+
+
+def back_in_service(session: Session, device: Device, calibration_due: date | None) -> bool:
+    """Return a maintenance unit to service and save its new calibration date.
+
+    The date is required — a unit whose calibration lap ran out must not
+    come back dateless. A date that is not in the future is stored anyway;
+    the borrow gate keeps the unit unborrowable until it is.
+
+    Args:
+        session: Active database session (caller commits).
+        device: A cabinet unit currently in maintenance.
+        calibration_due: The new calibration-due date (required).
+
+    Returns:
+        True when anything changed.
+
+    Raises:
+        NotCabinetUnit: The row is not a cabinet unit.
+        NotInMaintenance: The unit is not in maintenance.
+        InvalidCatalogField: No calibration date was given.
+    """
+    if not is_registered(device):
+        raise NotCabinetUnit(f"{device.pm_number} is not a cabinet unit.")
+    if device.status != DeviceStatus.MAINTENANCE:
+        raise NotInMaintenance(f"{device.pm_number} is not in maintenance.")
+    if calibration_due is None:
+        raise InvalidCatalogField(
+            "Back in service needs the new calibration date."
+        )
+    DeviceRepository.update_metadata(
+        session, device, calibration_due=calibration_due
+    )
+    device.status = DeviceStatus.AVAILABLE
+    session.flush()
+    _mark_mirror_dirty(session)
+    logger.info(
+        "Back in service: %s (pm=%s), calibration due %s.",
+        device.name, device.pm_number, calibration_due,
+    )
+    return True
+
+
+def apply_place_word(session: Session, device: Device, text: str | None) -> bool:
+    """Apply a sheet/hand-typed place word to a cabinet unit.
+
+    Only the maintenance word acts — every other cell value is derived
+    state the Pi owns (borrower name, in-locker token), so the word is a
+    no-op there. The reverse direction is not offered: a sheet cell cannot
+    supply the new calibration date back-in-service requires.
+
+    Args:
+        session: Active database session (caller commits).
+        device: Any catalog row.
+        text: The Location cell as read from the sheet.
+
+    Returns:
+        True when the unit is in maintenance after the call, False for a
+        non-cabinet row, a borrowed unit, or a non-maintenance word.
+    """
+    if not is_registered(device):
+        return False
+    if place_kind(text) != "maintenance":
+        return False
+    if device.status == DeviceStatus.BORROWED:
+        return False
+    if device.status == DeviceStatus.MAINTENANCE:
+        return True
+    return to_maintenance(session, device)
 
 
 def registerable_devices(session: Session) -> list[Device]:

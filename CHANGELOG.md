@@ -17,6 +17,7 @@ Work on `main` after the `v0.2.0` tag. Merging to `main` is not a release; the n
 - Register Device promotes a registerable catalog row (no slot, place = in-locker word) into a free slot; the kiosk list offers the registerable rows.
 - Mirror status/diff endpoints under `/api/dashboard/mirror*` and `GET /api/admin/devices/registerable`; `POST /api/admin/sync-source` now runs one mirror tick.
 - Calibration gate: on the due date and after, a unit cannot start a new loan — borrow and handover are refused and the refusal says why; return always works. Before the due date the kiosk card and dashboard cells show a due-soon badge (`SMART_LOCKER_CALIBRATION_WARN_DAYS`, default 14). Device feeds carry `calibration_state`/`calibration_days_left`.
+- Maintenance lifecycle on the dashboard: **To maintenance** takes a cabinet unit out of service (refused while borrowed; borrow is blocked and the mirror Location becomes the maintenance token), and **Back in service** requires the new calibration date and saves it — a date that is not in the future keeps the unit unborrowable on its own. Typing the maintenance word into a cabinet unit's sheet Location cell and applying the review does the same thing as the button.
 
 ### Removed
 
