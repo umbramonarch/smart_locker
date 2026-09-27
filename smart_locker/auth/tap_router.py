@@ -546,10 +546,16 @@ def _auto_intent(
     name = device.name
 
     if device.status == DeviceStatus.AVAILABLE:
-        success = LockerService.borrow_device(db_session, user_session, device.id)
-        message = f"{name} borrowed." if success else f"Could not borrow {name}."
+        outcome = LockerService.borrow_device(db_session, user_session, device.id)
+        if outcome:
+            message = f"{name} borrowed."
+        else:
+            message = f"Could not borrow {name}"
+            if outcome.reason:
+                message += f": {outcome.reason}"
+            message += "."
         return _device_action(
-            device, success=success, action="borrow" if success else "refused", message=message
+            device, success=outcome.success, action="borrow" if outcome else "refused", message=message
         )
 
     if device.status == DeviceStatus.BORROWED:
@@ -577,5 +583,11 @@ def _auto_intent(
             cli_message=f"{name} is held by {current_holder_name}. Transfer to {user.display_name}?",
         )
 
-    message = f"Could not borrow {name}."
+    # Maintenance and any later block state: the service is the authority on
+    # why a unit cannot be borrowed — ask it and report its reason.
+    outcome = LockerService.borrow_device(db_session, user_session, device.id)
+    message = f"Could not borrow {name}"
+    if outcome.reason:
+        message += f": {outcome.reason}"
+    message += "."
     return _device_action(device, success=False, action="refused", message=message)

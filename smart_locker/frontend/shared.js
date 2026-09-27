@@ -37,6 +37,9 @@ async function loadSharedSiteConfig(options = {}) {
       window.SMART_LOCKER_MAX_BORROWS = data.max_borrows;
       if (typeof setMenuBorrowCount === 'function') setMenuBorrowCount(window.__menuDevices || []);
     }
+    if (data && Number.isInteger(data.calibration_warn_days)) {
+      window.SMART_LOCKER_CAL_WARN_DAYS = data.calibration_warn_days;
+    }
   } catch (_) { /* keep built-in labels */ }
 }
 

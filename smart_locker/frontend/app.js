@@ -811,6 +811,69 @@ function safeKioskImagePath(raw) {
   return path;
 }
 
+/* ============================================================
+   CALIBRATION STATE — badge before the due date; borrow blocked on/after it
+============================================================ */
+/**
+ * Days until a device's calibration date (negative when overdue), or null
+ * when there is no usable date. Trusts the API's calibration_days_left;
+ * falls back to the ISO calibration_due string for demo data.
+ * @param {Object} dev - Device record from the API or DEMO_DEVICES.
+ * @returns {number|null}
+ */
+function calDaysLeft(dev) {
+  if (typeof dev.calibration_days_left === 'number') return dev.calibration_days_left;
+  if (!dev.calibration_due) return null;
+  const due = new Date(`${dev.calibration_due}T00:00:00`);
+  if (Number.isNaN(due.getTime())) return null;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  return Math.round((due - today) / 86400000);
+}
+
+/**
+ * Calibration state for a device: 'ok' | 'due_soon' | 'due' | 'overdue',
+ * or null when no date is set. Trusts the API's calibration_state;
+ * falls back to computing from the due date (demo data).
+ * @param {Object} dev - Device record.
+ * @returns {string|null}
+ */
+function calState(dev) {
+  if (typeof dev.calibration_state === 'string') return dev.calibration_state;
+  const n = calDaysLeft(dev);
+  if (n === null) return null;
+  if (n < 0) return 'overdue';
+  if (n === 0) return 'due';
+  const warn = Number.isInteger(window.SMART_LOCKER_CAL_WARN_DAYS)
+    ? window.SMART_LOCKER_CAL_WARN_DAYS : 14;
+  return n <= warn ? 'due_soon' : 'ok';
+}
+
+/**
+ * Whether calibration blocks a borrow of this device (due date reached).
+ * @param {Object} dev - Device record.
+ * @returns {boolean}
+ */
+function calBlocked(dev) {
+  const state = calState(dev);
+  return state === 'due' || state === 'overdue';
+}
+
+/**
+ * Short badge text for a device's calibration state, or null when the
+ * card shows no badge.
+ * @param {Object} dev - Device record.
+ * @returns {string|null}
+ */
+function calBadgeText(dev) {
+  const state = calState(dev);
+  const n = calDaysLeft(dev);
+  if (state === 'due_soon') return `CAL ${n}d`;
+  if (state === 'due') return 'CAL DUE';
+  if (state === 'overdue') return 'CAL OVERDUE';
+  return null;
+}
+
 /**
  * Build one locker card with textContent / setAttribute (no catalog HTML).
  * @param {Object} dev
@@ -866,6 +929,14 @@ function buildDeviceCardEl(dev, cls, statusCls, statusTxt, slotLabel) {
   statusEl.textContent = statusTxt;
   cardImage.appendChild(slotEl);
   cardImage.appendChild(statusEl);
+
+  const calText = calBadgeText(dev);
+  if (calText) {
+    const calEl = document.createElement('div');
+    calEl.className = `card-cal ${calState(dev)}`;
+    calEl.textContent = calText;
+    cardImage.appendChild(calEl);
+  }
 
   const body = document.createElement('div');
   body.className = 'card-body';
@@ -1045,6 +1116,22 @@ function openDetail(dev, mode) {
   // Color-code the status: cyan for yours, green for available, amber for maintenance
   statusEl.style.color =
     mine ? 'var(--info)' : avail ? 'var(--success)' : maint ? 'var(--warning)' : 'var(--text-muted)';
+
+  const calRow  = document.getElementById('detail-calibration-row');
+  const calEl   = document.getElementById('detail-calibration');
+  const calS    = calState(dev);
+  const calDays = calDaysLeft(dev);
+  if (dev.calibration_due && calS) {
+    const suffix = calS === 'overdue' ? `${-calDays}d overdue`
+                 : calS === 'due'     ? 'due today'
+                 : calS === 'due_soon' ? `in ${calDays}d`
+                 : '';
+    calEl.textContent = dev.calibration_due + (suffix ? ` (${suffix})` : '');
+    calEl.className = `meta-value cal-${calS}`;
+    calRow.classList.remove('hidden');
+  } else {
+    calRow.classList.add('hidden');
+  }
   document.getElementById('detail-desc').textContent    =
     dev.description || 'No description available.';
 
@@ -1074,7 +1161,11 @@ function openDetail(dev, mode) {
   const btn = document.getElementById('confirm-btn');
   btn.className = 'confirm-btn';
   if (mode === 'borrow') {
-    if (avail)      { btn.textContent = 'Confirm Borrow';    btn.classList.add('do-borrow'); }
+    if (avail && calBlocked(dev)) {
+      btn.textContent = calState(dev) === 'due' ? 'Calibration Due' : 'Calibration Overdue';
+      btn.classList.add('disabled');
+    }
+    else if (avail) { btn.textContent = 'Confirm Borrow';    btn.classList.add('do-borrow'); }
     else if (maint) { btn.textContent = 'Under Maintenance'; btn.classList.add('disabled'); }
     else            { btn.textContent = 'Already Borrowed';  btn.classList.add('disabled'); }
   } else {

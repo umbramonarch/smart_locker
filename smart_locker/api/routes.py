@@ -166,11 +166,16 @@ def public_config() -> dict:
     use ``pm_number``. Excel header extras are not needed in the browser.
 
     Returns:
-        dict: ``asset_label`` from ``SMART_LOCKER_ASSET_LABEL``.
+        dict: ``asset_label`` from ``SMART_LOCKER_ASSET_LABEL``, the borrow
+        limit, and the calibration due-soon window in days.
     """
-    from config.settings import MAX_BORROWS, asset_label
+    from config.settings import MAX_BORROWS, asset_label, calibration_warn_days
 
-    return {"asset_label": asset_label(), "max_borrows": MAX_BORROWS}
+    return {
+        "asset_label": asset_label(),
+        "max_borrows": MAX_BORROWS,
+        "calibration_warn_days": calibration_warn_days(),
+    }
 
 
 @router.get("/api/health")
@@ -721,11 +726,14 @@ def borrow_device(
     device = DeviceRepository.find_by_id(db, device_id)
     device_name = device.name if device else f"Device {device_id}"
 
-    success = LockerService.borrow_device(db, user_session, device_id)
+    outcome = LockerService.borrow_device(db, user_session, device_id)
 
-    if success:
+    if outcome:
         return {"success": True, "message": f"{device_name} borrowed."}
-    return {"success": False, "message": f"Could not borrow {device_name}."}
+    refusal = f"Could not borrow {device_name}"
+    if outcome.reason:
+        refusal += f": {outcome.reason}"
+    return {"success": False, "message": f"{refusal}."}
 
 
 @router.post("/api/devices/{device_id}/return")
@@ -781,11 +789,14 @@ def transfer_device(
     device = DeviceRepository.find_by_id(db, device_id)
     device_name = device.name if device else f"Device {device_id}"
 
-    success = LockerService.transfer_device(db, user_session, device_id)
+    outcome = LockerService.transfer_device(db, user_session, device_id)
 
-    if success:
+    if outcome:
         return {"success": True, "message": f"{device_name} transferred to you."}
-    return {"success": False, "message": f"Could not transfer {device_name}."}
+    refusal = f"Could not transfer {device_name}"
+    if outcome.reason:
+        refusal += f": {outcome.reason}"
+    return {"success": False, "message": f"{refusal}."}
 
 
 # --- Registration Endpoints -------------------------------------------------

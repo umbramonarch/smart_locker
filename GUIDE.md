@@ -1421,9 +1421,16 @@ that bridges card taps to the browser.
 
 `GET /api/devices` returns per device: `id`, `pm_number`, `name`, `device_type`,
 `serial_number`, `manufacturer`, `model`, `locker_slot`, `description`,
-`image_path`, `calibration_due`, `status`, `borrower_name`, `has_tag` (bool — no HMAC
-digest). Device-tag HMAC is never on this payload, the public dashboard, or the
-mirror sheet. `GET /api/dashboard/devices` also includes `has_tag`.
+`image_path`, `calibration_due`, `calibration_state` (`ok` | `due_soon` | `due` |
+`overdue` | null), `calibration_days_left`, `status`, `borrower_name`, `has_tag`
+(bool — no HMAC digest). Device-tag HMAC is never on this payload, the public
+dashboard, or the mirror sheet. `GET /api/dashboard/devices` and
+`GET /api/dashboard/inventory` carry the same calibration fields.
+
+**Calibration gate:** before the due date the unit shows a badge and borrows
+normally (`SMART_LOCKER_CALIBRATION_WARN_DAYS`, default 14, sets the window).
+On the due date and after, borrow — including a handover — is refused with the
+reason on the refusal message; return always works.
 
 **The NFC → browser bridge:** the background NFC listener detects a tap and puts an event on
 a queue; `GET /api/events` streams it to the kiosk browser (loopback only), which then runs
@@ -1440,7 +1447,8 @@ The raw UID is never stored or logged.
 
 **Flow:** tap work card → tap the sticker (or pick on screen). Auto-intent: available →
 borrow; borrowed by you → return; borrowed by someone else → fail for a normal user, or
-admin return-on-behalf; maintenance → fail. The session stays open. A **work-card** tap
+admin return-on-behalf; maintenance or a reached calibration date → fail. The session
+stays open. A **work-card** tap
 still logs out; a device tag does not. An unknown UID while logged in stays logged in.
 
 **Register Device** (hidden admin panel): pick a registerable catalog row (no slot,
@@ -1454,7 +1462,7 @@ rows can bind / unbind / change slot. The list shows **name + PM**. CLI bind-onl
 
 ## 16. Future improvements
 
-- **Calibration-due notifications** — calibration dates are stored; a reminder system is not.
+- **Calibration-due notifications** — dates gate borrow and badge the kiosk card and dashboard cells; a proactive reminder system is not.
 - **Full admin web panel** — user editing from the browser (today: the dashboard **Admin** overlay already edits the catalog, reviews sheet edits, and lists users/logs/NFC behind the admin secret; user changes still live at the kiosk or CLI).
 - **MIFARE sector reading** — APDU commands exist in `nfc/apdu.py` but aren't wired in.
 - **Multi-reader support** — currently the first matching reader is used.

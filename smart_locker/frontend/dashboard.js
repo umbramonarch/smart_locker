@@ -633,7 +633,7 @@ function renderInventory() {
       <td>${esc(d.model)}</td>
       <td>${esc(d.serial_number)}</td>
       <td>${d.in_locker ? esc(d.location) : ownerCell(d.pm_number, d.location)}</td>
-      <td>${esc(d.calibration_due)}</td>
+      <td>${calCell(d)}</td>
     </tr>
   `).join('');
 }
@@ -679,9 +679,24 @@ function renderDevices() {
       <td><span class="status-badge ${d.status}">${d.status}</span></td>
       <td>${esc(d.borrower_name ?? '')}</td>
       <td>${d.has_tag ? 'Tagged' : 'No tag'}</td>
-      <td>${esc(d.calibration_due ?? '')}</td>
+      <td>${calCell(d)}</td>
     </tr>
   `).join('');
+}
+
+
+/**
+ * Calibration cell: the ISO date, wrapped in a badge while the state is
+ * due_soon/due/overdue ('ok' and dateless rows stay plain).
+ *
+ * @param {Object} d - Inventory or Locker row (calibration_* fields).
+ * @returns {string} HTML for the cell.
+ */
+function calCell(d) {
+  const state = d.calibration_state;
+  const date = esc(d.calibration_due ?? '');
+  if (!date || !state || state === 'ok') return date;
+  return `<span class="cal-badge ${esc(state)}">${date}</span>`;
 }
 
 

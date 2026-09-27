@@ -442,6 +442,25 @@ body {
   color: var(--status-maintenance);
 }
 
+/* Calibration state badges on the date cell (Inventory and Locker) */
+.cal-badge {
+  display: inline-block;
+  padding: 0.2rem 0.55rem;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.cal-badge.due_soon {
+  background: var(--status-borrowed-bg);
+  color: var(--status-borrowed);
+}
+.cal-badge.due,
+.cal-badge.overdue {
+  background: rgba(248, 113, 113, 0.16);
+  color: #f87171;
+}
+
 /* --- Display tab --------------------------------------------------------- */
 .display-card {
   padding: 2rem 1.5rem 2.25rem;

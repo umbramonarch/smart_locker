@@ -1028,6 +1028,26 @@ body::after {
 .card-status.mine-tag  { background: var(--info-dim);        border: 1px solid rgba(0,212,255,0.38);  color: var(--info); }
 .card-status.maint     { background: rgba(245,158,11,0.1);   border: 1px solid rgba(245,158,11,0.3);   color: var(--warning); }
 
+/* Calibration badge (under the status badge on the card image) */
+.card-cal {
+  position: absolute; top: 2.15rem; right: 0.65rem;
+  padding: 0.2rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  z-index: 2;
+}
+.card-cal.due_soon { background: rgba(245,158,11,0.1);  border: 1px solid rgba(245,158,11,0.3);  color: var(--warning); }
+.card-cal.due      { background: rgba(239,68,68,0.12);  border: 1px solid rgba(239,68,68,0.4);   color: var(--danger); }
+.card-cal.overdue  { background: rgba(239,68,68,0.12);  border: 1px solid rgba(239,68,68,0.4);   color: var(--danger); }
+
+/* Calibration value colors on the device-detail meta row */
+.meta-value.cal-due_soon { color: var(--warning); }
+.meta-value.cal-due      { color: var(--danger); }
+.meta-value.cal-overdue  { color: var(--danger); }
+
 .card-body { padding: 0.9rem 1rem 1.1rem; }
 .card-name {
   font-family: var(--font-display);

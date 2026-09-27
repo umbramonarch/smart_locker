@@ -169,6 +169,18 @@ def maintenance_token() -> str:
     ).strip() or "Maintenance"
 
 
+def calibration_warn_days() -> int:
+    """Days before the calibration date that the due-soon badge appears.
+
+    Borrow is refused on the due date itself regardless of this window.
+    Read on each call so tests can setenv.
+
+    Returns:
+        ``SMART_LOCKER_CALIBRATION_WARN_DAYS`` clamped at 0, or 14.
+    """
+    return _env_int("SMART_LOCKER_CALIBRATION_WARN_DAYS", 14, minimum=0)
+
+
 def id_header_extras() -> list[str]:
     """Extra Excel header aliases for the join key.
 

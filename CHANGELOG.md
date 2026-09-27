@@ -16,6 +16,7 @@ Work on `main` after the `v0.2.0` tag. Merging to `main` is not a release; the n
 - Owner change on a **non-locker** device from dashboard Inventory is now public — no admin password. Location on a locker unit is derived from borrow state and cannot be edited anywhere.
 - Register Device promotes a registerable catalog row (no slot, place = in-locker word) into a free slot; the kiosk list offers the registerable rows.
 - Mirror status/diff endpoints under `/api/dashboard/mirror*` and `GET /api/admin/devices/registerable`; `POST /api/admin/sync-source` now runs one mirror tick.
+- Calibration gate: on the due date and after, a unit cannot start a new loan — borrow and handover are refused and the refusal says why; return always works. Before the due date the kiosk card and dashboard cells show a due-soon badge (`SMART_LOCKER_CALIBRATION_WARN_DAYS`, default 14). Device feeds carry `calibration_state`/`calibration_days_left`.
 
 ### Removed
 

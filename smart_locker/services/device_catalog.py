@@ -22,6 +22,7 @@ from smart_locker.database.repositories import (
     DeviceRepository,
     TransactionRepository,
 )
+from smart_locker.services.calibration import calibration_fields
 from smart_locker.sync.catalog_sheet import normalize_pm
 
 logger = logging.getLogger(__name__)
@@ -151,6 +152,7 @@ def device_record(device: Device, *, current_user_id: int | None = None) -> dict
         "locker_slot": device.locker_slot,
         "description": device.description,
         "calibration_due": device.calibration_due.isoformat() if device.calibration_due else None,
+        **calibration_fields(device.calibration_due),
         "status": device.status.value,
         "borrower_name": borrower_name,
         "has_tag": device.tag_hmac is not None,
@@ -172,6 +174,7 @@ def catalog_record(device: Device) -> dict:
         "serial_number": device.serial_number,
         "location": display_location(device),
         "calibration_due": device.calibration_due.isoformat() if device.calibration_due else None,
+        **calibration_fields(device.calibration_due),
         "in_locker": is_registered(device),
         "status": device.status.value,
         "has_tag": device.tag_hmac is not None,

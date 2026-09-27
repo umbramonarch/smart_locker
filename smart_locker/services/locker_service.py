@@ -13,6 +13,7 @@ Notes: The borrow limit is configured via MAX_BORROWS in config/settings.py
 """
 
 import logging
+from dataclasses import dataclass
 
 from sqlalchemy import event
 from sqlalchemy.orm import Session
@@ -21,8 +22,26 @@ from config.settings import MAX_BORROWS
 from smart_locker.auth.session_manager import UserSession
 from smart_locker.database.models import DeviceStatus, UserRole
 from smart_locker.database.repositories import DeviceRepository, TransactionRepository, UserRepository
+from smart_locker.services.calibration import borrow_block_reason
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class LoanOutcome:
+    """Outcome of a borrow/transfer attempt.
+
+    ``reason`` is a short kiosk-safe refusal clause (no device name, no
+    digests) that the API layer appends to its ``Could not … {name}`` line;
+    empty means the generic message — e.g. the id did not resolve. Truthy
+    when the loan succeeded so bool-style callers keep working.
+    """
+
+    success: bool
+    reason: str = ""
+
+    def __bool__(self) -> bool:
+        return self.success
 
 
 def _write_location(db_session: Session) -> None:
@@ -60,7 +79,7 @@ class LockerService:
         user_session: UserSession,
         device_id: int,
         notes: str | None = None,
-    ) -> bool:
+    ) -> LoanOutcome:
         """Borrow a device for the current user.
 
         Args:
@@ -70,11 +89,12 @@ class LockerService:
             notes: Optional notes for the transaction.
 
         Returns:
-            True if borrow succeeded, False otherwise.
+            LoanOutcome — truthy on success; ``reason`` says why a refusal
+            happened (calibration due/overdue, maintenance, limit, …).
         """
         if user_session.is_expired:
             logger.warning("Borrow attempted with expired session.")
-            return False
+            return LoanOutcome(False, "session expired — tap your card again")
 
         user = user_session.user
 
@@ -82,7 +102,31 @@ class LockerService:
         if device is None or device.locker_slot is None:
             # Catalog-only rows are not in the cabinet — they cannot be borrowed.
             logger.warning("Borrow failed: device %d not found.", device_id)
-            return False
+            return LoanOutcome(False)
+
+        if device.status != DeviceStatus.AVAILABLE:
+            reason = (
+                "in maintenance"
+                if device.status == DeviceStatus.MAINTENANCE
+                else "already borrowed"
+            )
+            logger.warning(
+                "Borrow failed: device %d (%s) is %s.",
+                device_id,
+                device.name,
+                device.status.value,
+            )
+            return LoanOutcome(False, reason)
+
+        block = borrow_block_reason(device.calibration_due)
+        if block is not None:
+            logger.warning(
+                "Borrow refused: %s (device=%d) — %s.",
+                device.name,
+                device_id,
+                block,
+            )
+            return LoanOutcome(False, block)
 
         borrowed_count = DeviceRepository.count_borrowed_by_user(db_session, user.id)
         if borrowed_count >= MAX_BORROWS:
@@ -92,16 +136,10 @@ class LockerService:
                 borrowed_count,
                 MAX_BORROWS,
             )
-            return False
-
-        if device.status != DeviceStatus.AVAILABLE:
-            logger.warning(
-                "Borrow failed: device %d (%s) is %s.",
-                device_id,
-                device.name,
-                device.status.value,
+            return LoanOutcome(
+                False, f"borrow limit reached ({borrowed_count}/{MAX_BORROWS})"
             )
-            return False
+
         DeviceRepository.borrow(db_session, device, user.id)
         TransactionRepository.log_borrow(db_session, user.id, device_id, notes)
         user_session.touch()
@@ -113,7 +151,7 @@ class LockerService:
             device.name,
             device_id,
         )
-        return True
+        return LoanOutcome(True)
 
     @staticmethod
     def return_device(
@@ -201,12 +239,14 @@ class LockerService:
         user_session: UserSession,
         device_id: int,
         notes: str | None = None,
-    ) -> bool:
+    ) -> LoanOutcome:
         """Transfer responsibility for a borrowed device to the current user.
 
         Records a return for the original borrower and a borrow for the new
         user, so the audit trail is preserved. The device stays borrowed;
-        only current_borrower_id changes. Enforces the new user's borrow limit.
+        only current_borrower_id changes. Enforces the new user's borrow
+        limit and the same calibration block as a fresh borrow — a handover
+        must not keep an overdue unit in circulation.
 
         Args:
             db_session: Active database session.
@@ -215,16 +255,17 @@ class LockerService:
             notes: Optional notes for the transaction.
 
         Returns:
-            True if transfer succeeded, False otherwise.
+            LoanOutcome — truthy on success; ``reason`` says why a refusal
+            happened.
         """
         if user_session.is_expired:
             logger.warning("Transfer attempted with expired session.")
-            return False
+            return LoanOutcome(False, "session expired — tap your card again")
 
         device = DeviceRepository.find_by_id(db_session, device_id)
         if device is None:
             logger.warning("Transfer failed: device %d not found.", device_id)
-            return False
+            return LoanOutcome(False)
 
         if device.status != DeviceStatus.BORROWED:
             logger.warning(
@@ -232,7 +273,7 @@ class LockerService:
                 device_id,
                 device.name,
             )
-            return False
+            return LoanOutcome(False, "not borrowed")
 
         user = user_session.user
         if device.current_borrower_id == user.id:
@@ -241,7 +282,7 @@ class LockerService:
                 device_id,
                 user.display_name,
             )
-            return False
+            return LoanOutcome(False, "already held by you")
 
         original_borrower_id = device.current_borrower_id
         if original_borrower_id is None:
@@ -249,7 +290,17 @@ class LockerService:
                 "Transfer failed: device %d has no recorded borrower.",
                 device_id,
             )
-            return False
+            return LoanOutcome(False)
+
+        block = borrow_block_reason(device.calibration_due)
+        if block is not None:
+            logger.warning(
+                "Transfer refused: %s (device=%d) — %s.",
+                device.name,
+                device_id,
+                block,
+            )
+            return LoanOutcome(False, block)
 
         new_borrowed_count = DeviceRepository.count_borrowed_by_user(
             db_session, user.id
@@ -261,7 +312,9 @@ class LockerService:
                 new_borrowed_count,
                 MAX_BORROWS,
             )
-            return False
+            return LoanOutcome(
+                False, f"borrow limit reached ({new_borrowed_count}/{MAX_BORROWS})"
+            )
 
         original_borrower = UserRepository.find_by_id(db_session, original_borrower_id)
         original_name = original_borrower.display_name if original_borrower else "unknown"
@@ -290,7 +343,7 @@ class LockerService:
             device_id,
             original_borrower_id,
         )
-        return True
+        return LoanOutcome(True)
 
     @staticmethod
     def return_unattended(db_session: Session, device_id: int) -> bool:

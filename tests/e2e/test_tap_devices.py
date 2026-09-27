@@ -27,6 +27,7 @@ TAG_UNATTENDED = "0A20000004"
 TAG_HANDOVER = "0A20000005"
 TAG_OVERLAY = "0A20000006"
 TAG_MAINTENANCE = "0A20000007"
+TAG_CAL_DUE = "0A20000008"
 
 
 def _login(h, card_uid: str) -> dict:
@@ -272,7 +273,7 @@ def test_session_tap_on_maintenance_tag_reports_borrow_failure(e2e):
     payload = h.wait_event("device_action")
     assert payload["success"] is False
     assert payload["action"] == "refused"
-    assert payload["message"] == "Could not borrow In Repair."
+    assert payload["message"] == "Could not borrow In Repair: in maintenance."
     assert payload["device_id"] == device_id
     assert payload["locker_slot"] == 27
 
@@ -282,4 +283,34 @@ def test_session_tap_on_maintenance_tag_reports_borrow_failure(e2e):
     assert _device_txns(h, device_id) == []
 
     # The failed action leaves the kiosk session open.
+    assert h.client.get("/api/session").json()["active"] is True
+
+
+def test_session_tap_on_cal_due_tag_reports_borrow_failure(e2e):
+    """Calibration due today blocks the loan: refused device_action, name why."""
+    from datetime import date
+
+    h = e2e()
+    add_user(h, CARD_USER, display_name="Borrower C")
+    device_id = add_device(
+        h, name="Old Meter", pm_number="PM-9008", locker_slot=28,
+        tag_uid=TAG_CAL_DUE, calibration_due=date.today(),
+    )
+
+    _login(h, CARD_USER)
+    h.tap(TAG_CAL_DUE)
+
+    payload = h.wait_event("device_action")
+    assert payload["success"] is False
+    assert payload["action"] == "refused"
+    assert payload["message"] == (
+        "Could not borrow Old Meter: calibration due today."
+    )
+    assert payload["device_id"] == device_id
+
+    device = get_device(h, device_id)
+    assert device.status == DeviceStatus.AVAILABLE
+    assert _device_txns(h, device_id) == []
+
+    # The refused borrow leaves the kiosk session open for the next try.
     assert h.client.get("/api/session").json()["active"] is True
