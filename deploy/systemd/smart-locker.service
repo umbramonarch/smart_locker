@@ -28,7 +28,11 @@ TimeoutStartSec=30
 # Send stdout/stderr to the journal (the app also logs to logs/smart_locker.log).
 StandardOutput=journal
 StandardError=journal
-NoNewPrivileges=true
+# Deliberately NO NoNewPrivileges=true: the admin-panel Update, Stop system,
+# and Shut down buttons run whitelisted `sudo -n` commands, and sudo's setuid
+# elevation is blocked under no_new_privs — the drop would brick all three on
+# the appliance. The sudoers whitelist in deploy/install/sudoers-smart-locker
+# is the privilege boundary instead.
 
 [Install]
 WantedBy=multi-user.target

@@ -105,17 +105,23 @@ VERSION_FILE="$APP_DIR/VERSION"
 KEEP_BACKUPS="${SMART_LOCKER_KEEP_BACKUPS:-5}"
 
 # Runtime paths preserved across the code swap (never overwritten by a release).
-PRESERVE=(".env" "smart_locker.db" "smart_locker.db-wal" "smart_locker.db-shm"
+# dashboard.secret holds the Setup-typed dashboard password — service-owned,
+# not root-owned .env (the service cannot rewrite .env inside the sticky
+# root-owned app dir, and must not: this script parses .env as root).
+PRESERVE=(".env" "dashboard.secret" "smart_locker.db" "smart_locker.db-wal"
+          "smart_locker.db-shm"
           "last_sync.json" "logs" "venv" "deploy/wheelhouse" "deploy/system-packages"
           "backups" ".update-staging" ".git" "smart_locker/frontend/images" "VERSION"
           "locker-updates")
 
 # Skip these from an incoming tree even if they were copied onto the stick.
-INCOMING_SKIP=(".env" "venv" "logs" "backups" "smart_locker.db" "smart_locker.db-wal"
+INCOMING_SKIP=(".env" "dashboard.secret" "venv" "logs" "backups" "smart_locker.db"
+               "smart_locker.db-wal"
                "smart_locker.db-shm" "deploy/wheelhouse" "deploy/system-packages"
                ".update-staging" ".git")
 # USB → $APP_DIR/locker-updates may include extra wheels the Pi does not have.
-PAYLOAD_SKIP=(".env" "venv" "logs" "backups" "smart_locker.db" "smart_locker.db-wal"
+PAYLOAD_SKIP=(".env" "dashboard.secret" "venv" "logs" "backups" "smart_locker.db"
+              "smart_locker.db-wal"
               "smart_locker.db-shm" ".update-staging" ".git" "locker-updates")
 
 # The rollback snapshot keeps the same runtime files out of the tar EXCEPT the
@@ -220,6 +226,12 @@ apply_runtime_permissions() {
     chown root:"$(id -gn "$APP_USER" 2>/dev/null || echo root)" "$APP_DIR/.env" 2>/dev/null || true
     chmod 640 "$APP_DIR/.env" 2>/dev/null || true
   fi
+  # The Setup-typed dashboard password lives service-owned (never root-owned
+  # like .env) so the kiosk can keep writing it inside the sticky app dir.
+  if [ -f "$APP_DIR/dashboard.secret" ]; then
+    chown "$APP_USER:$(id -gn "$APP_USER" 2>/dev/null || echo "$APP_USER")" "$APP_DIR/dashboard.secret" 2>/dev/null || true
+    chmod 640 "$APP_DIR/dashboard.secret" 2>/dev/null || true
+  fi
   local f
   for f in "$DB_PATH" "$DB_PATH-wal" "$DB_PATH-shm" "$APP_DIR/last_sync.json"; do
     if [ -e "$f" ]; then
@@ -227,6 +239,32 @@ apply_runtime_permissions() {
     fi
   done
   chown -R "$APP_USER":"$APP_USER" "$APP_DIR/smart_locker/frontend/images" 2>/dev/null || true
+}
+
+# Re-render the systemd unit from the tree now in place. An update that only
+# swaps $APP_DIR would otherwise leave the installed unit untouched forever —
+# e.g. this tree drops NoNewPrivileges, which had blocked every `sudo -n`
+# call (update, stop, poweroff) on the appliance. Missing/privileged paths
+# warn instead of failing the whole update — a stale unit only loses the
+# new unit flags, not the release.
+refresh_service_unit() {
+  local src="$APP_DIR/deploy/systemd/smart-locker.service"
+  local dst="${SMART_LOCKER_UNIT_DST:-/etc/systemd/system/smart-locker.service}"
+  [ -f "$src" ] || return 0
+  local grp
+  grp="$(id -gn "$APP_USER" 2>/dev/null || echo "$APP_USER")"
+  if sed \
+    -e "s#^User=.*#User=$APP_USER#" \
+    -e "s#^Group=.*#Group=$grp#" \
+    -e "s#^WorkingDirectory=.*#WorkingDirectory=$APP_DIR#" \
+    -e "s#^ExecStart=.*#ExecStart=$VENV_DIR/bin/python -m smart_locker.app#" \
+    -e "s#^Documentation=.*#Documentation=file://$APP_DIR/GUIDE.md#" \
+    "$src" > "$dst"; then
+    systemctl daemon-reload 2>/dev/null || true
+    log "Refreshed systemd unit at $dst."
+  else
+    log "WARNING: could not refresh $dst — unit-level changes need install.sh."
+  fi
 }
 
 # --- Rollback (restore the pre-update code + DB, restart on the old version) -
@@ -285,8 +323,10 @@ rollback() {
   fi
   # The restore left the tree root:root again — re-apply the same runtime
   # ownership the swap performs, or the service account cannot read .env or
-  # write logs/, the DB, or device photos.
+  # write logs/, the DB, or device photos. The unit is re-rendered too so a
+  # rollback restores the unit the old code shipped with.
   apply_runtime_permissions
+  refresh_service_unit
   sudo systemctl start "$SERVICE" 2>/dev/null || true
   if wait_for_health; then
     log "Rollback healthy — running previous version ${OLD_VERSION:-?}."
@@ -656,6 +696,7 @@ if [ -d "$STAGING_DIR/smart_locker/frontend/images" ]; then
   rsync -a "$STAGING_DIR/smart_locker/frontend/images/" "$APP_DIR/smart_locker/frontend/images/"
 fi
 apply_runtime_permissions
+refresh_service_unit
 log "New code in place."
 
 # ============================================================================

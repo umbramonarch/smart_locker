@@ -47,8 +47,11 @@ import smart_locker.api.app_context as ctx_module
 from smart_locker.api.app_context import (
     PendingRegistration,
     PendingTagBind,
+    arm_pending_registration,
+    arm_pending_tag_bind,
     assign_pending_registration,
     assign_pending_tag_bind,
+    drop_expired_pending,
     pending_state_lock,
 )
 from smart_locker.auth.session_manager import UserSession
@@ -387,6 +390,24 @@ def _end_kiosk_session(*, sse_reason: str = "explicit") -> None:
     ctx.end_kiosk_session(reason=sse_reason)
 
 
+def _secret_matches(provided: str, expected: str) -> bool:
+    """Constant-time secret comparison safe for arbitrary header text.
+
+    ``secrets.compare_digest`` raises ``TypeError`` on non-ASCII ``str`` —
+    a latin-1 header like ``päss`` would 500 the gate. Comparing UTF-8 bytes
+    accepts every value a header can carry.
+
+    Args:
+        provided: ``X-Smart-Locker-Admin`` header value (may be empty).
+        expected: Configured secret (non-empty when this is called).
+
+    Returns:
+        True only when the values match byte-for-byte.
+    """
+    p, e = provided.encode("utf-8"), expected.encode("utf-8")
+    return len(p) == len(e) and secrets.compare_digest(p, e)
+
+
 def require_dashboard_admin(request: Request) -> None:
     """Require the dashboard admin secret header. Fail closed if unset.
 
@@ -406,7 +427,7 @@ def require_dashboard_admin(request: Request) -> None:
             detail="Dashboard admin is not configured.",
         )
     provided = request.headers.get(DASHBOARD_ADMIN_HEADER) or ""
-    if len(provided) != len(expected) or not secrets.compare_digest(provided, expected):
+    if not _secret_matches(provided, expected):
         raise HTTPException(
             status_code=401,
             detail="Dashboard admin authorization required.",
@@ -419,12 +440,7 @@ def _clear_expired_pending() -> None:
     if ctx is None:
         return
     with pending_state_lock:
-        pending_reg = ctx.pending_registration
-        if pending_reg is not None and pending_reg.is_expired:
-            assign_pending_registration(ctx, None)
-        pending_bind = ctx.pending_tag_bind
-        if pending_bind is not None and pending_bind.is_expired:
-            assign_pending_tag_bind(ctx, None)
+        drop_expired_pending(ctx)
 
 
 def _pending_nfc_conflict() -> str | None:
@@ -894,6 +910,10 @@ def start_registration(
     if ctx_module.context.session_mgr.has_active_session:
         raise HTTPException(status_code=409, detail="A session is active. End it first.")
 
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="Name is required.")
+
     conflict = _pending_nfc_conflict()
     if conflict:
         raise HTTPException(status_code=409, detail=conflict)
@@ -901,7 +921,7 @@ def start_registration(
     # Validate name against the approved registrants list. While a source
     # import is still running (startup import is a background thread), a
     # missing name may just be "not yet imported" — say so instead of 403.
-    registrant = RegistrantRepository.find_by_name(db, body.name.strip())
+    registrant = RegistrantRepository.find_by_name(db, name)
     if registrant is None:
         from smart_locker.sync.scheduler import import_in_progress
 
@@ -915,12 +935,13 @@ def start_registration(
             detail="Name not found in approved list. Contact an admin for manual registration.",
         )
 
-    assign_pending_tag_bind(ctx_module.context, None)
-    assign_pending_registration(
+    conflict = arm_pending_registration(
         ctx_module.context,
-        PendingRegistration(display_name=body.name.strip()),
+        PendingRegistration(display_name=name),
     )
-    logger.info("Registration started for '%s'. Awaiting card tap.", body.name.strip())
+    if conflict:
+        raise HTTPException(status_code=409, detail=conflict)
+    logger.info("Registration started for '%s'. Awaiting card tap.", name)
     return {"success": True, "message": "Tap your NFC card to complete registration."}
 
 
@@ -996,10 +1017,10 @@ def get_registrants(db: Session = Depends(get_db)):
 class SetupRequest(BaseModel):
     """Setup arm: the first admin's name, plus the dashboard admin password.
 
-    ``password`` is written to the Pi .env as
-    ``SMART_LOCKER_DASHBOARD_ADMIN_SECRET`` when that secret is unset; when it
-    is already set it must arrive in the ``X-Smart-Locker-Admin`` header (the
-    typed password then doubles as authorization) and .env is left alone.
+    ``password`` is written to the service-owned ``dashboard.secret`` file when
+    no dashboard secret is configured; when one already exists it must arrive
+    in the ``X-Smart-Locker-Admin`` header (the typed password then doubles as
+    authorization) and the file is left alone.
     """
 
     name: str = Field(..., min_length=1, max_length=100)
@@ -1030,31 +1051,34 @@ def start_setup(
     request: Request,
     body: SetupRequest,
     db: Session = Depends(get_db),
+    _: None = Depends(require_loopback),
 ):
     """Arm a 60s card-tap window that enrolls the tapped card as admin.
 
-    Setup is open only while the database has no active admin — the moment one
-    exists, this returns 404 and Setup is gone. Once
-    ``SMART_LOCKER_DASHBOARD_ADMIN_SECRET`` is set, arming requires that secret
-    in the ``X-Smart-Locker-Admin`` header; before any password exists the arm
-    is open because the physical card tap on the cabinet reader is what
-    authorizes the enrollment — a LAN caller can open the window but cannot
-    finish it.
+    Loopback only, like every registration arm: a LAN caller must not plant a
+    dashboard password of their choosing or squat the enrollment window the
+    kiosk operator needs. Setup is open only while the database has no active
+    admin — the moment one exists, this returns 404 and Setup is gone. Once
+    ``SMART_LOCKER_DASHBOARD_ADMIN_SECRET`` is configured, arming requires it
+    in the ``X-Smart-Locker-Admin`` header.
 
     Args:
-        request: Incoming ASPI request (admin header check).
-        body: Admin display name and optional dashboard password.
+        request: Incoming ASGI request (admin header check).
+        body: Admin display name and dashboard password.
         db: Active database session (injected by ``get_db``).
 
     Returns:
         dict: ``{"success": True, "message": str}``.
 
     Raises:
-        HTTPException: 503 if system not ready; 404 once an admin exists;
-                       401 when the stored secret does not match; 409 when a
-                       registration/bind window already owns the reader.
+        HTTPException: 403 if not loopback; 503 if system not ready or the NFC
+                       reader is down; 404 once an admin exists; 401 when the
+                       stored secret does not match; 422 for a blank name or a
+                       missing password while no secret is configured; 409 when
+                       a registration/bind window already owns the reader.
     """
-    if ctx_module.context is None:
+    ctx = ctx_module.context
+    if ctx is None:
         raise HTTPException(status_code=503, detail="System not ready.")
 
     if not setup_needed(db):
@@ -1063,32 +1087,56 @@ def start_setup(
     secret = dashboard_admin_secret()
     if secret:
         provided = request.headers.get(DASHBOARD_ADMIN_HEADER) or ""
-        if len(provided) != len(secret) or not secrets.compare_digest(provided, secret):
+        if not _secret_matches(provided, secret):
             raise HTTPException(
                 status_code=401,
                 detail="Dashboard admin authorization required.",
             )
 
-    conflict = _pending_nfc_conflict()
-    if conflict:
-        raise HTTPException(status_code=409, detail=conflict)
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="Admin name is required.")
 
     password = body.password.strip()
-    if password and not secret:
-        try:
-            write_dashboard_secret(password)
-        except (OSError, ValueError) as e:
-            logger.error("Setup could not store the admin password: %s", type(e).__name__)
-            raise HTTPException(
-                status_code=500,
-                detail="Could not store the admin password.",
-            ) from e
+    if not password and not secret:
+        # Setup is the only UI writer of the dashboard secret — a blank
+        # password here would leave every admin-gated dashboard route dead
+        # (401 fail-closed) with no later UI path to set it.
+        raise HTTPException(
+            status_code=422, detail="Dashboard password is required."
+        )
 
-    assign_pending_tag_bind(ctx_module.context, None)
-    assign_pending_registration(
-        ctx_module.context,
-        PendingRegistration(display_name=body.name.strip(), role="admin"),
-    )
+    reader = getattr(ctx, "reader", None)
+    if reader is None or not getattr(reader, "is_running", False):
+        raise HTTPException(
+            status_code=503,
+            detail="NFC reader is not available — a card tap cannot complete Setup.",
+        )
+
+    # Conflict check, optional secret write, and the arm itself must be one
+    # critical section: two racing POSTs must not both write the secret or
+    # silently replace each other's window.
+    with pending_state_lock:
+        conflict = _pending_nfc_conflict()
+        if conflict:
+            raise HTTPException(status_code=409, detail=conflict)
+        if password and not secret:
+            try:
+                write_dashboard_secret(password)
+            except (OSError, ValueError) as e:
+                logger.error(
+                    "Setup could not store the admin password: %s",
+                    type(e).__name__,
+                )
+                raise HTTPException(
+                    status_code=500,
+                    detail="Could not store the admin password.",
+                ) from e
+        assign_pending_tag_bind(ctx, None)
+        assign_pending_registration(
+            ctx,
+            PendingRegistration(display_name=name, role="admin"),
+        )
     logger.info("Setup armed: awaiting the first admin card tap.")
     return {"success": True, "message": "Tap the admin card on the locker reader."}
 
@@ -1205,18 +1253,23 @@ def start_admin_registration(
     if user_session.user.role != UserRole.ADMIN:
         raise HTTPException(status_code=403, detail="Admin access required.")
 
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="Name is required.")
+
     conflict = _pending_nfc_conflict()
     if conflict:
         raise HTTPException(status_code=409, detail=conflict)
 
-    assign_pending_tag_bind(ctx_module.context, None)
-    assign_pending_registration(
+    conflict = arm_pending_registration(
         ctx_module.context,
-        PendingRegistration(display_name=body.name.strip()),
+        PendingRegistration(display_name=name),
     )
+    if conflict:
+        raise HTTPException(status_code=409, detail=conflict)
     logger.info(
         "Admin-initiated registration for '%s' by admin %s. Awaiting card tap.",
-        body.name.strip(), user_session.user.display_name,
+        name, user_session.user.display_name,
     )
     return {"success": True, "message": "Tap the new user's NFC card to complete registration."}
 
@@ -1289,9 +1342,11 @@ def register_locker_device(
     from smart_locker.sync.location_writeback import schedule_write_location
 
     schedule_write_location(workbook)
-    assign_pending_tag_bind(
+    conflict = arm_pending_tag_bind(
         ctx_module.context, PendingTagBind(device_id=device.id)
     )
+    if conflict:
+        raise HTTPException(status_code=409, detail=conflict)
     logger.info(
         "Locker device registered %s (pm=%s, slot=%s) by admin %s. Awaiting sticker.",
         device.name,
@@ -1645,11 +1700,13 @@ def _require_update_authorized(request: Request, db: Session) -> None:
     """Gate POST /api/admin/update. Never returns on refusal.
 
     The update does not require an enrolled admin — a first-boot box with no
-    admin and no dashboard password may still take a stick (Setup runs it).
-    Once ``SMART_LOCKER_DASHBOARD_ADMIN_SECRET`` is set, the
-    ``X-Smart-Locker-Admin`` header is what authorizes the call, from the kiosk
-    or the LAN. A loopback admin kiosk session also still authorizes, so the
-    cabinet behaves exactly as before.
+    admin and no dashboard password may still take a stick, but only from the
+    kiosk itself (loopback). Once ``SMART_LOCKER_DASHBOARD_ADMIN_SECRET`` is
+    set, the ``X-Smart-Locker-Admin`` header is what authorizes the call, from
+    the kiosk or the LAN. A loopback admin kiosk session also still
+    authorizes, so the cabinet behaves exactly as before. There is no
+    unauthenticated LAN path — a remote caller cannot own the physical
+    first-boot ceremony.
 
     Args:
         request: Incoming ASGI request (client address + admin header).
@@ -1662,7 +1719,7 @@ def _require_update_authorized(request: Request, db: Session) -> None:
     """
     secret = dashboard_admin_secret()
     provided = request.headers.get(DASHBOARD_ADMIN_HEADER) or ""
-    if secret and len(provided) == len(secret) and secrets.compare_digest(provided, secret):
+    if secret and _secret_matches(provided, secret):
         return
 
     if _is_loopback_request(request):
@@ -1673,13 +1730,13 @@ def _require_update_authorized(request: Request, db: Session) -> None:
                 return
             raise HTTPException(status_code=403, detail="Admin access required.")
         if not secret and UserRepository.first_active_admin(db) is None:
-            # First boot: no admin enrolled and no password stored yet.
+            # First boot at the kiosk itself: no admin enrolled and no
+            # password stored yet — the physical Setup screen runs the update.
             return
         raise HTTPException(status_code=401, detail="No active session.")
 
-    # LAN: the secret (checked above) or a true first-boot Setup.
-    if not secret and UserRepository.first_active_admin(db) is None:
-        return
+    # LAN: only the secret authorizes (checked above). First-boot openness is
+    # kiosk-local — a LAN host must never launch the root updater unit.
     raise HTTPException(
         status_code=401,
         detail=(
@@ -1734,6 +1791,7 @@ def trigger_update(
     return {"started": True, "message": "Update started. The kiosk will restart briefly."}
 
 
+@router.post("/api/admin/exit-kiosk", include_in_schema=False)
 @router.post("/api/admin/stop-system")
 def admin_stop_system(
     background_tasks: BackgroundTasks,
@@ -2025,10 +2083,12 @@ def dashboard_bind_tag(
     if device is None:
         raise HTTPException(status_code=404, detail="Device not found.")
 
-    assign_pending_tag_bind(
+    conflict = arm_pending_tag_bind(
         ctx_module.context,
         PendingTagBind(device_id=device.id, from_dashboard=True),
     )
+    if conflict:
+        raise HTTPException(status_code=409, detail=conflict)
     logger.info(
         "Dashboard tag bind armed for %s (pm=%s). Awaiting sticker at kiosk.",
         device.name,

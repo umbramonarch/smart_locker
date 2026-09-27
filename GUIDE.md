@@ -593,19 +593,23 @@ The kiosk does this itself — no SSH needed. On a fresh database:
 1. Boot the Pi; Chromium opens the idle screen.
 2. Tap the **clock 5× within 3 seconds** — with no admin enrolled, the **First Admin
    Setup** screen appears instead of the admin menu.
-3. Enter the admin's full name. Optionally enter a dashboard password — it is written
-   to `.env` as `SMART_LOCKER_DASHBOARD_ADMIN_SECRET` (mode `640`) and the dashboard
-   needs it for admin functions. If that secret is already configured in `.env`, the
-   field is required and is used only to authorize.
+3. Enter the admin's full name and choose a dashboard password — required: it is
+   written to `dashboard.secret` next to `.env` (mode `640`, owned by the service
+   account — the root-owned `.env` is deliberately not writable by the kiosk) and
+   the dashboard needs it for admin functions. If the secret is already configured
+   (`.env` or `dashboard.secret`), the field carries that existing password and is
+   used only to authorize.
 4. Continue, then **tap the card** within 60 seconds. That card becomes the first
    admin; the next tap logs in.
 5. **Software Update** is on the same screen — a first-boot box can take a USB
-   `locker-updates/` stick before any admin exists.
+   `locker-updates/` stick before any admin exists (kiosk only; the LAN POST is
+   refused until the secret exists).
 
-The same flow exists on the dashboard: 5-tap the header clock on
-`http://<pi>:8000/dashboard`, enter name + password, then have someone tap the card
-on the locker reader (enrollment always needs the physical card — a LAN browser can
-start Setup but cannot finish it).
+On the dashboard, a 5-tap on the header clock while Setup is open shows the steps
+above and waits for the kiosk ceremony to finish — a LAN browser can never arm
+Setup (`POST /api/setup` is loopback-only), so the password and the card window
+stay under physical control. Once the admin exists the dashboard asks for the
+password that was chosen at the kiosk.
 
 Setup closes for good the moment one active admin exists (`GET /api/setup` reports
 `needed:false`; the POST then returns 404).
@@ -874,9 +878,11 @@ Pi on the LAN can use them — the lock is **physical access**, not a password.
    - **Software Update** — plug in the USB stick (`locker-updates/` from
      `python -m scripts.copy_update`), then apply. Full-screen overlay, then the kiosk
      reloads. Do not copy onto `/home/locker/smart_locker` in the file manager.
-   - **Stop system** — close Chromium, then `systemctl stop smart-locker`. The reply
-     goes out first; the service then stops and stays stopped (`Restart=always` does
-     not bring it back) until the next boot. The Pi stays powered on. Confirm first.
+   - **Stop system** — close Chromium, stop any in-flight `smart-locker-update`
+     unit (so its final `systemctl start` cannot resurrect the box), then
+     `systemctl stop smart-locker`. The reply goes out first; the service then
+     stops and stays stopped (`Restart=always` does not bring it back) until the
+     next boot. The Pi stays powered on. Confirm first.
      Needs the sudoers drop-in (see Section 9 if the button errors after a first update).
    - **Shut down** — `systemctl poweroff` the Pi. Confirm first. Needs the sudoers
      drop-in (see Section 9 if the button errors after a first update).
@@ -1101,13 +1107,22 @@ SSH command. If the app is not running, the button is unavailable — use SSH. T
 relies on the sudoers drop-in that `apply-sudoers.sh` writes to `/etc/sudoers.d/smart-locker`.
 
 **First apply of Stop system / Shut down:** the *old* `update.sh` on the Pi does not
-refresh sudoers. After this release is on disk, SSH once:
+refresh sudoers or the systemd unit. After this release is on disk, SSH once:
 
-`sudo bash /home/locker/smart_locker/deploy/install/apply-sudoers.sh`
+```
+sudo bash /home/locker/smart_locker/deploy/install/apply-sudoers.sh
+sudo install -m 644 /home/locker/smart_locker/deploy/systemd/smart-locker.service \
+    /etc/systemd/system/smart-locker.service
+sudo systemctl daemon-reload && sudo systemctl restart smart-locker
+```
 
-Without that, **Shut down** and **Stop system** return an error (sudoers still has
-only the update rule) — both run `systemctl` (`poweroff`, `stop smart-locker`) as root.
-Later `update.sh` applies refresh sudoers themselves.
+Both pieces are needed: sudoers alone is not enough because the old unit carried
+`NoNewPrivileges=true`, which makes every `sudo -n` call fail no matter what
+sudoers allows. The unit file above is already rendered for the default install
+(`locker` user, `/home/locker/smart_locker`) — a custom user/path re-runs the
+`sed` render from `install.sh` step 4. Without these, **Shut down**, **Stop
+system**, and the in-app **Software Update** return errors. Later `update.sh`
+applies refresh sudoers *and* re-render the unit themselves.
 
 The backend restarts for a few seconds. The kiosk stays on the updating overlay,
 then reloads. Progress is in `logs/update.log` and `logs/update-status.json`.
@@ -1118,6 +1133,7 @@ already up to date.
 **Leave these on the Pi forever (never copy them from a Windows tree)**
 
 - `.env`
+- `dashboard.secret` (the Setup-typed dashboard password; service-owned, mode `640`)
 - `smart_locker.db` (plus `-wal` / `-shm`)
 - `venv/`
 - `deploy/wheelhouse/` (copy extra wheels via `copy_update` only when it warns)

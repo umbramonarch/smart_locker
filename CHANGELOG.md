@@ -8,9 +8,20 @@ Work on `main` after the `v0.2.0` tag. Merging to `main` is not a release; the n
 
 ### Added
 
+- `POST /api/admin/exit-kiosk` is kept as an alias of Stop system so cached older kiosk pages still work after an update.
+
 ### Fixed
 
+- First-admin Setup on the installed Pi: the dashboard password no longer writes to root-owned `.env` (which failed every time under the hardened install). It now lands in the service-owned `dashboard.secret` file (mode `640`), survives updates, and is picked up on the next boot.
+- `POST /api/setup` is loopback-only: a LAN caller can no longer plant a dashboard password or occupy the physical card window the kiosk needs.
+- `POST /api/admin/update` no longer has an unauthenticated LAN first-boot path; only the kiosk itself can run it before an admin/secret exists.
+- **Stop system** now still stops the service if closing the kiosk browser fails, and first stops an in-flight `smart-locker-update` unit so it cannot restart the box.
+- The systemd unit no longer sets `NoNewPrivileges=true`, which had made every `sudo -n` call (update, stop, poweroff) fail on the appliance.
+- Setup refuses blank/whitespace admin names, a missing dashboard password while no secret exists, and arming while the NFC reader is down.
+
 ### Changed
+
+- First-boot Setup now **requires** a dashboard password (a blank one would have left every admin-gated dashboard route permanently 401 with no UI path to set it). The kiosk Setup screen starts its countdown only after the backend confirms the arm, and the dashboard shows guided kiosk-side steps instead of arming Setup remotely.
 
 - Dashboard share launcher now writes only `dashboard.url`; the generated `dashboard.html` redirect is removed because the Windows shortcut is enough to open the live page.
 - Pi **Software Update** is only `python -m scripts.copy_update` → gitignored `locker-updates/` on a USB stick (or already at `$APP_DIR/locker-updates`). `update.sh` copies USB `locker-updates` into `$APP_DIR/locker-updates`, then stop / backup / rsync-preserve / pip / migrate / health / rollback. Missing wheels are warned at copy time; pip failure on the Pi rolls back. The signed `pack_release` tarball + HMAC sidecar and CIFS `SMART_LOCKER_UPDATE_DIR` drop are removed.

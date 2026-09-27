@@ -92,6 +92,69 @@ def assign_pending_registration(ctx, pending: PendingRegistration | None) -> Non
         ctx.pending_registration = pending
 
 
+def drop_expired_pending(ctx) -> None:
+    """Clear expired registration/bind windows. Caller holds the lock.
+
+    Shared by the HTTP-side conflict checks and the NFC bridge so "expired"
+    means the same thing on both sides of ``pending_state_lock``.
+    """
+    reg = ctx.pending_registration
+    if reg is not None and reg.is_expired:
+        ctx.pending_registration = None
+    bind = ctx.pending_tag_bind
+    if bind is not None and bind.is_expired:
+        ctx.pending_tag_bind = None
+
+
+def arm_pending_registration(ctx, pending: PendingRegistration) -> str | None:
+    """Atomically take the reader for a registration, or report the conflict.
+
+    Expired windows are dropped, then any live registration or bind window
+    blocks the arm — all under one lock hold so two racing arms cannot both
+    succeed (the loser's window silently replacing the winner's).
+
+    Args:
+        ctx: Application context (or test double with the same attribute).
+        pending: The pending registration to arm.
+
+    Returns:
+        A conflict detail string when a non-expired window already owns the
+        reader, else None (armed).
+    """
+    with pending_state_lock:
+        drop_expired_pending(ctx)
+        if ctx.pending_registration is not None:
+            return "A registration is already waiting for a card tap."
+        if ctx.pending_tag_bind is not None:
+            return "A device-tag bind is already waiting for a sticker tap."
+        ctx.pending_registration = pending
+        return None
+
+
+def arm_pending_tag_bind(ctx, bind: PendingTagBind) -> str | None:
+    """Atomically take the reader for a tag bind, or report the conflict.
+
+    Same contract as :func:`arm_pending_registration` for ``PendingTagBind``.
+    A pending registration is NOT cleared — it wins the conflict instead.
+
+    Args:
+        ctx: Application context (or test double with the same attribute).
+        bind: The pending bind to arm.
+
+    Returns:
+        A conflict detail string when a non-expired window already owns the
+        reader, else None (armed).
+    """
+    with pending_state_lock:
+        drop_expired_pending(ctx)
+        if ctx.pending_registration is not None:
+            return "A registration is already waiting for a card tap."
+        if ctx.pending_tag_bind is not None:
+            return "A device-tag bind is already waiting for a sticker tap."
+        ctx.pending_tag_bind = bind
+        return None
+
+
 class AppContext:
     """Shared application state bridging NFC hardware with the async API layer.
 

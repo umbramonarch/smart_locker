@@ -176,18 +176,42 @@ HMAC_KEY_ENV_VAR = "SMART_LOCKER_HMAC_KEY"
 # Header LAN browsers send for dashboard mutations (bind/unbind, later owner).
 DASHBOARD_ADMIN_HEADER = "X-Smart-Locker-Admin"
 
-# Environment variable that stores the dashboard admin password. Setup writes
-# it to .env on first boot when the operator types a password.
+# Environment variable that stores the dashboard admin password.
 DASHBOARD_ADMIN_SECRET_ENV_VAR = "SMART_LOCKER_DASHBOARD_ADMIN_SECRET"
+
+# Env override for the Setup-written secret file location (tests point it at a
+# temp path). Default: ``dashboard.secret`` next to .env at the app root.
+DASHBOARD_SECRET_PATH_ENV_VAR = "SMART_LOCKER_DASHBOARD_SECRET_PATH"
+
+
+def dashboard_secret_path() -> Path:
+    """File that holds the Setup-typed dashboard admin password.
+
+    The password CANNOT go in .env: on the installed appliance ``.env`` is
+    root-owned and the app directory is sticky — the service must not be able
+    to rewrite the file that update.sh parses as root. A dedicated
+    service-owned file is the only durable write the kiosk needs.
+    """
+    override = (os.getenv(DASHBOARD_SECRET_PATH_ENV_VAR) or "").strip()
+    return Path(override) if override else BASE_DIR / "dashboard.secret"
 
 
 def dashboard_admin_secret() -> str:
     """Shared secret for dashboard admin mutations.
 
-    Read on each call so tests can setenv. Empty means fail closed: mutating
-    dashboard routes must 401 rather than treating an admin SQLite row as auth.
+    ``SMART_LOCKER_DASHBOARD_ADMIN_SECRET`` (env/.env) wins when set — that is
+    the operator-configured path. Otherwise the first-boot Setup file written
+    by ``setup_service.write_dashboard_secret`` supplies it. Read on each call
+    so tests can setenv. Empty means fail closed: mutating dashboard routes
+    must 401 rather than treating an admin SQLite row as auth.
 
     Returns:
-        Stripped ``SMART_LOCKER_DASHBOARD_ADMIN_SECRET``, or ``""``.
+        Stripped dashboard admin secret, or ``""``.
     """
-    return (os.getenv(DASHBOARD_ADMIN_SECRET_ENV_VAR) or "").strip()
+    env = (os.getenv(DASHBOARD_ADMIN_SECRET_ENV_VAR) or "").strip()
+    if env:
+        return env
+    try:
+        return dashboard_secret_path().read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""

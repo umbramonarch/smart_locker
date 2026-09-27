@@ -112,6 +112,13 @@ def handle_registration_tap(
     session-clearing policy; this function owns the database tap policy.
     ``role`` is "admin" only when a first-boot Setup window armed the tap.
     """
+    if not display_name.strip():
+        logger.warning("Registration refused: blank display name.")
+        return TapResult(
+            event="registration_failed",
+            payload={"reason": "A name is required. Start registration again."},
+        )
+
     kind, user, _ = classify_uid(db_session, card_uid_hex, hmac_key)
     if kind == TapKind.DEVICE_TAG:
         logger.warning("Registration failed: UID is already a device tag.")
@@ -138,7 +145,12 @@ def handle_registration_tap(
         card_uid_hex=card_uid_hex,
         role=role,
     )
-    logger.info("Self-registered user: %s (id=%d)", user.display_name, user.id)
+    logger.info(
+        "Enrolled %s via card tap: %s (id=%d)",
+        user.role.value,
+        user.display_name,
+        user.id,
+    )
     return TapResult(
         event="registration_success",
         payload={

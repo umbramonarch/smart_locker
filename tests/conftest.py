@@ -48,6 +48,19 @@ def _default_site_overlay(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_dashboard_secret_path(tmp_path, monkeypatch):
+    """Point the Setup-written dashboard.secret file at a per-test temp path.
+
+    Without this, a test that arms Setup would write the admin password into
+    the repository root — and a stale file would leak a configured secret
+    into every later test.
+    """
+    monkeypatch.setenv(
+        "SMART_LOCKER_DASHBOARD_SECRET_PATH", str(tmp_path / "dashboard.secret")
+    )
+
+
+@pytest.fixture(autouse=True)
 def _isolate_last_sync(tmp_path, monkeypatch):
     """Keep last-sync JSON off the repo disk and reset in-memory state per test."""
     monkeypatch.setenv("SMART_LOCKER_LAST_SYNC_PATH", str(tmp_path / "last_sync.json"))

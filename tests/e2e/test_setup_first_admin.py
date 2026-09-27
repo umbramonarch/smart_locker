@@ -28,7 +28,9 @@ def test_setup_tap_enrolls_first_admin(e2e):
         "secret_set": False,
     }
 
-    r = h.client.post("/api/setup", json={"name": "First Admin"})
+    r = h.client.post(
+        "/api/setup", json={"name": "First Admin", "password": "pw"}
+    )
     assert r.status_code == 200
     assert r.json()["success"] is True
     assert h.ctx.pending_registration is not None
@@ -50,7 +52,7 @@ def test_setup_tap_enrolls_first_admin(e2e):
 
     # One active admin exists: Setup is closed for good.
     assert h.client.get("/api/setup").json()["needed"] is False
-    r = h.client.post("/api/setup", json={"name": "Late Admin"})
+    r = h.client.post("/api/setup", json={"name": "Late Admin", "password": "pw"})
     assert r.status_code == 404
 
     # No leftover session/overlay: the fresh admin card logs in normally.
@@ -66,7 +68,9 @@ def test_setup_window_expires_and_tap_is_normal(e2e, monkeypatch):
     import smart_locker.api.app_context as app_context
 
     h = e2e()
-    r = h.client.post("/api/setup", json={"name": "First Admin"})
+    r = h.client.post(
+        "/api/setup", json={"name": "First Admin", "password": "pw"}
+    )
     assert r.status_code == 200
 
     # Age the armed window past REGISTRATION_TIMEOUT_SECONDS.
@@ -83,3 +87,15 @@ def test_setup_window_expires_and_tap_is_normal(e2e, monkeypatch):
         assert UserRepository.find_by_uid_hmac(db, uid_hmac_for(SETUP_CARD_UID)) is None
         assert UserRepository.first_active_admin(db) is None
     assert h.client.get("/api/setup").json()["needed"] is True
+
+
+def test_setup_arm_refuses_lan(lan):
+    """A LAN caller cannot arm the physical Setup window — the public GET
+    stays a status probe, but the POST is loopback-only."""
+    h = lan
+    assert h.lan_client.get("/api/setup").json()["needed"] is True
+    r = h.lan_client.post(
+        "/api/setup", json={"name": "Remote Arm", "password": "planted"}
+    )
+    assert r.status_code == 403
+    assert h.ctx.pending_registration is None

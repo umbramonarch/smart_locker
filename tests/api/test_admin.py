@@ -361,16 +361,31 @@ class TestAdminSyncAndUpdateEndpoints:
         resp = client.post("/api/admin/update")
         assert resp.status_code == 200
 
-    def test_trigger_update_first_boot_lan(
+    def test_trigger_update_first_boot_refuses_lan(
         self, lan_client, mock_context, monkeypatch
     ):
-        """A LAN browser may also launch the update while Setup is open."""
+        """First-boot update openness is kiosk-local — a LAN caller must not
+        launch the root updater unit before any admin or secret exists."""
         import smart_locker.api.routes as routes_module
 
         monkeypatch.setattr(routes_module, "_SYSTEMD_RUN", "/usr/bin/systemd-run")
         monkeypatch.setattr(routes_module, "launch_update", lambda *a: None)
         resp = lan_client.post("/api/admin/update")
-        assert resp.status_code == 200
+        assert resp.status_code == 401
+
+    def test_trigger_update_non_ascii_header_is_401_not_500(
+        self, lan_client, mock_context, admin_user, dashboard_secret, monkeypatch
+    ):
+        """A latin-1 admin header must not crash secrets.compare_digest."""
+        import smart_locker.api.routes as routes_module
+
+        monkeypatch.setattr(routes_module, "_SYSTEMD_RUN", "/usr/bin/systemd-run")
+        monkeypatch.setattr(routes_module, "launch_update", lambda *a: None)
+        resp = lan_client.post(
+            "/api/admin/update",
+            headers={"X-Smart-Locker-Admin": "päss".encode("latin-1")},
+        )
+        assert resp.status_code == 401
 
     def test_trigger_update_accepts_dashboard_secret(
         self, client, lan_client, mock_context, admin_user,
@@ -457,19 +472,63 @@ class TestAdminSyncAndUpdateEndpoints:
     def test_stop_system_stops_browser_then_service(
         self, client, mock_context, admin_user, monkeypatch
     ):
-        """The post-response task closes Chromium before systemctl stop."""
+        """The post-response task closes Chromium, then kills any in-flight
+        update unit (so its final `systemctl start` can't resurrect the box),
+        then stops the service."""
         import smart_locker.api.routes as routes_module
         import smart_locker.services.appliance as appliance
 
         calls = []
         monkeypatch.setattr(routes_module, "_SYSTEMCTL", "/usr/bin/systemctl")
         monkeypatch.setattr(appliance, "exit_kiosk", lambda: calls.append("browser"))
+        monkeypatch.setattr(appliance, "_stop_update_unit", lambda: calls.append("update"))
         monkeypatch.setattr(appliance, "stop_service", lambda: calls.append("service"))
         monkeypatch.setattr(appliance, "_STOP_RESPONSE_DELAY_SECONDS", 0)
         mock_context.session_mgr.start_session(admin_user)
         resp = client.post("/api/admin/stop-system")
         assert resp.status_code == 200
-        assert calls == ["browser", "service"]
+        assert calls == ["browser", "update", "service"]
+
+    def test_stop_system_still_stops_service_when_kiosk_close_raises(
+        self, client, mock_context, admin_user, monkeypatch
+    ):
+        """An unexpected exit_kiosk failure (OSError, not just the declared
+        appliance errors) must not keep the service running."""
+        import smart_locker.api.routes as routes_module
+        import smart_locker.services.appliance as appliance
+
+        calls = []
+
+        def _boom():
+            raise OSError("pgrep vanished mid-stop")
+
+        monkeypatch.setattr(routes_module, "_SYSTEMCTL", "/usr/bin/systemctl")
+        monkeypatch.setattr(appliance, "exit_kiosk", _boom)
+        monkeypatch.setattr(appliance, "_stop_update_unit", lambda: calls.append("update"))
+        monkeypatch.setattr(appliance, "stop_service", lambda: calls.append("service"))
+        monkeypatch.setattr(appliance, "_STOP_RESPONSE_DELAY_SECONDS", 0)
+        mock_context.session_mgr.start_session(admin_user)
+        resp = client.post("/api/admin/stop-system")
+        assert resp.status_code == 200
+        assert calls == ["update", "service"]
+
+    def test_exit_kiosk_alias_behaves_like_stop_system(
+        self, client, mock_context, admin_user, monkeypatch
+    ):
+        """Cached pre-rename kiosk builds still POST /api/admin/exit-kiosk —
+        the alias must hit the same handler instead of 404ing."""
+        import smart_locker.api.routes as routes_module
+
+        monkeypatch.setattr(routes_module, "_SYSTEMCTL", "/usr/bin/systemctl")
+        monkeypatch.setattr(routes_module, "stop_system", lambda: None)
+        mock_context.session_mgr.start_session(admin_user)
+        resp = client.post("/api/admin/exit-kiosk")
+        assert resp.status_code == 200
+        assert resp.json().get("ok") is True
+
+    def test_exit_kiosk_alias_requires_session(self, client, mock_context):
+        resp = client.post("/api/admin/exit-kiosk")
+        assert resp.status_code == 401
 
     def test_stop_system_refuses_lan(
         self, lan_client, mock_context, admin_user, monkeypatch

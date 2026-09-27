@@ -28,6 +28,7 @@ KIOSK_PROFILE_MARKER = "smart-locker-kiosk"
 # Exact argv the sudoers drop-in allows — no wildcard, no ``systemctl`` from PATH.
 _POWEROFF_CMD = ["sudo", "-n", "/usr/bin/systemctl", "poweroff"]
 _STOP_SERVICE_CMD = ["sudo", "-n", "/usr/bin/systemctl", "stop", "smart-locker"]
+_STOP_UPDATE_CMD = ["sudo", "-n", "/usr/bin/systemctl", "stop", "smart-locker-update"]
 SYSTEMD_RUN = shutil.which("systemd-run")
 SYSTEMCTL = shutil.which("systemctl")
 
@@ -114,15 +115,20 @@ def exit_kiosk() -> None:
             raise ApplianceError(f"Could not stop kiosk process {pid}: {e}") from e
 
     # Hide-cursor helper from start-kiosk.sh; ignore if it was never started.
+    # A failing pkill (binary vanished, timeout) must not escape — callers
+    # treat exit_kiosk failures as best-effort and still stop the service.
     pkill = shutil.which("pkill")
     if pkill is not None:
-        subprocess.run(
-            [pkill, "-x", "unclutter"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
+        try:
+            subprocess.run(
+                [pkill, "-x", "unclutter"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as e:
+            logger.warning("Could not stop the unclutter helper: %s", e)
 
     logger.info("Kiosk Chromium stopped (%s pid(s)).", len(pids))
 
@@ -158,6 +164,29 @@ def stop_service() -> None:
     logger.info("smart-locker service stop requested.")
 
 
+def _stop_update_unit() -> None:
+    """Best-effort stop of an in-flight update so it cannot restart the service.
+
+    ``update.sh`` runs in its own ``smart-locker-update`` systemd unit and ends
+    with ``systemctl start smart-locker`` — left running, it resurrects a box
+    the admin just stopped. Stopping the unit first aborts the script before
+    it reaches that restart. Every failure (no such unit, sudo refused,
+    timeout) is logged and ignored: the service stop below must still run.
+    """
+    if SYSTEMCTL is None:
+        return
+    try:
+        subprocess.run(
+            _STOP_UPDATE_CMD,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        logger.warning("Could not stop a running update unit: %s", e)
+
+
 def stop_system() -> None:
     """Close the kiosk browser, then stop the ``smart-locker`` service.
 
@@ -165,13 +194,18 @@ def stop_system() -> None:
     wire. The short delay lets the reply flush before the listener drops. A
     browser that is already gone (or cannot be signalled) does not keep the
     service running: the explicit ``systemctl stop`` is the point of the
-    button, and ``Restart=always`` must not resurrect the process.
+    button, and ``Restart=always`` must not resurrect the process. An in-flight
+    update unit is stopped first so its final ``systemctl start`` cannot undo
+    the shutdown.
     """
     time.sleep(_STOP_RESPONSE_DELAY_SECONDS)
     try:
         exit_kiosk()
-    except (ApplianceUnavailable, ApplianceError) as e:
-        logger.warning("Kiosk browser close failed (%s) — stopping the service anyway.", e)
+    except Exception as e:
+        logger.warning(
+            "Kiosk browser close failed (%s) — stopping the service anyway.", e
+        )
+    _stop_update_unit()
     stop_service()
 
 

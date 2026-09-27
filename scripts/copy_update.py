@@ -49,7 +49,7 @@ SKIP_DIR_NAMES = {
     ".mypy_cache",
     "node_modules",
 }
-SKIP_FILE_NAMES = {".env"}
+SKIP_FILE_NAMES = {".env", "dashboard.secret"}
 
 
 def missing_wheel_names(

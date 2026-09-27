@@ -51,8 +51,13 @@ class UserService:
             Created User object.
 
         Raises:
-            ValueError: If the UID HMAC is already bound to a device sticker.
+            ValueError: If the display name is blank or the UID HMAC is
+                        already bound to a device sticker.
         """
+        display_name = display_name.strip()
+        if not display_name:
+            raise ValueError("Display name is required.")
+
         card_uid_hex = card_uid_hex.upper().strip()
         uid_hmac = compute_uid_hmac(card_uid_hex, self._hmac_key)
         if DeviceRepository.find_by_tag_hmac(db_session, uid_hmac) is not None:

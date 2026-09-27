@@ -1705,6 +1705,7 @@ function handleRegistrationFailed(data) {
    FIRST-BOOT SETUP — enroll the first admin (empty database)
 ============================================================ */
 let setupSecretSet = false;   // a dashboard password is already configured
+let setupArmed = false;       // backend confirmed the card window is armed
 let setupCountdownTimer = null;
 let setupAfterTimer = null;
 
@@ -1749,6 +1750,7 @@ function showSetupStep(stepId) {
 async function openSetup() {
   clearInterval(setupCountdownTimer);
   clearTimeout(setupAfterTimer);
+  setupArmed = false;
   document.getElementById('setup-name').value = '';
   document.getElementById('setup-password').value = '';
   document.getElementById('setup-next-btn').disabled = true;
@@ -1758,8 +1760,8 @@ async function openSetup() {
     pwInput.placeholder = 'Dashboard password (required)';
     pwHint.textContent = 'Enter the configured dashboard password to authorize.';
   } else {
-    pwInput.placeholder = 'Dashboard password (optional)';
-    pwHint.textContent = 'Sets the dashboard admin password on this locker.';
+    pwInput.placeholder = 'Dashboard password (required)';
+    pwHint.textContent = 'Choose the dashboard admin password — it unlocks the dashboard on the network.';
   }
   showSetupStep('setup-step-name');
   navigate('setup');
@@ -1767,22 +1769,25 @@ async function openSetup() {
 }
 
 /**
- * Submit the Setup form and advance to the "tap the admin card" step. The
- * backend arms a 60-second window; the next card tap on the cabinet reader
- * enrolls it as the first admin.
+ * Submit the Setup form. Only after the backend confirms the arm do we show
+ * the "tap the admin card" step and start the countdown — otherwise the
+ * client's 60s would run ahead of the server's window by the request latency,
+ * and a rejected arm would still flash the tap prompt.
  * @returns {Promise<void>}
  */
 async function submitSetup() {
   const name = document.getElementById('setup-name').value.trim();
-  const password = document.getElementById('setup-password').value;
-  if (!name || (setupSecretSet && !password)) return;
+  const password = document.getElementById('setup-password').value.trim();
+  if (!name || !password) return;
 
   document.getElementById('setup-next-btn').disabled = true;
   document.getElementById('setup-confirm-name').textContent = name;
-  showSetupStep('setup-step-tap');
-  startSetupCountdown();
 
-  if (USE_DEMO) return;  // demo shows the tap step; no real enrollment
+  if (USE_DEMO) {  // demo shows the tap step; no real enrollment
+    showSetupStep('setup-step-tap');
+    startSetupCountdown();
+    return;
+  }
 
   try {
     const headers = { 'Content-Type': 'application/json' };
@@ -1794,14 +1799,16 @@ async function submitSetup() {
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      clearInterval(setupCountdownTimer);
       showSetupStep('setup-step-error');
       document.getElementById('setup-error-msg').textContent =
         data.detail || 'Could not start setup.';
       scheduleAfterSetup(3500);
+      return;
     }
+    setupArmed = true;
+    showSetupStep('setup-step-tap');
+    startSetupCountdown();
   } catch (_) {
-    clearInterval(setupCountdownTimer);
     showSetupStep('setup-step-error');
     document.getElementById('setup-error-msg').textContent =
       'Could not start setup.';
@@ -1822,6 +1829,7 @@ function startSetupCountdown() {
     cdEl.textContent = secs + 's';
     if (secs <= 0) {
       clearInterval(setupCountdownTimer);
+      setupArmed = false;
       showSetupStep('setup-step-error');
       document.getElementById('setup-error-msg').textContent =
         'Setup timed out. Please try again.';
@@ -1849,18 +1857,23 @@ function scheduleAfterSetup(ms) {
 function cancelSetup() {
   clearInterval(setupCountdownTimer);
   clearTimeout(setupAfterTimer);
+  setupArmed = false;
   apiCancelRegistration();
   navigate('idle');
 }
 
 /**
- * Handle registration_success SSE while the Setup screen is up: the tapped
- * card is now the first admin.
+ * Handle registration_success SSE while a Setup arm is live: the tapped
+ * card is now the first admin. The ``setupArmed`` flag — not just the
+ * screen — must be set, or a stale registration event arriving while the
+ * name form is open would be misread as the admin enrollment.
  * @param {Object} data - SSE payload with the enrolled user.
  */
 function handleSetupSuccess(data) {
-  if (S.screen !== 'setup') return;
+  if (S.screen !== 'setup' || !setupArmed) return;
+  setupArmed = false;
   clearInterval(setupCountdownTimer);
+  document.getElementById('setup-password').value = '';
   showSetupStep('setup-step-success');
   document.getElementById('setup-success-msg').textContent =
     `${data.user.name} is now an administrator — tap the card to log in.`;
@@ -1868,11 +1881,12 @@ function handleSetupSuccess(data) {
 }
 
 /**
- * Handle registration_failed SSE while the Setup screen is up.
+ * Handle registration_failed SSE while a Setup arm is live.
  * @param {Object} data - SSE payload with a human-readable reason.
  */
 function handleSetupFailed(data) {
-  if (S.screen !== 'setup') return;
+  if (S.screen !== 'setup' || !setupArmed) return;
+  setupArmed = false;
   clearInterval(setupCountdownTimer);
   showSetupStep('setup-step-error');
   document.getElementById('setup-error-msg').textContent =
@@ -2325,7 +2339,16 @@ async function adminUpdate() {
   const launchedAt = Date.now();
   const gen = updatePollGen;
   try {
-    const res = await fetch('/api/admin/update', { method: 'POST' });
+    // Once a dashboard secret exists the update gate needs it in the header —
+    // a first-boot Setup screen has no session to authorize with. The Setup
+    // password field still holds the value the operator typed (or the
+    // configured secret); send it when present. An empty/wrong header simply
+    // falls through to the session/first-boot checks on the server.
+    const headers = {};
+    const pwEl = document.getElementById('setup-password');
+    const setupPw = pwEl ? pwEl.value.trim() : '';
+    if (setupPw) headers['X-Smart-Locker-Admin'] = setupPw;
+    const res = await fetch('/api/admin/update', { method: 'POST', headers });
     const data = await res.json().catch(() => ({}));
     if (gen !== updatePollGen) return;
     if (!res.ok) {
@@ -3090,7 +3113,7 @@ const setupNameInput = document.getElementById('setup-name');
 const setupPasswordInput = document.getElementById('setup-password');
 function refreshSetupNext() {
   document.getElementById('setup-next-btn').disabled =
-    !setupNameInput.value.trim() || (setupSecretSet && !setupPasswordInput.value);
+    !setupNameInput.value.trim() || !setupPasswordInput.value.trim();
 }
 setupNameInput.addEventListener('input', refreshSetupNext);
 setupPasswordInput.addEventListener('input', refreshSetupNext);

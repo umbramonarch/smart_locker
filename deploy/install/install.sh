@@ -359,6 +359,12 @@ if [ -f "$APP_DIR/.env" ]; then
   chown root:"$APP_GROUP" "$APP_DIR/.env"
   chmod 640 "$APP_DIR/.env"
 fi
+# The Setup-typed dashboard password lives in a service-owned file: .env stays
+# root-owned (update.sh parses it as root) so the kiosk cannot write it there.
+if [ -f "$APP_DIR/dashboard.secret" ]; then
+  chown "$APP_USER:$APP_GROUP" "$APP_DIR/dashboard.secret"
+  chmod 640 "$APP_DIR/dashboard.secret"
+fi
 for f in "$APP_DIR/smart_locker.db" "$APP_DIR/smart_locker.db-wal" "$APP_DIR/smart_locker.db-shm" "$APP_DIR/last_sync.json"; do
   if [ -e "$f" ]; then
     chown "$APP_USER:$APP_GROUP" "$f"
