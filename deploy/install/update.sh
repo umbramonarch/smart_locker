@@ -19,8 +19,10 @@
 #        trades a brief restart (seconds, invisible between card taps) for a SAFE,
 #        self-reverting update on a box no one is standing next to.
 #        Must stay LF (enforced by .gitattributes); CRLF breaks it on the Pi.
-#        PRESERVE keeps runtime files (.env, DB, last_sync.json, venv, logs, backups,
-#        wheelhouse, deploy/system-packages, device photos) across rsync --delete;
+#        PRESERVE keeps runtime files (.env, DB, last_sync.json, mirror_state.json
+#        and the default-path smart_locker_catalog.xlsx mirror, venv, logs,
+#        backups, wheelhouse, deploy/system-packages, device photos) across
+#        rsync --delete;
 #        committed UI images from the incoming tree are overlaid afterwards without
 #        --delete. The rollback snapshot additionally carries the venv and the
 #        images dir so a revert restores the exact dependency set and the
@@ -110,7 +112,8 @@ KEEP_BACKUPS="${SMART_LOCKER_KEEP_BACKUPS:-5}"
 # root-owned app dir, and must not: this script parses .env as root).
 PRESERVE=(".env" "dashboard.secret" "smart_locker.db" "smart_locker.db-wal"
           "smart_locker.db-shm"
-          "last_sync.json" "logs" "venv" "deploy/wheelhouse" "deploy/system-packages"
+          "last_sync.json" "mirror_state.json" "smart_locker_catalog.xlsx"
+          "logs" "venv" "deploy/wheelhouse" "deploy/system-packages"
           "backups" ".update-staging" ".git" "smart_locker/frontend/images" "VERSION"
           "locker-updates")
 
@@ -118,11 +121,13 @@ PRESERVE=(".env" "dashboard.secret" "smart_locker.db" "smart_locker.db-wal"
 INCOMING_SKIP=(".env" "dashboard.secret" "venv" "logs" "backups" "smart_locker.db"
                "smart_locker.db-wal"
                "smart_locker.db-shm" "deploy/wheelhouse" "deploy/system-packages"
-               ".update-staging" ".git")
+               ".update-staging" ".git"
+               "mirror_state.json" "smart_locker_catalog.xlsx")
 # USB → $APP_DIR/locker-updates may include extra wheels the Pi does not have.
 PAYLOAD_SKIP=(".env" "dashboard.secret" "venv" "logs" "backups" "smart_locker.db"
               "smart_locker.db-wal"
-              "smart_locker.db-shm" ".update-staging" ".git" "locker-updates")
+              "smart_locker.db-shm" ".update-staging" ".git" "locker-updates"
+              "mirror_state.json" "smart_locker_catalog.xlsx")
 
 # The rollback snapshot keeps the same runtime files out of the tar EXCEPT the
 # venv and the images dir: pip runs before the health gate, so a rollback must
@@ -233,7 +238,11 @@ apply_runtime_permissions() {
     chmod 640 "$APP_DIR/dashboard.secret" 2>/dev/null || true
   fi
   local f
-  for f in "$DB_PATH" "$DB_PATH-wal" "$DB_PATH-shm" "$APP_DIR/last_sync.json"; do
+  # The env-overridden mirror paths expand to "" when unset — the -e guard
+  # skips those and any file that does not exist yet.
+  for f in "$DB_PATH" "$DB_PATH-wal" "$DB_PATH-shm" "$APP_DIR/last_sync.json" \
+           "$APP_DIR/mirror_state.json" "$APP_DIR/smart_locker_catalog.xlsx" \
+           "${SMART_LOCKER_MIRROR_STATE_PATH:-}" "${SMART_LOCKER_MIRROR_PATH:-}"; do
     if [ -e "$f" ]; then
       chown "$APP_USER":"$APP_USER" "$f" 2>/dev/null || true
     fi

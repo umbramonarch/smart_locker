@@ -28,6 +28,26 @@ class WorkbookStaleError(Exception):
     """The source workbook changed after its edit copy was made."""
 
 
+def _catalog_worksheet(wb):
+    """Pick the sheet whose header row carries a PM column, else the active one.
+
+    The mirror rewrites the catalog sheet; a workbook left open on a scratch
+    sheet (Notes, a pivot, …) must not have that sheet wiped instead.
+    """
+    from smart_locker.sync.catalog_sheet import find_column, pm_candidates
+
+    for ws in wb.worksheets:
+        first_row = next(
+            ws.iter_rows(min_row=1, max_row=1, values_only=True), None
+        )
+        if not first_row:
+            continue
+        headers = [str(c).strip() if c is not None else "" for c in first_row]
+        if find_column(headers, pm_candidates()) is not None:
+            return ws
+    return wb.active
+
+
 @dataclass(frozen=True)
 class WorkbookRows:
     """Rows read from one workbook sheet, or the reason they were unavailable."""
@@ -87,13 +107,16 @@ class WorkbookAdapter:
         self,
         edit: Callable[[object], bool],
         expected_mtime: float | None = None,
+        pick_sheet: Callable[[object], object] | None = None,
     ) -> bool:
         """Copy, edit, and atomically replace the workbook when ``edit`` changes it.
 
         Args:
-            edit: Receives the active worksheet and returns True when it changed.
+            edit: Receives the chosen worksheet and returns True when it changed.
             expected_mtime: When given, the current mtime must match — binds
                 the copy to an earlier detection stat.
+            pick_sheet: Optional chooser ``wb -> worksheet``; default is the
+                active sheet.
 
         Returns:
             True when a changed workbook was saved and replaced; False when
@@ -112,7 +135,8 @@ class WorkbookAdapter:
         try:
             with self._copied_workbook() as work_path:
                 wb = load_workbook(work_path)
-                if not edit(wb.active):
+                ws = pick_sheet(wb) if pick_sheet is not None else wb.active
+                if not edit(ws):
                     return False
 
                 dest_fd, dest_str = tempfile.mkstemp(
@@ -146,10 +170,13 @@ class WorkbookAdapter:
         rows: list[list],
         expected_mtime: float | None = None,
     ) -> bool:
-        """Rewrite the active sheet to exactly ``headers`` + ``rows``.
+        """Rewrite the catalog sheet to exactly ``headers`` + ``rows``.
 
-        The mirror owns this file: the active sheet is cleared and rewritten;
-        other sheets are preserved. A missing file is created.
+        The mirror owns this file: the sheet carrying the PM column is
+        cleared and rewritten (the active sheet is only the fallback);
+        other sheets are preserved. A missing file is created — but a
+        missing parent directory raises instead of being created, so a
+        write can never plant a shadow file under an unmounted share.
 
         Args:
             headers: Header row cell values.
@@ -181,7 +208,8 @@ class WorkbookAdapter:
                 ws.append([safe_cell_value(v) for v in row])
 
         if not self.path.exists():
-            self.path.parent.mkdir(parents=True, exist_ok=True)
+            # No mkdir: a missing parent means the share is not mounted —
+            # creating it would plant a shadow file the mount then hides.
             from openpyxl import Workbook
 
             wb = Workbook()
@@ -207,7 +235,11 @@ class WorkbookAdapter:
             _fill(ws)
             return True
 
-        return self.edit_active_sheet(edit, expected_mtime=expected_mtime)
+        return self.edit_active_sheet(
+            edit,
+            expected_mtime=expected_mtime,
+            pick_sheet=_catalog_worksheet,
+        )
 
     def _replace_into(self, staged_path: Path) -> None:
         """Replace the source workbook with a staged file, retrying a file lock."""

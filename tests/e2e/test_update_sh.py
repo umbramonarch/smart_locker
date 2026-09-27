@@ -33,6 +33,30 @@ pytestmark = pytest.mark.skipif(
 
 OLD_ROW = ("PM-1", "Scope", 3, "available")
 
+MIRROR_STATE = '{"seeded": true, "pending_writes": true}\n'
+CATALOG_XLSX = "mirror-workbook-bytes\n"
+
+
+def _write_mirror_runtime_files(sb: UpdateSandbox) -> None:
+    """The mirror runtime files that live next to the DB on a real appliance:
+    ``mirror_state.json`` (seeded flag, pending writes, the hand-edit gate,
+    write baseline) and the default-path ``smart_locker_catalog.xlsx``.
+    ``rsync --delete`` must keep both — losing them silently re-adopts the
+    sheet (wiping the registrant list and applying pending edits unreviewed).
+    """
+    sb.path("mirror_state.json").write_text(MIRROR_STATE, encoding="utf-8")
+    sb.path("smart_locker_catalog.xlsx").write_text(CATALOG_XLSX, encoding="utf-8")
+
+
+def _assert_mirror_files_intact(sb: UpdateSandbox) -> None:
+    assert (
+        sb.path("mirror_state.json").read_text(encoding="utf-8") == MIRROR_STATE
+    )
+    assert (
+        sb.path("smart_locker_catalog.xlsx").read_text(encoding="utf-8")
+        == CATALOG_XLSX
+    )
+
 
 @pytest.fixture()
 def sandbox(tmp_path):
@@ -104,7 +128,16 @@ def _assert_rolled_back(sb: UpdateSandbox, env_before: bytes) -> None:
 
 def test_good_payload_is_healthy_and_preserves_runtime_files(sandbox):
     env_before = sandbox.env_file.read_bytes()
+    _write_mirror_runtime_files(sandbox)
     sandbox.write_payload("1.1.0")
+    # A stale mirror state/workbook riding inside the payload must not be
+    # adopted either — INCOMING_SKIP keeps them out of the staged tree.
+    (sandbox.updates_dir / "mirror_state.json").write_text(
+        '{"poison": true}\n', encoding="utf-8"
+    )
+    (sandbox.updates_dir / "smart_locker_catalog.xlsx").write_text(
+        "stale\n", encoding="utf-8"
+    )
 
     r = sandbox.run_update()
 
@@ -124,9 +157,11 @@ def test_good_payload_is_healthy_and_preserves_runtime_files(sandbox):
     assert sandbox.path("smart_locker/frontend/images/new_ui.png").exists()
     assert sandbox.path("smart_locker/frontend/images/device_photo.jpg").exists()
 
-    # Runtime files survived the code swap untouched.
+    # Runtime files survived the code swap untouched — including the mirror
+    # state and the default-path mirror workbook (PRESERVE + INCOMING_SKIP).
     assert sandbox.env_file.read_bytes() == env_before
     assert sandbox.device_rows() == [OLD_ROW]
+    _assert_mirror_files_intact(sandbox)
     # The health gate saw the NEW version answering.
     assert '"version":"1.1.0"' in sandbox.curl_answers()[-1]
 
@@ -155,12 +190,15 @@ def test_good_payload_is_healthy_and_preserves_runtime_files(sandbox):
 
 def test_health_failure_rolls_back_code_and_db(sandbox):
     env_before = sandbox.env_file.read_bytes()
+    _write_mirror_runtime_files(sandbox)
     sandbox.write_payload("1.1.0", boot_fail=True)
 
     r = sandbox.run_update()
 
     assert r.returncode == 1
     _assert_rolled_back(sandbox, env_before)
+    # The restore rsync --delete (BACKUP_SKIP) keeps the mirror files too.
+    _assert_mirror_files_intact(sandbox)
     # stop -> swap -> start new (never healthy) -> rollback stop -> start old
     assert sandbox.systemctl_calls() == [
         "systemctl stop e2e-locker",
@@ -255,7 +293,11 @@ def test_rollback_unhealthy_when_service_never_recovers(sandbox):
 
 
 def test_usb_payload_is_staged_to_local_disk_and_applied(sandbox):
-    sandbox.write_usb_payload("1.1.0")
+    dest = sandbox.write_usb_payload("1.1.0")
+    # Mirror runtime files on the stick are not payload — PAYLOAD_SKIP drops
+    # them from the USB → locker-updates copy.
+    (dest / "mirror_state.json").write_text('{"poison": true}\n', encoding="utf-8")
+    (dest / "smart_locker_catalog.xlsx").write_text("stale\n", encoding="utf-8")
 
     r = sandbox.run_update()
 
@@ -270,6 +312,8 @@ def test_usb_payload_is_staged_to_local_disk_and_applied(sandbox):
     assert (
         sandbox.updates_dir / "VERSION"
     ).read_text(encoding="utf-8").strip() == "1.1.0"
+    assert not (sandbox.updates_dir / "mirror_state.json").exists()
+    assert not (sandbox.updates_dir / "smart_locker_catalog.xlsx").exists()
 
 
 def test_nested_payload_is_not_deleted_by_its_own_staging_copy(sandbox):

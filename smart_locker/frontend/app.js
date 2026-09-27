@@ -468,12 +468,14 @@ function splitMenuText() {
  * @param {number} newValue - The new numeric value to display.
  */
 function updateSlotNumber(el, newValue) {
-  const newStr = String(newValue);
+  const newStr = String(newValue).padStart(2, '0');
   const oldStr = el.dataset.slotValue || '';
   el.dataset.slotValue = newStr;
 
-  // Initialize if empty
-  if (!el.querySelector('.slot-digit')) {
+  // (Re)build the digit DOM on first render or when the digit count changes —
+  // without the length check a drop to one digit (10 → 9) left the stale
+  // second digit showing ("90", "80", …).
+  if (el.querySelectorAll('.slot-digit').length !== newStr.length) {
     el.innerHTML = '';
     [...newStr].forEach(ch => {
       const digit = document.createElement('span');
@@ -1117,16 +1119,24 @@ async function confirmAction() {
   btn.classList.add('disabled');
 
   const dev = S.selected;
-  const result = S.mode === 'borrow'
-    ? await apiBorrow(dev.id)
-    : await apiReturn(dev.id);
-
   const wasReturn = S.mode === 'return';
+  let result = null;
+  try {
+    result = wasReturn
+      ? await apiReturn(dev.id)
+      : await apiBorrow(dev.id);
+  } catch (_) { /* fall through to the generic error toast */ }
+  btn.classList.remove('disabled');
+
   closeDetail();
-  if (wasReturn && result.success) {
+  const succeeded = !!(result && result.success);
+  if (wasReturn && succeeded) {
     showSlotOverlay(dev.name, dev.locker_slot);
   } else {
-    showToast(result.message, result.success ? 'success' : 'error');
+    const fallback = succeeded
+      ? 'Done.'
+      : wasReturn ? 'Could not return the device.' : 'Could not borrow the device.';
+    showToast((result && result.message) || fallback, succeeded ? 'success' : 'error');
   }
 
   if (S.mode === 'borrow') openBorrow();
@@ -1285,9 +1295,12 @@ async function acceptHandover() {
   const deviceId = S.handoverDeviceId;
   const from = S.handoverFromScreen;
   if (deviceId == null || !from) return;
-  const result = await apiTransfer(deviceId);
+  let result = null;
+  try {
+    result = await apiTransfer(deviceId);
+  } catch (_) { /* fall through to the error toast */ }
   if (result && result.success) {
-    showToast(result.message, 'success');
+    showToast(result.message || 'Device transferred to you.', 'success');
     closeHandover();
     if (from === 'borrow') {
       await openBorrow();
@@ -1613,12 +1626,16 @@ async function submitRegistrationName() {
   }, 1000);
 
   // Tell backend to await the next NFC tap for registration
-  const result = await endpoint(name);
-  if (!result.success) {
+  let result = null;
+  try {
+    result = await endpoint(name);
+  } catch (_) { /* fall through to the error step */ }
+  if (!result || !result.success) {
     clearInterval(registerCountdownTimer);
+    document.getElementById(btnId).disabled = false;
     showRegisterStep('register-step-error');
     document.getElementById('register-error-msg').textContent =
-      result.detail || result.message || 'Could not start registration.';
+      (result && (result.detail || result.message)) || 'Could not start registration.';
     scheduleAfterRegistration(3500);
   }
 }
@@ -1943,18 +1960,31 @@ async function toggleAdminPanel() {
  */
 async function openAdminPanel() {
   clickSound();
-  if (S.screen === 'idle') S.screen = 'admin';
+  const wasIdle = S.screen === 'idle';
+  if (wasIdle) S.screen = 'admin';
   armIdle();
   const overlay = document.getElementById('overlay-admin');
   overlay.style.display = '';
+  // Establish the backend admin session BEFORE the panel is revealed so EVERY
+  // panel action (mirror sync, register, bind/unbind, software update) is
+  // authorized the moment the panel opens — not only after the admin happens
+  // to use the Borrow/Return shortcuts (which were previously the only callers
+  // of adminStartSession). On a 403/404 nothing opens: admin_overlay_open was
+  // never set backend-side, so sticker taps must keep borrow/return working
+  // instead of hitting a dead overlay.
+  const ok = await adminStartSession();
+  if (!ok) {
+    overlay.classList.remove('visible');
+    overlay.style.display = 'none';
+    if (wasIdle) {
+      S.screen = 'idle';
+      clearTimeout(S.idleTimer); // disarm — idle never runs the countdown
+    }
+    return;
+  }
   requestAnimationFrame(() => requestAnimationFrame(() => {
     overlay.classList.add('visible');
   }));
-  // Establish the backend admin session up front so EVERY panel action (mirror
-  // sync, register, bind/unbind, software update) is authorized the moment
-  // the panel opens — not only after the admin happens to use the Borrow/Return
-  // shortcuts (which were previously the only callers of adminStartSession).
-  await adminStartSession();
   refreshSyncStatus();
   reportKioskDisplay('admin');
 }
@@ -3192,6 +3222,9 @@ probePerformance();
 /* ============================================================
    SSE — real-time events from backend (live mode only)
 ============================================================ */
+/** @type {boolean} True once an SSE stream has opened — later opens are reconnects. */
+let sseOpenedOnce = false;
+
 /**
  * Establish a Server-Sent Events connection to the backend for real-time
  * push notifications. Handles auth success/failure, session end/timeout,
@@ -3200,6 +3233,13 @@ probePerformance();
  */
 function connectSSE() {
   const source = new EventSource('/api/events');
+
+  source.onopen = () => {
+    // A reopened stream means events were dropped while disconnected — pull
+    // the session state again so the kiosk matches the backend.
+    if (sseOpenedOnce) checkExistingSession();
+    sseOpenedOnce = true;
+  };
 
   source.addEventListener('auth_success', e => {
     if (S.updating) return;

@@ -51,6 +51,8 @@ from smart_locker.api.app_context import (
     arm_pending_tag_bind,
     assign_pending_registration,
     assign_pending_tag_bind,
+    clear_pending_tag_bind_for_device,
+    clear_pending_tag_bind_if,
     drop_expired_pending,
     pending_state_lock,
 )
@@ -63,6 +65,7 @@ from config.settings import (
 )
 from smart_locker.database.engine import get_session, get_session_factory
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from smart_locker.database.models import (
     Device,
     DeviceStatus,
@@ -1388,9 +1391,8 @@ def register_locker_device(
     db.flush()
     # Arm before committing: a bind conflict rolls the slot assignment back
     # so a 409 never leaves the registration half-applied.
-    conflict = arm_pending_tag_bind(
-        ctx_module.context, PendingTagBind(device_id=device.id)
-    )
+    bind = PendingTagBind(device_id=device.id)
+    conflict = arm_pending_tag_bind(ctx_module.context, bind)
     if conflict:
         db.rollback()
         raise HTTPException(status_code=409, detail=conflict)
@@ -1398,7 +1400,9 @@ def register_locker_device(
         db.commit()
     except Exception:
         db.rollback()
-        assign_pending_tag_bind(ctx_module.context, None)
+        # Clear only this request's armed window — a bind armed after this
+        # window was consumed by a tap must survive.
+        clear_pending_tag_bind_if(ctx_module.context, bind)
         raise
     from smart_locker.sync import mirror
 
@@ -1440,7 +1444,8 @@ def set_device_slot(
         dict: ``{"success": True, "locker_slot": int}``.
 
     Raises:
-        HTTPException: 403 if not admin, 404 if missing, 409 if slot taken.
+        HTTPException: 403 if not admin, 404 if missing, 409 if the row is
+            not a locker unit or the slot is taken.
     """
     if user_session.user.role != UserRole.ADMIN:
         raise HTTPException(status_code=403, detail="Admin access required.")
@@ -1448,6 +1453,11 @@ def set_device_slot(
     device = DeviceRepository.find_by_id(db, device_id)
     if device is None:
         raise HTTPException(status_code=404, detail="Device not found.")
+    if not is_registered(device):
+        raise HTTPException(
+            status_code=409,
+            detail="Device is not in the locker — use Register Device.",
+        )
 
     from smart_locker.services.device_registration import (
         InvalidSlot,
@@ -1462,6 +1472,9 @@ def set_device_slot(
     except InvalidSlot as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
 
+    # The committed slot change is a catalog change: the after-commit
+    # listener turns this flag into mark_dirty + schedule_flush.
+    db.info["mirror_dirty_pending"] = True
     logger.info(
         "Slot for %s (pm=%s) set to %s by admin %s.",
         device.name,
@@ -1493,7 +1506,8 @@ def start_device_tag_bind(
 
     Raises:
         HTTPException: 503 if system not ready, 403 if not admin, 404 if
-            the device does not exist.
+            the device does not exist or is not a locker unit, 409 if a
+            pending window owns the reader.
     """
     if ctx_module.context is None:
         raise HTTPException(status_code=503, detail="System not ready.")
@@ -1502,16 +1516,14 @@ def start_device_tag_bind(
         raise HTTPException(status_code=403, detail="Admin access required.")
 
     device = DeviceRepository.find_by_id(db, device_id)
-    if device is None:
+    if device is None or not is_registered(device):
         raise HTTPException(status_code=404, detail="Device not found.")
 
-    conflict = _pending_nfc_conflict()
+    conflict = arm_pending_tag_bind(
+        ctx_module.context, PendingTagBind(device_id=device.id)
+    )
     if conflict:
         raise HTTPException(status_code=409, detail=conflict)
-
-    assign_pending_tag_bind(
-        ctx_module.context, PendingTagBind(device_id=device_id)
-    )
     logger.info(
         "Device tag bind started for %s (pm=%s) by admin %s. Awaiting sticker.",
         device.name,
@@ -1549,7 +1561,9 @@ def unbind_device_tag(
 
     clear_device_tag(db, device)
     if ctx_module.context is not None:
-        assign_pending_tag_bind(ctx_module.context, None)
+        # Cancel only a bind window aimed at this device — a window armed
+        # for another device must survive the unbind.
+        clear_pending_tag_bind_for_device(ctx_module.context, device.id)
     logger.info(
         "Unbound device tag for %s (pm=%s) by admin %s.",
         device.name,
@@ -2128,8 +2142,8 @@ def dashboard_remove_device(
         dict: ``ok`` and ``pm_number``.
 
     Raises:
-        HTTPException: 401 without secret; 404 unknown PM; 409 borrowed or
-                       history-bearing.
+        HTTPException: 401 without secret; 404 unknown PM; 409 borrowed,
+                       history-bearing, or a live tag-bind window on the row.
     """
     from smart_locker.services.device_catalog import (
         DeviceBorrowed,
@@ -2140,11 +2154,38 @@ def dashboard_remove_device(
     device = DeviceRepository.find_by_pm(db, pm_number.strip())
     if device is None:
         raise HTTPException(status_code=404, detail="Device not found.")
+
+    # Deleting the row out from under an armed bind window would leave the
+    # next sticker tap binding a device that no longer exists.
+    with pending_state_lock:
+        ctx = ctx_module.context
+        bind = ctx.pending_tag_bind if ctx is not None else None
+        live_bind = (
+            bind is not None
+            and bind.device_id == device.id
+            and not bind.is_expired
+        )
+    if live_bind:
+        raise HTTPException(
+            status_code=409,
+            detail="A tag bind is in progress for this device.",
+        )
+
+    pm = device.pm_number
     try:
         remove_device(db, device)
+        db.commit()
     except (DeviceBorrowed, DeviceHasHistory) as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
-    return {"ok": True, "pm_number": device.pm_number}
+    except IntegrityError as e:
+        # A borrow landed between the borrowed-check and the delete — the
+        # transaction FK makes this a conflict, not a 500.
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail=f"{pm} cannot be removed while records reference it.",
+        ) from e
+    return {"ok": True, "pm_number": pm}
 
 
 @router.get("/api/dashboard/mirror")
@@ -2308,7 +2349,9 @@ def dashboard_unbind_tag(
 
     clear_device_tag(db, device)
     if ctx_module.context is not None:
-        assign_pending_tag_bind(ctx_module.context, None)
+        # Cancel only a bind window aimed at this device — a window armed
+        # for another device must survive the unbind.
+        clear_pending_tag_bind_for_device(ctx_module.context, device.id)
     logger.info(
         "Dashboard unbound device tag for %s (pm=%s).",
         device.name,

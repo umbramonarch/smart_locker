@@ -155,6 +155,37 @@ def arm_pending_tag_bind(ctx, bind: PendingTagBind) -> str | None:
         return None
 
 
+def clear_pending_tag_bind_if(ctx, bind: PendingTagBind) -> None:
+    """Clear ``pending_tag_bind`` only when it is still ``bind`` (same object).
+
+    A bind window another request armed after ``bind`` was consumed survives —
+    a commit-failure cleanup must not kill it.
+
+    Args:
+        ctx: Application context (or test double with the same attribute).
+        bind: The pending bind this caller armed.
+    """
+    with pending_state_lock:
+        if ctx.pending_tag_bind is bind:
+            ctx.pending_tag_bind = None
+
+
+def clear_pending_tag_bind_for_device(ctx, device_id: int) -> None:
+    """Clear ``pending_tag_bind`` only when it targets ``device_id``.
+
+    An unbind may cancel only a bind window aimed at that same device — a
+    window armed for a different device survives.
+
+    Args:
+        ctx: Application context (or test double with the same attribute).
+        device_id: Device the caller is unbinding.
+    """
+    with pending_state_lock:
+        bind = ctx.pending_tag_bind
+        if bind is not None and bind.device_id == device_id:
+            ctx.pending_tag_bind = None
+
+
 class AppContext:
     """Shared application state bridging NFC hardware with the async API layer.
 

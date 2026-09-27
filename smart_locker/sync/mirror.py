@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,6 +28,7 @@ from types import SimpleNamespace
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from config.settings import in_locker_token
 from smart_locker.database.models import Device, DeviceStatus
 from smart_locker.database.repositories import (
     DeviceRepository,
@@ -37,6 +39,7 @@ from smart_locker.services.device_catalog import (
     canonical_place,
     display_location,
     is_registered,
+    place_kind,
 )
 from smart_locker.sync.catalog_sheet import (
     MIRROR_HEADERS,
@@ -54,6 +57,7 @@ logger = logging.getLogger(__name__)
 
 _IO_TIMEOUT_SECONDS = 8.0
 _writer_lock = threading.Lock()
+_reader_lock = threading.Lock()
 _tick_lock = threading.Lock()
 _state_lock = threading.Lock()
 _scheduled_lock = threading.Lock()
@@ -98,8 +102,32 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
 
+def _valid_state_value(key: str, value) -> bool:
+    """Whether a persisted state value has the shape its key expects.
+
+    A hand-edited or poisoned ``mirror_state.json`` must not feed malformed
+    values into merge comparisons or row fingerprints — bad values drop to
+    the key's default instead.
+    """
+    if key in ("seeded", "pending_writes", "external_pending"):
+        return isinstance(value, bool)
+    if key == "last_write_rows":
+        return isinstance(value, list)
+    if key in ("last_seen_mtime", "last_seen_size"):
+        return value is None or (
+            isinstance(value, (int, float)) and not isinstance(value, bool)
+        )
+    # external_decided_at / last_write_at / last_error
+    return value is None or isinstance(value, str)
+
+
 def _load_state() -> dict:
-    """Read the persisted mirror state (defaults when missing/corrupt)."""
+    """Read the persisted mirror state (defaults when missing/corrupt).
+
+    Never raises: a poisoned state file falls back to per-key defaults so
+    ``mark_dirty`` cannot re-raise through a borrow's ``after_commit``
+    listener.
+    """
     state = {
         "seeded": False,
         "pending_writes": False,
@@ -108,17 +136,16 @@ def _load_state() -> dict:
         "last_write_at": None,
         "last_write_rows": [],
         "last_seen_mtime": None,
+        "last_seen_size": None,
         "last_error": None,
     }
     try:
         data = json.loads(_state_path().read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return state
-    except (OSError, json.JSONDecodeError, TypeError):
+    except Exception:
         return state
     if isinstance(data, dict):
         for key in state:
-            if key in data:
+            if key in data and _valid_state_value(key, data[key]):
                 state[key] = data[key]
     return state
 
@@ -134,41 +161,60 @@ def _save_state(state: dict) -> None:
     write snapshot (``last_write_*``, ``last_seen_mtime``, ``last_error``)
     follows the newer ``last_write_at``.
     """
-    path = _state_path()
-    tmp = path.with_suffix(path.suffix + ".tmp")
+    path: Path | None = None
+    tmp: Path | None = None
     try:
+        path = _state_path()
+        tmp = path.with_suffix(path.suffix + ".tmp")
         with _state_lock:
             try:
                 disk = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError, TypeError):
+            except Exception:
                 disk = {}
             if isinstance(disk, dict):
-                if disk.get("pending_writes"):
+                # Strict ``is True``: a hand-edited truthy value must not
+                # fake the sticky flags (a forged seeded=True would skip
+                # adoption entirely).
+                if disk.get("pending_writes") is True:
                     state["pending_writes"] = True
-                if disk.get("seeded"):
+                if disk.get("seeded") is True:
                     state["seeded"] = True
-                if (disk.get("external_decided_at") or "") > (
-                    state.get("external_decided_at") or ""
-                ):
-                    state["external_pending"] = disk["external_pending"]
-                    state["external_decided_at"] = disk["external_decided_at"]
-                if (disk.get("last_write_at") or "") > (
-                    state.get("last_write_at") or ""
-                ):
+                disk_decided = disk.get("external_decided_at")
+                if not isinstance(disk_decided, str):
+                    disk_decided = None
+                state_decided = state.get("external_decided_at")
+                if not isinstance(state_decided, str):
+                    state_decided = None
+                if (disk_decided or "") > (state_decided or ""):
+                    state["external_pending"] = bool(
+                        disk.get("external_pending")
+                    )
+                    state["external_decided_at"] = disk_decided
+                disk_write = disk.get("last_write_at")
+                if not isinstance(disk_write, str):
+                    disk_write = None
+                state_write = state.get("last_write_at")
+                if not isinstance(state_write, str):
+                    state_write = None
+                if (disk_write or "") > (state_write or ""):
                     for key in (
                         "last_write_at", "last_write_rows",
-                        "last_seen_mtime", "last_error",
+                        "last_seen_mtime", "last_seen_size", "last_error",
                     ):
-                        state[key] = disk.get(key)
+                        value = disk.get(key)
+                        state[key] = (
+                            value if _valid_state_value(key, value) else None
+                        )
             path.parent.mkdir(parents=True, exist_ok=True)
             tmp.write_text(json.dumps(state, indent=1), encoding="utf-8")
             tmp.replace(path)
-    except OSError as e:
+    except Exception as e:
         logger.warning("Mirror state %s not written (%s).", path, e)
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
+        if tmp is not None:
+            try:
+                tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
 
 
 def configured_path() -> Path | None:
@@ -186,6 +232,15 @@ def _expected_rows(session: Session) -> list[list[str]]:
     """Canonical mirror rows for every catalog device, sorted by id."""
     rows: list[list[str]] = []
     for device in DeviceRepository.list_all(session):
+        # A cabinet unit's Location is already the derived canonical value —
+        # canonicalizing a borrower literally named like a place word would
+        # silently turn the name back into a token. Non-cabinet rows keep
+        # canonical_place so stored place text normalizes once more.
+        location = (
+            display_location(device)
+            if is_registered(device)
+            else canonical_place(display_location(device))
+        )
         rows.append([
             (device.pm_number or "").strip(),
             (device.name or "").strip(),
@@ -194,7 +249,7 @@ def _expected_rows(session: Session) -> list[list[str]]:
             (device.model or "").strip(),
             (device.serial_number or "").strip(),
             device.calibration_due.isoformat() if device.calibration_due else "",
-            canonical_place(display_location(device)),
+            location,
         ])
     rows.sort(key=lambda r: pm_match_key(r[0]))
     return rows
@@ -245,6 +300,20 @@ def _write_values(rows: list[list[str]]) -> list[list]:
     return out
 
 
+def _stored_place(location: str | None) -> str | None:
+    """Stored ``location`` for a sheet Location cell.
+
+    Whole-word in-locker spellings ("Cabinet", "locker room", the token
+    itself) collapse to the in-locker token — the row is then registerable
+    instead of stranded in limbo (not a registrant name, not a locker
+    place). Everything else keeps ``canonical_place`` (person names,
+    free-text places, the maintenance token).
+    """
+    if is_in_locker_location(location or ""):
+        return in_locker_token()
+    return canonical_place(location) or None
+
+
 # ---------------------------------------------------------------------------
 # Status reporting
 # ---------------------------------------------------------------------------
@@ -257,7 +326,13 @@ def _remember_write(result: dict) -> None:
     global _last_write
     snapshot = {
         "at": _now_iso(),
-        "error": result.get("error"),
+        # Categories only — the raw adapter text carries paths/header names
+        # and this snapshot is exposed on the public /api/health.
+        "error": (
+            _error_category(str(result["error"]))
+            if result.get("error")
+            else None
+        ),
         "saved": bool(result.get("flushed")),
         "written": int(result.get("written") or 0),
     }
@@ -334,7 +409,9 @@ def _adopt(engine, parsed: list[CatalogRow]) -> int:
         registrant_names: set[str] = set()
         has_location = any(r.location is not None for r in parsed)
         for row in parsed:
-            if row.location and not is_in_locker_location(row.location):
+            # Only real place words are excluded from the registrant seed —
+            # both tokens, while person names and free-text places seed.
+            if row.location and place_kind(row.location) == "other":
                 registrant_names.add(row.location.strip())
             existing = DeviceRepository.find_by_pm(session, row.pm_number)
             if existing is not None:
@@ -353,8 +430,13 @@ def _adopt(engine, parsed: list[CatalogRow]) -> int:
                     updates["model"] = row.model
                 if "calibration_due" in row.present and row.calibration_due is not None:
                     updates["calibration_due"] = row.calibration_due
-                DeviceRepository.update_metadata(session, existing, **updates)
-                session.commit()
+                try:
+                    DeviceRepository.update_metadata(session, existing, **updates)
+                    session.commit()
+                except IntegrityError:
+                    # One bad row must not abort the whole adoption (and be
+                    # retried — and fail — on every tick).
+                    session.rollback()
                 continue
 
             serial = row.serial_number
@@ -371,11 +453,11 @@ def _adopt(engine, parsed: list[CatalogRow]) -> int:
                     model=row.model,
                     calibration_due=row.calibration_due,
                 )
+                device.location = _stored_place(row.location)
+                session.commit()
             except IntegrityError:
                 session.rollback()
                 continue
-            device.location = canonical_place(row.location) or None
-            session.commit()
             inserted += 1
         if has_location:
             RegistrantRepository.sync_names(session, registrant_names)
@@ -392,14 +474,35 @@ def _read_catalog(path: Path) -> tuple[list[CatalogRow] | None, str | None]:
 
     A hung share read must not wedge the tick (it holds the tick mutex) or
     park a dashboard request thread forever — the worker is abandoned and
-    the next tick retries.
+    the next tick retries. The reader gate makes the abandonment bounded:
+    while a wedged reader holds it, later reads fail fast as a timeout
+    instead of leaking another thread on a dead share.
     """
     try:
         return _call_with_timeout(
-            lambda: read_catalog_rows(path), _IO_TIMEOUT_SECONDS
+            lambda: read_catalog_rows(path), _IO_TIMEOUT_SECONDS,
+            gate=_reader_lock,
         )
     except TimeoutError:
         return None, "timeout"
+
+
+def _stat_path(path: Path):
+    """Stat ``path`` inside the reader I/O timebox.
+
+    A dead ``hard``-mounted CIFS share blocks ``stat`` in-kernel; running it
+    in the gated worker bounds the wait so a later tick (or the route that
+    called us) is never wedged behind it.
+
+    Raises:
+        FileNotFoundError: the file does not exist.
+        TimeoutError: stat did not finish in the I/O window — or a wedged
+            reader still holds the gate.
+        OSError: any other stat failure.
+    """
+    return _call_with_timeout(
+        path.stat, _IO_TIMEOUT_SECONDS, gate=_reader_lock
+    )
 
 
 def _read_sheet(workbook: WorkbookAdapter) -> tuple[list[list[str]], str | None]:
@@ -478,8 +581,10 @@ def external_diffs() -> tuple[list[dict], str | None]:
         ``(diffs, None)`` or ``([], error)`` when the file cannot be read.
     """
     path = configured_path()
-    if path is None or not path.exists():
+    if path is None:
         return [], "Mirror file is not available."
+    # No existence pre-check: a stat on a dead share blocks in-kernel. The
+    # timeboxed read produces the "File not found" error instead.
     sheet_rows, err = _read_sheet(WorkbookAdapter(path))
     if err:
         return [], err
@@ -499,7 +604,7 @@ def apply_external(engine) -> dict:
         Counts: applied, skipped.
     """
     path = configured_path()
-    if path is None or not path.exists():
+    if path is None:
         raise MirrorUnavailable("Mirror file is not available.")
     workbook = WorkbookAdapter(path)
     parsed, err = _read_catalog(workbook.path)
@@ -538,7 +643,7 @@ def apply_external(engine) -> dict:
                             model=row.model,
                             calibration_due=row.calibration_due,
                         )
-                        device.location = canonical_place(row.location) or None
+                        device.location = _stored_place(row.location)
                         session.commit()
                     except IntegrityError:
                         session.rollback()
@@ -572,7 +677,12 @@ def apply_external(engine) -> dict:
                     skipped += 1
                     continue
                 if _apply_field(session, device, diff["field"], row):
-                    session.commit()
+                    try:
+                        session.commit()
+                    except IntegrityError:
+                        session.rollback()
+                        skipped += 1
+                        continue
                     applied += 1
                 else:
                     session.rollback()
@@ -603,7 +713,7 @@ def _apply_catalog_row(
         updates["calibration_due"] = row.calibration_due
     DeviceRepository.update_metadata(session, device, **updates)
     if include_location and not is_registered(device):
-        device.location = canonical_place(row.location) or None
+        device.location = _stored_place(row.location)
         session.flush()
 
 
@@ -623,7 +733,7 @@ def _apply_field(session: Session, device: Device, field: str, row: CatalogRow) 
     if attr == "location":
         if is_registered(device):
             return False
-        device.location = canonical_place(row.location) or None
+        device.location = _stored_place(row.location)
         session.flush()
         return True
     if attr == "serial_number":
@@ -706,11 +816,16 @@ def tick(engine, trigger: str = "interval") -> dict:
         if state["seeded"]:
             _detect(path, workbook, state, result)
 
-            if state.get("pending_writes"):
-                if state.get("external_pending"):
-                    result["skipped"] = "external_changes"
-                else:
-                    _flush(engine, path, workbook, state, result)
+        # The flush is not gated on ``seeded``: an adopted sheet's pending
+        # write regenerates it, and a confirmed-missing path gets its mirror
+        # file created while still unseeded. But an unseeded path where a
+        # file DOES exist is a foreign workbook we never overwrite — the
+        # read error is already in result["error"].
+        if state.get("pending_writes"):
+            if state.get("external_pending"):
+                result["skipped"] = "external_changes"
+            elif state["seeded"] or result.get("file_missing"):
+                _flush(engine, path, workbook, state, result)
 
         _save_state(state)
         return result
@@ -731,7 +846,9 @@ def _record_tick(trigger: str, result: dict) -> None:
     from smart_locker.sync import sync_status
 
     if result["error"]:
-        sync_status.record_error(trigger, result["error"])
+        # Public JSON carries the category only — raw adapter text has
+        # filesystem paths and header names.
+        sync_status.record_error(trigger, _error_category(str(result["error"])))
         return
     sync_status.record_result(
         trigger,
@@ -744,16 +861,26 @@ def _record_tick(trigger: str, result: dict) -> None:
 
 
 def _adopt_or_mark(engine, path: Path, state: dict, result: dict) -> None:
-    """First sight of the sheet: adopt its rows, or mark seeded when absent.
+    """First sight of the sheet: adopt its rows, or owe it a write.
 
-    A sheet that exists but is not a catalog workbook (no PM column, locked,
-    unreadable) is never adopted — it is left alone and reported instead of
-    being overwritten.
+    ``seeded`` means a real catalog sheet was adopted. A missing file only
+    sets ``pending_writes`` — the share may simply not be mounted yet, and
+    burning adoption then would flag the real sheet as a foreign edit when
+    it appears later. A sheet that exists but is not a catalog workbook
+    (no PM column, locked, unreadable) is never adopted — it is left alone
+    and reported instead of being overwritten.
     """
-    if not path.exists():
-        state["seeded"] = True
+    try:
+        _stat_path(path)
+    except FileNotFoundError:
         # No sheet yet — the pending write below creates the mirror file.
         state["pending_writes"] = True
+        result["file_missing"] = True
+        return
+    except OSError as e:
+        err = "timeout" if isinstance(e, TimeoutError) else "unavailable"
+        state["last_error"] = err
+        result["error"] = err
         return
     parsed, err = _read_catalog(path)
     if err:
@@ -768,9 +895,12 @@ def _adopt_or_mark(engine, path: Path, state: dict, result: dict) -> None:
     # hand edit.
     state["last_write_rows"] = _canonical_rows(parsed)
     try:
-        state["last_seen_mtime"] = path.stat().st_mtime
+        st = _stat_path(path)
+        state["last_seen_mtime"] = st.st_mtime
+        state["last_seen_size"] = st.st_size
     except OSError:
         state["last_seen_mtime"] = None
+        state["last_seen_size"] = None
     result["seeded"] = True
     result["adopted"] = adopted
     logger.info("Mirror adopted %d catalog row(s) from %s.", adopted, path)
@@ -779,26 +909,41 @@ def _adopt_or_mark(engine, path: Path, state: dict, result: dict) -> None:
 def _detect(path: Path, workbook: WorkbookAdapter, state: dict, result: dict) -> None:
     """Compare the file to what the Pi last wrote; flag hand edits."""
     try:
-        mtime = path.stat().st_mtime
-    except OSError:
+        st = _stat_path(path)
+    except FileNotFoundError:
         # File missing: nothing left to review — the database wins trivially
         # and a pending write recreates the mirror.
         state["last_seen_mtime"] = None
+        state["last_seen_size"] = None
         state["external_pending"] = False
         state["external_decided_at"] = _now_iso()
         return
-    if mtime == state.get("last_seen_mtime"):
+    except OSError as e:
+        # Any other stat failure (dead share, wedged reader, I/O timeout)
+        # must NOT clear a held review — the quarantine survives so a later
+        # flush can never destroy unreviewed edits.
+        err = "timeout" if isinstance(e, TimeoutError) else "unavailable"
+        state["last_error"] = err
+        result["error"] = err
+        return
+    if (
+        st.st_mtime == state.get("last_seen_mtime")
+        and st.st_size == state.get("last_seen_size")
+    ):
         result["external"] = bool(state.get("external_pending"))
         return
+    # Stamp the decision BEFORE the read: an admin dismiss/apply saved
+    # mid-read carries a newer decided_at and wins the _save_state merge.
+    state["external_decided_at"] = _now_iso()
     sheet_rows, err = _read_sheet(workbook)
     if err:
         state["last_error"] = _error_category(err)
         result["error"] = err
         return
-    state["last_seen_mtime"] = mtime
+    state["last_seen_mtime"] = st.st_mtime
+    state["last_seen_size"] = st.st_size
     state["last_error"] = None
     written = state.get("last_write_rows") or []
-    state["external_decided_at"] = _now_iso()
     if _fingerprint(sheet_rows) != _fingerprint(written):
         state["external_pending"] = True
         result["external"] = True
@@ -809,6 +954,51 @@ def _detect(path: Path, workbook: WorkbookAdapter, state: dict, result: dict) ->
 
 class _WriterBusy(Exception):
     """A write worker already holds (or waits on) the writer lock."""
+
+
+# POSIX mount bases: a mirror file that should live on a share must never be
+# created under an unmounted mountpoint — the write would land on the SD card
+# and be masked when the mount returns (a shadow file).
+_POSIX_MOUNT_ROOTS = frozenset(("/mnt", "/media", "/run/media"))
+
+
+def _refuse_shadow_create(path: Path, create_only: bool) -> None:
+    """Refuse a mirror creation that would land on the wrong filesystem.
+
+    Only creation is guarded — rewriting an existing file is not a shadow
+    write. Refused when the file appeared mid-tick while we are still
+    unseeded (a real foreign sheet must be adopted, not rewritten), when the
+    parent directory is missing, or — POSIX only — when an ancestor that is
+    a direct child of /mnt, /media, or /run/media exists but is not a mount.
+
+    Runs inside the write worker's I/O timebox: a hung stat there abandons
+    the worker instead of wedging the tick.
+
+    Raises:
+        OSError: the write must defer instead of creating the file here.
+    """
+    if path.exists():
+        if create_only:
+            raise OSError(
+                f"mirror file {path} appeared after adoption check — "
+                "write deferred"
+            )
+        return
+    if not path.parent.exists():
+        raise OSError(f"mirror directory unavailable: {path.parent}")
+    if os.name != "posix":
+        return
+    # Walk upward: the first mounted ancestor wins — a path under
+    # /media/<user>/<stick> is fine while the stick is mounted even though
+    # the /media/<user> dir above it is not itself a mount.
+    for ancestor in path.parents:
+        if os.path.ismount(ancestor):
+            break
+        if str(ancestor.parent) in _POSIX_MOUNT_ROOTS and ancestor.exists():
+            raise OSError(
+                f"mirror path {ancestor} exists but is not a mount — "
+                "write deferred"
+            )
 
 
 def _flush(
@@ -824,6 +1014,7 @@ def _flush(
 
     result["write_attempted"] = True
     expected_mtime = state.get("last_seen_mtime")
+    create_only = not state["seeded"]
 
     def _write() -> bool:
         # A worker parked on the lock would write its own stale snapshot;
@@ -831,6 +1022,7 @@ def _flush(
         if not _writer_lock.acquire(blocking=False):
             raise _WriterBusy()
         try:
+            _refuse_shadow_create(path, create_only)
             return workbook.write_sheet(
                 MIRROR_HEADERS,
                 _write_values(expected),
@@ -842,12 +1034,22 @@ def _flush(
     try:
         _call_with_timeout(_write, _IO_TIMEOUT_SECONDS)
     except _WriterBusy:
+        logger.warning(
+            "Mirror write for %s skipped — a previous write worker is "
+            "still running (wedged share?).",
+            path,
+        )
         result["write_attempted"] = False
         result["skipped"] = "writer_busy"
         state["last_error"] = "busy"
         return
     except TimeoutError:
         logger.warning("Mirror write timed out after %ss (%s).", _IO_TIMEOUT_SECONDS, path)
+        # The abandoned worker can still land the write later; adopt the
+        # intended rows as the baseline now so the late write is not flagged
+        # as hand edits. pending_writes stays set — the next tick retries
+        # (writer_busy while the worker is alive, then an idempotent rewrite).
+        state["last_write_rows"] = expected
         state["last_error"] = "timeout"
         result["error"] = "timeout"
         return
@@ -874,9 +1076,17 @@ def _flush(
         return
 
     try:
-        state["last_seen_mtime"] = path.stat().st_mtime
+        st = _stat_path(path)
+        state["last_seen_mtime"] = st.st_mtime
+        state["last_seen_size"] = st.st_size
     except OSError:
         state["last_seen_mtime"] = None
+        state["last_seen_size"] = None
+    # A successful write IS the seed: this file's baseline is ours, so the
+    # next tick detects hand edits against it instead of re-adopting the
+    # file we just created (which would silently bless edits made between
+    # creation and the following tick).
+    state["seeded"] = True
     state["pending_writes"] = False
     state["external_pending"] = False
     state["external_decided_at"] = _now_iso()
@@ -888,20 +1098,31 @@ def _flush(
     logger.info("Mirror wrote %d catalog row(s) to %s.", len(expected), path)
 
 
-def _call_with_timeout(fn, timeout: float):
+def _call_with_timeout(
+    fn, timeout: float, gate: threading.Lock | None = None
+):
     """Run ``fn`` in a worker thread and abort waiting after ``timeout``.
 
     The worker cannot be killed; the caller returns so the kiosk is not
-    frozen on hung CIFS I/O. The writer lock stays held by the worker.
+    frozen on hung CIFS I/O. When ``gate`` is given the worker takes it
+    non-blocking: while a wedged worker still holds it, the next call fails
+    fast with ``TimeoutError`` instead of spawning (and leaking) another
+    thread — so at most one worker is ever hung on the share.
     """
     box: list = []
     err: list = []
 
     def _run() -> None:
+        if gate is not None and not gate.acquire(blocking=False):
+            err.append(TimeoutError("workbook I/O busy"))
+            return
         try:
             box.append(fn())
         except Exception as exc:
             err.append(exc)
+        finally:
+            if gate is not None:
+                gate.release()
 
     worker = threading.Thread(target=_run, daemon=True)
     worker.start()

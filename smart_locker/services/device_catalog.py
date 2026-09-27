@@ -22,6 +22,7 @@ from smart_locker.database.repositories import (
     DeviceRepository,
     TransactionRepository,
 )
+from smart_locker.sync.catalog_sheet import normalize_pm
 
 logger = logging.getLogger(__name__)
 
@@ -244,26 +245,33 @@ def add_device(
         DuplicatePm: id already in the catalog.
         DuplicateSerial: another row already holds the serial.
     """
-    pm = (pm_number or "").strip()
+    pm = normalize_pm(pm_number)
     name = (name or "").strip()
     if not pm or not name:
         raise InvalidCatalogField("Device id and name are required.")
     if DeviceRepository.find_by_pm(session, pm) is not None:
         raise DuplicatePm(f"{pm} is already in the catalog.")
 
+    serial = _resolve_serial(session, None, serial_number)
     try:
         device = DeviceRepository.create(
             session,
             name=name,
             device_type=(device_type or "").strip() or "general",
             pm_number=pm,
-            serial_number=_resolve_serial(session, None, serial_number),
+            serial_number=serial,
             manufacturer=(manufacturer or "").strip() or None,
             model=(model or "").strip() or None,
             calibration_due=calibration_due,
         )
     except IntegrityError as e:
         session.rollback()
+        if serial is not None and (
+            DeviceRepository.find_by_serial(session, serial) is not None
+        ):
+            raise DuplicateSerial(
+                f"Serial {serial} is already held by another row."
+            ) from e
         raise DuplicatePm(f"{pm} is already in the catalog.") from e
     device.location = canonical_place(location) or None
     session.flush()
@@ -294,22 +302,37 @@ def update_device_fields(session: Session, device: Device, fields: dict) -> bool
         True when at least one field changed.
 
     Raises:
-        LockerOwned: ``location`` was included on a cabinet unit.
+        LockerOwned: ``location`` on a cabinet unit differs from the place
+            borrow/return derives (an unchanged resend is a no-op).
         InvalidCatalogField: ``name`` was set to empty.
         DuplicateSerial: another row already holds the serial.
     """
     if "location" in fields and is_registered(device):
-        raise LockerOwned(
-            "This device is in the locker. Place follows borrow/return."
-        )
+        # The dashboard PATCH resends the derived place it displayed — a
+        # value equal to it is a no-op, not a borrow/return takeover.
+        if canonical_place(fields["location"]) != display_location(device):
+            raise LockerOwned(
+                "This device is in the locker. Place follows borrow/return."
+            )
+        fields = {k: v for k, v in fields.items() if k != "location"}
 
     updates: dict = {}
     for key in _EDITABLE_FIELDS:
         if key in fields:
             updates[key] = fields[key]
+    # Text fields are user-typed: strip, and keep the stored forms the
+    # mirror round-trips — an empty cell reads back as NULL/"general".
+    for key in ("name", "device_type", "manufacturer", "model"):
+        if key in updates:
+            updates[key] = (updates[key] or "").strip()
+    if updates.get("device_type") == "":
+        updates["device_type"] = "general"
+    for key in ("manufacturer", "model"):
+        if updates.get(key) == "":
+            updates[key] = None
     if "serial_number" in updates:
         updates["serial_number"] = _resolve_serial(session, device, updates["serial_number"])
-    if "name" in updates and not (updates["name"] or "").strip():
+    if "name" in updates and not updates["name"]:
         raise InvalidCatalogField("Name cannot be empty.")
 
     changed = DeviceRepository.update_metadata(session, device, **updates)
@@ -345,6 +368,8 @@ def set_place(session: Session, device: Device, place: str | None) -> str:
             "This device is in the locker. Change holder at the kiosk."
         )
     stored = canonical_place(place)
+    if device.location == (stored or None):
+        return stored
     device.location = stored or None
     session.flush()
     _mark_mirror_dirty(session)

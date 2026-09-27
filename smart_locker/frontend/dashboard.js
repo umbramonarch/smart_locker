@@ -1062,6 +1062,12 @@ async function submitDeviceDialog() {
     calibration_due: value('device-calibration'),
     location: value('device-location'),
   };
+  // A cabinet unit's place is owned by borrow/return — editing it must not
+  // send the hidden (prefilled) location field or the API 409s the PATCH.
+  if (deviceDialogPm) {
+    const row = inventoryData.find(d => d.pm_number === deviceDialogPm);
+    if (row && row.in_locker) delete fields.location;
+  }
   if (btn) btn.disabled = true;
   if (err) {
     err.textContent = '';
@@ -1129,6 +1135,7 @@ async function removeCatalogDevice(pm, btn) {
     setTimeout(() => { btn.dataset.armed = ''; btn.textContent = orig; }, 3000);
     return;
   }
+  btn.disabled = true;
   try {
     const res = await fetch(`/api/dashboard/devices/${encodeURIComponent(pm)}`, {
       method: 'DELETE',
@@ -1153,6 +1160,8 @@ async function removeCatalogDevice(pm, btn) {
     fetchAdminTables();
   } catch (_) {
     if (status) status.textContent = 'Could not remove the device.';
+  } finally {
+    btn.disabled = false;
   }
 }
 
@@ -1162,6 +1171,8 @@ async function removeCatalogDevice(pm, btn) {
  */
 async function applySheetEdits() {
   const status = document.getElementById('sheet-diff-status');
+  const btn = document.getElementById('sheet-apply');
+  if (btn) btn.disabled = true;
   try {
     const res = await fetch('/api/dashboard/mirror/apply', {
       method: 'POST',
@@ -1189,6 +1200,8 @@ async function applySheetEdits() {
     fetchAdminTables();
   } catch (_) {
     if (status) status.textContent = 'Could not apply the sheet edits.';
+  } finally {
+    if (btn) btn.disabled = false;
   }
 }
 
@@ -1198,6 +1211,8 @@ async function applySheetEdits() {
  */
 async function dismissSheetEdits() {
   const status = document.getElementById('sheet-diff-status');
+  const btn = document.getElementById('sheet-keep');
+  if (btn) btn.disabled = true;
   try {
     const res = await fetch('/api/dashboard/mirror/dismiss', {
       method: 'POST',
@@ -1218,6 +1233,8 @@ async function dismissSheetEdits() {
     fetchAdminTables();
   } catch (_) {
     if (status) status.textContent = 'Could not dismiss the sheet edits.';
+  } finally {
+    if (btn) btn.disabled = false;
   }
 }
 
@@ -1226,10 +1243,12 @@ async function dismissSheetEdits() {
  * Arm a 60s bind window on the Pi; the sticker must be tapped at the kiosk.
  *
  * @param {string} pm - Locker PM number.
+ * @param {HTMLElement} [btn] - The Bind button clicked (disabled while in flight).
  */
-async function armBind(pm) {
+async function armBind(pm, btn) {
   const status = document.getElementById('admin-tag-status');
   if (status) status.textContent = '';
+  if (btn) btn.disabled = true;
   try {
     const res = await fetch('/api/dashboard/bind-tag', {
       method: 'POST',
@@ -1252,6 +1271,8 @@ async function armBind(pm) {
       : detail;
   } catch (_) {
     if (status) status.textContent = 'Could not arm bind.';
+  } finally {
+    if (btn) btn.disabled = false;
   }
 }
 
@@ -1260,10 +1281,12 @@ async function armBind(pm) {
  * Clear the sticker HMAC for one locker PM.
  *
  * @param {string} pm - Locker PM number.
+ * @param {HTMLElement} [btn] - The Unbind button clicked (disabled while in flight).
  */
-async function unbindTag(pm) {
+async function unbindTag(pm, btn) {
   const status = document.getElementById('admin-tag-status');
   if (status) status.textContent = '';
+  if (btn) btn.disabled = true;
   try {
     const res = await fetch('/api/dashboard/unbind-tag', {
       method: 'POST',
@@ -1289,6 +1312,8 @@ async function unbindTag(pm) {
     renderDevices();
   } catch (_) {
     if (status) status.textContent = 'Could not unbind.';
+  } finally {
+    if (btn) btn.disabled = false;
   }
 }
 
@@ -1336,9 +1361,9 @@ function initEvents() {
       openOwnerDialog(btn.dataset.pm || '', btn.dataset.owner || '');
     }
     const bindBtn = e.target.closest('[data-bind-pm]');
-    if (bindBtn) armBind(bindBtn.dataset.bindPm || '');
+    if (bindBtn) armBind(bindBtn.dataset.bindPm || '', bindBtn);
     const unbindBtn = e.target.closest('[data-unbind-pm]');
-    if (unbindBtn) unbindTag(unbindBtn.dataset.unbindPm || '');
+    if (unbindBtn) unbindTag(unbindBtn.dataset.unbindPm || '', unbindBtn);
     const editBtn = e.target.closest('[data-edit-pm]');
     if (editBtn) openDeviceDialog(editBtn.dataset.editPm || '');
     const removeBtn = e.target.closest('[data-remove-pm]');

@@ -60,19 +60,19 @@ def list_devices() -> None:
         print(f"\n{len(devices)} device(s) total.")
 
 
-def update_device(pm_number: str, updates: dict) -> None:
-    """Update a single device's fields by PM number.
+def _update_one(pm_number: str, updates: dict) -> bool:
+    """Apply field updates to one device and flag the mirror dirty.
 
-    Looks up the device, applies each field update (skipping non-updatable
-    fields), flushes to the database, and runs one mirror tick.
+    The dirty flag is persisted to ``mirror_state.json`` on every call, so
+    the owed workbook write survives even if the process dies before the
+    end-of-run tick.
 
     Args:
         pm_number: The PM number identifying the device (e.g. ``"PM-042"``).
-        updates: Mapping of field names to new values
-                 (e.g. ``{"image_path": "images/osc.jpg"}``).
+        updates: Mapping of field names to new values.
 
     Returns:
-        None. Progress is printed to stdout.
+        True when the device was found (updates were attempted), else False.
     """
     init_db()
     with get_session() as session:
@@ -82,7 +82,7 @@ def update_device(pm_number: str, updates: dict) -> None:
 
         if device is None:
             print(f"ERROR: No device found with PM number '{pm_number}'.")
-            return
+            return False
 
         for field, value in updates.items():
             if field not in UPDATABLE_FIELDS:
@@ -100,14 +100,40 @@ def update_device(pm_number: str, updates: dict) -> None:
         session.flush()
         print(f"Updated: {device.pm_number} ({device.name})")
 
-    # The workbook is a Pi-written mirror — flag the change and write it now.
-    from smart_locker.database.engine import get_engine
+    # The workbook is a Pi-written mirror — flag the change now. The flag is
+    # persisted, so a crash before the flush still leaves the write owed.
     from smart_locker.sync import mirror
 
     mirror.mark_dirty()
+    return True
+
+
+def _flush_mirror() -> None:
+    """Run one mirror tick so the workbook reflects the SQLite catalog."""
+    from smart_locker.database.engine import get_engine
+    from smart_locker.sync import mirror
+
     result = mirror.tick(get_engine(), trigger="manual")
     if result.get("error"):
         print(f"Mirror write deferred: {result['error']} (retries on the next tick)")
+
+
+def update_device(pm_number: str, updates: dict) -> None:
+    """Update a single device's fields by PM number.
+
+    Looks up the device, applies each field update (skipping non-updatable
+    fields), flushes to the database, and runs one mirror tick.
+
+    Args:
+        pm_number: The PM number identifying the device (e.g. ``"PM-042"``).
+        updates: Mapping of field names to new values
+                 (e.g. ``{"image_path": "images/osc.jpg"}``).
+
+    Returns:
+        None. Progress is printed to stdout.
+    """
+    if _update_one(pm_number, updates):
+        _flush_mirror()
 
 
 def batch_update(batch_file: str) -> None:
@@ -148,9 +174,14 @@ def batch_update(batch_file: str) -> None:
         pm, field, value = parts
         updates_by_pm.setdefault(pm, {})[field] = value
 
+    any_updated = False
     for pm, updates in updates_by_pm.items():
         print(f"\n--- {pm} ---")
-        update_device(pm, updates)
+        any_updated = _update_one(pm, updates) or any_updated
+
+    # One whole-sheet rewrite for the whole batch — not one per row.
+    if any_updated:
+        _flush_mirror()
 
 
 def auto_match_images() -> None:
@@ -207,7 +238,10 @@ def auto_match_images() -> None:
 
     print()
     for pm, filename in matched:
-        update_device(pm, {"image_path": f"images/{filename}"})
+        _update_one(pm, {"image_path": f"images/{filename}"})
+
+    # One whole-sheet rewrite for the whole run — not one per matched photo.
+    _flush_mirror()
 
     print(f"\nDone. {len(matched)} device(s) updated.")
 

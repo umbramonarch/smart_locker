@@ -21,14 +21,15 @@ table at the end.
 - [ ] Kiosk boots and runs correctly with the locker share **not yet connected** (Sections 4-5
       of `GUIDE.md` are all reachable with zero network).
 - [ ] **Last:** `/etc/smart-locker/cifs-credentials` filled; fstab line points at the real
-      `//SERVER/share`; `SMART_LOCKER_SOURCE_EXCEL_PATH` points at the workbook on the
+      `//SERVER/share`; `SMART_LOCKER_MIRROR_PATH` points at the workbook on the
       mounted `/mnt/locker` (`GUIDE.md` Section 6).
 
 ## 2. Boot & service
 
 - [ ] `sudo systemctl status smart-locker` → `active (running)`, no crash loop.
 - [ ] Kill the process (`sudo systemctl kill smart-locker`) → systemd restarts it (Restart=always).
-- [ ] `journalctl -u smart-locker -b` shows a clean startup and the startup source import.
+- [ ] `journalctl -u smart-locker -b` shows a clean startup and the startup mirror tick
+      (adopts an existing catalog sheet on first sight, otherwise writes pending changes).
 - [ ] After a full reboot, the service comes up headless with no login.
 
 ## 3. NFC reader — REAL hardware (QEMU cannot test this)
@@ -57,6 +58,11 @@ table at the end.
 - [ ] `mount | grep /mnt/locker` shows the CIFS mount; the mirror workbook is writable.
 - [ ] Admin panel → **Sync Sheet** runs a mirror tick; the sheet on the share is
       rewritten from the SQLite catalog. Check `journalctl` for the mirror write.
+- [ ] The **first** mirror write against an adopted sheet rewrites the whole sheet
+      to the catalog columns — extra/foreign columns are removed. Keep a copy of
+      the old sheet first if it carried notes.
+- [ ] Hand edits in the sheet are **held for admin review** on the dashboard
+      (Apply sheet edits / Keep database) — they are never silently merged.
 - [ ] Borrow or return on the kiosk updates **Location** in
       `device-list.xlsx` for that PM (`Locker` when in the locker, borrower name
       when out, `Maintenance` for a maintenance unit). If the file is open

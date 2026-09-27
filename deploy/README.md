@@ -68,7 +68,11 @@ sudo systemctl start smart-locker     # then reboot to test kiosk autostart
 sudo nano /etc/smart-locker/cifs-credentials              # real share login
 sudo nano /etc/fstab                  # add the line from deploy/mount/fstab.snippet
 sudo mount /mnt/locker && ls /mnt/locker                  # verify the share
-venv/bin/python -m scripts.sync_source --file "/mnt/locker/<workbook>.xlsx"
+
+# SQLite is the catalog; the workbook at SMART_LOCKER_MIRROR_PATH (.env) is a
+# Pi-written mirror. One manual tick adopts an existing sheet on first sight,
+# otherwise it writes the catalog out to it:
+venv/bin/python -m scripts.sync_source
 ```
 
 ## Verifying a running Pi

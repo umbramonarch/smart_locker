@@ -319,6 +319,9 @@ class DeviceRepository:
     def find_by_serial(session: Session, serial_number: str) -> Device | None:
         """Look up a device by manufacturer serial number.
 
+        Exact match first, then a case-folded match — sheet-typed serials
+        may differ only in letter case from the stored value.
+
         Args:
             session: Active database session.
             serial_number: Serial string as stored on the device.
@@ -326,8 +329,17 @@ class DeviceRepository:
         Returns:
             Device object or None if not found.
         """
-        stmt = select(Device).where(Device.serial_number == serial_number)
-        return session.execute(stmt).scalar_one_or_none()
+        want = (serial_number or "").strip()
+        if not want:
+            return None
+        found = session.execute(
+            select(Device).where(Device.serial_number == want)
+        ).scalar_one_or_none()
+        if found is not None:
+            return found
+        return session.execute(
+            select(Device).where(func.lower(Device.serial_number) == want.lower())
+        ).scalar_one_or_none()
 
     @staticmethod
     def set_locker_slot(session: Session, device: Device, locker_slot: int) -> None:

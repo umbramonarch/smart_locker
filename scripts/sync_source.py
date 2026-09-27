@@ -21,6 +21,21 @@ from config.logging_config import setup_logging
 from smart_locker.database.engine import get_engine, init_db
 
 
+def _fmt_side(value) -> str:
+    """Render one side of a diff for the console.
+
+    ``changed`` diffs carry a single cell string; ``added``/``removed``
+    diffs carry the whole canonical row as a list — join those cells into
+    one readable ``a | b | c`` line instead of a Python list repr.
+    """
+    if value is None:
+        return "-"
+    if isinstance(value, (list, tuple)):
+        cells = ["" if c is None else str(c) for c in value]
+        return " | ".join(cells) if cells else "-"
+    return str(value)
+
+
 def main() -> None:
     """Parse CLI arguments and run a mirror tick (or list sheet diffs).
 
@@ -50,7 +65,9 @@ def main() -> None:
             return
         for diff in diffs:
             print(f"  {diff['kind']}: {diff['pm_number']} "
-                  f"{diff.get('field', '')} sheet={diff.get('sheet')} db={diff.get('database')}")
+                  f"{diff.get('field') or ''} "
+                  f"sheet={_fmt_side(diff.get('sheet'))} "
+                  f"db={_fmt_side(diff.get('database'))}")
         return
 
     result = mirror.tick(get_engine(), trigger="manual")

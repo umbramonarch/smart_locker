@@ -127,6 +127,25 @@ def migrate() -> None:
         )
         print("  CREATE UNIQUE INDEX ix_devices_locker_slot")
 
+    # Unique PM/serial: ALTER TABLE-added columns cannot carry UNIQUE, so
+    # databases that grew through migrations get the constraint as a
+    # separate index. Pre-existing duplicates warn instead of crashing.
+    for idx, col in (
+        ("ix_devices_pm_number", "pm_number"),
+        ("ix_devices_serial_number", "serial_number"),
+    ):
+        if _index_exists(cur, idx):
+            print(f"  SKIP  {idx} (already exists)")
+            continue
+        try:
+            cur.execute(f"CREATE UNIQUE INDEX {idx} ON devices ({col})")
+            print(f"  CREATE UNIQUE INDEX {idx}")
+        except sqlite3.IntegrityError:
+            print(
+                f"  WARN  {idx} NOT created — duplicate {col} values exist; "
+                "dedupe manually"
+            )
+
     # --- Table creation: registrants (self-service registration name list) ---
     if _table_exists(cur, "registrants"):
         print("  SKIP  registrants table (already exists)")
