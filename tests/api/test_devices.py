@@ -57,7 +57,7 @@ class TestDeviceEndpoints:
         mock_context.session_mgr.start_session(test_user)
         user_session = mock_context.session_mgr.current_session
         # Borrow the camera
-        LockerService.borrow_device(db_session, user_session, test_devices[0].id)
+        assert LockerService.borrow_device(db_session, user_session, test_devices[0].id)
         db_session.commit()
 
         resp = client.get("/api/devices")
@@ -72,7 +72,7 @@ class TestDeviceEndpoints:
         """Devices borrowed by another user show their display name."""
         # Admin borrows the camera
         admin_session = mock_context.session_mgr.start_session(admin_user)
-        LockerService.borrow_device(db_session, admin_session, test_devices[0].id)
+        assert LockerService.borrow_device(db_session, admin_session, test_devices[0].id)
         db_session.commit()
 
         # Switch to test_user's session
@@ -137,7 +137,7 @@ class TestBorrowReturn:
         """Cannot borrow a device that's already borrowed."""
         mock_context.session_mgr.start_session(test_user)
         user_session = mock_context.session_mgr.current_session
-        LockerService.borrow_device(db_session, user_session, test_devices[0].id)
+        assert LockerService.borrow_device(db_session, user_session, test_devices[0].id)
         db_session.commit()
 
         resp = client.post(f"/api/devices/{test_devices[0].id}/borrow")
@@ -150,7 +150,7 @@ class TestBorrowReturn:
         """Verify POST /api/devices/{id}/return succeeds after borrowing."""
         mock_context.session_mgr.start_session(test_user)
         user_session = mock_context.session_mgr.current_session
-        LockerService.borrow_device(db_session, user_session, test_devices[0].id)
+        assert LockerService.borrow_device(db_session, user_session, test_devices[0].id)
         db_session.commit()
 
         resp = client.post(f"/api/devices/{test_devices[0].id}/return")
@@ -176,7 +176,7 @@ class TestBorrowReturn:
         """Non-admin cannot return another user's device."""
         # Admin borrows
         admin_session = mock_context.session_mgr.start_session(admin_user)
-        LockerService.borrow_device(db_session, admin_session, test_devices[0].id)
+        assert LockerService.borrow_device(db_session, admin_session, test_devices[0].id)
         db_session.commit()
 
         # Test user tries to return
@@ -191,7 +191,7 @@ class TestBorrowReturn:
         """Admin can return another user's device."""
         # Test user borrows
         user_session = mock_context.session_mgr.start_session(test_user)
-        LockerService.borrow_device(db_session, user_session, test_devices[0].id)
+        assert LockerService.borrow_device(db_session, user_session, test_devices[0].id)
         db_session.commit()
 
         # Admin returns

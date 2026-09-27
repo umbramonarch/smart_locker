@@ -36,10 +36,16 @@ def _as_date(due: date | datetime | str | None) -> date | None:
     if isinstance(due, date):
         return due
     if isinstance(due, str):
+        text = due.strip()
         try:
-            return date.fromisoformat(due.strip())
+            return date.fromisoformat(text)
         except ValueError:
-            return None
+            pass
+        # Sheet-style strings (DD.MM.YYYY, DD/MM/YYYY) share the catalog
+        # parser so a caller handing us sheet text does not fail open.
+        from smart_locker.sync.catalog_sheet import parse_date
+
+        return parse_date(text)
     return None
 
 
@@ -129,6 +135,9 @@ def calibration_fields(
     Returns:
         dict: ``{"calibration_state": ..., "calibration_days_left": ...}``.
     """
+    # One reference date for both fields — a request straddling midnight must
+    # not pair a state computed before rollover with a days_left after it.
+    today = today or date.today()
     return {
         "calibration_state": calibration_state(due, today),
         "calibration_days_left": days_left(due, today),

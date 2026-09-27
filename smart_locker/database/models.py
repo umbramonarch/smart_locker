@@ -22,7 +22,13 @@ from sqlalchemy import (
     String,
     Text,
 )
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.orm import (
+    DeclarativeBase,
+    Mapped,
+    mapped_column,
+    relationship,
+    validates,
+)
 
 
 class Base(DeclarativeBase):
@@ -196,6 +202,26 @@ class Device(Base):
     transactions: Mapped[list["TransactionLog"]] = relationship(
         back_populates="device"
     )
+
+    @validates("calibration_due")
+    def _normalize_calibration_due(self, key, value):
+        """Normalize sheet/CLI strings to ``date`` and reject garbage early.
+
+        ``None``/``date``/``datetime`` pass through ``parse_date``; a blank
+        string clears the column; a non-blank string that is not
+        DD.MM.YYYY / YYYY-MM-DD / DD/MM/YYYY raises ``ValueError`` so a
+        stray string can never reach the Date column.
+        """
+        from smart_locker.sync.catalog_sheet import parse_date
+
+        if isinstance(value, str):
+            if not value.strip():
+                return None
+            parsed = parse_date(value)
+            if parsed is None:
+                raise ValueError(f"calibration_due must be a date, got {value!r}")
+            return parsed
+        return parse_date(value)
 
     __table_args__ = (
         Index("ix_devices_tag_hmac", "tag_hmac", unique=True),

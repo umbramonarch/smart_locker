@@ -824,7 +824,7 @@ function safeKioskImagePath(raw) {
 function calDaysLeft(dev) {
   if (typeof dev.calibration_days_left === 'number') return dev.calibration_days_left;
   if (!dev.calibration_due) return null;
-  const due = new Date(`${dev.calibration_due}T00:00:00`);
+  const due = new Date(`${String(dev.calibration_due).slice(0, 10)}T00:00:00`);
   if (Number.isNaN(due.getTime())) return null;
   const today = new Date();
   today.setHours(0, 0, 0, 0);
@@ -868,7 +868,7 @@ function calBlocked(dev) {
 function calBadgeText(dev) {
   const state = calState(dev);
   const n = calDaysLeft(dev);
-  if (state === 'due_soon') return `CAL ${n}d`;
+  if (state === 'due_soon') return n === null ? 'CAL SOON' : `CAL ${n}d`;
   if (state === 'due') return 'CAL DUE';
   if (state === 'overdue') return 'CAL OVERDUE';
   return null;
@@ -1122,7 +1122,8 @@ function openDetail(dev, mode) {
   const calS    = calState(dev);
   const calDays = calDaysLeft(dev);
   if (dev.calibration_due && calS) {
-    const suffix = calS === 'overdue' ? `${-calDays}d overdue`
+    const suffix = calDays === null   ? ''
+                 : calS === 'overdue' ? `${-calDays}d overdue`
                  : calS === 'due'     ? 'due today'
                  : calS === 'due_soon' ? `in ${calDays}d`
                  : '';
@@ -1417,6 +1418,7 @@ async function acceptHandover() {
     }
   } else {
     showToast((result && result.message) || 'Could not transfer device.', 'error');
+    closeHandover();
   }
 }
 
@@ -3139,7 +3141,7 @@ document.querySelectorAll('.back-btn').forEach(btn =>
 );
 
 document.getElementById('detail-close').addEventListener('click',  () => { clickSound(); closeDetail();      });
-document.getElementById('confirm-btn').addEventListener('click',   () => { clickSound(); confirmAction();    });
+document.getElementById('confirm-btn').addEventListener('click',   () => { const b = document.getElementById('confirm-btn'); if (!b.classList.contains('disabled')) clickSound(); confirmAction(); });
 document.getElementById('stay-btn').addEventListener('click',      () => { clickSound(); dismissInactivity(); });
 document.getElementById('overlay-slot').addEventListener('click',  () => { clickSound(); dismissSlotOverlay(); });
 document.getElementById('handover-accept').addEventListener('click', () => { clickSound(); acceptHandover(); });

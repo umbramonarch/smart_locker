@@ -1021,6 +1021,7 @@ body::after {
   font-weight: 700;
   letter-spacing: 0.1em;
   text-transform: uppercase;
+  white-space: nowrap;
   z-index: 2;
 }
 .card-status.available { background: rgba(34,197,94,0.14);  border: 1px solid rgba(34,197,94,0.38);   color: var(--success); }
@@ -1037,6 +1038,7 @@ body::after {
   font-weight: 700;
   letter-spacing: 0.1em;
   text-transform: uppercase;
+  white-space: nowrap;
   z-index: 2;
 }
 .card-cal.due_soon { background: rgba(245,158,11,0.1);  border: 1px solid rgba(245,158,11,0.3);  color: var(--warning); }

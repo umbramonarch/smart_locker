@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 
 from config.settings import MAX_BORROWS
 from smart_locker.auth.session_manager import UserSession
-from smart_locker.database.models import DeviceStatus, UserRole
+from smart_locker.database.models import Device, DeviceStatus, UserRole
 from smart_locker.database.repositories import DeviceRepository, TransactionRepository, UserRepository
 from smart_locker.services.calibration import borrow_block_reason
 
@@ -234,6 +234,86 @@ class LockerService:
         return True
 
     @staticmethod
+    def check_transfer(
+        db_session: Session,
+        user_session: UserSession,
+        device: Device | None,
+    ) -> LoanOutcome:
+        """Preflight a handover: truthy when a transfer to this session may proceed.
+
+        Runs the same refusal ladder as ``transfer_device`` in the same order
+        — expired session, missing device, not borrowed, already held, no
+        recorded borrower, calibration block, borrow limit — so a caller can
+        refuse before offering the handover prompt.
+
+        Args:
+            db_session: Active database session.
+            user_session: Current authenticated user session.
+            device: Already-loaded device row, or None when the id missed.
+
+        Returns:
+            LoanOutcome — truthy when the transfer may proceed; ``reason``
+            says why a refusal happened.
+        """
+        if user_session.is_expired:
+            logger.warning("Transfer attempted with expired session.")
+            return LoanOutcome(False, "session expired — tap your card again")
+
+        if device is None:
+            logger.warning("Transfer failed: device not found.")
+            return LoanOutcome(False)
+
+        if device.status != DeviceStatus.BORROWED:
+            logger.warning(
+                "Transfer failed: device %d (%s) is not borrowed.",
+                device.id,
+                device.name,
+            )
+            return LoanOutcome(False, "not borrowed")
+
+        user = user_session.user
+        if device.current_borrower_id == user.id:
+            logger.warning(
+                "Transfer failed: device %d is already held by %s.",
+                device.id,
+                user.display_name,
+            )
+            return LoanOutcome(False, "already held by you")
+
+        if device.current_borrower_id is None:
+            logger.warning(
+                "Transfer failed: device %d has no recorded borrower.",
+                device.id,
+            )
+            return LoanOutcome(False)
+
+        block = borrow_block_reason(device.calibration_due)
+        if block is not None:
+            logger.warning(
+                "Transfer refused: %s (device=%d) — %s.",
+                device.name,
+                device.id,
+                block,
+            )
+            return LoanOutcome(False, block)
+
+        new_borrowed_count = DeviceRepository.count_borrowed_by_user(
+            db_session, user.id
+        )
+        if new_borrowed_count >= MAX_BORROWS:
+            logger.warning(
+                "Transfer failed: %s has reached the borrow limit (%d/%d).",
+                user.display_name,
+                new_borrowed_count,
+                MAX_BORROWS,
+            )
+            return LoanOutcome(
+                False, f"borrow limit reached ({new_borrowed_count}/{MAX_BORROWS})"
+            )
+
+        return LoanOutcome(True)
+
+    @staticmethod
     def transfer_device(
         db_session: Session,
         user_session: UserSession,
@@ -258,64 +338,13 @@ class LockerService:
             LoanOutcome — truthy on success; ``reason`` says why a refusal
             happened.
         """
-        if user_session.is_expired:
-            logger.warning("Transfer attempted with expired session.")
-            return LoanOutcome(False, "session expired — tap your card again")
-
         device = DeviceRepository.find_by_id(db_session, device_id)
-        if device is None:
-            logger.warning("Transfer failed: device %d not found.", device_id)
-            return LoanOutcome(False)
-
-        if device.status != DeviceStatus.BORROWED:
-            logger.warning(
-                "Transfer failed: device %d (%s) is not borrowed.",
-                device_id,
-                device.name,
-            )
-            return LoanOutcome(False, "not borrowed")
+        outcome = LockerService.check_transfer(db_session, user_session, device)
+        if not outcome:
+            return outcome
 
         user = user_session.user
-        if device.current_borrower_id == user.id:
-            logger.warning(
-                "Transfer failed: device %d is already held by %s.",
-                device_id,
-                user.display_name,
-            )
-            return LoanOutcome(False, "already held by you")
-
         original_borrower_id = device.current_borrower_id
-        if original_borrower_id is None:
-            logger.warning(
-                "Transfer failed: device %d has no recorded borrower.",
-                device_id,
-            )
-            return LoanOutcome(False)
-
-        block = borrow_block_reason(device.calibration_due)
-        if block is not None:
-            logger.warning(
-                "Transfer refused: %s (device=%d) — %s.",
-                device.name,
-                device_id,
-                block,
-            )
-            return LoanOutcome(False, block)
-
-        new_borrowed_count = DeviceRepository.count_borrowed_by_user(
-            db_session, user.id
-        )
-        if new_borrowed_count >= MAX_BORROWS:
-            logger.warning(
-                "Transfer failed: %s has reached the borrow limit (%d/%d).",
-                user.display_name,
-                new_borrowed_count,
-                MAX_BORROWS,
-            )
-            return LoanOutcome(
-                False, f"borrow limit reached ({new_borrowed_count}/{MAX_BORROWS})"
-            )
-
         original_borrower = UserRepository.find_by_id(db_session, original_borrower_id)
         original_name = original_borrower.display_name if original_borrower else "unknown"
 

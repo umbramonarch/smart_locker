@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from config.logging_config import setup_logging
 from smart_locker.database.engine import get_session, init_db
 from smart_locker.database.models import Device
+from smart_locker.sync.catalog_sheet import parse_date
 from smart_locker.sync.photo_matcher import photo_matches_device
 from sqlalchemy import select
 
@@ -92,6 +93,17 @@ def _update_one(pm_number: str, updates: dict) -> bool:
             if field == "locker_slot":
                 # locker_slot is an INTEGER column — cast string input to int
                 value = int(value) if value else None
+
+            if field == "calibration_due":
+                # calibration_due is a DATE column — parse string input
+                parsed = parse_date(value)
+                if parsed is None and isinstance(value, str) and value.strip():
+                    print(
+                        f"  SKIP: 'calibration_due' value '{value}' is not a "
+                        f"date (YYYY-MM-DD, DD.MM.YYYY, DD/MM/YYYY)."
+                    )
+                    continue
+                value = parsed
 
             old_val = getattr(device, field)
             setattr(device, field, value)

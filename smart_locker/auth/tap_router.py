@@ -567,9 +567,20 @@ def _auto_intent(
                 device, success=success, action="return", message=message
             )
 
-        # Another user holds the device; offer a handover instead of failing.
+        # Another user holds the device; offer a handover instead of failing —
+        # but only when the transfer could actually succeed (the service owns
+        # the refusal ladder: calibration block, borrow limit, …).
         current_holder = device.current_borrower
         current_holder_name = current_holder.display_name if current_holder else "someone"
+        check = LockerService.check_transfer(db_session, user_session, device)
+        if not check:
+            message = f"Could not transfer {name}"
+            if check.reason:
+                message += f": {check.reason}"
+            message += "."
+            return _device_action(
+                device, success=False, action="refused", message=message
+            )
         return TapResult(
             event="handover_requested",
             payload={

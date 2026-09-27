@@ -74,6 +74,7 @@ def _default_site_overlay(monkeypatch):
     monkeypatch.delenv("SMART_LOCKER_MAINTENANCE_TOKEN", raising=False)
     monkeypatch.delenv("SMART_LOCKER_PHOTO_INPUT_PATH", raising=False)
     monkeypatch.delenv("SMART_LOCKER_PUBLIC_URL", raising=False)
+    monkeypatch.delenv("SMART_LOCKER_CALIBRATION_WARN_DAYS", raising=False)
     monkeypatch.delenv("SMART_LOCKER_DASHBOARD_SHARE_PATH", raising=False)
     monkeypatch.delenv("SMART_LOCKER_DASHBOARD_ADMIN_SECRET", raising=False)
 

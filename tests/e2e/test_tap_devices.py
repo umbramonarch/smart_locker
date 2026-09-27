@@ -28,6 +28,8 @@ TAG_HANDOVER = "0A20000005"
 TAG_OVERLAY = "0A20000006"
 TAG_MAINTENANCE = "0A20000007"
 TAG_CAL_DUE = "0A20000008"
+TAG_HANDOVER_CAL = "0A20000009"
+TAG_HANDOVER_LIMIT = "0A2000000A"
 
 
 def _login(h, card_uid: str) -> dict:
@@ -313,4 +315,81 @@ def test_session_tap_on_cal_due_tag_reports_borrow_failure(e2e):
     assert _device_txns(h, device_id) == []
 
     # The refused borrow leaves the kiosk session open for the next try.
+    assert h.client.get("/api/session").json()["active"] is True
+
+
+def test_handover_prompt_suppressed_for_overdue_device(e2e):
+    """B taps A's overdue unit: refused device_action, no handover prompt."""
+    from datetime import date, timedelta
+
+    h = e2e()
+    user_a = add_user(h, CARD_A, display_name="User A")
+    add_user(h, CARD_B, display_name="User B")
+    due = date.today() - timedelta(days=1)
+    device_id = add_device(
+        h, name="Overdue Meter", pm_number="PM-9009", locker_slot=29,
+        tag_uid=TAG_HANDOVER_CAL, calibration_due=due,
+    )
+    _mark_borrowed(h, device_id, user_a)
+
+    _login(h, CARD_B)
+    h.tap(TAG_HANDOVER_CAL)
+
+    payload = h.wait_event("device_action")
+    assert payload["success"] is False
+    assert payload["action"] == "refused"
+    assert payload["message"] == (
+        f"Could not transfer Overdue Meter: "
+        f"calibration overdue (due {due.isoformat()})."
+    )
+    assert payload["device_id"] == device_id
+    assert payload["device_name"] == "Overdue Meter"
+    assert payload["locker_slot"] == 29
+    h.assert_no_event("handover_requested", within=1.0)
+
+    # The refused handover changed nothing: A still holds the unit.
+    device = get_device(h, device_id)
+    assert device.status == DeviceStatus.BORROWED
+    assert device.current_borrower_id == user_a
+    assert _device_txns(h, device_id) == []
+    assert h.client.get("/api/session").json()["active"] is True
+
+
+def test_handover_prompt_suppressed_at_borrow_limit(e2e):
+    """Receiver already at MAX_BORROWS: refused device_action, no prompt."""
+    from config.settings import MAX_BORROWS
+
+    h = e2e()
+    user_a = add_user(h, CARD_A, display_name="User A")
+    user_b = add_user(h, CARD_B, display_name="User B")
+    for i in range(MAX_BORROWS):
+        held_id = add_device(
+            h, name=f"B-Unit-{i}", pm_number=f"PM-91{i:02d}",
+            locker_slot=40 + i,
+        )
+        _mark_borrowed(h, held_id, user_b)
+    device_id = add_device(
+        h, name="Handover Target", pm_number="PM-9105", locker_slot=45,
+        tag_uid=TAG_HANDOVER_LIMIT,
+    )
+    _mark_borrowed(h, device_id, user_a)
+
+    _login(h, CARD_B)
+    h.tap(TAG_HANDOVER_LIMIT)
+
+    payload = h.wait_event("device_action")
+    assert payload["success"] is False
+    assert payload["action"] == "refused"
+    assert payload["message"] == (
+        f"Could not transfer Handover Target: "
+        f"borrow limit reached ({MAX_BORROWS}/{MAX_BORROWS})."
+    )
+    assert payload["device_id"] == device_id
+    h.assert_no_event("handover_requested", within=1.0)
+
+    # The refused handover changed nothing: A still holds the unit.
+    device = get_device(h, device_id)
+    assert device.status == DeviceStatus.BORROWED
+    assert device.current_borrower_id == user_a
+    assert _device_txns(h, device_id) == []
     assert h.client.get("/api/session").json()["active"] is True

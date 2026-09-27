@@ -591,7 +591,7 @@ class TestDashboardCatalogEditor:
         from smart_locker.services.locker_service import LockerService
 
         user_session = mock_context.session_mgr.start_session(test_user)
-        LockerService.borrow_device(db_session, user_session, test_devices[0].id)
+        assert LockerService.borrow_device(db_session, user_session, test_devices[0].id)
         db_session.commit()
         resp = client.delete(
             "/api/dashboard/devices/PM-001",
@@ -609,7 +609,7 @@ class TestDashboardCatalogEditor:
         from smart_locker.services.locker_service import LockerService
 
         user_session = mock_context.session_mgr.start_session(test_user)
-        LockerService.borrow_device(db_session, user_session, test_devices[0].id)
+        assert LockerService.borrow_device(db_session, user_session, test_devices[0].id)
         db_session.commit()
         LockerService.return_device(db_session, user_session, test_devices[0].id)
         db_session.commit()

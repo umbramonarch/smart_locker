@@ -2031,7 +2031,10 @@ def _parse_calibration(raw: str | None) -> "date | None":
     if parsed is None:
         raise HTTPException(
             status_code=422,
-            detail=f"Calibration date '{text}' is not a date (YYYY-MM-DD).",
+            detail=(
+                f"Calibration date '{text}' is not a date "
+                "(YYYY-MM-DD, DD.MM.YYYY, or DD/MM/YYYY — day-first)."
+            ),
         )
     return parsed
 
