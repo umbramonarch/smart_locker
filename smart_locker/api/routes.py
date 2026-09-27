@@ -2238,6 +2238,7 @@ def dashboard_to_maintenance(
     from smart_locker.services.device_catalog import (
         DeviceBorrowed,
         NotCabinetUnit,
+        UnknownPm,
         to_maintenance,
     )
 
@@ -2246,6 +2247,8 @@ def dashboard_to_maintenance(
         raise HTTPException(status_code=404, detail="Device not found.")
     try:
         changed = to_maintenance(db, device)
+    except UnknownPm as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
     except (NotCabinetUnit, DeviceBorrowed) as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
     return {"ok": True, "changed": changed, "device": catalog_record(device)}
@@ -2281,6 +2284,7 @@ def dashboard_back_in_service(
         InvalidCatalogField,
         NotCabinetUnit,
         NotInMaintenance,
+        UnknownPm,
         back_in_service,
     )
 
@@ -2291,6 +2295,8 @@ def dashboard_back_in_service(
         changed = back_in_service(
             db, device, _parse_calibration(body.calibration_due)
         )
+    except UnknownPm as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
     except InvalidCatalogField as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
     except (NotCabinetUnit, NotInMaintenance) as e:

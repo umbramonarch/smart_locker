@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 from config.settings import in_locker_token
@@ -36,6 +36,7 @@ from smart_locker.database.repositories import (
     TransactionRepository,
 )
 from smart_locker.services.device_catalog import (
+    CatalogError,
     apply_place_word,
     canonical_place,
     display_location,
@@ -410,9 +411,17 @@ def _adopt(engine, parsed: list[CatalogRow]) -> int:
         registrant_names: set[str] = set()
         has_location = any(r.location is not None for r in parsed)
         for row in parsed:
-            # Only real place words are excluded from the registrant seed —
-            # both tokens, while person names and free-text places seed.
-            if row.location and place_kind(row.location) == "other":
+            # Only person names seed the registrant list. "other" place
+            # cells still exclude the whole-word locker spellings
+            # ("Cabinet", "locker room" — places, not people) and the
+            # literal word "maintenance" for sites whose configured
+            # SMART_LOCKER_MAINTENANCE_TOKEN is a different word.
+            if (
+                row.location
+                and place_kind(row.location) == "other"
+                and not is_in_locker_location(row.location)
+                and row.location.strip().casefold() != "maintenance"
+            ):
                 registrant_names.add(row.location.strip())
             existing = DeviceRepository.find_by_pm(session, row.pm_number)
             if existing is not None:
@@ -437,9 +446,10 @@ def _adopt(engine, parsed: list[CatalogRow]) -> int:
                     # thing as the dashboard action, adoption included.
                     apply_place_word(session, existing, row.location)
                     session.commit()
-                except IntegrityError:
-                    # One bad row must not abort the whole adoption (and be
-                    # retried — and fail — on every tick).
+                except (IntegrityError, OperationalError, CatalogError):
+                    # One bad row — or a raced borrow/locked-database flush
+                    # inside apply_place_word — must not abort the whole
+                    # adoption (and be retried on every tick).
                     session.rollback()
                 continue
 
@@ -630,6 +640,18 @@ def apply_external(engine) -> dict:
                     skipped += 1
                     continue
                 if device is not None and is_registered(device):
+                    # A unit registered after the last baseline write diffs
+                    # as "added": its catalog fields stay SQLite-owned, but
+                    # the maintenance word in Location still applies like
+                    # it does on a "changed" diff.
+                    try:
+                        if apply_place_word(session, device, row.location):
+                            session.commit()
+                            applied += 1
+                            continue
+                        session.rollback()
+                    except (IntegrityError, OperationalError, CatalogError):
+                        session.rollback()
                     skipped += 1
                     continue
                 if device is None:
@@ -680,16 +702,24 @@ def apply_external(engine) -> dict:
                 if device is None or row is None:
                     skipped += 1
                     continue
-                if _apply_field(session, device, diff["field"], row):
-                    try:
+                # The flush inside _apply_field can raise before commit is
+                # reached (locked SQLite, a raced borrow in to_maintenance)
+                # — the guard covers the field write and the commit alike.
+                try:
+                    applied_row = _apply_field(
+                        session, device, diff["field"], row
+                    )
+                    if applied_row:
                         session.commit()
-                    except IntegrityError:
+                    else:
                         session.rollback()
-                        skipped += 1
-                        continue
+                except (IntegrityError, OperationalError, CatalogError):
+                    session.rollback()
+                    skipped += 1
+                    continue
+                if applied_row:
                     applied += 1
                 else:
-                    session.rollback()
                     skipped += 1
 
     state["external_pending"] = False

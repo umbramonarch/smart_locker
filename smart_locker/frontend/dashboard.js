@@ -397,13 +397,17 @@ async function fetchTables() {
 
 
 /**
- * Parallel Locker + optional Inventory + mirror-status GETs.
+ * Parallel Locker + optional Inventory + mirror-status GETs. An open
+ * admin overlay counts as wanting Inventory — its catalog buttons gate
+ * on those rows — and re-renders after the poll so they never go stale.
  *
  * @returns {Promise<void>}
  */
 async function _fetchTablesWork() {
   const tab = activeTabName();
-  const wantInventory = tab === 'inventory';
+  const overlay = document.getElementById('admin-overlay');
+  const adminOpen = !!(overlay && !overlay.hidden);
+  const wantInventory = tab === 'inventory' || adminOpen;
   const devicesP = fetch('/api/dashboard/devices')
     .then(async (res) => {
       if (res.ok) devicesData = await res.json();
@@ -438,6 +442,7 @@ async function _fetchTablesWork() {
   renderMirrorBanner();
   renderDevices();
   if (wantInventory) renderInventory();
+  if (adminOpen) renderAdminOverlay();
   updateTimestamp();
 }
 
@@ -716,6 +721,23 @@ function esc(str) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+
+/**
+ * Error detail from an API body — a string, or pydantic's list of issues.
+ *
+ * @param {Object} body - Parsed response JSON (may be null/non-object).
+ * @param {string} fallback - Text to use when the body has no detail.
+ * @returns {string} Human-readable error text.
+ */
+function detailText(body, fallback) {
+  if (body && Array.isArray(body.detail)) {
+    const msg = body.detail.map(e => e && e.msg ? String(e.msg) : String(e)).join(' ');
+    return msg || fallback;
+  }
+  if (body && body.detail) return String(body.detail);
+  return fallback;
 }
 
 
@@ -1194,13 +1216,23 @@ async function removeCatalogDevice(pm, btn) {
 
 /**
  * Take one cabinet unit out of service ("To maintenance" row action).
+ * Confirms in-place like Remove — returning needs a new calibration
+ * date, so this is not a toggle: first click arms 'Sure?', the second
+ * POSTs.
  *
  * @param {string} pm - Locker PM number.
  * @param {HTMLElement} btn - The button clicked (disabled while in flight).
  */
 async function toMaintenance(pm, btn) {
   const status = document.getElementById('admin-catalog-status');
-  if (btn) btn.disabled = true;
+  if (btn.dataset.armed !== '1') {
+    btn.dataset.armed = '1';
+    const orig = btn.textContent;
+    btn.textContent = 'Sure?';
+    setTimeout(() => { btn.dataset.armed = ''; btn.textContent = orig; }, 3000);
+    return;
+  }
+  btn.disabled = true;
   try {
     const res = await fetch(
       `/api/dashboard/devices/${encodeURIComponent(pm)}/maintenance`,
@@ -1214,7 +1246,7 @@ async function toMaintenance(pm, btn) {
       } else {
         try {
           const body = await res.json();
-          if (body && body.detail) detail = String(body.detail);
+          detail = detailText(body, detail);
         } catch (_) { /* keep default */ }
       }
       if (status) status.textContent = detail;
@@ -1226,7 +1258,7 @@ async function toMaintenance(pm, btn) {
   } catch (_) {
     if (status) status.textContent = 'Could not mark maintenance.';
   } finally {
-    if (btn) btn.disabled = false;
+    btn.disabled = false;
   }
 }
 
@@ -1236,7 +1268,9 @@ let serviceDialogPm = '';
 
 
 /**
- * Open the back-in-service dialog: the new calibration date is required.
+ * Open the back-in-service dialog: the new calibration date is required
+ * and never prefilled — the stale date may be why the unit went down, so
+ * the admin must pick a new one rather than confirm it unchanged.
  *
  * @param {string} pm - Locker PM number of a unit in maintenance.
  */
@@ -1247,7 +1281,7 @@ function openServiceDialog(pm) {
   const input = document.getElementById('service-calibration');
   const err = document.getElementById('service-dialog-error');
   if (pmEl) pmEl.textContent = row ? `${row.pm_number} — ${row.name}` : pm;
-  if (input) input.value = row && row.calibration_due ? row.calibration_due : '';
+  if (input) input.value = '';
   if (err) {
     err.textContent = '';
     err.style.display = 'none';
@@ -1310,7 +1344,7 @@ async function submitServiceDialog() {
       } else {
         try {
           const body = await res.json();
-          if (body && body.detail) detail = String(body.detail);
+          detail = detailText(body, detail);
         } catch (_) { /* keep default */ }
       }
       if (err) {
@@ -1319,8 +1353,19 @@ async function submitServiceDialog() {
       }
       return;
     }
+    // {ok, changed, device}: a still-due/overdue calibration_state means
+    // the borrow gate stays closed — say so instead of claiming full service.
+    let body = null;
+    try {
+      body = await res.json();
+    } catch (_) { /* no JSON — report plainly */ }
     closeServiceDialog();
-    if (status) status.textContent = `${pm} is back in service.`;
+    if (status) {
+      const state = body && body.device ? body.device.calibration_state : null;
+      status.textContent = (state === 'due' || state === 'overdue')
+        ? `${pm} is back in service — still unborrowable (calibration due ${body.device.calibration_due}).`
+        : `${pm} is back in service.`;
+    }
     await fetchTables();
     fetchAdminTables();
   } catch (_) {

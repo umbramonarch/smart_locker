@@ -13,7 +13,7 @@ Notes: Client-specific fields are selected at the API boundary; tag digests
 import logging
 from datetime import date
 
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, InvalidRequestError
 from sqlalchemy.orm import Session
 
 from config.settings import in_locker_token, maintenance_token
@@ -424,6 +424,10 @@ def remove_device(session: Session, device: Device) -> None:
 def to_maintenance(session: Session, device: Device) -> bool:
     """Take a cabinet unit out of service.
 
+    The AVAILABLE → MAINTENANCE write is a conditional UPDATE: a kiosk
+    borrow that committed after this session's status check wins the row,
+    and this call reports the conflict instead of overwriting the loan.
+
     Args:
         session: Active database session (caller commits).
         device: A cabinet unit (``locker_slot`` set).
@@ -433,7 +437,9 @@ def to_maintenance(session: Session, device: Device) -> bool:
 
     Raises:
         NotCabinetUnit: The row is not a cabinet unit.
-        DeviceBorrowed: The unit is borrowed right now.
+        DeviceBorrowed: The unit is borrowed right now — including a borrow
+            that raced this call and committed first.
+        UnknownPm: The row was deleted between the read and the write.
     """
     if not is_registered(device):
         raise NotCabinetUnit(f"{device.pm_number} is not a cabinet unit.")
@@ -441,8 +447,22 @@ def to_maintenance(session: Session, device: Device) -> bool:
         raise DeviceBorrowed(f"{device.pm_number} is borrowed — return it first.")
     if device.status == DeviceStatus.MAINTENANCE:
         return False
-    device.status = DeviceStatus.MAINTENANCE
-    session.flush()
+    moved = DeviceRepository.transition_status(
+        session, device, DeviceStatus.AVAILABLE, DeviceStatus.MAINTENANCE
+    )
+    if not moved:
+        # The snapshot was stale — read the state that won the row.
+        try:
+            session.refresh(device)
+        except InvalidRequestError as e:
+            raise UnknownPm(
+                f"{device.pm_number} was removed from the catalog."
+            ) from e
+        if device.status == DeviceStatus.BORROWED:
+            raise DeviceBorrowed(
+                f"{device.pm_number} is borrowed — return it first."
+            )
+        return False
     _mark_mirror_dirty(session)
     logger.info("To maintenance: %s (pm=%s).", device.name, device.pm_number)
     return True
@@ -467,6 +487,7 @@ def back_in_service(session: Session, device: Device, calibration_due: date | No
         NotCabinetUnit: The row is not a cabinet unit.
         NotInMaintenance: The unit is not in maintenance.
         InvalidCatalogField: No calibration date was given.
+        UnknownPm: The row was deleted between the read and the write.
     """
     if not is_registered(device):
         raise NotCabinetUnit(f"{device.pm_number} is not a cabinet unit.")
@@ -476,11 +497,26 @@ def back_in_service(session: Session, device: Device, calibration_due: date | No
         raise InvalidCatalogField(
             "Back in service needs the new calibration date."
         )
-    DeviceRepository.update_metadata(
-        session, device, calibration_due=calibration_due
+    # One conditional write carries the new date and clears any borrower
+    # reference: the predicate is checked at write time (a raced change
+    # wins the row), and a maintenance row that wrongly kept a borrower
+    # does not come back still attributed.
+    moved = DeviceRepository.transition_status(
+        session,
+        device,
+        DeviceStatus.MAINTENANCE,
+        DeviceStatus.AVAILABLE,
+        calibration_due=calibration_due,
+        current_borrower_id=None,
     )
-    device.status = DeviceStatus.AVAILABLE
-    session.flush()
+    if not moved:
+        try:
+            session.refresh(device)
+        except InvalidRequestError as e:
+            raise UnknownPm(
+                f"{device.pm_number} was removed from the catalog."
+            ) from e
+        raise NotInMaintenance(f"{device.pm_number} is not in maintenance.")
     _mark_mirror_dirty(session)
     logger.info(
         "Back in service: %s (pm=%s), calibration due %s.",
@@ -514,7 +550,12 @@ def apply_place_word(session: Session, device: Device, text: str | None) -> bool
         return False
     if device.status == DeviceStatus.MAINTENANCE:
         return True
-    return to_maintenance(session, device)
+    try:
+        return to_maintenance(session, device)
+    except DeviceBorrowed:
+        # A borrow landed between the status check and the write — that is
+        # "skipped", not an error worth surfacing into the mirror apply.
+        return False
 
 
 def registerable_devices(session: Session) -> list[Device]:

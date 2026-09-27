@@ -12,7 +12,7 @@ from datetime import date, timedelta
 
 import pytest
 
-from smart_locker.database.models import DeviceStatus
+from smart_locker.database.models import Device, DeviceStatus
 from smart_locker.database.repositories import DeviceRepository
 from smart_locker.services.locker_service import LockerService
 
@@ -152,6 +152,84 @@ class TestToMaintenance:
         )
         assert resp.status_code == 200
 
+    def test_lan_without_secret_is_401(self, lan_client, locker_unit):
+        """A LAN mutation without the secret is 401 — same as loopback."""
+        resp = lan_client.post("/api/dashboard/devices/PM-001/maintenance")
+        assert resp.status_code == 401
+
+    def test_stale_check_loses_to_committed_borrow(
+        self, db_session, locker_unit, test_user
+    ):
+        """A borrow committed between the status check and the write wins:
+        to_maintenance must raise DeviceBorrowed, not clobber the loan."""
+        from sqlalchemy.orm import Session
+        from smart_locker.database.engine import get_engine
+        from smart_locker.services.device_catalog import (
+            DeviceBorrowed,
+            to_maintenance,
+        )
+
+        db_session.commit()  # publish test_user for the borrower FK
+        # locker_unit in db_session still reads AVAILABLE — a stale snapshot.
+        with Session(get_engine()) as other:
+            rival = other.get(Device, locker_unit.id)
+            rival.status = DeviceStatus.BORROWED
+            rival.current_borrower_id = test_user.id
+            other.commit()
+
+        assert locker_unit.status == DeviceStatus.AVAILABLE
+        with pytest.raises(DeviceBorrowed):
+            to_maintenance(db_session, locker_unit)
+
+        db_session.expire_all()
+        assert locker_unit.status == DeviceStatus.BORROWED
+        assert locker_unit.current_borrower_id == test_user.id
+
+    def test_stale_borrow_loses_to_committed_maintenance(
+        self, db_session, locker_unit, test_user, mock_context
+    ):
+        """A maintenance commit between the availability check and the
+        borrow write wins: borrow_device refuses instead of overwriting."""
+        from sqlalchemy.orm import Session
+        from smart_locker.database.engine import get_engine
+
+        db_session.commit()
+        with Session(get_engine()) as other:
+            rival = other.get(Device, locker_unit.id)
+            rival.status = DeviceStatus.MAINTENANCE
+            other.commit()
+
+        assert locker_unit.status == DeviceStatus.AVAILABLE  # stale snapshot
+        user_session = mock_context.session_mgr.start_session(test_user)
+        outcome = LockerService.borrow_device(
+            db_session, user_session, locker_unit.id
+        )
+        assert not outcome
+        assert "maintenance" in outcome.reason
+
+        db_session.expire_all()
+        assert locker_unit.status == DeviceStatus.MAINTENANCE
+        assert locker_unit.current_borrower_id is None
+
+    def test_post_marks_mirror_dirty(
+        self, client, locker_unit, dashboard_secret, monkeypatch
+    ):
+        """The dashboard POST drives the deferred mirror pipeline — the
+        after_commit listener marks dirty and schedules the flush."""
+        from smart_locker.sync import mirror
+
+        calls = []
+        monkeypatch.setattr(mirror, "mark_dirty", lambda: calls.append("dirty"))
+        monkeypatch.setattr(
+            mirror, "schedule_flush", lambda: calls.append("flush")
+        )
+        resp = client.post(
+            "/api/dashboard/devices/PM-001/maintenance",
+            headers=dashboard_admin_headers(dashboard_secret),
+        )
+        assert resp.status_code == 200
+        assert calls == ["dirty", "flush"]
+
 
 class TestBackInService:
     """POST /api/dashboard/devices/{pm}/back-in-service."""
@@ -264,3 +342,53 @@ class TestBackInService:
         assert borrow.status_code == 200
         assert borrow.json()["success"] is False
         assert "calibration" in borrow.json()["message"].lower()
+
+    def test_raced_back_in_service_is_refused(
+        self, db_session, maintenance_unit
+    ):
+        """The row already left maintenance under us — the conditional
+        write misses and the call refuses instead of overwriting."""
+        from sqlalchemy.orm import Session
+        from smart_locker.database.engine import get_engine
+        from smart_locker.services.device_catalog import (
+            NotInMaintenance,
+            back_in_service,
+        )
+
+        with Session(get_engine()) as other:
+            rival = other.get(Device, maintenance_unit.id)
+            rival.status = DeviceStatus.AVAILABLE
+            other.commit()
+
+        # maintenance_unit in db_session still reads MAINTENANCE — stale.
+        assert maintenance_unit.status == DeviceStatus.MAINTENANCE
+        with pytest.raises(NotInMaintenance):
+            back_in_service(
+                db_session,
+                maintenance_unit,
+                date.today() + timedelta(days=90),
+            )
+
+        db_session.expire_all()
+        assert maintenance_unit.status == DeviceStatus.AVAILABLE
+
+    def test_back_in_service_clears_dangling_borrower(
+        self, db_session, locker_unit, test_user
+    ):
+        """A corrupted maintenance+borrower row comes back clean: one
+        conditional write restores AVAILABLE and clears the borrower FK."""
+        from smart_locker.services.device_catalog import back_in_service
+
+        db_session.commit()  # publish test_user for the borrower FK
+        locker_unit.status = DeviceStatus.MAINTENANCE
+        locker_unit.current_borrower_id = test_user.id
+        db_session.commit()
+
+        new_due = date.today() + timedelta(days=90)
+        assert back_in_service(db_session, locker_unit, new_due) is True
+        db_session.commit()
+
+        db_session.expire_all()
+        assert locker_unit.status == DeviceStatus.AVAILABLE
+        assert locker_unit.current_borrower_id is None
+        assert locker_unit.calibration_due == new_due

@@ -16,6 +16,7 @@ import logging
 from dataclasses import dataclass
 
 from sqlalchemy import event
+from sqlalchemy.exc import InvalidRequestError
 from sqlalchemy.orm import Session
 
 from config.settings import MAX_BORROWS
@@ -140,7 +141,29 @@ class LockerService:
                 False, f"borrow limit reached ({borrowed_count}/{MAX_BORROWS})"
             )
 
-        DeviceRepository.borrow(db_session, device, user.id)
+        if not DeviceRepository.borrow(db_session, device, user.id):
+            # The status checked above was a stale snapshot — another
+            # session committed a different state first (e.g. dashboard
+            # maintenance). Read the winning state and refuse with the
+            # same reasons as the early check.
+            try:
+                db_session.refresh(device)
+            except InvalidRequestError:
+                # The row was deleted mid-race — a plain refusal.
+                return LoanOutcome(False)
+            reason = (
+                "in maintenance"
+                if device.status == DeviceStatus.MAINTENANCE
+                else "already borrowed"
+            )
+            logger.warning(
+                "Borrow failed: device %d (%s) became %s during the check.",
+                device_id,
+                device.name,
+                device.status.value,
+            )
+            return LoanOutcome(False, reason)
+
         TransactionRepository.log_borrow(db_session, user.id, device_id, notes)
         user_session.touch()
         _write_location(db_session)
@@ -355,7 +378,11 @@ class LockerService:
             device_id=device_id,
             notes=f"transferred to {user.display_name}",
         )
-        DeviceRepository.borrow(db_session, device, user.id)
+        # Defensive: our own return flush made the row AVAILABLE inside this
+        # transaction, so a refused borrow here can only be a raced write —
+        # refuse rather than overwrite the winning state.
+        if not DeviceRepository.borrow(db_session, device, user.id):
+            return LoanOutcome(False)
         TransactionRepository.log_borrow(
             db_session,
             user.id,

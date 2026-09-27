@@ -9,7 +9,10 @@ Description: Adversarial-review hardening coverage for the catalog mirror.
              still detected; a timed-out write that lands late is not flagged
              as a hand edit; a busy reader fails fast; write_sheet rewrites
              the PM-column sheet rather than whatever sheet is active; and
-             apply_external skips a diff whose commit raises IntegrityError.
+             apply_external skips a diff whose commit raises IntegrityError
+             or whose field write flushes into an OperationalError, while a
+             unit registered after the baseline write diffs as "added" yet
+             still takes the maintenance word.
 Project: smart_locker/tests/e2e
 Notes: start_scheduler is monkeypatched off per test so the only ticks are
        the ones the test drives — adopt/detect/flush ordering stays
@@ -23,7 +26,7 @@ import time
 
 import pytest
 from openpyxl import Workbook, load_workbook
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 from config.settings import in_locker_token, maintenance_token
@@ -34,8 +37,8 @@ from smart_locker.services.device_catalog import registerable_devices
 from smart_locker.sync import mirror, scheduler, sync_status
 from smart_locker.sync.catalog_sheet import MIRROR_HEADERS
 from smart_locker.sync.workbook_adapter import WorkbookAdapter
-from tests.api.helpers import catalog_workbook
-from tests.e2e.helpers import add_device
+from tests.api.helpers import catalog_workbook, dashboard_admin_headers
+from tests.e2e.helpers import add_device, add_user
 from tests.e2e.test_mirror import (
     CATALOG_HEADERS,
     _drain_mirror,
@@ -182,8 +185,9 @@ def test_adoption_place_tokens_and_registrant_exclusions(
     e2e, tmp_path, monkeypatch
 ):
     """The Maintenance token and in-locker token never seed registrants; a
-    whole-word locker place ("Cabinet") stores the in-locker token so the
-    adopted row is registerable instead of stranded in limbo."""
+    whole-word locker place ("Cabinet", "locker room") stores the in-locker
+    token so the adopted row is registerable instead of stranded in limbo —
+    and neither spelling is a person name for the registrant list."""
     _no_scheduler(monkeypatch)
     path = catalog_workbook(tmp_path, [
         CATALOG_HEADERS,
@@ -191,6 +195,7 @@ def test_adoption_place_tokens_and_registrant_exclusions(
         ["PM-2", "Beta", "Tool", "M", "Mod", "S2", "Cabinet"],
         ["PM-3", "Gamma", "Tool", "M", "Mod", "S3", "Locker"],
         ["PM-4", "Delta", "Tool", "M", "Mod", "S4", "Alice Smith"],
+        ["PM-5", "Epsilon", "Tool", "M", "Mod", "S5", "locker room"],
     ])
     _point_mirror_at(monkeypatch, path)
     h = e2e()
@@ -204,19 +209,24 @@ def test_adoption_place_tokens_and_registrant_exclusions(
         assert maintenance_token() not in registrants
         assert in_locker_token() not in registrants
         assert "Maintenance" not in registrants
+        # Whole-word locker spellings are places, not person names.
+        assert "Cabinet" not in registrants
+        assert "locker room" not in registrants
         assert "Alice Smith" in registrants
 
         pm1 = DeviceRepository.find_by_pm(db, "PM-1")
         pm2 = DeviceRepository.find_by_pm(db, "PM-2")
         pm3 = DeviceRepository.find_by_pm(db, "PM-3")
         pm4 = DeviceRepository.find_by_pm(db, "PM-4")
+        pm5 = DeviceRepository.find_by_pm(db, "PM-5")
         assert pm1.location == maintenance_token()
         assert pm2.location == in_locker_token()   # "Cabinet" → token, not limbo
         assert pm3.location == in_locker_token()
         assert pm4.location == "Alice Smith"
+        assert pm5.location == in_locker_token()   # "locker room" → token
 
         registerable = {d.pm_number for d in registerable_devices(db)}
-    assert {"PM-2", "PM-3"} <= registerable
+    assert {"PM-2", "PM-3", "PM-5"} <= registerable
     assert "PM-1" not in registerable
 
     # The regenerated sheet writes the canonical token for in-locker rows.
@@ -654,3 +664,180 @@ def test_last_write_snapshot_categorizes_error():
     snap = mirror.last_write()
     assert snap["error"] == "missing"
     assert "/mnt" not in (snap["error"] or "")
+
+
+def test_added_diff_maintenance_word_on_registered_row(
+    e2e, tmp_path, monkeypatch
+):
+    """A unit registered after the last baseline write is absent from
+    last_write_rows, so its hand-written sheet row diffs as "added" — and
+    the maintenance word in its Location must still transition the unit."""
+    _no_scheduler(monkeypatch)
+    path = tmp_path / "mirror.xlsx"
+    _point_mirror_at(monkeypatch, path)
+    h = e2e()
+    add_device(h, name="Camera", pm_number="PM-100", locker_slot=1)
+
+    result = _tick_now()
+    assert result["error"] is None
+    assert _mirror_cell(path, "PM-100") == in_locker_token()
+
+    # Registered in SQLite after the baseline write: not in
+    # last_write_rows, so a sheet row for it is an "added" diff. The sheet
+    # rewrite must carry every baseline row plus the new one.
+    device_id = add_device(h, name="Scope", pm_number="PM-500", locker_slot=2)
+    _write_sheet(path, [
+        CATALOG_HEADERS,
+        ["PM-100", "Camera", "Tool", "", "", "", in_locker_token()],
+        ["PM-500", "Scope", "Tool", "", "", "", maintenance_token()],
+    ])
+    result = _tick_now()
+    assert result["external"] is True
+
+    outcome = mirror.apply_external(get_engine())
+    assert outcome["applied"] >= 1
+    with h.db() as db:
+        device = DeviceRepository.find_by_id(db, device_id)
+        assert device.status == DeviceStatus.MAINTENANCE
+
+    # The converged sheet writes the canonical token on the new row.
+    _drain_mirror()
+    assert _mirror_cell(path, "PM-500") == maintenance_token()
+
+
+def test_added_diff_maintenance_word_skipped_while_borrowed(
+    e2e, tmp_path, monkeypatch
+):
+    """The "added" branch honors the same borrow guard as "changed": a
+    unit registered and loaned after the baseline write stays borrowed —
+    the loan owns the row, the sheet word cannot park it."""
+    _no_scheduler(monkeypatch)
+    path = tmp_path / "mirror.xlsx"
+    _point_mirror_at(monkeypatch, path)
+    h = e2e()
+    user_id = add_user(h, "0A30000001", display_name="E2E Borrower")
+    add_device(h, name="Camera", pm_number="PM-100", locker_slot=1)
+
+    result = _tick_now()
+    assert result["error"] is None
+
+    device_id = add_device(
+        h, name="Scope", pm_number="PM-500", locker_slot=2, status="borrowed"
+    )
+    with h.db() as db:
+        device = DeviceRepository.find_by_id(db, device_id)
+        device.current_borrower_id = user_id
+        db.commit()
+
+    _write_sheet(path, [
+        CATALOG_HEADERS,
+        ["PM-100", "Camera", "Tool", "", "", "", in_locker_token()],
+        ["PM-500", "Scope", "Tool", "", "", "", maintenance_token()],
+    ])
+    result = _tick_now()
+    assert result["external"] is True
+
+    outcome = mirror.apply_external(get_engine())
+    assert outcome["skipped"] >= 1
+    with h.db() as db:
+        device = DeviceRepository.find_by_id(db, device_id)
+        assert device.status == DeviceStatus.BORROWED
+        assert device.current_borrower_id == user_id
+
+
+def test_apply_external_flush_error_is_skipped_not_raised(
+    e2e, tmp_path, monkeypatch
+):
+    """A flush-time failure inside _apply_field (OperationalError from a
+    locked SQLite/tired SD, CatalogError from a raced borrow) is a skipped
+    diff — apply_external must not raise, or the route turns it into a
+    bare 500 and external_pending stays set."""
+    _no_scheduler(monkeypatch)
+    path = tmp_path / "mirror.xlsx"
+    _point_mirror_at(monkeypatch, path)
+    h = e2e()
+    device_id = add_device(h, name="Scope", pm_number="PM-100", locker_slot=1)
+
+    result = _tick_now()
+    assert result["error"] is None
+    assert _mirror_cell(path, "PM-100") == in_locker_token()
+
+    _edit_location(path, "PM-100", "maintenance")
+    result = _tick_now()
+    assert result["external"] is True
+
+    def broken_place_word(session, device, text):
+        raise OperationalError("x", None, None)
+
+    monkeypatch.setattr(mirror, "apply_place_word", broken_place_word)
+    try:
+        outcome = mirror.apply_external(get_engine())
+    finally:
+        mirror.flush_scheduled()
+    assert outcome["skipped"] >= 1
+    with h.db() as db:
+        device = DeviceRepository.find_by_id(db, device_id)
+        assert device.status == DeviceStatus.AVAILABLE
+
+
+@pytest.mark.parametrize("word", ["MAINTENANCE", " maintenance "])
+def test_maintenance_word_case_and_padding_apply(
+    e2e, tmp_path, monkeypatch, word
+):
+    """place_kind strips and case-folds the cell: an uppercase or padded
+    spelling of the maintenance word still applies the transition."""
+    _no_scheduler(monkeypatch)
+    path = tmp_path / "mirror.xlsx"
+    _point_mirror_at(monkeypatch, path)
+    h = e2e()
+    device_id = add_device(h, name="Scope", pm_number="PM-100", locker_slot=1)
+
+    result = _tick_now()
+    assert result["error"] is None
+    assert _mirror_cell(path, "PM-100") == in_locker_token()
+
+    _edit_location(path, "PM-100", word)
+    result = _tick_now()
+    assert result["external"] is True
+
+    outcome = mirror.apply_external(get_engine())
+    assert outcome["applied"] >= 1
+    with h.db() as db:
+        device = DeviceRepository.find_by_id(db, device_id)
+        assert device.status == DeviceStatus.MAINTENANCE
+
+
+def test_apply_external_via_dashboard_route(e2e, tmp_path, monkeypatch):
+    """The HTTP wiring: POST /api/dashboard/mirror/apply runs apply_external
+    behind the admin-secret gate — 401 without the header, the same apply
+    counts with it."""
+    _no_scheduler(monkeypatch)
+    path = tmp_path / "mirror.xlsx"
+    _point_mirror_at(monkeypatch, path)
+    h = e2e()
+    add_device(h, name="Camera", pm_number="PM-100", locker_slot=1)
+    monkeypatch.setenv("SMART_LOCKER_DASHBOARD_ADMIN_SECRET", "e2e-secret")
+
+    result = _tick_now()
+    assert result["error"] is None
+
+    _edit_location(path, "PM-100", "maintenance")
+    result = _tick_now()
+    assert result["external"] is True
+
+    # The gate is the header, not the button — no header, no apply.
+    resp = h.client.post("/api/dashboard/mirror/apply")
+    assert resp.status_code == 401
+
+    resp = h.client.post(
+        "/api/dashboard/mirror/apply",
+        headers=dashboard_admin_headers("e2e-secret"),
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["applied"] >= 1
+    mirror.flush_scheduled()
+    with h.db() as db:
+        device = DeviceRepository.find_by_pm(db, "PM-100")
+        assert device.status == DeviceStatus.MAINTENANCE

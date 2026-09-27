@@ -13,7 +13,7 @@ Notes: All write operations call session.flush() to assign IDs immediately
 import logging
 from datetime import date, datetime, timezone
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session, selectinload
 
 from smart_locker.database.models import (
@@ -173,17 +173,70 @@ class DeviceRepository:
         return list(session.execute(stmt).scalars().all())
 
     @staticmethod
-    def borrow(session: Session, device: Device, user_id: int) -> None:
+    def transition_status(
+        session: Session,
+        device: Device,
+        expect: DeviceStatus,
+        to: DeviceStatus,
+        **fields,
+    ) -> bool:
+        """Move a device to ``to`` only while its row still holds ``expect``.
+
+        The ``expect`` predicate is part of the UPDATE's WHERE clause, so it
+        is evaluated atomically at write time — a status change another
+        session committed after this session's earlier read wins the row,
+        and this statement matches zero rows instead of overwriting the
+        newer state. Extra column writes (borrower id, calibration date)
+        ride along in the same UPDATE.
+
+        Args:
+            session: Active database session.
+            device: Device row to transition (bound to ``session``).
+            expect: Status the row must hold for the write to land.
+            to: Status to set when the predicate matches.
+            **fields: Extra column values written with the transition.
+
+        Returns:
+            True only when the row moved. On False the row holds a state
+            this session has not seen — the caller refreshes to read the
+            winning state.
+        """
+        stmt = (
+            update(Device)
+            .where(Device.id == device.id, Device.status == expect)
+            .values(status=to, **fields)
+        )
+        result = session.execute(stmt)
+        if result.rowcount != 1:
+            return False
+        session.refresh(device)
+        return True
+
+    @staticmethod
+    def borrow(session: Session, device: Device, user_id: int) -> bool:
         """Mark a device as borrowed by the given user.
+
+        The AVAILABLE → BORROWED write is conditional: the UPDATE only
+        lands while the row is still available, so a maintenance write
+        that committed after the caller's availability check wins instead
+        of being overwritten.
 
         Args:
             session: Active database session.
             device: Device object to borrow.
             user_id: ID of the borrowing user.
+
+        Returns:
+            True when the borrow landed; False when the row was no longer
+            available (the caller refreshes to read the winning state).
         """
-        device.status = DeviceStatus.BORROWED
-        device.current_borrower_id = user_id
-        session.flush()
+        return DeviceRepository.transition_status(
+            session,
+            device,
+            DeviceStatus.AVAILABLE,
+            DeviceStatus.BORROWED,
+            current_borrower_id=user_id,
+        )
 
     @staticmethod
     def return_device(session: Session, device: Device) -> None:

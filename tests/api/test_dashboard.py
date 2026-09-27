@@ -57,9 +57,11 @@ class TestDashboardInventoryAndDisplay:
         assert van["name"] == "Van kit"
         assert van["location"] == "Workshop"
         assert van["in_locker"] is False
+        assert "status" in van
         locker = next(r for r in rows if r["pm_number"] == "PM-001")
         assert locker["in_locker"] is True
         assert locker["location"] == "Locker"
+        assert locker["status"] == "available"
         assert "locker_slot" not in van
         assert "tag_hmac" not in van
         assert "uid_hmac" not in van
