@@ -178,6 +178,47 @@ class TestRegistrantEndpoints:
 class TestRegisterDeviceApi:
     """Admin POST /api/admin/devices/register promotes a catalog row."""
 
+    def test_registerable_requires_session(self, client, mock_context):
+        resp = client.get("/api/admin/devices/registerable")
+        assert resp.status_code == 401
+
+    def test_registerable_rejects_non_admin(
+        self, client, mock_context, test_user
+    ):
+        mock_context.session_mgr.start_session(test_user)
+        resp = client.get("/api/admin/devices/registerable")
+        assert resp.status_code == 403
+
+    def test_registerable_lists_only_waiting_rows(
+        self, client, mock_context, admin_user, test_devices, db_session
+    ):
+        """In-locker place + no slot is offered; everything else is excluded."""
+        waiting = DeviceRepository.create(
+            db_session,
+            name="Bench Scope",
+            device_type="Tool",
+            pm_number="PM-WAIT",
+        )
+        waiting.location = "locker"  # any capitalization is the place word
+        shelf = DeviceRepository.create(
+            db_session,
+            name="Shelf Meter",
+            device_type="Tool",
+            pm_number="PM-SHELF",
+        )
+        shelf.location = "Shelf 3"
+        db_session.commit()
+        mock_context.session_mgr.start_session(admin_user)
+
+        resp = client.get("/api/admin/devices/registerable")
+        assert resp.status_code == 200
+        rows = {d["pm_number"]: d for d in resp.json()}
+        assert "PM-WAIT" in rows
+        assert "PM-SHELF" not in rows
+        # test_devices rows already hold a slot — not offered again.
+        assert "PM-001" not in rows
+        assert rows["PM-WAIT"]["name"] == "Bench Scope"
+
     def test_register_requires_session(self, client, mock_context):
         resp = client.post(
             "/api/admin/devices/register",

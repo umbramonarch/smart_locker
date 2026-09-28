@@ -47,8 +47,27 @@ class TestDeviceEndpoints:
         assert "model" in cam
         assert "barcode" not in cam
         assert "calibration_due" in cam
-        assert cam["has_tag"] is False
+        assert cam["has_tag"] is True
         assert "tag_hmac" not in cam
+
+    def test_list_devices_excludes_untagged(
+        self, client, mock_context, test_user, test_devices, db_session
+    ):
+        """A cabinet unit with no sticker is absent from the kiosk list."""
+        DeviceRepository.create(
+            db_session,
+            name="Fresh Unit",
+            device_type="Tool",
+            pm_number="PM-NEW",
+            locker_slot=9,
+        )
+        db_session.commit()
+        mock_context.session_mgr.start_session(test_user)
+        resp = client.get("/api/devices")
+        assert resp.status_code == 200
+        names = {d["name"] for d in resp.json()}
+        assert "Fresh Unit" not in names
+        assert "Camera" in names
 
     def test_list_devices_borrower_name_you(
         self, client, mock_context, test_user, test_devices, db_session

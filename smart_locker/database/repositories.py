@@ -516,6 +516,21 @@ class DeviceRepository:
         )
         return list(session.execute(stmt).scalars().all())
 
+    @staticmethod
+    def list_tagged_by_slot(session: Session) -> list[Device]:
+        """Return locker rows with a sticker bound, in slot/name order.
+
+        The kiosk borrow and return grids show only units that have a
+        sticker — an untagged row stays on the admin manage list until one
+        is bound.
+        """
+        stmt = (
+            select(Device)
+            .where(Device.locker_slot.is_not(None), Device.tag_hmac.is_not(None))
+            .order_by(Device.locker_slot, Device.name)
+        )
+        return list(session.execute(stmt).scalars().all())
+
 
 class TransactionRepository:
     """Data access layer for TransactionLog audit records.

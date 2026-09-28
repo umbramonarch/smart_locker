@@ -46,12 +46,12 @@ function applyAssetLabel(label) {
   const addHint = document.getElementById('bind-add-hint');
   if (addHint) {
     addHint.textContent =
-      `Pick a catalog unit (or type its ${text}), choose a free slot, then continue to tap the sticker.`;
+      'Pick a unit waiting for the locker, choose a free slot, then tap the sticker.';
   }
   const search = document.getElementById('bind-search');
   if (search) search.placeholder = `Search name or ${text}…`;
-  const pmInput = document.getElementById('bind-pm-input');
-  if (pmInput) pmInput.placeholder = text;
+  const addSearch = document.getElementById('bind-add-search');
+  if (addSearch) addSearch.placeholder = `Search name or ${text}…`;
 }
 
 /**
@@ -102,13 +102,13 @@ let demoUserIdx = 0;
 
 const DEMO_DEVICES = [
   { id:1, pm_number:'PM-001', name:'Keysight DSOX3054T',  device_type:'Oscilloscope',   serial_number:'MY12345678',  manufacturer:'Keysight',       model:'DSOX3054T',   locker_slot:1,  description:null, image_path:null, calibration_due:'2026-09-15', status:'available',   borrower_name:null, has_tag:false },
-  { id:2, pm_number:'PM-002', name:'Rohde & Schwarz HMC8043', device_type:'Power Supply', serial_number:'RS-HMC-042', manufacturer:'Rohde & Schwarz', model:'HMC8043',    locker_slot:2,  description:null, image_path:null, calibration_due:'2026-11-01', status:'borrowed',    borrower_name:'Sarah K.' },
-  { id:3, pm_number:'PM-003', name:'Fluke 87V',           device_type:'Multimeter',     serial_number:'FL-87V-007',  manufacturer:'Fluke',          model:'87V',         locker_slot:3,  description:null, image_path:null, calibration_due:'2026-06-30', status:'available',   borrower_name:null       },
-  { id:4, pm_number:'PM-004', name:'Keysight 34465A',     device_type:'Multimeter',     serial_number:'MY98765432',  manufacturer:'Keysight',       model:'34465A',      locker_slot:4,  description:null, image_path:null, calibration_due:null,         status:'available',   borrower_name:null       },
-  { id:5, pm_number:'PM-005', name:'Fluke i400s',         device_type:'Current Probe',  serial_number:null,          manufacturer:'Fluke',          model:'i400s',       locker_slot:5,  description:null, image_path:null, calibration_due:'2027-01-15', status:'borrowed',    borrower_name:'You'      },
-  { id:6, pm_number:'PM-006', name:'Tektronix TBS2104X',  device_type:'Oscilloscope',   serial_number:'TEK-TBS-099', manufacturer:'Tektronix',      model:'TBS2104X',    locker_slot:6,  description:null, image_path:null, calibration_due:'2026-08-20', status:'available',   borrower_name:null       },
-  { id:7, pm_number:'PM-007', name:'Hioki DT4282',        device_type:'Multimeter',     serial_number:null,          manufacturer:'Hioki',          model:'DT4282',      locker_slot:7,  description:null, image_path:null, calibration_due:null,         status:'available',   borrower_name:null       },
-  { id:8, pm_number:'PM-008', name:'Megger MIT485/2',     device_type:'Insulation Tester', serial_number:'MEG-485-002', manufacturer:'Megger',      model:'MIT485/2', locker_slot:8,  description:null, image_path:null, calibration_due:'2026-12-01', status:'maintenance', borrower_name:null       },
+  { id:2, pm_number:'PM-002', name:'Rohde & Schwarz HMC8043', device_type:'Power Supply', serial_number:'RS-HMC-042', manufacturer:'Rohde & Schwarz', model:'HMC8043',    locker_slot:2,  description:null, image_path:null, calibration_due:'2026-11-01', status:'borrowed',    borrower_name:'Sarah K.', has_tag:true },
+  { id:3, pm_number:'PM-003', name:'Fluke 87V',           device_type:'Multimeter',     serial_number:'FL-87V-007',  manufacturer:'Fluke',          model:'87V',         locker_slot:3,  description:null, image_path:null, calibration_due:'2026-06-30', status:'available',   borrower_name:null,       has_tag:true },
+  { id:4, pm_number:'PM-004', name:'Keysight 34465A',     device_type:'Multimeter',     serial_number:'MY98765432',  manufacturer:'Keysight',       model:'34465A',      locker_slot:4,  description:null, image_path:null, calibration_due:null,         status:'available',   borrower_name:null,       has_tag:true },
+  { id:5, pm_number:'PM-005', name:'Fluke i400s',         device_type:'Current Probe',  serial_number:null,          manufacturer:'Fluke',          model:'i400s',       locker_slot:5,  description:null, image_path:null, calibration_due:'2027-01-15', status:'borrowed',    borrower_name:'You',      has_tag:true },
+  { id:6, pm_number:'PM-006', name:'Tektronix TBS2104X',  device_type:'Oscilloscope',   serial_number:'TEK-TBS-099', manufacturer:'Tektronix',      model:'TBS2104X',    locker_slot:6,  description:null, image_path:null, calibration_due:'2026-08-20', status:'available',   borrower_name:null,       has_tag:true },
+  { id:7, pm_number:'PM-007', name:'Hioki DT4282',        device_type:'Multimeter',     serial_number:null,          manufacturer:'Hioki',          model:'DT4282',      locker_slot:7,  description:null, image_path:null, calibration_due:null,         status:'available',   borrower_name:null,       has_tag:true },
+  { id:8, pm_number:'PM-008', name:'Megger MIT485/2',     device_type:'Insulation Tester', serial_number:'MEG-485-002', manufacturer:'Megger',      model:'MIT485/2', locker_slot:8,  description:null, image_path:null, calibration_due:'2026-12-01', status:'maintenance', borrower_name:null,       has_tag:true },
 ];
 
 /** @type {string[]} Demo registrant names for testing the name list without backend */
@@ -142,8 +142,20 @@ async function apiAuthTap(uid_hmac) {
  * @returns {Promise<Array<Object>>} Array of device objects, or empty array on error.
  */
 async function apiGetDevices() {
-  if (USE_DEMO) { await sleep(280); return DEMO_DEVICES; } // simulate fetch latency
+  if (USE_DEMO) { await sleep(280); return DEMO_DEVICES.filter(d => d.has_tag); } // simulate fetch latency
   const res = await fetch('/api/devices');
+  if (!res.ok) return [];
+  return await res.json();
+}
+
+/**
+ * Fetch every locker unit for the admin manage list — untagged rows
+ * included, since binding a sticker is what the list is for.
+ * @returns {Promise<Array<Object>>} Array of device objects, or empty array on error.
+ */
+async function apiGetAdminDevices() {
+  if (USE_DEMO) { await sleep(280); return DEMO_DEVICES; }
+  const res = await fetch('/api/admin/devices');
   if (!res.ok) return [];
   return await res.json();
 }
@@ -2541,6 +2553,15 @@ async function adminRegisterUser() {
 /** @type {number|null} Bind-window countdown interval. */
 let bindCountdownTimer = null;
 
+/** @type {Array<Object>} Locker units on the admin manage list (tagged or not). */
+let bindDevices = [];
+/** @type {Array<Object>} Catalog rows the Register Device add step offers. */
+let registerableRows = [];
+/** @type {string|null} PM of the catalog row picked on the add step. */
+let selectedAddPm = null;
+/** Debounce timer for the add-step search (filters registerableRows). */
+let addSearchTimer = 0;
+
 /**
  * Show a Register Device overlay step and hide the others.
  * @param {string} stepId - Element id of the step to show.
@@ -2599,20 +2620,21 @@ let bindSearchTimer = 0;
 
 /**
  * Fetch devices and render the bind list: name + PM (+ slot), unbound first.
- * Duplicate names stay as distinct rows (PM identifies the unit).
+ * Duplicate names stay as distinct rows (PM identifies the unit). The manage
+ * list needs untagged rows too, so it reads the admin feed — not the
+ * tagged-only kiosk list the borrow/return grids show.
  * Search filters the cached list; pass refresh=true after a bind/register.
  *
- * @param {boolean} [refresh=true] - When false, filter ``S.devices`` without a GET.
+ * @param {boolean} [refresh=true] - When false, filter ``bindDevices`` without a GET.
  * @returns {Promise<void>}
  */
 async function populateBindList(refresh) {
   const list = document.getElementById('bind-device-list');
   if (!list) return;
-  if (refresh !== false || !Array.isArray(S.devices)) {
-    const devices = await apiGetDevices();
-    S.devices = devices;
+  if (refresh !== false) {
+    bindDevices = await apiGetAdminDevices();
   }
-  const devices = S.devices || [];
+  const devices = bindDevices;
   const query = (document.getElementById('bind-search').value || '').toLowerCase().trim();
   const filtered = devices.filter(d => {
     if (!query) return true;
@@ -2737,7 +2759,7 @@ let selectedChangeSlot = null;
  */
 function occupiedSlots(exceptId) {
   const used = new Set();
-  (S.devices || []).forEach(d => {
+  bindDevices.forEach(d => {
     if (d.locker_slot == null) return;
     if (exceptId != null && d.id === exceptId) return;
     used.add(d.locker_slot);
@@ -2801,29 +2823,60 @@ function startBindCountdown() {
 
 /**
  * Fetch the catalog rows eligible for Register Device (place = locker word,
- * no slot yet) and render them as pickable rows on the add step.
+ * no slot yet) into ``registerableRows``, then render the picker. The
+ * add-step field filters this list — the id a unit registers under always
+ * comes from a picked row, never free text.
  * @returns {Promise<void>}
  */
 async function loadRegisterableList() {
-  const list = document.getElementById('bind-registerable-list');
-  if (!list) return;
-  list.innerHTML = '';
-  let rows = [];
   try {
     const res = await fetch('/api/admin/devices/registerable');
-    if (res.ok) rows = await res.json();
-  } catch (_) { /* leave the typed-PM fallback */ }
+    registerableRows = res.ok ? await res.json() : [];
+  } catch (_) {
+    registerableRows = [];
+  }
+  renderRegisterableList();
+}
+
+/**
+ * Render the registerable rows filtered by the add-step search input.
+ * Tapping a row selects it; a selection that falls outside the filter is
+ * cleared so Continue can only pick a visible row.
+ */
+function renderRegisterableList() {
+  const list = document.getElementById('bind-registerable-list');
+  if (!list) return;
+  const search = document.getElementById('bind-add-search');
+  const query = (search && search.value || '').toLowerCase().trim();
+  const rows = registerableRows.filter(r => {
+    if (!query) return true;
+    return (r.name || '').toLowerCase().includes(query)
+        || (r.pm_number || '').toLowerCase().includes(query);
+  });
+  if (selectedAddPm && !rows.some(r => r.pm_number === selectedAddPm)) {
+    selectedAddPm = null;
+  }
+  list.innerHTML = '';
+  if (!rows.length) {
+    const empty = document.createElement('p');
+    empty.className = 'bind-hint';
+    empty.textContent = registerableRows.length
+      ? 'No units match the search.'
+      : 'No catalog units are waiting to be registered.';
+    list.appendChild(empty);
+    return;
+  }
   rows.forEach(row => {
     const btn = document.createElement('button');
     btn.type = 'button';
-    btn.className = 'bind-registerable';
+    btn.className = 'bind-registerable'
+      + (row.pm_number === selectedAddPm ? ' selected' : '');
     btn.textContent = `${row.name} (${row.pm_number})`;
     btn.addEventListener('click', () => {
       clickSound();
-      document.getElementById('bind-pm-input').value = row.pm_number;
-      list.querySelectorAll('.bind-registerable').forEach(b =>
-        b.classList.toggle('selected', b === btn)
-      );
+      selectedAddPm = row.pm_number === selectedAddPm ? null : row.pm_number;
+      document.getElementById('bind-add-error').textContent = '';
+      renderRegisterableList();
     });
     list.appendChild(btn);
   });
@@ -2838,9 +2891,10 @@ function openAddCatalogUnit() {
     showToast('Register Device is Pi only', 'error');
     return;
   }
-  document.getElementById('bind-pm-input').value = '';
+  document.getElementById('bind-add-search').value = '';
   document.getElementById('bind-add-error').textContent = '';
   selectedAddSlot = null;
+  selectedAddPm = null;
   const paint = () => {
     renderSlotGrid('bind-slot-grid', occupiedSlots(), selectedAddSlot, n => {
       selectedAddSlot = n;
@@ -2861,11 +2915,11 @@ async function submitRegisterDevice() {
     showToast('Register Device is Pi only', 'error');
     return;
   }
-  const pm = (document.getElementById('bind-pm-input').value || '').trim();
+  const pm = selectedAddPm;
   const err = document.getElementById('bind-add-error');
   err.textContent = '';
   if (!pm) {
-    err.textContent = `Enter the ${ASSET_LABEL}.`;
+    err.textContent = 'Pick a unit from the list.';
     return;
   }
   if (!selectedAddSlot) {
@@ -3228,6 +3282,10 @@ document.getElementById('bind-device-close').addEventListener('click', () => { c
 document.getElementById('bind-search').addEventListener('input', () => {
   clearTimeout(bindSearchTimer);
   bindSearchTimer = setTimeout(() => { populateBindList(false); }, 200);
+});
+document.getElementById('bind-add-search').addEventListener('input', () => {
+  clearTimeout(addSearchTimer);
+  addSearchTimer = setTimeout(renderRegisterableList, 200);
 });
 document.getElementById('bind-add-open').addEventListener('click', () => { clickSound(); openAddCatalogUnit(); });
 document.getElementById('bind-add-back').addEventListener('click', () => { clickSound(); showBindStep('bind-step-list'); populateBindList(); });

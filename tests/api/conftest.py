@@ -107,7 +107,7 @@ def admin_user(db_session):
 
 @pytest.fixture()
 def test_devices(db_session):
-    """Create a set of test devices."""
+    """Create a set of test devices — cabinet units with stickers bound."""
     devices = []
     for i, (name, dtype, status) in enumerate([
         ("Camera", "Camera", DeviceStatus.AVAILABLE),
@@ -123,6 +123,8 @@ def test_devices(db_session):
             locker_slot=i,
             description=f"Test {name}",
         )
+        # Kiosk borrow/return grids list only units that carry a sticker.
+        DeviceRepository.bind_tag(db_session, d, f"tag-hmac-{i:03d}")
         if status == DeviceStatus.MAINTENANCE:
             d.status = DeviceStatus.MAINTENANCE
             db_session.flush()

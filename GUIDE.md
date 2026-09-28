@@ -778,8 +778,8 @@ ways catalog rows arrive:
   secret, see Section 8) has a catalog editor — add, edit, remove.
 - **Register a locker unit.** A catalog row becomes a locker device when an admin
   uses **Register Device** at the kiosk: pick a registerable row (no slot yet,
-  Location = the in-locker word) or type its **PM**, pick a **free slot**, tap the
-  NFC sticker. Unknown PM or a taken slot → error, no ghost row.
+  Location = the in-locker word; the field filters the list), pick a
+  **free slot**, tap the NFC sticker. A taken slot → error, no ghost row.
 
 Hand edits to the sheet are never merged silently — Section 8 covers how the
 dashboard flags them and what **Apply** / **Keep database** do.
@@ -875,10 +875,10 @@ it still asks for a work card first.
   work card first. A **borrowed** sticker at idle returns the device.
 - **Main menu** — welcome + name; **Tap the device** to borrow or return; **Locker**
   (what's in · what's out) and **Return** (*or pick on screen*); **End Session**.
-- **Locker** — availability overlay: every locker device by slot, tagged **IN** / **OUT**
-  / **YOURS** / **MAINT**, with **PM number** on the card. Screen-pick borrow still
-  works for units without a sticker. A sticker tap still auto-intents and refreshes
-  this grid.
+- **Locker** — availability overlay: every locker device with a sticker, by slot,
+  tagged **IN** / **OUT** / **YOURS** / **MAINT**, with **PM number** on the card.
+  A unit with no sticker is absent until an admin binds one. A sticker tap still
+  auto-intents and refreshes this grid.
 - **Return** — the same grid (PM on each card), with your own borrowed items highlighted.
   Confirming a return shows the slot overlay.
 - **Device detail** (overlay) — photo, PM, type, serial, and a confirm button.
@@ -917,10 +917,10 @@ Pi on the LAN can use them — the lock is **physical access**, not a password.
      After success, timeout, or cancel the kiosk returns to idle; the next
      work-card tap logs that user in (a leftover admin session must not
      treat the tap as logout).
-   - **Register Device** — promote a catalog row into a locker unit: pick a
-     registerable row (no slot, Location = the in-locker word) or type its **PM**,
-     pick a **free slot**, tap the sticker. Existing rows can bind / unbind /
-     change slot. The list shows **name + PM** (and slot).
+   - **Register Device** — promote a catalog row into a locker unit: the field
+     filters the registerable list (no slot, Location = the in-locker word),
+     pick a row, pick a **free slot**, tap the sticker. Existing rows can
+     bind / unbind / change slot. The list shows **name + PM** (and slot).
    - **Software Update** — plug in the USB stick (`locker-updates/` from
      `python -m scripts.copy_update`), then apply. Full-screen overlay, then the kiosk
      reloads. Do not copy onto `/home/locker/smart_locker` in the file manager.

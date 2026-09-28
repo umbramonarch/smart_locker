@@ -683,19 +683,22 @@ def list_devices(
     db: Session = Depends(get_db),
     user_session: UserSession = Depends(require_session),
 ):
-    """List all devices with borrower info for the kiosk UI.
+    """List tagged locker devices with borrower info for the kiosk UI.
 
-    Returns a flat list of device dicts with status and borrower name.
-    The current user's own borrowed devices show ``"You"`` as the borrower.
+    The borrow and return grids show only units that have a sticker bound —
+    a registered row without a tag stays on the admin manage list
+    (``GET /api/admin/devices``) until one is bound. The current user's own
+    borrowed devices show ``"You"`` as the borrower.
 
     Args:
         db: Database session (injected by ``get_db``).
         user_session: The active session (injected by ``require_session``).
 
     Returns:
-        list[dict]: One dict per device with id, name, status, borrower_name, etc.
+        list[dict]: One dict per tagged device with id, name, status,
+                    borrower_name, etc.
     """
-    devices = DeviceRepository.list_by_slot(db)
+    devices = DeviceRepository.list_tagged_by_slot(db)
     current_user_id = user_session.user.id
     return [
         {"id": d.id, **device_record(d, current_user_id=current_user_id),
@@ -1325,6 +1328,38 @@ def start_admin_registration(
         name, user_session.user.display_name,
     )
     return {"success": True, "message": "Tap the new user's NFC card to complete registration."}
+
+
+@router.get("/api/admin/devices")
+def list_admin_devices(
+    db: Session = Depends(get_db),
+    user_session: UserSession = Depends(require_session),
+):
+    """Every locker unit for the admin manage list (bind, unbind, slot).
+
+    Unlike the kiosk ``GET /api/devices`` — which feeds the borrow/return
+    grids — this feed includes rows with no sticker yet: binding one is
+    what the list is for. Same record shape plus the internal ``id`` the
+    bind-tag endpoints key on.
+
+    Args:
+        db: Database session (injected by ``get_db``).
+        user_session: The active admin session (injected by
+            ``require_session``).
+
+    Returns:
+        list[dict]: One dict per locker device, ordered by slot then name.
+
+    Raises:
+        HTTPException: 403 if not admin.
+    """
+    if user_session.user.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Admin access required.")
+
+    return [
+        {"id": d.id, **device_record(d)}
+        for d in DeviceRepository.list_by_slot(db)
+    ]
 
 
 @router.get("/api/admin/devices/registerable")

@@ -647,12 +647,13 @@
       </div>
 
       <div class="bind-step hidden" id="bind-step-add">
-        <p class="bind-hint" id="bind-add-hint">Pick a catalog unit (or type its PM), choose a free slot, then continue to tap the sticker.</p>
-        <div class="bind-device-list bind-registerable-list" id="bind-registerable-list"></div>
-        <div class="register-input-group bind-pm-group">
-          <input type="text" id="bind-pm-input" class="register-input" placeholder="PM number" maxlength="50" autocomplete="off" spellcheck="false">
+        <p class="bind-hint" id="bind-add-hint">Pick a unit waiting for the locker, choose a free slot, then tap the sticker.</p>
+        <div class="register-search-group bind-search-group">
+          <svg class="register-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+          <input type="text" id="bind-add-search" class="register-input register-search-input" placeholder="Search name or PM…" autocomplete="off" spellcheck="false">
           <div class="register-input-glow"></div>
         </div>
+        <div class="bind-device-list bind-registerable-list" id="bind-registerable-list"></div>
         <div class="bind-slot-grid" id="bind-slot-grid"></div>
         <div class="bind-add-actions">
           <button type="button" class="bind-unbind" id="bind-add-back">Back</button>

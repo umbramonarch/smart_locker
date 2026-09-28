@@ -21,7 +21,7 @@ from smart_locker.security.hashing import compute_uid_hmac
 import smart_locker.api.app_context as ctx_module
 
 class TestDeviceTagBindApi:
-    """Auth gates for bind/unbind, has_tag on the kiosk list, duplicate names."""
+    """Auth gates for bind/unbind, has_tag on the manage list, duplicate names."""
 
     def test_bind_tag_requires_session(self, client, mock_context, test_devices):
         """POST /api/admin/devices/{id}/bind-tag returns 401 without a session."""
@@ -97,7 +97,11 @@ class TestDeviceTagBindApi:
         assert resp.json()["success"] is True
         db_session.expire_all()
         assert test_devices[0].tag_hmac is None
-        listed = client.get("/api/devices").json()
+        # The untagged unit leaves the kiosk grids but stays on the
+        # admin manage list — binding a new sticker is done from there.
+        kiosk = client.get("/api/devices").json()
+        assert "Camera" not in {d["name"] for d in kiosk}
+        listed = client.get("/api/admin/devices").json()
         cam = next(d for d in listed if d["name"] == "Camera")
         assert cam["has_tag"] is False
         assert "tag_hmac" not in cam
@@ -206,8 +210,41 @@ class TestAdminOverlaySession:
         assert mock_context.pending_tag_bind.device_id == 1
         assert mock_context.pending_tag_bind.from_dashboard is True
 
+    def test_admin_devices_requires_session(self, client, mock_context):
+        """GET /api/admin/devices returns 401 without a session."""
+        resp = client.get("/api/admin/devices")
+        assert resp.status_code == 401
+
+    def test_admin_devices_rejects_non_admin(
+        self, client, mock_context, test_user
+    ):
+        """GET /api/admin/devices returns 403 for a normal user."""
+        mock_context.session_mgr.start_session(test_user)
+        resp = client.get("/api/admin/devices")
+        assert resp.status_code == 403
+
+    def test_admin_devices_lists_untagged_units(
+        self, client, mock_context, admin_user, test_devices, db_session
+    ):
+        """A cabinet unit with no sticker stays on the manage list."""
+        DeviceRepository.create(
+            db_session,
+            name="Fresh Unit",
+            device_type="Tool",
+            pm_number="PM-NEW",
+            locker_slot=9,
+        )
+        db_session.commit()
+        mock_context.session_mgr.start_session(admin_user)
+        resp = client.get("/api/admin/devices")
+        assert resp.status_code == 200
+        by_name = {d["name"]: d for d in resp.json()}
+        assert by_name["Fresh Unit"]["has_tag"] is False
+        assert "tag_hmac" not in by_name["Fresh Unit"]
+        assert by_name["Camera"]["has_tag"] is True
+
     def test_list_devices_duplicate_name_distinct_pm(
-        self, client, mock_context, test_user, db_session
+        self, client, mock_context, admin_user, db_session
     ):
         """Same name, different PM — both rows in the bind-list payload."""
         DeviceRepository.create(
@@ -225,8 +262,8 @@ class TestAdminOverlaySession:
             locker_slot=2,
         )
         db_session.commit()
-        mock_context.session_mgr.start_session(test_user)
-        resp = client.get("/api/devices")
+        mock_context.session_mgr.start_session(admin_user)
+        resp = client.get("/api/admin/devices")
         assert resp.status_code == 200
         rows = [d for d in resp.json() if d["name"] == "Fluke 87V"]
         assert len(rows) == 2

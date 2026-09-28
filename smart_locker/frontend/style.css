@@ -2215,7 +2215,6 @@ body::after {
   width: 100%;
   cursor: pointer;
 }
-.bind-pm-group { width: 100%; max-width: 100%; }
 .bind-slot-grid {
   width: 100%;
   display: grid;

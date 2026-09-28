@@ -21,7 +21,7 @@ TODAY = date.today()
 
 def _mk_device(db_session, *, pm, slot, cal=None, name=None):
     """One cabinet unit (slot assigned) with an optional calibration date."""
-    return DeviceRepository.create(
+    device = DeviceRepository.create(
         db_session,
         name=name or f"Meter {pm}",
         device_type="Tool",
@@ -29,6 +29,9 @@ def _mk_device(db_session, *, pm, slot, cal=None, name=None):
         locker_slot=slot,
         calibration_due=cal,
     )
+    # Cabinet units on the kiosk grids carry a sticker.
+    DeviceRepository.bind_tag(db_session, device, f"tag:{pm}")
+    return device
 
 
 class TestCalibrationBorrowBlock:
