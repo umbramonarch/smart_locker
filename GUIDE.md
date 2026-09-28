@@ -920,7 +920,8 @@ Pi on the LAN can use them — the lock is **physical access**, not a password.
    - **Register Device** — promote a catalog row into a locker unit: the field
      filters the registerable list (no slot, Location = the in-locker word),
      pick a row, pick a **free slot**, tap the sticker. Existing rows can
-     bind / unbind / change slot. The list shows **name + PM** (and slot).
+     bind / unbind / change slot (unbind is refused while the unit is
+     borrowed). The list shows **name + PM** (and slot).
    - **Software Update** — plug in the USB stick (`locker-updates/` from
      `python -m scripts.copy_update`), then apply. Full-screen overlay, then the kiosk
      reloads. Do not copy onto `/home/locker/smart_locker` in the file manager.
@@ -1468,7 +1469,8 @@ still logs out; a device tag does not. An unknown UID while logged in stays logg
 Location = the in-locker word) or enter its **PM**, pick a **free slot**, tap the
 sticker. The row is already in SQLite — registering assigns the slot, nothing is
 copied from a file. Unknown PM or a taken slot fails with no ghost row. Existing
-rows can bind / unbind / change slot. The list shows **name + PM**. CLI bind-only:
+rows can bind / unbind / change slot (unbind is refused while the unit is
+borrowed). The list shows **name + PM**. CLI bind-only:
 `python -m scripts.enroll_device_tag --pm PM-001` (or `--uid HEX`, `--force` to replace).
 
 ---

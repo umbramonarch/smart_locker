@@ -69,6 +69,29 @@ class TestDeviceEndpoints:
         assert "Fresh Unit" not in names
         assert "Camera" in names
 
+    def test_list_devices_includes_borrowed_untagged(
+        self, client, mock_context, test_user, test_devices, db_session
+    ):
+        """A unit borrowed while untagged stays on the grid so the stranded
+        loan can still be screen-pick returned."""
+        DeviceRepository.create(
+            db_session,
+            name="Stranded Loan",
+            device_type="Tool",
+            pm_number="PM-STR",
+            locker_slot=9,
+            status="borrowed",
+            current_borrower_id=test_user.id,
+        )
+        db_session.commit()
+        mock_context.session_mgr.start_session(test_user)
+        resp = client.get("/api/devices")
+        assert resp.status_code == 200
+        row = next(d for d in resp.json() if d["name"] == "Stranded Loan")
+        assert row["status"] == "borrowed"
+        assert row["has_tag"] is False
+        assert row["borrower_name"] == "You"
+
     def test_list_devices_borrower_name_you(
         self, client, mock_context, test_user, test_devices, db_session
     ):
@@ -149,6 +172,23 @@ class TestBorrowReturn:
         resp = client.post(f"/api/devices/{laptop.id}/borrow")
         data = resp.json()
         assert data["success"] is False
+
+    def test_borrow_untagged_unit_refused(
+        self, client, mock_context, test_user, db_session
+    ):
+        """A cabinet unit with no sticker bound cannot be borrowed."""
+        device = DeviceRepository.create(
+            db_session,
+            name="Fresh Unit",
+            device_type="Tool",
+            pm_number="PM-NEW",
+            locker_slot=9,
+        )
+        db_session.commit()
+        mock_context.session_mgr.start_session(test_user)
+        resp = client.post(f"/api/devices/{device.id}/borrow")
+        assert resp.status_code == 200
+        assert resp.json()["success"] is False
 
     def test_borrow_already_borrowed(
         self, client, mock_context, test_user, test_devices, db_session

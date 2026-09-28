@@ -17,6 +17,7 @@ from smart_locker.auth.session_manager import SessionManager
 from smart_locker.database.models import DeviceStatus, UserRole
 from smart_locker.database.repositories import DeviceRepository, RegistrantRepository, UserRepository
 from smart_locker.security.hashing import compute_uid_hmac
+from smart_locker.services.locker_service import LockerService
 
 import smart_locker.api.app_context as ctx_module
 
@@ -82,15 +83,10 @@ class TestDeviceTagBindApi:
         assert resp.status_code == 403
 
     def test_unbind_tag_accepts_admin(
-        self, client, mock_context, admin_user, test_devices, db_session, hmac_key
+        self, client, mock_context, admin_user, test_devices, db_session
     ):
         """Admin unbind-tag clears tag_hmac; GET list has has_tag False."""
-        DeviceRepository.bind_tag(
-            db_session,
-            test_devices[0],
-            compute_uid_hmac("AABBCCDD", hmac_key),
-        )
-        db_session.commit()
+        # test_devices rows are already sticker-bound.
         mock_context.session_mgr.start_session(admin_user)
         resp = client.post(f"/api/admin/devices/{test_devices[0].id}/unbind-tag")
         assert resp.status_code == 200
@@ -108,20 +104,27 @@ class TestDeviceTagBindApi:
         assert mock_context.pending_tag_bind is None
 
     def test_unbind_tag_clears_pending_bind(
-        self, client, mock_context, admin_user, test_devices, db_session, hmac_key
+        self, client, mock_context, admin_user, test_devices
     ):
         """Kiosk unbind cancels an armed bind window so the next tap is not rebound."""
-        DeviceRepository.bind_tag(
-            db_session,
-            test_devices[0],
-            compute_uid_hmac("AABBCCDD", hmac_key),
-        )
-        db_session.commit()
         mock_context.session_mgr.start_session(admin_user)
         mock_context.pending_tag_bind = PendingTagBind(device_id=test_devices[0].id)
         resp = client.post(f"/api/admin/devices/{test_devices[0].id}/unbind-tag")
         assert resp.status_code == 200
         assert mock_context.pending_tag_bind is None
+
+    def test_unbind_tag_borrowed_is_409(
+        self, client, mock_context, admin_user, test_devices, db_session
+    ):
+        """Unbind is refused while the unit is borrowed — the loan owns the row."""
+        session = mock_context.session_mgr.start_session(admin_user)
+        assert LockerService.borrow_device(db_session, session, test_devices[0].id)
+        db_session.commit()
+
+        resp = client.post(f"/api/admin/devices/{test_devices[0].id}/unbind-tag")
+        assert resp.status_code == 409
+        db_session.expire_all()
+        assert test_devices[0].tag_hmac is not None
 
     def test_unbind_tag_unknown_device(self, client, mock_context, admin_user):
         """POST unbind-tag returns 404 when the device id does not exist."""
@@ -276,15 +279,10 @@ class TestAdminOverlaySession:
             assert "tag_hmac" not in d
 
     def test_list_devices_has_tag_true(
-        self, client, mock_context, test_user, test_devices, db_session, hmac_key
+        self, client, mock_context, test_user, test_devices
     ):
         """has_tag is True when tag_hmac is set; digest is not in the payload."""
-        DeviceRepository.bind_tag(
-            db_session,
-            test_devices[0],
-            compute_uid_hmac("AABBCCDD", hmac_key),
-        )
-        db_session.commit()
+        # test_devices rows are already sticker-bound.
         mock_context.session_mgr.start_session(test_user)
         resp = client.get("/api/devices")
         cam = next(d for d in resp.json() if d["name"] == "Camera")

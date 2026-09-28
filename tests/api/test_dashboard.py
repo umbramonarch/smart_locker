@@ -20,6 +20,7 @@ from smart_locker.database.repositories import DeviceRepository, RegistrantRepos
 from smart_locker.security.hashing import compute_uid_hmac
 
 import smart_locker.api.app_context as ctx_module
+from smart_locker.services.locker_service import LockerService
 from tests.api.helpers import dashboard_admin_headers
 
 
@@ -387,6 +388,24 @@ class TestDashboardTagApi:
         )
         assert resp.status_code == 200
         assert mock_context.pending_tag_bind is None
+
+    def test_unbind_tag_borrowed_is_409(
+        self, client, mock_context, test_user, test_devices, db_session,
+        dashboard_secret,
+    ):
+        """Dashboard unbind is refused while the unit is borrowed."""
+        session = mock_context.session_mgr.start_session(test_user)
+        assert LockerService.borrow_device(db_session, session, test_devices[0].id)
+        db_session.commit()
+
+        resp = client.post(
+            "/api/dashboard/unbind-tag",
+            json={"pm_number": "PM-001"},
+            headers=dashboard_admin_headers(dashboard_secret),
+        )
+        assert resp.status_code == 409
+        db_session.expire_all()
+        assert test_devices[0].tag_hmac is not None
 
     def test_bind_refused_while_kiosk_session_active(
         self, client, mock_context, test_user, test_devices, dashboard_secret

@@ -190,7 +190,17 @@ def catalog_record(device: Device) -> dict:
 
 
 def unbind_device_tag(session, device: Device) -> None:
-    """Clear a tag through the same service for either authorized client."""
+    """Clear a tag through the same service for either authorized client.
+
+    Args:
+        session: Active database session (caller commits).
+        device: Device row to unbind.
+
+    Raises:
+        DeviceBorrowed: The unit is borrowed right now — return it first.
+    """
+    if device.status == DeviceStatus.BORROWED:
+        raise DeviceBorrowed(f"{device.pm_number} is borrowed — return it first.")
     DeviceRepository.unbind_tag(session, device)
 
 

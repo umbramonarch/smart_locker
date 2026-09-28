@@ -683,22 +683,23 @@ def list_devices(
     db: Session = Depends(get_db),
     user_session: UserSession = Depends(require_session),
 ):
-    """List tagged locker devices with borrower info for the kiosk UI.
+    """List locker devices with borrower info for the kiosk UI.
 
-    The borrow and return grids show only units that have a sticker bound —
-    a registered row without a tag stays on the admin manage list
-    (``GET /api/admin/devices``) until one is bound. The current user's own
-    borrowed devices show ``"You"`` as the borrower.
+    The borrow and return grids show units that have a sticker bound, plus
+    any unit currently on loan — a row borrowed while untagged stays
+    returnable from the return grid. An untagged available row waits on the
+    admin manage list (``GET /api/admin/devices``) until a sticker is bound.
+    The current user's own borrowed devices show ``"You"`` as the borrower.
 
     Args:
         db: Database session (injected by ``get_db``).
         user_session: The active session (injected by ``require_session``).
 
     Returns:
-        list[dict]: One dict per tagged device with id, name, status,
+        list[dict]: One dict per listed device with id, name, status,
                     borrower_name, etc.
     """
-    devices = DeviceRepository.list_tagged_by_slot(db)
+    devices = DeviceRepository.list_kiosk_devices(db)
     current_user_id = user_session.user.id
     return [
         {"id": d.id, **device_record(d, current_user_id=current_user_id),
@@ -1357,7 +1358,7 @@ def list_admin_devices(
         raise HTTPException(status_code=403, detail="Admin access required.")
 
     return [
-        {"id": d.id, **device_record(d)}
+        {"id": d.id, **device_record(d), "image_path": d.image_path}
         for d in DeviceRepository.list_by_slot(db)
     ]
 
@@ -1415,7 +1416,8 @@ def register_locker_device(
 
     Raises:
         HTTPException: 503 if not ready, 403 if not admin,
-            404 if PM unknown, 409 if PM or slot taken.
+            404 if PM unknown, 409 if PM or slot taken or the row is not
+            marked for the locker.
     """
     if ctx_module.context is None:
         raise HTTPException(status_code=503, detail="System not ready.")
@@ -1430,6 +1432,7 @@ def register_locker_device(
     from smart_locker.services.device_registration import (
         AlreadyRegistered,
         InvalidSlot,
+        NotRegisterable,
         SlotTaken,
         UnknownPm,
         register_locker_device as create_from_catalog,
@@ -1439,7 +1442,7 @@ def register_locker_device(
         device = create_from_catalog(db, body.pm_number, body.locker_slot)
     except UnknownPm as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
-    except (SlotTaken, AlreadyRegistered) as e:
+    except (SlotTaken, AlreadyRegistered, NotRegisterable) as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
     except InvalidSlot as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
@@ -1606,7 +1609,8 @@ def unbind_device_tag(
         dict: ``{"success": True}``.
 
     Raises:
-        HTTPException: 403 if not admin, 404 if the device does not exist.
+        HTTPException: 403 if not admin, 404 if the device does not exist,
+            409 while the unit is borrowed.
     """
     if user_session.user.role != UserRole.ADMIN:
         raise HTTPException(status_code=403, detail="Admin access required.")
@@ -1615,7 +1619,12 @@ def unbind_device_tag(
     if device is None:
         raise HTTPException(status_code=404, detail="Device not found.")
 
-    clear_device_tag(db, device)
+    from smart_locker.services.device_catalog import DeviceBorrowed
+
+    try:
+        clear_device_tag(db, device)
+    except DeviceBorrowed as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
     if ctx_module.context is not None:
         # Cancel only a bind window aimed at this device — a window armed
         # for another device must survive the unbind.
@@ -2491,14 +2500,20 @@ def dashboard_unbind_tag(
         dict: ``ok``, ``pm_number``.
 
     Raises:
-        HTTPException: 401 without secret; 404 if the PM is not a locker device.
+        HTTPException: 401 without secret; 404 if the PM is not a locker
+            device; 409 while the unit is borrowed.
     """
     pm = body.pm_number.strip()
     device = DeviceRepository.find_by_pm(db, pm)
     if device is None or not is_registered(device):
         raise HTTPException(status_code=404, detail="Device not found.")
 
-    clear_device_tag(db, device)
+    from smart_locker.services.device_catalog import DeviceBorrowed
+
+    try:
+        clear_device_tag(db, device)
+    except DeviceBorrowed as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
     if ctx_module.context is not None:
         # Cancel only a bind window aimed at this device — a window armed
         # for another device must survive the unbind.

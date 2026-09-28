@@ -1012,9 +1012,14 @@ function renderAdminOverlay() {
   tagsBody.innerHTML = devicesData.map(d => {
     const tagged = !!d.has_tag;
     const bindLabel = tagged ? 'Replace tag' : 'Bind';
-    const unbind = tagged
-      ? `<button type="button" class="admin-tag-btn" data-unbind-pm="${esc(d.pm_number)}">Unbind</button>`
-      : '';
+    // Borrowed units refuse unbind (API 409) — show who holds it instead of
+    // a dead button. Same pattern as the maintenance buttons above.
+    const borrowed = d.status === 'borrowed';
+    const unbind = borrowed
+      ? `<span class="admin-hint">Out — ${esc(d.borrower_name || 'borrowed')}</span>`
+      : tagged
+        ? `<button type="button" class="admin-tag-btn" data-unbind-pm="${esc(d.pm_number)}">Unbind</button>`
+        : '';
     return `
       <tr>
         <td>${d.locker_slot ?? '—'}</td>

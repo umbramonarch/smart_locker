@@ -2099,6 +2099,7 @@ body::after {
   width: 92%;
   max-width: 640px;
   max-height: 90vh;
+  overflow-y: auto; /* add step (list + 48-slot grid + actions) can exceed 90vh */
   display: flex;
   flex-direction: column;
   gap: 1.25rem;

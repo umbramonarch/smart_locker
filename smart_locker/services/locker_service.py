@@ -91,7 +91,8 @@ class LockerService:
 
         Returns:
             LoanOutcome — truthy on success; ``reason`` says why a refusal
-            happened (calibration due/overdue, maintenance, limit, …).
+            happened (no sticker, calibration due/overdue, maintenance,
+            limit, …).
         """
         if user_session.is_expired:
             logger.warning("Borrow attempted with expired session.")
@@ -104,6 +105,16 @@ class LockerService:
             # Catalog-only rows are not in the cabinet — they cannot be borrowed.
             logger.warning("Borrow failed: device %d not found.", device_id)
             return LoanOutcome(False)
+
+        if device.tag_hmac is None:
+            # No sticker bound — the unit waits on the admin manage list for
+            # one. A borrowed-untagged row stays returnable via return_device.
+            logger.warning(
+                "Borrow failed: device %d (%s) has no sticker bound.",
+                device_id,
+                device.name,
+            )
+            return LoanOutcome(False, "no sticker bound")
 
         if device.status != DeviceStatus.AVAILABLE:
             reason = (

@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 from config.settings import MAX_LOCKER_SLOT, asset_label
 from smart_locker.database.models import Device
 from smart_locker.database.repositories import DeviceRepository
+from smart_locker.services.device_catalog import place_kind
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,10 @@ class SlotTaken(Exception):
 
 class AlreadyRegistered(Exception):
     """This id is already a locker device."""
+
+
+class NotRegisterable(Exception):
+    """The catalog row is not marked for the locker."""
 
 
 class InvalidSlot(Exception):
@@ -76,6 +81,8 @@ def register_locker_device(
     Raises:
         UnknownPm: id not in the catalog.
         AlreadyRegistered: id already has a locker slot.
+        NotRegisterable: id is not marked with the in-locker place word —
+            only rows on the registerable list may be promoted.
         InvalidSlot: Slot is not >= 1.
         SlotTaken: Slot occupied.
     """
@@ -88,6 +95,8 @@ def register_locker_device(
         raise UnknownPm(f"{asset_label()} '{pm}' is not in the catalog.")
     if device.locker_slot is not None:
         raise AlreadyRegistered(f"{pm} is already in the locker.")
+    if place_kind(device.location) != "locker":
+        raise NotRegisterable(f"{pm} is not marked for the locker.")
 
     _require_free_slot(session, locker_slot)
 

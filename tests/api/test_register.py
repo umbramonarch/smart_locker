@@ -255,6 +255,7 @@ class TestRegisterDeviceApi:
             device_type="Tool",
             pm_number="PM-NEW",
         )
+        device.location = "locker"  # the in-locker word makes it registerable
         db_session.commit()
         mock_context.session_mgr.start_session(admin_user)
         resp = client.post(
@@ -267,8 +268,32 @@ class TestRegisterDeviceApi:
         assert body["locker_slot"] == 7
         db_session.expire_all()
         assert device.locker_slot == 7
+        # The sticker-bind window is armed on the never-tagged row.
+        assert mock_context.pending_tag_bind is not None
+        assert mock_context.pending_tag_bind.device_id == device.id
         listed = client.get("/api/dashboard/devices").json()
         assert "PM-NEW" in {d["pm_number"] for d in listed}
+
+    def test_register_non_locker_place_is_409(
+        self, client, mock_context, admin_user, db_session
+    ):
+        """A catalog row whose place is not the in-locker word is refused."""
+        device = DeviceRepository.create(
+            db_session,
+            name="Shelf Meter",
+            device_type="Tool",
+            pm_number="PM-SHELF",
+        )
+        device.location = "Shelf 3"
+        db_session.commit()
+        mock_context.session_mgr.start_session(admin_user)
+        resp = client.post(
+            "/api/admin/devices/register",
+            json={"pm_number": "PM-SHELF", "locker_slot": 7},
+        )
+        assert resp.status_code == 409
+        db_session.expire_all()
+        assert device.locker_slot is None
 
     def test_register_already_registered_is_409(
         self, client, mock_context, admin_user, test_devices, db_session
@@ -291,6 +316,7 @@ class TestRegisterDeviceApi:
             device_type="Tool",
             pm_number="PM-NEW",
         )
+        device.location = "locker"  # registerable rows carry the place word
         db_session.commit()
         mock_context.session_mgr.start_session(admin_user)
         resp = client.post(

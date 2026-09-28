@@ -21,7 +21,7 @@ from tests.api.helpers import dashboard_admin_headers
 
 @pytest.fixture()
 def locker_unit(db_session):
-    """One registered cabinet unit (slot assigned, AVAILABLE)."""
+    """One registered cabinet unit (slot assigned, sticker bound, AVAILABLE)."""
     device = DeviceRepository.create(
         db_session,
         name="Multimeter",
@@ -29,6 +29,8 @@ def locker_unit(db_session):
         pm_number="PM-001",
         locker_slot=1,
     )
+    # Borrow requires a bound sticker — same convention as test_devices.
+    DeviceRepository.bind_tag(db_session, device, "tag-hmac-PM-001")
     db_session.commit()
     return device
 

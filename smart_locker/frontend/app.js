@@ -142,7 +142,8 @@ async function apiAuthTap(uid_hmac) {
  * @returns {Promise<Array<Object>>} Array of device objects, or empty array on error.
  */
 async function apiGetDevices() {
-  if (USE_DEMO) { await sleep(280); return DEMO_DEVICES.filter(d => d.has_tag); } // simulate fetch latency
+  // Tagged units plus any on loan — same predicate as list_kiosk_devices.
+  if (USE_DEMO) { await sleep(280); return DEMO_DEVICES.filter(d => d.has_tag || d.status === 'borrowed'); } // simulate fetch latency
   const res = await fetch('/api/devices');
   if (!res.ok) return [];
   return await res.json();
@@ -150,13 +151,15 @@ async function apiGetDevices() {
 
 /**
  * Fetch every locker unit for the admin manage list — untagged rows
- * included, since binding a sticker is what the list is for.
- * @returns {Promise<Array<Object>>} Array of device objects, or empty array on error.
+ * included, since binding a sticker is what the list is for. Throws on a
+ * non-OK response so a failed GET is never mistaken for an empty locker —
+ * callers keep the last good list instead of painting slots from bad data.
+ * @returns {Promise<Array<Object>>} Array of device objects.
  */
 async function apiGetAdminDevices() {
   if (USE_DEMO) { await sleep(280); return DEMO_DEVICES; }
   const res = await fetch('/api/admin/devices');
-  if (!res.ok) return [];
+  if (!res.ok) throw new Error(`admin devices ${res.status}`);
   return await res.json();
 }
 
@@ -732,7 +735,10 @@ async function refreshAfterDeviceAction(data) {
   }
   if (detailOpen && S.selected) {
     const updated = devices.find(d => d.id === S.selected.id);
+    // The device left the feed (unbound, removed, or slot cleared) — close
+    // the overlay so its live Borrow/Return button cannot act on a stale row.
     if (updated) openDetail(updated, S.mode);
+    else closeDetail();
   }
 }
 
@@ -2557,6 +2563,9 @@ let bindCountdownTimer = null;
 let bindDevices = [];
 /** @type {Array<Object>} Catalog rows the Register Device add step offers. */
 let registerableRows = [];
+/** @type {boolean} True when the last registerable GET failed — an empty
+ * list then means "dead API", not "empty catalog". */
+let registerableLoadFailed = false;
 /** @type {string|null} PM of the catalog row picked on the add step. */
 let selectedAddPm = null;
 /** Debounce timer for the add-step search (filters registerableRows). */
@@ -2605,14 +2614,17 @@ async function adminRegisterDevice() {
   await sleep(300);
   const overlay = document.getElementById('overlay-register-device');
   overlay.style.display = '';
-  showBindStep('bind-step-list');
   document.getElementById('bind-search').value = '';
   S.screen = 'admin';
   armIdle();
   requestAnimationFrame(() => requestAnimationFrame(() => {
     overlay.classList.add('visible');
   }));
+  // Fetch before revealing the list step: the manage list, and a later Add
+  // tap's slot grid, must both render from real occupancy — never from an
+  // unloaded bindDevices.
   await populateBindList();
+  showBindStep('bind-step-list');
 }
 
 /** Debounce timer for Register Device bind-search (filters cached rows). */
@@ -2632,7 +2644,13 @@ async function populateBindList(refresh) {
   const list = document.getElementById('bind-device-list');
   if (!list) return;
   if (refresh !== false) {
-    bindDevices = await apiGetAdminDevices();
+    try {
+      bindDevices = await apiGetAdminDevices();
+    } catch (_) {
+      // Keep the last good list — a failed GET must not blank the rows or
+      // feed empty occupancy to a later slot grid.
+      showToast('Could not refresh the device list', 'error');
+    }
   }
   const devices = bindDevices;
   const query = (document.getElementById('bind-search').value || '').toLowerCase().trim();
@@ -2664,7 +2682,9 @@ async function populateBindList(refresh) {
     const metaEl = document.createElement('div');
     metaEl.className = 'bind-row-meta';
     const slot = dev.locker_slot != null ? ` · Slot ${dev.locker_slot}` : '';
-    metaEl.textContent = `${dev.pm_number || '—'}${slot}`;
+    // Borrowed/maintenance rows can't unbind (API 409) — say why in the meta.
+    const state = dev.status && dev.status !== 'available' ? ` · ${dev.status}` : '';
+    metaEl.textContent = `${dev.pm_number || '—'}${slot}${state}`;
     info.appendChild(nameEl);
     info.appendChild(metaEl);
 
@@ -2686,7 +2706,8 @@ async function populateBindList(refresh) {
     slotBtn.textContent = 'Slot';
     slotBtn.addEventListener('click', () => { clickSound(); openChangeSlot(dev); });
     actions.appendChild(slotBtn);
-    if (tagged) {
+    // Borrowed units refuse unbind (API 409) — don't offer a dead button.
+    if (tagged && dev.status !== 'borrowed') {
       const unbindBtn = document.createElement('button');
       unbindBtn.type = 'button';
       unbindBtn.className = 'bind-unbind';
@@ -2832,8 +2853,10 @@ async function loadRegisterableList() {
   try {
     const res = await fetch('/api/admin/devices/registerable');
     registerableRows = res.ok ? await res.json() : [];
+    registerableLoadFailed = !res.ok;
   } catch (_) {
     registerableRows = [];
+    registerableLoadFailed = true;
   }
   renderRegisterableList();
 }
@@ -2860,9 +2883,11 @@ function renderRegisterableList() {
   if (!rows.length) {
     const empty = document.createElement('p');
     empty.className = 'bind-hint';
-    empty.textContent = registerableRows.length
-      ? 'No units match the search.'
-      : 'No catalog units are waiting to be registered.';
+    empty.textContent = registerableLoadFailed
+      ? 'Could not load catalog units — try again.'
+      : registerableRows.length
+        ? 'No units match the search.'
+        : 'No catalog units are waiting to be registered.';
     list.appendChild(empty);
     return;
   }
@@ -2871,7 +2896,7 @@ function renderRegisterableList() {
     btn.type = 'button';
     btn.className = 'bind-registerable'
       + (row.pm_number === selectedAddPm ? ' selected' : '');
-    btn.textContent = `${row.name} (${row.pm_number})`;
+    btn.textContent = `${row.name || '—'} (${row.pm_number})`;
     btn.addEventListener('click', () => {
       clickSound();
       selectedAddPm = row.pm_number === selectedAddPm ? null : row.pm_number;
@@ -2884,17 +2909,40 @@ function renderRegisterableList() {
 
 
 /**
- * Open the Add device step (catalog unit + free slot).
+ * Open the Add device step (catalog unit + free slot). The slot grid waits on
+ * a fresh admin feed: painting from a stale or empty ``bindDevices`` would
+ * show occupied slots as free.
+ * @returns {Promise<void>}
  */
-function openAddCatalogUnit() {
+async function openAddCatalogUnit() {
   if (USE_DEMO) {
     showToast('Register Device is Pi only', 'error');
     return;
   }
   document.getElementById('bind-add-search').value = '';
   document.getElementById('bind-add-error').textContent = '';
+  document.getElementById('bind-slot-grid').innerHTML = '';
   selectedAddSlot = null;
   selectedAddPm = null;
+  // Loading hint covers the fetch and clears any stale rows/selection left
+  // over from the last visit to this step.
+  const regList = document.getElementById('bind-registerable-list');
+  regList.innerHTML = '';
+  const loading = document.createElement('p');
+  loading.className = 'bind-hint';
+  loading.textContent = 'Loading…';
+  regList.appendChild(loading);
+  showBindStep('bind-step-add');
+  try {
+    bindDevices = await apiGetAdminDevices();
+  } catch (_) {
+    regList.innerHTML = '';
+    const fail = document.createElement('p');
+    fail.className = 'bind-hint';
+    fail.textContent = 'Could not load the device list.';
+    regList.appendChild(fail);
+    return;
+  }
   const paint = () => {
     renderSlotGrid('bind-slot-grid', occupiedSlots(), selectedAddSlot, n => {
       selectedAddSlot = n;
@@ -2902,7 +2950,6 @@ function openAddCatalogUnit() {
     });
   };
   paint();
-  showBindStep('bind-step-add');
   loadRegisterableList();
 }
 
@@ -2911,6 +2958,8 @@ function openAddCatalogUnit() {
  * @returns {Promise<void>}
  */
 async function submitRegisterDevice() {
+  const btn = document.getElementById('bind-add-submit');
+  if (btn.disabled) return; // a register POST is already in flight
   if (USE_DEMO) {
     showToast('Register Device is Pi only', 'error');
     return;
@@ -2926,6 +2975,7 @@ async function submitRegisterDevice() {
     err.textContent = 'Pick a free slot.';
     return;
   }
+  btn.disabled = true;
   try {
     const res = await fetch('/api/admin/devices/register', {
       method: 'POST',
@@ -2944,6 +2994,8 @@ async function submitRegisterDevice() {
     startBindCountdown();
   } catch (_) {
     err.textContent = 'Could not register.';
+  } finally {
+    btn.disabled = false;
   }
 }
 
@@ -2974,6 +3026,8 @@ function openChangeSlot(dev) {
  * @returns {Promise<void>}
  */
 async function submitChangeSlot() {
+  const btn = document.getElementById('bind-slot-submit');
+  if (btn.disabled) return; // a slot POST is already in flight
   const err = document.getElementById('bind-slot-error');
   err.textContent = '';
   if (!slotChangeDevice) return;
@@ -2987,6 +3041,7 @@ async function submitChangeSlot() {
     populateBindList();
     return;
   }
+  btn.disabled = true;
   try {
     const res = await fetch(`/api/admin/devices/${slotChangeDevice.id}/slot`, {
       method: 'POST',
@@ -3003,6 +3058,8 @@ async function submitChangeSlot() {
     await populateBindList();
   } catch (_) {
     err.textContent = 'Could not change slot.';
+  } finally {
+    btn.disabled = false;
   }
 }
 
@@ -3283,7 +3340,19 @@ document.getElementById('bind-search').addEventListener('input', () => {
   clearTimeout(bindSearchTimer);
   bindSearchTimer = setTimeout(() => { populateBindList(false); }, 200);
 });
-document.getElementById('bind-add-search').addEventListener('input', () => {
+document.getElementById('bind-add-search').addEventListener('input', (e) => {
+  // Drop a picked row the moment it filters out — the debounced render would
+  // leave selectedAddPm submittable inside the 200ms window otherwise. Same
+  // predicate renderRegisterableList applies to registerableRows.
+  if (selectedAddPm) {
+    const query = (e.target.value || '').toLowerCase().trim();
+    const survives = registerableRows.some(r =>
+      r.pm_number === selectedAddPm
+      && (!query
+          || (r.name || '').toLowerCase().includes(query)
+          || (r.pm_number || '').toLowerCase().includes(query)));
+    if (!survives) selectedAddPm = null;
+  }
   clearTimeout(addSearchTimer);
   addSearchTimer = setTimeout(renderRegisterableList, 200);
 });
