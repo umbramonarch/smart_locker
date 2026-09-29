@@ -171,8 +171,10 @@ def test_enrolled_card_tap_during_registration_fails(e2e):
     assert h.client.get("/api/session").json()["active"] is False
 
 
-def test_device_tag_tap_during_registration_fails(e2e):
-    """A sticker already bound to a device cannot enroll as a user card."""
+def test_device_tag_tap_during_registration_keeps_window(e2e):
+    """A sticker tap does not consume a card window: it falls through to
+    ordinary handling and the armed registration still completes on the
+    next card tap."""
     h = e2e()
     add_device(
         h,
@@ -187,15 +189,20 @@ def test_device_tag_tap_during_registration_fails(e2e):
     assert r.status_code == 200
 
     h.tap(DEVICE_TAG_UID)
-    payload = h.wait_event("registration_failed")
-    assert "bound to a device" in payload["reason"].lower()
-    assert h.ctx.pending_registration is None
+    payload = h.wait_event("device_tag_idle")
+    assert "work card" in payload["message"].lower()
+    # The card window survived the stray sticker tap.
+    assert h.ctx.pending_registration is not None
 
     with h.db() as db:
         assert (
             UserRepository.find_by_uid_hmac(db, uid_hmac_for(DEVICE_TAG_UID))
             is None
         )
+
+    h.tap(NEW_CARD_UID)
+    h.wait_event("registration_success")
+    assert h.ctx.pending_registration is None
 
 
 def test_register_rejects_name_not_on_approved_list(e2e):

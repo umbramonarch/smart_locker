@@ -46,17 +46,16 @@ def _add_registrant(h, name: str) -> None:
         db.commit()
 
 
-def test_inactive_user_card_flush_failure_fails_registration_and_bridge_survives(e2e):
-    """Re-tapping a deactivated user's card hits the users.uid_hmac unique
-    constraint inside enroll_user. The dispatch must roll back, emit
-    registration_failed, clear the window, and keep the bridge alive."""
+def test_deactivated_user_card_is_refused_during_registration(e2e):
+    """Re-tapping a deactivated user's card during a card window is a clean
+    refusal — the card still belongs to its person row, so enroll never runs
+    (previously this died on the uid_hmac unique constraint)."""
     h = e2e()
     add_user(h, REUSE_UID, display_name="Old User")
     with h.db() as db:
         user = UserRepository.find_by_uid_hmac(db, uid_hmac_for(REUSE_UID))
         user.is_active = False
         db.commit()
-    add_user(h, WORK_UID, display_name="Worker")
     _add_registrant(h, "Old User")
 
     r = h.client.post("/api/register", json={"name": "Old User"})
@@ -65,13 +64,39 @@ def test_inactive_user_card_flush_failure_fails_registration_and_bridge_survives
 
     h.tap(REUSE_UID)
     payload = h.wait_event("registration_failed")
-    assert "try again" in payload["reason"].lower()
+    assert "already registered" in payload["reason"].lower()
     assert h.ctx.pending_registration is None
 
-    # No second user row was committed.
+    # No second user row was created for the same card.
     with h.db() as db:
         users = UserRepository.list_all(db)
-        assert len(users) == 2
+        assert len(users) == 1
+
+
+def test_enroll_flush_failure_fails_registration_and_bridge_survives(
+    e2e, monkeypatch
+):
+    """A flush-level failure inside enroll_user (e.g. database locked) must
+    roll back, emit registration_failed, clear the window, and keep the
+    bridge alive — same contract as the tag-bind dispatch failure."""
+    h = e2e()
+    add_user(h, WORK_UID, display_name="Worker")
+    _add_registrant(h, "New Person")
+
+    def boom(*args, **kwargs):
+        raise OperationalError(
+            "INSERT users", {}, Exception("database is locked")
+        )
+
+    monkeypatch.setattr(UserRepository, "create", boom)
+
+    r = h.client.post("/api/register", json={"name": "New Person"})
+    assert r.status_code == 200
+
+    h.tap(NEW_CARD_UID)
+    payload = h.wait_event("registration_failed")
+    assert "try again" in payload["reason"].lower()
+    assert h.ctx.pending_registration is None
 
     # The bridge survived: an ordinary work-card tap still logs in.
     h.tap(WORK_UID)

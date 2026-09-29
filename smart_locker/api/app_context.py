@@ -36,12 +36,18 @@ class PendingRegistration:
     registration is valid for ``REGISTRATION_TIMEOUT_SECONDS`` (60s) — if no
     card is tapped before then, the attempt expires and the user must retry.
     ``role`` is "admin" only for first-boot Setup; every other path keeps
-    the default "user".
+    the default "user". ``replace_user_id`` turns the window into a card
+    replacement: the tapped card rebinds that existing user instead of
+    enrolling a new one (``display_name`` stays as the screen label).
+    ``from_dashboard`` marks a secret-armed window so public
+    ``POST /api/register/cancel`` cannot clear it.
     """
 
     display_name: str
     created_at: float = field(default_factory=time.monotonic)
     role: str = "user"
+    replace_user_id: int | None = None
+    from_dashboard: bool = False
 
     @property
     def is_expired(self) -> bool:
@@ -462,6 +468,11 @@ class AppContext:
                     ),
                     registration_role=(
                         pending_reg.role if pending_reg is not None else "user"
+                    ),
+                    registration_replace_user_id=(
+                        pending_reg.replace_user_id
+                        if pending_reg is not None
+                        else None
                     ),
                     registration_expired=expired_reg,
                     tag_bind_device_id=(

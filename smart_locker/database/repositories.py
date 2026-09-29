@@ -119,6 +119,16 @@ class UserRepository:
         )
         return session.execute(stmt).scalars().first()
 
+    @staticmethod
+    def count_active_admins(session: Session) -> int:
+        """How many active admin users exist (last-admin guard input)."""
+        from smart_locker.database.models import UserRole
+
+        stmt = select(func.count()).select_from(User).where(
+            User.role == UserRole.ADMIN, User.is_active.is_(True)
+        )
+        return session.execute(stmt).scalar_one()
+
 
 class DeviceRepository:
     """Data access layer for Device entities.

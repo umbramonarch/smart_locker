@@ -2274,6 +2274,34 @@ body::after {
 }
 
 /* ============================================================
+   OVERLAY — PEOPLE
+============================================================ */
+.people-role-row {
+  display: flex;
+  gap: 0.6rem;
+  width: 100%;
+  justify-content: center;
+}
+.people-role-btn {
+  font-family: var(--font-display);
+  font-size: 0.85rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 0.6rem 1.4rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.people-role-btn.selected {
+  border-color: var(--border-accent);
+  background: var(--accent-dim);
+  color: var(--accent);
+}
+
+/* ============================================================
    OVERLAY — SOFTWARE UPDATE
 ============================================================ */
 #overlay-update,

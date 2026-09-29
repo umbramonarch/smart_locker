@@ -783,6 +783,30 @@ body {
   color: #fff;
 }
 
+/* --- People (user admin) --------------------------------------------------- */
+.people-add-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  margin-bottom: 0.8rem;
+  flex-wrap: wrap;
+}
+
+.people-add-row .search-input {
+  min-width: 14rem;
+}
+
+.role-select {
+  font-family: var(--font-body);
+  font-size: 0.8rem;
+  padding: 0.25rem 0.4rem;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  cursor: pointer;
+}
+
 /* --- Responsive ---------------------------------------------------------- */
 @media (max-width: 768px) {
   .header {

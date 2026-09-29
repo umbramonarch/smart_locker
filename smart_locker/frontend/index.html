@@ -560,6 +560,16 @@
           </div>
         </button>
 
+        <button class="admin-action-btn" id="admin-people">
+          <div class="admin-btn-icon register-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/></svg>
+          </div>
+          <div class="admin-btn-text">
+            <span class="admin-btn-label">People</span>
+            <span class="admin-btn-desc">Roles, deactivate, replace card</span>
+          </div>
+        </button>
+
         <button class="admin-action-btn" id="admin-update">
           <div class="admin-btn-icon">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -707,6 +717,81 @@
         </div>
         <h1 class="register-title register-title-error">FAILED</h1>
         <p class="register-sub" id="bind-error-msg">Bind failed.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================================================================
+       OVERLAY — PEOPLE (roles, deactivate, replace card, add person)
+  ================================================================ -->
+  <div id="overlay-people" class="overlay" style="display:none">
+    <div class="bind-panel">
+      <div class="admin-header">
+        <div class="admin-badge">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/></svg>
+          <span>PEOPLE</span>
+        </div>
+        <button class="admin-close" id="people-close">
+          <svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+
+      <div class="bind-step" id="people-step-list">
+        <p class="bind-hint">Edit a role, deactivate someone, replace a card — or add a person and have them tap their card. Card changes arm this reader for 60 seconds.</p>
+        <button type="button" class="bind-add-open" id="people-add-open">Add person</button>
+        <div class="bind-device-list" id="people-list"></div>
+      </div>
+
+      <div class="bind-step hidden" id="people-step-add">
+        <p class="bind-hint">Type the person's name and pick a role, then have them tap their card on this reader.</p>
+        <div class="register-input-group">
+          <input type="text" id="people-add-name" class="register-input" placeholder="Full name" maxlength="100" autocomplete="off" spellcheck="false">
+          <div class="register-input-glow"></div>
+        </div>
+        <div class="people-role-row" role="group" aria-label="Role">
+          <button type="button" class="people-role-btn selected" id="people-role-user">User</button>
+          <button type="button" class="people-role-btn" id="people-role-admin">Admin</button>
+        </div>
+        <div class="bind-add-actions">
+          <button type="button" class="bind-unbind" id="people-add-back">Back</button>
+          <button type="button" class="bind-go" id="people-add-submit" disabled>Continue</button>
+        </div>
+        <p class="bind-error-inline" id="people-add-error"></p>
+      </div>
+
+      <div class="bind-step hidden" id="people-step-tap">
+        <div class="nfc-wrapper nfc-wrapper-sm">
+          <div class="nfc-ring-outer"></div>
+          <div class="nfc-ring-mid"></div>
+          <div class="nfc-core">
+            <div class="nfc-texture-reveal"></div>
+            <svg class="nfc-svg" viewBox="0 0 64 64">
+              <path d="M32 22 C39 22 44 27 44 32 C44 37 39 42 32 42" stroke-linecap="round"/>
+              <path d="M32 14 C43 14 52 22 52 32 C52 42 43 50 32 50" stroke-linecap="round"/>
+              <path d="M32 30 C34.8 30 36 31 36 32 C36 33 34.8 34 32 34" stroke-linecap="round"/>
+              <circle cx="24" cy="32" r="5" fill="currentColor" stroke="none" style="color:var(--accent)"/>
+            </svg>
+          </div>
+        </div>
+        <h1 class="register-title register-title-sm" id="people-tap-title">TAP THE CARD</h1>
+        <p class="register-sub" id="people-tap-label">—</p>
+        <div class="register-countdown" id="people-countdown">60s</div>
+      </div>
+
+      <div class="bind-step hidden" id="people-step-success">
+        <div class="register-icon-circle success-circle">
+          <svg viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5"/></svg>
+        </div>
+        <h1 class="register-title register-title-success">DONE</h1>
+        <p class="register-sub" id="people-success-msg">Card updated.</p>
+      </div>
+
+      <div class="bind-step hidden" id="people-step-error">
+        <div class="register-icon-circle error-circle">
+          <svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </div>
+        <h1 class="register-title register-title-error">FAILED</h1>
+        <p class="register-sub" id="people-error-msg">Something went wrong.</p>
       </div>
     </div>
   </div>

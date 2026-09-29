@@ -257,7 +257,17 @@
       </section>
 
       <section class="admin-section">
-        <h3 class="admin-section-title">Registered Users</h3>
+        <h3 class="admin-section-title">People</h3>
+        <p class="admin-hint">Edit roles, deactivate, replace a card, or add a person. Card changes arm the locker reader for 60 seconds — the new card is tapped on the cabinet. The last active admin cannot be removed, and a person holding a device cannot be deactivated.</p>
+        <p class="admin-tag-status" id="admin-users-status"></p>
+        <div class="people-add-row">
+          <input type="text" class="search-input" id="user-add-name" placeholder="Full name" maxlength="100" autocomplete="off">
+          <select class="role-select" id="user-add-role" aria-label="Role">
+            <option value="user" selected>User</option>
+            <option value="admin">Admin</option>
+          </select>
+          <button type="button" class="admin-tag-btn admin-tag-bind" id="user-add-btn">Add person</button>
+        </div>
         <div class="table-wrap">
           <table class="data-table" id="admin-users-table">
             <thead>
@@ -266,6 +276,7 @@
                 <th>Role</th>
                 <th>Active</th>
                 <th>Registered</th>
+                <th>Actions</th>
               </tr>
             </thead>
             <tbody id="admin-users-tbody"></tbody>

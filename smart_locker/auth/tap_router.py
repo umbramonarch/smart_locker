@@ -104,13 +104,17 @@ def handle_registration_tap(
     hmac_key: bytes,
     enc_key: bytes | None,
     role: str = "user",
+    replace_user_id: int | None = None,
+    classified_uid: tuple[TapKind, User | None, Device | None] | None = None,
 ) -> TapResult:
-    """Enroll ``display_name`` from a fresh card tap.
+    """Enroll ``display_name`` from a fresh card tap, or rebind ``replace_user_id``.
 
     Classification, duplicate rejection, and enrollment deliberately share the
     caller's session. The AppContext owns the pending-window timeout and
     session-clearing policy; this function owns the database tap policy.
     ``role`` is "admin" only when a first-boot Setup window armed the tap.
+    ``replace_user_id`` makes the window a card replacement: the tap rebinds
+    that user's card instead of enrolling a new person.
     """
     if not display_name.strip():
         logger.warning("Registration refused: blank display name.")
@@ -119,7 +123,11 @@ def handle_registration_tap(
             payload={"reason": "A name is required. Start registration again."},
         )
 
-    kind, user, _ = classify_uid(db_session, card_uid_hex, hmac_key)
+    kind, user, _ = (
+        classified_uid
+        if classified_uid is not None
+        else classify_uid(db_session, card_uid_hex, hmac_key)
+    )
     if kind == TapKind.DEVICE_TAG:
         logger.warning("Registration failed: UID is already a device tag.")
         return TapResult(
@@ -127,7 +135,22 @@ def handle_registration_tap(
             payload={"reason": "This tag is already bound to a device."},
         )
 
-    if kind == TapKind.WORK_CARD and user is not None and user.is_active:
+    if replace_user_id is not None:
+        return _handle_card_replace(
+            db_session,
+            card_uid_hex,
+            replace_user_id,
+            kind=kind,
+            tapped_user=user,
+            hmac_key=hmac_key,
+            enc_key=enc_key,
+        )
+
+    if kind == TapKind.WORK_CARD and user is not None:
+        # A card belongs to its person row until replaced — active or not.
+        # Enrolling an inactive user's card under a new name would die on the
+        # uid_hmac unique constraint; refuse it cleanly instead. The way back
+        # is reactivate, or replace-card on the existing row.
         logger.warning(
             "Registration failed: card already enrolled to %s.",
             user.display_name,
@@ -151,6 +174,11 @@ def handle_registration_tap(
         user.display_name,
         user.id,
     )
+    return _registration_success(user)
+
+
+def _registration_success(user: User) -> TapResult:
+    """SSE payload shared by enrollment and card-replacement success."""
     return TapResult(
         event="registration_success",
         payload={
@@ -161,6 +189,64 @@ def handle_registration_tap(
             },
         },
     )
+
+
+def _handle_card_replace(
+    db_session: Session,
+    card_uid_hex: str,
+    replace_user_id: int,
+    *,
+    kind: TapKind,
+    tapped_user: User | None,
+    hmac_key: bytes,
+    enc_key: bytes | None,
+) -> TapResult:
+    """Rebind ``replace_user_id``'s card to the tapped UID.
+
+    Tapping the user's current card is an idempotent success; a card enrolled
+    to anyone else is refused — a replace never steals another person's card.
+    """
+    target = UserRepository.find_by_id(db_session, replace_user_id)
+    if target is None:
+        logger.warning(
+            "Card replace failed: user id=%d no longer exists.", replace_user_id
+        )
+        return TapResult(
+            event="registration_failed",
+            payload={"reason": "That person no longer exists."},
+        )
+
+    if kind == TapKind.WORK_CARD and tapped_user is not None:
+        if tapped_user.id == target.id:
+            logger.info(
+                "Card replace no-op: same card tapped for %s (id=%d).",
+                target.display_name,
+                target.id,
+            )
+            return _registration_success(target)
+        logger.warning(
+            "Card replace refused: card belongs to %s.",
+            tapped_user.display_name,
+        )
+        return TapResult(
+            event="registration_failed",
+            payload={"reason": "This card is already registered to someone else."},
+        )
+
+    from smart_locker.services.user_service import UserService
+
+    try:
+        UserService(enc_key=enc_key, hmac_key=hmac_key).replace_card(
+            db_session, target, card_uid_hex
+        )
+    except ValueError as exc:
+        return TapResult(
+            event="registration_failed", payload={"reason": str(exc)}
+        )
+    logger.info(
+        "Card replaced for %s (id=%d).", target.display_name, target.id
+    )
+    return _registration_success(target)
 
 
 def bind_uid_to_device(
@@ -311,6 +397,7 @@ def dispatch_insert(
     *,
     registration_display_name: str | None = None,
     registration_role: str = "user",
+    registration_replace_user_id: int | None = None,
     registration_expired: bool = False,
     tag_bind_device_id: int | None = None,
     admin_overlay_open: bool = False,
@@ -346,6 +433,21 @@ def dispatch_insert(
         )
 
     if registration_display_name is not None:
+        kind, tap_user, tap_device = classify_uid(db_session, card_uid_hex, hmac_key)
+        if kind == TapKind.DEVICE_TAG:
+            # A sticker tap does not consume a card window: it falls through
+            # to ordinary handling (idle return, in-session auto-intent) and
+            # the armed registration/replace keeps waiting for a card.
+            result = handle_insert(
+                db_session,
+                card_uid_hex,
+                hmac_key,
+                session_mgr,
+                admin_overlay_open=admin_overlay_open,
+                reader_name=reader_name,
+                classified_uid=(kind, tap_user, tap_device),
+            )
+            return TapDispatchOutcome(result)
         try:
             result = handle_registration_tap(
                 db_session,
@@ -354,6 +456,8 @@ def dispatch_insert(
                 hmac_key=hmac_key,
                 enc_key=enc_key,
                 role=registration_role,
+                replace_user_id=registration_replace_user_id,
+                classified_uid=(kind, tap_user, tap_device),
             )
         except Exception:
             logger.exception(

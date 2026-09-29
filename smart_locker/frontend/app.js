@@ -658,6 +658,7 @@ async function endSession(fromTimeout = false, fromSSE = false) {
   adminSessionActive = false;
   closeAdminPanel();
   hideRegisterDeviceOverlay();
+  hidePeopleOverlay();
   navigate('idle');
 }
 
@@ -2121,6 +2122,7 @@ function closeAdminPanel() {
 function dismissAdminToIdle() {
   closeAdminPanel();
   hideRegisterDeviceOverlay();
+  hidePeopleOverlay();
   apiCancelRegistration();
   adminSessionActive = false;
   endSession();
@@ -3118,6 +3120,416 @@ function handleTagBindFailed(data) {
   }, 2500);
 }
 
+/* ============================================================
+   PEOPLE — admin overlay: list, add person, role, deactivate,
+   replace card. Card changes arm the cabinet reader for 60s and
+   resolve through the registration_success/failed SSE events —
+   the same events the self-service register flow uses, routed to
+   this overlay while ``peopleTapMode`` owns the card window.
+   A resolved card window ends the admin session backend-side
+   (end_leftover_session_silently), so success/failure leaves to
+   idle like Register User; a timeout leaves the session alive and
+   returns to the list.
+============================================================ */
+
+/** @type {Array<Object>} People rows from GET /api/admin/users. */
+let peopleRows = [];
+/** Countdown timer for the people card-tap step. */
+let peopleCountdownTimer = null;
+/** Timer that leaves the overlay after a card result. */
+let peopleAfterTimer = null;
+/** 'add' or 'replace' while the tap step owns the card window, else null. */
+let peopleTapMode = null;
+/** Role picked on the people add step ('user' or 'admin'). */
+let peopleAddRole = 'user';
+/** Name typed on the add step — shown on the tap step and result. */
+let peopleTapName = '';
+
+/**
+ * True while the People overlay is displayed.
+ * @returns {boolean}
+ */
+function peopleOverlayOpen() {
+  const overlay = document.getElementById('overlay-people');
+  return !!overlay && overlay.style.display !== 'none';
+}
+
+/**
+ * Show one People overlay step and hide the others.
+ * @param {string} stepId - Element id of the step to show.
+ */
+function showPeopleStep(stepId) {
+  document.querySelectorAll('#overlay-people .bind-step').forEach(el => {
+    el.classList.toggle('hidden', el.id !== stepId);
+  });
+}
+
+/**
+ * Hide the People overlay without touching the admin session.
+ */
+function hidePeopleOverlay() {
+  clearInterval(peopleCountdownTimer);
+  clearTimeout(peopleAfterTimer);
+  peopleTapMode = null;
+  const overlay = document.getElementById('overlay-people');
+  if (!overlay || overlay.style.display === 'none') return;
+  overlay.classList.add('hidden-left');
+  setTimeout(() => {
+    overlay.classList.remove('visible', 'hidden-left');
+    overlay.style.display = 'none';
+  }, 710);
+}
+
+/**
+ * X button: cancel any armed card window, close the overlay, and
+ * return to the admin panel (the session is still live — a card
+ * window only ends it once a tap resolves).
+ */
+function closePeople() {
+  clearInterval(peopleCountdownTimer);
+  clearTimeout(peopleAfterTimer);
+  peopleTapMode = null;
+  apiCancelRegistration();
+  hidePeopleOverlay();
+  openAdminPanel();
+}
+
+/**
+ * Open the People overlay from the admin panel and load the list.
+ * @returns {Promise<void>}
+ */
+async function adminPeople() {
+  closeAdminPanel();
+  await sleep(300);
+  const overlay = document.getElementById('overlay-people');
+  overlay.style.display = '';
+  S.screen = 'admin';
+  armIdle();
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    overlay.classList.add('visible');
+  }));
+  await populatePeopleList();
+  showPeopleStep('people-step-list');
+}
+
+/**
+ * Fetch the people list and render one row per registered user:
+ * name, role pill (+ inactive marker), and the row actions
+ * (make admin/user, replace card, deactivate/reactivate).
+ * @returns {Promise<void>}
+ */
+async function populatePeopleList() {
+  const list = document.getElementById('people-list');
+  if (!list) return;
+  try {
+    const res = await fetch('/api/admin/users');
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      showToast(data.detail || 'Could not load people', 'error');
+      if (res.status === 401 || res.status === 403) leavePeopleOverlay(); // admin session is gone
+      return;
+    }
+    peopleRows = await res.json();
+  } catch (_) {
+    showToast('Could not load people', 'error');
+  }
+  const rows = [...peopleRows].sort((a, b) => {
+    if (!!a.is_active !== !!b.is_active) return a.is_active ? -1 : 1;
+    if ((a.role === 'admin') !== (b.role === 'admin')) return a.role === 'admin' ? -1 : 1;
+    return (a.display_name || '').localeCompare(b.display_name || '');
+  });
+  list.innerHTML = '';
+  rows.forEach(user => {
+    const row = document.createElement('div');
+    row.className = 'bind-row';
+
+    const info = document.createElement('div');
+    info.className = 'bind-row-info';
+    const nameEl = document.createElement('div');
+    nameEl.className = 'bind-row-name';
+    nameEl.textContent = user.display_name || '';
+    const metaEl = document.createElement('div');
+    metaEl.className = 'bind-row-meta';
+    const registered = user.registered_at ? ` · card ${user.registered_at.slice(0, 10)}` : '';
+    metaEl.textContent =
+      `${user.role === 'admin' ? 'Admin' : 'User'}${user.is_active ? '' : ' · inactive'}${registered}`;
+    info.appendChild(nameEl);
+    info.appendChild(metaEl);
+
+    const actions = document.createElement('div');
+    actions.className = 'bind-row-actions';
+
+    const roleBtn = document.createElement('button');
+    roleBtn.type = 'button';
+    roleBtn.className = 'bind-unbind';
+    roleBtn.textContent = user.role === 'admin' ? 'Make user' : 'Make admin';
+    roleBtn.addEventListener('click', () => { clickSound(); peopleSetRole(user, roleBtn); });
+    actions.appendChild(roleBtn);
+
+    const cardBtn = document.createElement('button');
+    cardBtn.type = 'button';
+    cardBtn.className = 'bind-unbind';
+    cardBtn.textContent = 'Replace card';
+    cardBtn.addEventListener('click', () => { clickSound(); peopleReplaceCard(user); });
+    actions.appendChild(cardBtn);
+
+    const activeBtn = document.createElement('button');
+    activeBtn.type = 'button';
+    activeBtn.className = 'bind-unbind';
+    activeBtn.textContent = user.is_active ? 'Deactivate' : 'Reactivate';
+    activeBtn.addEventListener('click', () => { clickSound(); peopleToggleActive(user, activeBtn); });
+    actions.appendChild(activeBtn);
+
+    row.appendChild(info);
+    row.appendChild(actions);
+    list.appendChild(row);
+  });
+}
+
+/**
+ * PATCH one person's role on the kiosk admin session.
+ * @param {Object} user - Person row (id, role).
+ * @param {HTMLElement} btn - The role button clicked (disabled in flight).
+ * @returns {Promise<void>}
+ */
+async function peopleSetRole(user, btn) {
+  btn.disabled = true;
+  try {
+    const res = await fetch(`/api/admin/users/${user.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ role: user.role === 'admin' ? 'user' : 'admin' }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      showToast(typeof data.detail === 'string' ? data.detail : 'Could not change the role', 'error');
+      if (res.status === 401 || res.status === 403) leavePeopleOverlay();
+      return;
+    }
+    showToast(`${data.display_name} is now ${data.role}`, 'success');
+    await populatePeopleList();
+  } catch (_) {
+    showToast('Could not change the role', 'error');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/**
+ * Deactivate arms the button for a second tap ("Sure?"); reactivate
+ * applies at once. The API still refuses the last admin or anyone
+ * holding a device — the detail is toasted.
+ * @param {Object} user - Person row (id, is_active, display_name).
+ * @param {HTMLElement} btn - The Deactivate/Reactivate button.
+ * @returns {Promise<void>}
+ */
+async function peopleToggleActive(user, btn) {
+  if (user.is_active && btn.dataset.armed !== '1') {
+    btn.dataset.armed = '1';
+    const orig = btn.textContent;
+    btn.textContent = 'Sure?';
+    setTimeout(() => { btn.dataset.armed = ''; btn.textContent = orig; }, 3000);
+    return;
+  }
+  btn.disabled = true;
+  try {
+    const res = await fetch(`/api/admin/users/${user.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ is_active: !user.is_active }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      showToast(typeof data.detail === 'string' ? data.detail : 'Could not update the person', 'error');
+      if (res.status === 401 || res.status === 403) leavePeopleOverlay();
+      return;
+    }
+    showToast(
+      data.is_active ? `${data.display_name} reactivated` : `${data.display_name} deactivated`,
+      'success',
+    );
+    await populatePeopleList();
+  } catch (_) {
+    showToast('Could not update the person', 'error');
+  } finally {
+    btn.disabled = false;
+    btn.dataset.armed = '';
+  }
+}
+
+/**
+ * Show the add-person step with a blank name and the User role.
+ */
+function openPeopleAdd() {
+  peopleAddRole = 'user';
+  peopleTapName = '';
+  const input = document.getElementById('people-add-name');
+  input.value = '';
+  document.getElementById('people-add-submit').disabled = true;
+  document.getElementById('people-add-error').textContent = '';
+  syncPeopleRoleButtons();
+  showPeopleStep('people-step-add');
+  setTimeout(() => input.focus(), 300);
+}
+
+/**
+ * Reflect ``peopleAddRole`` on the add step's User/Admin buttons.
+ */
+function syncPeopleRoleButtons() {
+  document.getElementById('people-role-user').classList
+    .toggle('selected', peopleAddRole !== 'admin');
+  document.getElementById('people-role-admin').classList
+    .toggle('selected', peopleAddRole === 'admin');
+}
+
+/**
+ * POST the add-person arm: name + role. On success the tap step waits
+ * for the new card on this reader.
+ * @returns {Promise<void>}
+ */
+async function submitPeopleAdd() {
+  const btn = document.getElementById('people-add-submit');
+  const err = document.getElementById('people-add-error');
+  const name = document.getElementById('people-add-name').value.trim();
+  if (!name) { err.textContent = 'Enter a name.'; return; }
+  btn.disabled = true;
+  err.textContent = '';
+  try {
+    const res = await fetch('/api/admin/users', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, role: peopleAddRole }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      err.textContent = typeof data.detail === 'string' ? data.detail : 'Could not add the person.';
+      if (res.status === 401 || res.status === 403) leavePeopleOverlay();
+      return;
+    }
+    peopleTapName = name;
+    peopleTapMode = 'add';
+    peopleShowTap('TAP THE CARD', `New card for ${name}`);
+  } catch (_) {
+    err.textContent = 'Could not add the person.';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/**
+ * Arm a 60s replace-card window for one person; the tapped card rebinds them.
+ * @param {Object} user - Person row (id, display_name).
+ * @returns {Promise<void>}
+ */
+async function peopleReplaceCard(user) {
+  try {
+    const res = await fetch(`/api/admin/users/${user.id}/replace-card`, { method: 'POST' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      showToast(typeof data.detail === 'string' ? data.detail : 'Could not arm card replace.', 'error');
+      if (res.status === 401 || res.status === 403) leavePeopleOverlay();
+      return;
+    }
+    peopleTapName = user.display_name || '';
+    peopleTapMode = 'replace';
+    peopleShowTap('TAP THE NEW CARD', `Replacing the card for ${user.display_name}`);
+  } catch (_) {
+    showToast('Could not arm card replace.', 'error');
+  }
+}
+
+/**
+ * Show the card-tap step and start the 60s countdown.
+ * @param {string} title - Big step title.
+ * @param {string} label - Sub-line naming the person the card is for.
+ */
+function peopleShowTap(title, label) {
+  document.getElementById('people-tap-title').textContent = title;
+  document.getElementById('people-tap-label').textContent = label;
+  showPeopleStep('people-step-tap');
+  startPeopleCountdown();
+}
+
+/**
+ * 60s countdown on the tap step. A timeout never consumed a card, so the
+ * admin session is still live — show the error, then return to the list.
+ */
+function startPeopleCountdown() {
+  clearInterval(peopleCountdownTimer);
+  let secs = 60;
+  const cdEl = document.getElementById('people-countdown');
+  cdEl.textContent = secs + 's';
+  peopleCountdownTimer = setInterval(() => {
+    secs--;
+    cdEl.textContent = secs + 's';
+    if (secs <= 0) {
+      clearInterval(peopleCountdownTimer);
+      peopleTapMode = null;
+      apiCancelRegistration();
+      showPeopleStep('people-step-error');
+      document.getElementById('people-error-msg').textContent =
+        'Card window timed out. Please try again.';
+      setTimeout(() => {
+        if (!peopleOverlayOpen()) return;
+        showPeopleStep('people-step-list');
+        populatePeopleList();
+      }, 2500);
+    }
+  }, 1000);
+}
+
+/**
+ * registration_success SSE while the people tap step owns the card window.
+ * The card resolution ended the admin session backend-side, so the overlay
+ * leaves to idle after the success flash (same rule as Register User).
+ * @param {Object} data - SSE payload with the enrolled/rebound user.
+ */
+function handlePeopleCardSuccess(data) {
+  const mode = peopleTapMode || 'add';
+  peopleTapMode = null;
+  clearInterval(peopleCountdownTimer);
+  const name = (data.user && data.user.name) || peopleTapName || 'the person';
+  showPeopleStep('people-step-success');
+  document.getElementById('people-success-msg').textContent =
+    mode === 'replace' ? `Card updated for ${name}.` : `Added ${name}.`;
+  schedulePeopleLeave(3000);
+}
+
+/**
+ * registration_failed SSE while the people tap step owns the card window.
+ * @param {Object} data - SSE payload with the refusal reason.
+ */
+function handlePeopleCardFailed(data) {
+  peopleTapMode = null;
+  clearInterval(peopleCountdownTimer);
+  showPeopleStep('people-step-error');
+  document.getElementById('people-error-msg').textContent =
+    data.reason || 'Card update failed. Please try again.';
+  schedulePeopleLeave(3000);
+}
+
+/**
+ * Leave the people overlay to idle after a card result — the card window
+ * silently ended the admin session, so staying would show dead controls.
+ * @param {number} ms - Delay so the result step is readable first.
+ */
+function schedulePeopleLeave(ms) {
+  clearTimeout(peopleAfterTimer);
+  peopleAfterTimer = setTimeout(() => {
+    peopleAfterTimer = null;
+    leavePeopleOverlay();
+  }, ms);
+}
+
+/**
+ * Hide the overlay and end the session locally (the backend already ended
+ * it when the card window resolved — endSession just cleans up the UI).
+ */
+function leavePeopleOverlay() {
+  hidePeopleOverlay();
+  endSession();
+}
+
 /**
  * End the admin session from the admin panel. Closes the panel, clears the
  * admin session flag, and calls the standard session end flow.
@@ -3335,6 +3747,24 @@ document.getElementById('admin-goto-return').addEventListener('click', () => { c
 document.getElementById('admin-sync-source').addEventListener('click', () => { clickSound(); adminSyncSource(); });
 document.getElementById('admin-register-user').addEventListener('click', () => { clickSound(); adminRegisterUser(); });
 document.getElementById('admin-register-device').addEventListener('click', () => { clickSound(); adminRegisterDevice(); });
+document.getElementById('admin-people').addEventListener('click', () => { clickSound(); adminPeople(); });
+document.getElementById('people-close').addEventListener('click', () => { clickSound(); closePeople(); });
+document.getElementById('people-add-open').addEventListener('click', () => { clickSound(); openPeopleAdd(); });
+document.getElementById('people-add-back').addEventListener('click', () => { clickSound(); showPeopleStep('people-step-list'); });
+document.getElementById('people-add-submit').addEventListener('click', () => { clickSound(); submitPeopleAdd(); });
+document.getElementById('people-role-user').addEventListener('click', () => {
+  clickSound(); peopleAddRole = 'user'; syncPeopleRoleButtons();
+});
+document.getElementById('people-role-admin').addEventListener('click', () => {
+  clickSound(); peopleAddRole = 'admin'; syncPeopleRoleButtons();
+});
+const peopleNameInput = document.getElementById('people-add-name');
+peopleNameInput.addEventListener('input', () => {
+  document.getElementById('people-add-submit').disabled = !peopleNameInput.value.trim();
+});
+peopleNameInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && peopleNameInput.value.trim()) { clickSound(); submitPeopleAdd(); }
+});
 document.getElementById('bind-device-close').addEventListener('click', () => { clickSound(); closeRegisterDevice(); });
 document.getElementById('bind-search').addEventListener('input', () => {
   clearTimeout(bindSearchTimer);
@@ -3384,6 +3814,7 @@ document.getElementById('overlay-inactivity').style.display    = 'none';
 document.getElementById('overlay-device-detail').style.display = 'none';
 document.getElementById('overlay-admin').style.display         = 'none';
 document.getElementById('overlay-register-device').style.display = 'none';
+document.getElementById('overlay-people').style.display          = 'none';
 document.getElementById('overlay-update').style.display        = 'none';
 document.getElementById('overlay-power').style.display         = 'none';
 document.getElementById('overlay-slot').style.display          = 'none';
@@ -3506,6 +3937,7 @@ function connectSSE() {
     if (S.updating) return;
     const data = JSON.parse(e.data);
     if (S.screen === 'setup') handleSetupSuccess(data);
+    else if (peopleTapMode) handlePeopleCardSuccess(data);
     else handleRegistrationSuccess(data);
   });
 
@@ -3513,6 +3945,7 @@ function connectSSE() {
     if (S.updating) return;
     const data = JSON.parse(e.data);
     if (S.screen === 'setup') handleSetupFailed(data);
+    else if (peopleTapMode) handlePeopleCardFailed(data);
     else handleRegistrationFailed(data);
   });
 

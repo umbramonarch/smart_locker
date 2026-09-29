@@ -936,9 +936,18 @@ function renderAdminOverlay() {
     usersBody.innerHTML = usersData.map(u => `
       <tr>
         <td>${esc(u.display_name)}</td>
-        <td>${esc(u.role)}</td>
+        <td>
+          <select class="role-select" data-user-role="${u.id}" aria-label="Role for ${esc(u.display_name)}">
+            <option value="user"${u.role === 'user' ? ' selected' : ''}>User</option>
+            <option value="admin"${u.role === 'admin' ? ' selected' : ''}>Admin</option>
+          </select>
+        </td>
         <td>${u.is_active ? 'Yes' : 'No'}</td>
         <td>${esc(u.registered_at)}</td>
+        <td>
+          <button type="button" class="admin-tag-btn" data-user-card="${u.id}">Replace card</button>
+          <button type="button" class="admin-tag-btn" data-user-active="${u.id}">${u.is_active ? 'Deactivate' : 'Reactivate'}</button>
+        </td>
       </tr>
     `).join('');
   }
@@ -1536,6 +1545,150 @@ async function unbindTag(pm, btn) {
 }
 
 
+/* ── People (users): role / active / card ─────────────────────────────────── */
+
+/**
+ * PATCH one person's role or active flag (dashboard admin secret).
+ *
+ * @param {number} userId - The user's primary key.
+ * @param {Object} fields - ``role`` and/or ``is_active``.
+ * @param {HTMLElement} [el] - Control clicked (disabled while in flight).
+ */
+async function patchUser(userId, fields, el) {
+  const status = document.getElementById('admin-users-status');
+  if (status) status.textContent = '';
+  if (el) el.disabled = true;
+  try {
+    const res = await fetch(`/api/dashboard/users/${userId}`, {
+      method: 'PATCH',
+      headers: dashboardAdminHeaders(),
+      body: JSON.stringify(fields),
+    });
+    if (!res.ok) {
+      let detail = 'Could not update the person.';
+      if (res.status === 401) {
+        sessionStorage.removeItem(ADMIN_SECRET_KEY);
+        detail = 'Admin authorization failed. Open Admin to enter the secret.';
+      } else {
+        try {
+          const body = await res.json();
+          if (body && body.detail) detail = String(body.detail);
+        } catch (_) { /* keep default */ }
+      }
+      if (status) status.textContent = detail;
+      fetchAdminTables();  // re-render resets the control to the stored value
+      return;
+    }
+    const body = await res.json();
+    if (status) status.textContent =
+      `${body.display_name}: ${body.role}${body.is_active ? '' : ' (inactive)'}.`;
+    fetchAdminTables();
+  } catch (_) {
+    if (status) status.textContent = 'Could not update the person.';
+  } finally {
+    if (el) el.disabled = false;
+  }
+}
+
+
+/**
+ * Deactivate needs a second tap ("Sure?"); reactivate applies at once.
+ *
+ * @param {number} userId - The user's primary key.
+ * @param {HTMLElement} btn - The toggle button clicked.
+ */
+async function toggleUserActive(userId, btn) {
+  const user = usersData.find(u => String(u.id) === String(userId));
+  if (!user) return;
+  if (user.is_active && btn.dataset.armed !== '1') {
+    btn.dataset.armed = '1';
+    const orig = btn.textContent;
+    btn.textContent = 'Sure?';
+    setTimeout(() => { btn.dataset.armed = ''; btn.textContent = orig; }, 3000);
+    return;
+  }
+  await patchUser(userId, { is_active: !user.is_active }, btn);
+}
+
+
+/**
+ * Arm the cabinet reader 60s; the tapped card rebinds this person.
+ *
+ * @param {number} userId - The user's primary key.
+ */
+async function armReplaceCard(userId) {
+  const status = document.getElementById('admin-users-status');
+  const user = usersData.find(u => String(u.id) === String(userId));
+  if (status) status.textContent = '';
+  try {
+    const res = await fetch(`/api/dashboard/users/${userId}/replace-card`, {
+      method: 'POST',
+      headers: dashboardAdminHeaders(),
+    });
+    if (res.status === 401) {
+      sessionStorage.removeItem(ADMIN_SECRET_KEY);
+      if (status) status.textContent = 'Admin authorization failed. Open Admin to enter the secret.';
+      return;
+    }
+    let detail = 'Could not arm card replace.';
+    try {
+      const body = await res.json();
+      if (body && body.message) detail = String(body.message);
+      else if (body && body.detail) detail = String(body.detail);
+    } catch (_) { /* keep default */ }
+    if (status) status.textContent = res.ok && user
+      ? `${detail}`
+      : detail;
+  } catch (_) {
+    if (status) status.textContent = 'Could not arm card replace.';
+  }
+}
+
+
+/**
+ * Add a person: name + role arm the cabinet reader; their card tap on the
+ * locker completes enrollment.
+ */
+async function addPerson() {
+  const status = document.getElementById('admin-users-status');
+  const nameEl = document.getElementById('user-add-name');
+  const roleEl = document.getElementById('user-add-role');
+  const btn = document.getElementById('user-add-btn');
+  const name = nameEl ? nameEl.value.trim() : '';
+  if (!name) {
+    if (status) status.textContent = 'Enter the person\u2019s name.';
+    if (nameEl) nameEl.focus();
+    return;
+  }
+  if (status) status.textContent = '';
+  if (btn) btn.disabled = true;
+  try {
+    const res = await fetch('/api/dashboard/users', {
+      method: 'POST',
+      headers: dashboardAdminHeaders(),
+      body: JSON.stringify({ name, role: roleEl ? roleEl.value : 'user' }),
+    });
+    if (res.status === 401) {
+      sessionStorage.removeItem(ADMIN_SECRET_KEY);
+      if (status) status.textContent = 'Admin authorization failed. Open Admin to enter the secret.';
+      return;
+    }
+    let detail = 'Could not add the person.';
+    try {
+      const body = await res.json();
+      if (body && body.message) detail = String(body.message);
+      else if (body && body.detail) detail = String(body.detail);
+    } catch (_) { /* keep default */ }
+    if (status) status.textContent = detail;
+    if (res.ok && nameEl) nameEl.value = '';
+  } catch (_) {
+    if (status) status.textContent = 'Could not add the person.';
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+
 /* ── Event wiring ─────────────────────────────────────────────────────────── */
 
 /**
@@ -1590,6 +1743,15 @@ function initEvents() {
     if (serviceBtn) openServiceDialog(serviceBtn.dataset.servicePm || '');
     const removeBtn = e.target.closest('[data-remove-pm]');
     if (removeBtn) removeCatalogDevice(removeBtn.dataset.removePm || '', removeBtn);
+    const cardBtn = e.target.closest('[data-user-card]');
+    if (cardBtn) armReplaceCard(cardBtn.dataset.userCard || '');
+    const activeBtn = e.target.closest('[data-user-active]');
+    if (activeBtn) toggleUserActive(activeBtn.dataset.userActive || '', activeBtn);
+  });
+
+  document.addEventListener('change', (e) => {
+    const sel = e.target.closest('select[data-user-role]');
+    if (sel) patchUser(sel.dataset.userRole, { role: sel.value }, sel);
   });
 
   const cancel = document.getElementById('owner-cancel');
@@ -1610,6 +1772,16 @@ function initEvents() {
 
   const catalogAdd = document.getElementById('catalog-add-open');
   if (catalogAdd) catalogAdd.addEventListener('click', () => openDeviceDialog(''));
+
+  const userAdd = document.getElementById('user-add-btn');
+  if (userAdd) userAdd.addEventListener('click', () => addPerson());
+
+  const userAddName = document.getElementById('user-add-name');
+  if (userAddName) {
+    userAddName.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') addPerson();
+    });
+  }
 
   const deviceCancel = document.getElementById('device-cancel');
   if (deviceCancel) deviceCancel.addEventListener('click', closeDeviceDialog);

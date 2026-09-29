@@ -100,6 +100,12 @@ from smart_locker.services.owner_edit import (
     set_owner,
 )
 from smart_locker.services.setup_service import setup_needed, write_dashboard_secret
+from smart_locker.services.user_service import (
+    LastAdminError,
+    PersonHoldsDeviceError,
+    person_record,
+    update_person,
+)
 from smart_locker.sync import sync_status
 
 logger = logging.getLogger(__name__)
@@ -886,6 +892,20 @@ class ServiceReturnBody(BaseModel):
     calibration_due: str = Field(..., min_length=1, max_length=20)
 
 
+class UserAddBody(BaseModel):
+    """People: add a person — name + role, then their card tap on the cabinet."""
+
+    name: str = Field(..., min_length=1, max_length=100)
+    role: str = Field("user", max_length=10)
+
+
+class UserUpdateBody(BaseModel):
+    """People row edit: role and/or the active flag."""
+
+    role: str | None = Field(None, max_length=10)
+    is_active: bool | None = None
+
+
 # Labels for GET /api/dashboard/display. Unknown ids are title-cased.
 _KIOSK_SCREEN_LABELS = {
     "idle": "Idle",
@@ -1023,14 +1043,19 @@ def cancel_registration(_: None = Depends(require_loopback)):
     ctx = ctx_module.context
     with pending_state_lock:
         bind = ctx.pending_tag_bind
-        keep_dashboard = bind is not None and bool(
+        reg = ctx.pending_registration
+        keep_dashboard_bind = bind is not None and bool(
             getattr(bind, "from_dashboard", False)
         )
-        was_pending = ctx.pending_registration is not None or (
-            bind is not None and not keep_dashboard
+        keep_dashboard_reg = reg is not None and bool(
+            getattr(reg, "from_dashboard", False)
         )
-        assign_pending_registration(ctx, None)
-        if not keep_dashboard:
+        was_pending = (reg is not None and not keep_dashboard_reg) or (
+            bind is not None and not keep_dashboard_bind
+        )
+        if not keep_dashboard_reg:
+            assign_pending_registration(ctx, None)
+        if not keep_dashboard_bind:
             assign_pending_tag_bind(ctx, None)
     return {"success": True, "cancelled": was_pending}
 
@@ -1329,6 +1354,194 @@ def start_admin_registration(
         name, user_session.user.display_name,
     )
     return {"success": True, "message": "Tap the new user's NFC card to complete registration."}
+
+
+# --- People (kiosk + dashboard share one policy, two gates) ------------------
+
+def _require_admin_session(user_session: UserSession) -> None:
+    """403 unless the live kiosk session belongs to an admin."""
+    if user_session.user.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Admin access required.")
+
+
+def _apply_person_edit(db: Session, user_id: int, body: UserUpdateBody) -> dict:
+    """Apply a People row edit; map service refusals to HTTP errors.
+
+    Args:
+        db: Active database session (auto-committed by ``get_db``).
+        user_id: Primary key of the user being edited.
+        body: Role and/or active flag.
+
+    Returns:
+        dict: The updated ``person_record``.
+    """
+    user = UserRepository.find_by_id(db, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="Person not found.")
+    try:
+        update_person(db, user, role=body.role, is_active=body.is_active)
+    except (LastAdminError, PersonHoldsDeviceError) as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    return person_record(user)
+
+
+def _parse_person_role(role: str) -> str:
+    """Validate a People role value; 422 on anything but user/admin."""
+    try:
+        return UserRole((role or "").strip()).value
+    except ValueError as e:
+        raise HTTPException(
+            status_code=422, detail="Role must be 'user' or 'admin'."
+        ) from e
+
+
+def _arm_card_window(
+    pending: PendingRegistration, *, require_idle: bool
+) -> None:
+    """Arm a 60s card-tap window (enroll or replace) or raise the HTTP error.
+
+    ``require_idle`` is the dashboard rule: a remote arm is refused while a
+    kiosk session is live, so a borrower's card tap cannot land inside a
+    window it did not ask for.
+    """
+    ctx = ctx_module.context
+    if ctx is None:
+        raise HTTPException(status_code=503, detail="System not ready.")
+    if require_idle and ctx.session_mgr.has_active_session:
+        raise HTTPException(
+            status_code=409,
+            detail="A kiosk session is active. Arm from the kiosk or end the session.",
+        )
+    conflict = arm_pending_registration(ctx, pending)
+    if conflict:
+        raise HTTPException(status_code=409, detail=conflict)
+
+
+@router.get("/api/admin/users")
+def list_people(
+    db: Session = Depends(get_db),
+    user_session: UserSession = Depends(require_session),
+):
+    """People list for the kiosk admin menu (loopback session, admin only).
+
+    Args:
+        db: Active database session (injected by ``get_db``).
+        user_session: The active admin session (injected by ``require_session``).
+
+    Returns:
+        list[dict]: ``person_record`` per user — id, name, role, active,
+                    registered date. Card credentials are never included.
+    """
+    _require_admin_session(user_session)
+    return [person_record(u) for u in UserRepository.list_all(db)]
+
+
+@router.patch("/api/admin/users/{user_id}")
+def edit_person_kiosk(
+    user_id: int,
+    body: UserUpdateBody,
+    db: Session = Depends(get_db),
+    user_session: UserSession = Depends(require_session),
+):
+    """Edit one person's role or active flag from the kiosk admin menu.
+
+    Args:
+        user_id: Primary key of the user.
+        body: ``role`` and/or ``is_active``.
+        db: Active database session (injected by ``get_db``).
+        user_session: The active admin session (injected by ``require_session``).
+
+    Returns:
+        dict: The updated ``person_record``.
+
+    Raises:
+        HTTPException: 403 if not admin, 404 unknown person, 409 last-admin /
+            still-holding-device refusal, 422 bad role or empty edit.
+    """
+    _require_admin_session(user_session)
+    return _apply_person_edit(db, user_id, body)
+
+
+@router.post("/api/admin/users")
+def add_person_kiosk(
+    body: UserAddBody,
+    user_session: UserSession = Depends(require_session),
+):
+    """People add-person: arm a 60s window; the tapped card becomes the person.
+
+    Args:
+        body: Display name plus role ("user" or "admin").
+        user_session: The active admin session (injected by ``require_session``).
+
+    Returns:
+        dict: ``{"success": True, "message": str}``.
+
+    Raises:
+        HTTPException: 403 if not admin, 503 if not ready, 422 blank name or
+            bad role, 409 if a window already owns the reader.
+    """
+    _require_admin_session(user_session)
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="Name is required.")
+    role = _parse_person_role(body.role)
+    _arm_card_window(
+        PendingRegistration(display_name=name, role=role),
+        require_idle=False,
+    )
+    logger.info(
+        "People add-person armed for '%s' (role=%s) by admin %s.",
+        name,
+        role,
+        user_session.user.display_name,
+    )
+    return {"success": True, "message": "Tap the new card on the reader."}
+
+
+@router.post("/api/admin/users/{user_id}/replace-card")
+def replace_card_kiosk(
+    user_id: int,
+    db: Session = Depends(get_db),
+    user_session: UserSession = Depends(require_session),
+):
+    """Arm a 60s window; the tapped card rebinds this person's work card.
+
+    Args:
+        user_id: Primary key of the user receiving the new card.
+        db: Active database session (injected by ``get_db``).
+        user_session: The active admin session (injected by ``require_session``).
+
+    Returns:
+        dict: ``{"success": True, "message": str}``.
+
+    Raises:
+        HTTPException: 403 if not admin, 503 if not ready, 404 unknown person,
+            409 if a window already owns the reader.
+    """
+    _require_admin_session(user_session)
+    user = UserRepository.find_by_id(db, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="Person not found.")
+    _arm_card_window(
+        PendingRegistration(
+            display_name=user.display_name,
+            role=user.role.value,
+            replace_user_id=user.id,
+        ),
+        require_idle=False,
+    )
+    logger.info(
+        "Card replace armed for %s (id=%d) by admin %s.",
+        user.display_name,
+        user.id,
+        user_session.user.display_name,
+    )
+    return {
+        "success": True,
+        "message": f"Tap the new card for {user.display_name}.",
+    }
 
 
 @router.get("/api/admin/devices")
@@ -2575,18 +2788,117 @@ def dashboard_users(
         db: Active database session (injected by ``get_db``).
 
     Returns:
-        list[dict]: One dict per user with display name, role, active
-                    status, and registration timestamp.
+        list[dict]: ``person_record`` per user — id, display name, role,
+                    active status, and registration timestamp.
     """
-    users = UserRepository.list_all(db)
+    return [person_record(u) for u in UserRepository.list_all(db)]
 
-    result = []
-    for u in users:
-        result.append({
-            "display_name": u.display_name,
-            "role": u.role.value,
-            "is_active": u.is_active,
-            "registered_at": u.created_at.strftime("%Y-%m-%d %H:%M:%S") if u.created_at else None,
-        })
 
-    return result
+@router.patch("/api/dashboard/users/{user_id}")
+def edit_person_dashboard(
+    user_id: int,
+    body: UserUpdateBody,
+    db: Session = Depends(get_db),
+    _: None = Depends(require_dashboard_admin),
+):
+    """Edit one person's role or active flag from the dashboard People list.
+
+    Requires ``X-Smart-Locker-Admin`` (fail closed if unset). Same refusals as
+    the kiosk: the last active admin cannot be demoted or deactivated, and a
+    person holding a borrowed device cannot be deactivated.
+
+    Args:
+        user_id: Primary key of the user.
+        body: ``role`` and/or ``is_active``.
+        db: Active database session (injected by ``get_db``).
+
+    Returns:
+        dict: The updated ``person_record``.
+
+    Raises:
+        HTTPException: 401 without secret; 404 unknown person; 409 last-admin /
+            still-holding-device refusal; 422 bad role or empty edit.
+    """
+    return _apply_person_edit(db, user_id, body)
+
+
+@router.post("/api/dashboard/users")
+def add_person_dashboard(
+    body: UserAddBody,
+    _: None = Depends(require_dashboard_admin),
+):
+    """People add-person from the dashboard: arm the cabinet reader 60s.
+
+    A remote PC cannot write a card by itself — this only arms the window;
+    the new card is tapped on the locker. Refused while a kiosk session is
+    live, like ``/api/dashboard/bind-tag``.
+
+    Args:
+        body: Display name plus role ("user" or "admin").
+
+    Returns:
+        dict: ``ok`` plus the instruction message.
+
+    Raises:
+        HTTPException: 401 without secret; 503 if not ready; 422 blank name or
+            bad role; 409 if a session or pending window owns the reader.
+    """
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="Name is required.")
+    role = _parse_person_role(body.role)
+    _arm_card_window(
+        PendingRegistration(display_name=name, role=role, from_dashboard=True),
+        require_idle=True,
+    )
+    logger.info(
+        "Dashboard armed add-person for '%s' (role=%s). Awaiting card at kiosk.",
+        name,
+        role,
+    )
+    return {"ok": True, "message": "Tap the new card on the kiosk."}
+
+
+@router.post("/api/dashboard/users/{user_id}/replace-card")
+def replace_card_dashboard(
+    user_id: int,
+    db: Session = Depends(get_db),
+    _: None = Depends(require_dashboard_admin),
+):
+    """Arm the cabinet reader 60s; the tapped card rebinds this person's card.
+
+    Requires ``X-Smart-Locker-Admin``. The replacement happens on the locker
+    reader — the LAN request only opens the window.
+
+    Args:
+        user_id: Primary key of the user receiving the new card.
+        db: Active database session (injected by ``get_db``).
+
+    Returns:
+        dict: ``ok`` plus the instruction message.
+
+    Raises:
+        HTTPException: 401 without secret; 503 if not ready; 404 unknown
+            person; 409 if a session or pending window owns the reader.
+    """
+    user = UserRepository.find_by_id(db, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="Person not found.")
+    _arm_card_window(
+        PendingRegistration(
+            display_name=user.display_name,
+            role=user.role.value,
+            replace_user_id=user.id,
+            from_dashboard=True,
+        ),
+        require_idle=True,
+    )
+    logger.info(
+        "Dashboard armed card replace for %s (id=%d). Awaiting card at kiosk.",
+        user.display_name,
+        user.id,
+    )
+    return {
+        "ok": True,
+        "message": f"Tap the new card for {user.display_name} on the kiosk.",
+    }
