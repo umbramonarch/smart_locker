@@ -3,8 +3,10 @@ File: test_people.py
 Description: People feature API tests — the dashboard-secret gate and the
              kiosk admin-session gate both edit roles, activate/deactivate,
              add a person, and arm card replacement. Covers the last-admin and
-             still-holding-device refusals and that no payload carries card
-             credentials.
+             still-holding-device refusals, that no payload carries card
+             credentials, and that a live session follows the user row's
+             current role/active flag (deactivation ends it, demotion locks
+             out the admin gate).
 Project: smart_locker/tests/api
 Notes: Run with: python -m pytest tests/api/test_people.py -v
        The card tap that completes an arm lives in tests/e2e/test_people.py —
@@ -14,6 +16,7 @@ Notes: Run with: python -m pytest tests/api/test_people.py -v
 from smart_locker.api.app_context import PendingTagBind
 from smart_locker.database.models import DeviceStatus, UserRole
 from smart_locker.database.repositories import DeviceRepository, UserRepository
+from smart_locker.services.user_service import update_person
 
 from tests.api.helpers import dashboard_admin_headers
 
@@ -241,6 +244,96 @@ class TestKioskPeopleApi:
         mock_context.session_mgr.start_session(test_user)
         resp = client.post(f"/api/admin/users/{test_user.id}/replace-card")
         assert resp.status_code == 403
+
+    def test_edit_person_role_with_surrounding_whitespace(
+        self, client, mock_context, admin_user, test_user, db_session
+    ):
+        """PATCH {"role": " admin"} behaves like the POST path's parse."""
+        mock_context.session_mgr.start_session(admin_user)
+        resp = client.patch(
+            f"/api/admin/users/{test_user.id}", json={"role": " admin"}
+        )
+        assert resp.status_code == 200
+        assert resp.json()["role"] == "admin"
+        db_session.expire_all()
+        assert UserRepository.find_by_id(db_session, test_user.id).role.value == "admin"
+
+    def test_edit_person_whitespace_only_role_422(
+        self, client, mock_context, admin_user, test_user
+    ):
+        """Whitespace-only strips to empty — still a bad role, not a no-op."""
+        mock_context.session_mgr.start_session(admin_user)
+        resp = client.patch(f"/api/admin/users/{test_user.id}", json={"role": "  "})
+        assert resp.status_code == 422
+
+
+class TestStaleSession:
+    """require_session re-reads the user row — a live session follows the
+    live is_active/role, not the snapshot taken at login."""
+
+    def test_deactivated_user_session_is_ended(
+        self, client, mock_context, test_user, db_session
+    ):
+        """A deactivated user's live session dies on the next gated call."""
+        mock_context.session_mgr.start_session(test_user)
+        update_person(db_session, test_user, is_active=False)
+        db_session.commit()
+
+        resp = client.get("/api/devices")
+        assert resp.status_code == 401
+        assert not mock_context.session_mgr.has_active_session
+        events = [c.args[0] for c in mock_context.broadcast_sse.call_args_list]
+        assert {
+            "event": "session_ended", "reason": "account_inactive"
+        } in events
+
+    def test_deactivated_admin_session_is_ended(
+        self, client, mock_context, admin_user, db_session
+    ):
+        """Same for an admin session — ended before the admin gate runs."""
+        UserRepository.create(
+            db_session,
+            display_name="Second Admin",
+            uid_hmac="adm2-hmac",
+            encrypted_card_uid="enc-adm2",
+            role="admin",
+        )
+        mock_context.session_mgr.start_session(admin_user)
+        update_person(db_session, admin_user, is_active=False)
+        db_session.commit()
+
+        resp = client.get("/api/admin/users")
+        assert resp.status_code == 401
+        assert not mock_context.session_mgr.has_active_session
+
+    def test_demoted_admin_cannot_self_restore(
+        self, client, mock_context, admin_user, db_session
+    ):
+        """A demoted admin's live session loses admin rights immediately —
+        including the PATCH that would restore its own role."""
+        UserRepository.create(
+            db_session,
+            display_name="Second Admin",
+            uid_hmac="adm2-hmac",
+            encrypted_card_uid="enc-adm2",
+            role="admin",
+        )
+        db_session.commit()
+        mock_context.session_mgr.start_session(admin_user)
+        update_person(db_session, admin_user, role="user")
+        db_session.commit()
+
+        # The session survives, but the fresh role is USER.
+        resp = client.get("/api/admin/users")
+        assert resp.status_code == 403
+        # Self-restore is refused by the same live-role check.
+        resp = client.patch(
+            f"/api/admin/users/{admin_user.id}", json={"role": "admin"}
+        )
+        assert resp.status_code == 403
+        db_session.expire_all()
+        admin = UserRepository.find_by_id(db_session, admin_user.id)
+        assert admin.role == UserRole.USER
 
 
 class TestDashboardPeopleApi:

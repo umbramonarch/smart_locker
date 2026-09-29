@@ -148,19 +148,30 @@ def mock_context(session_mgr):
     mock_ctx.kiosk_screen = "idle"
     mock_ctx.pending_tag_bind = None
     mock_ctx.pending_registration = None
+    # AppContext owns this latch — pin it to None or MagicMock's autovivified
+    # attribute would read as a truthy "resolved" card-window outcome.
+    mock_ctx.last_card_result = None
     real_context = AppContext.__new__(AppContext)
     real_context.session_mgr = session_mgr
     real_context.sse_queue = mock_ctx.sse_queue
     real_context.admin_overlay_open = False
     real_context.pending_tag_bind = None
     real_context.pending_registration = None
+    real_context.last_card_result = None
     real_context.broadcast_sse = mock_ctx.broadcast_sse
 
     def end_kiosk_session(**kwargs):
+        # Real end_kiosk_session reads its own pending_* to decide what to
+        # clear/preserve — mirror the mock's armed windows onto it first so
+        # the pair behaves as the single AppContext it stands in for.
+        real_context.pending_registration = mock_ctx.pending_registration
+        real_context.pending_tag_bind = mock_ctx.pending_tag_bind
+        real_context.last_card_result = mock_ctx.last_card_result
         real_context.end_kiosk_session(**kwargs)
         mock_ctx.admin_overlay_open = real_context.admin_overlay_open
         mock_ctx.pending_tag_bind = real_context.pending_tag_bind
         mock_ctx.pending_registration = real_context.pending_registration
+        mock_ctx.last_card_result = getattr(real_context, "last_card_result", None)
 
     mock_ctx.end_kiosk_session = end_kiosk_session
     ctx_module.context = mock_ctx

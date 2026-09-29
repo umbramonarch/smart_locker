@@ -161,14 +161,17 @@ def test_session_end_clears_overlay_and_pending_tag_bind(e2e):
     assert h.client.get("/api/session").json()["active"] is False
 
 
-def test_http_session_end_clears_all_pending_state(e2e):
+def test_http_session_end_preserves_dashboard_pending_state(e2e):
+    """Session end drops kiosk-armed windows, but a dashboard-armed window is
+    not kiosk-session state — it survives for the remote arm to complete."""
     h = e2e()
     add_user(h, WORK_UID)
     h.tap(WORK_UID)
     h.wait_event("auth_success")
     h.ctx.admin_overlay_open = True
     h.ctx.pending_registration = PendingRegistration("Pending User")
-    h.ctx.pending_tag_bind = PendingTagBind(device_id=1, from_dashboard=True)
+    bind = PendingTagBind(device_id=1, from_dashboard=True)
+    h.ctx.pending_tag_bind = bind
 
     response = h.client.post("/api/session/end")
 
@@ -178,18 +181,21 @@ def test_http_session_end_clears_all_pending_state(e2e):
     }
     assert h.ctx.admin_overlay_open is False
     assert h.ctx.pending_registration is None
-    assert h.ctx.pending_tag_bind is None
+    assert h.ctx.pending_tag_bind is bind
     assert h.client.get("/api/session").json()["active"] is False
 
 
-def test_reader_disconnect_ends_session_and_clears_pending_state(e2e):
+def test_reader_disconnect_preserves_dashboard_pending_state(e2e):
+    """Reader disconnect ends the kiosk session like an explicit end: kiosk
+    windows clear, the remote-armed bind survives."""
     h = e2e()
     add_user(h, WORK_UID)
     h.tap(WORK_UID)
     h.wait_event("auth_success")
     h.ctx.admin_overlay_open = True
     h.ctx.pending_registration = PendingRegistration("Pending User")
-    h.ctx.pending_tag_bind = PendingTagBind(device_id=1, from_dashboard=True)
+    bind = PendingTagBind(device_id=1, from_dashboard=True)
+    h.ctx.pending_tag_bind = bind
 
     h.ctx.reader._event_queue.put(
         ReaderEvent(ReaderEventType.DISCONNECTED, "fake-reader")
@@ -198,7 +204,7 @@ def test_reader_disconnect_ends_session_and_clears_pending_state(e2e):
     assert h.wait_event("reader_disconnected") == {"event": "reader_disconnected"}
     assert h.ctx.admin_overlay_open is False
     assert h.ctx.pending_registration is None
-    assert h.ctx.pending_tag_bind is None
+    assert h.ctx.pending_tag_bind is bind
     assert h.client.get("/api/session").json()["active"] is False
 
 

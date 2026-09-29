@@ -40,6 +40,8 @@ let inventoryQuery = '';
 const REFRESH_MS = 30_000;
 /** How often to poll the kiosk Display snapshot. */
 const DISPLAY_MS = 2_000;
+/** How often to poll an armed card window while waiting for the tap. */
+const CARD_WINDOW_MS = 2_000;
 /** Debounce for Inventory search so each keystroke is not a full tbody rebuild. */
 const SEARCH_DEBOUNCE_MS = 200;
 
@@ -872,6 +874,7 @@ async function openAdminOverlay() {
 function closeAdminOverlay() {
   const overlay = document.getElementById('admin-overlay');
   if (overlay) overlay.hidden = true;
+  stopCardWindowPolling();
 }
 
 
@@ -1639,6 +1642,7 @@ async function armReplaceCard(userId) {
     if (status) status.textContent = res.ok && user
       ? `${detail}`
       : detail;
+    if (res.ok) startCardWindowPolling();
   } catch (_) {
     if (status) status.textContent = 'Could not arm card replace.';
   }
@@ -1681,11 +1685,147 @@ async function addPerson() {
     } catch (_) { /* keep default */ }
     if (status) status.textContent = detail;
     if (res.ok && nameEl) nameEl.value = '';
+    if (res.ok) startCardWindowPolling();
   } catch (_) {
     if (status) status.textContent = 'Could not add the person.';
   } finally {
     if (btn) btn.disabled = false;
   }
+}
+
+
+/* ── Card-window polling (add person / replace card) ──────────────────────── */
+
+/** Interval handle for the card-window poll, or null. */
+let cardWindowTimer = null;
+/** Generation counter: a still-in-flight tick exits after a stop/restart. */
+let cardWindowGen = 0;
+
+
+/**
+ * Stop the card-window poll and hide its Cancel button. Any tick still
+ * waiting on fetch exits when it sees the generation has moved on.
+ */
+function stopCardWindowPolling() {
+  cardWindowGen += 1;
+  if (cardWindowTimer) {
+    clearInterval(cardWindowTimer);
+    cardWindowTimer = null;
+  }
+  const cancelBtn = document.getElementById('admin-card-window-cancel');
+  if (cancelBtn) cancelBtn.hidden = true;
+}
+
+
+/**
+ * Start polling the armed card window after a successful arm so the People
+ * status line tracks the countdown, the outcome, or the timeout.
+ */
+function startCardWindowPolling() {
+  stopCardWindowPolling();
+  cardWindowTimer = setInterval(pollCardWindow, CARD_WINDOW_MS);
+  pollCardWindow();
+}
+
+
+/**
+ * One card-window poll tick. Runs only while the admin overlay is open —
+ * a closed overlay stops the poll without touching the status line.
+ * ``armed`` shows the countdown and the Cancel button; ``resolved`` reports
+ * the outcome and refreshes People; ``idle`` means the window vanished
+ * server-side without a result.
+ *
+ * @returns {Promise<void>}
+ */
+async function pollCardWindow() {
+  const overlay = document.getElementById('admin-overlay');
+  if (!overlay || overlay.hidden) {
+    stopCardWindowPolling();
+    return;
+  }
+  const gen = cardWindowGen;
+  let res = null;
+  try {
+    res = await fetch('/api/dashboard/card-window', {
+      headers: dashboardAdminHeaders(),
+    });
+  } catch (_) {
+    return;  // transient miss — the next tick retries
+  }
+  if (gen !== cardWindowGen) return;  // stopped or re-armed mid-fetch
+  const status = document.getElementById('admin-users-status');
+  const cancelBtn = document.getElementById('admin-card-window-cancel');
+  if (res.status === 401) {
+    sessionStorage.removeItem(ADMIN_SECRET_KEY);
+    if (status) status.textContent = 'Admin authorization failed. Open Admin to enter the secret.';
+    stopCardWindowPolling();
+    return;
+  }
+  if (!res.ok) return;
+  let data = null;
+  try {
+    data = await res.json();
+  } catch (_) {
+    return;
+  }
+  if (data.state === 'armed') {
+    if (status) status.textContent =
+      `Waiting for the card tap on the kiosk… ${data.seconds_left}s`;
+    if (cancelBtn) cancelBtn.hidden = false;
+    return;
+  }
+  if (data.state === 'idle') {
+    stopCardWindowPolling();
+    if (status) status.textContent = 'Card window closed.';
+    return;
+  }
+  if (data.state !== 'resolved') return;
+  stopCardWindowPolling();
+  if (status) {
+    const name = (data.user && data.user.name) || data.display_name || 'the person';
+    let text = 'Card window closed.';
+    if (data.outcome === 'success') {
+      text = data.replace ? `Card updated for ${name}.` : `Added ${name}.`;
+    } else if (data.outcome === 'failed') {
+      text = data.reason || 'Card enrollment failed.';
+    } else if (data.outcome === 'expired') {
+      text = 'Card window timed out.';
+    } else if (data.outcome === 'cancelled') {
+      text = 'Card window cancelled.';
+    }
+    status.textContent = text;
+  }
+  fetchAdminTables();
+}
+
+
+/**
+ * Cancel the armed card window. On success stop polling and report it; on
+ * a miss leave the poll running so the next tick settles the state.
+ *
+ * @returns {Promise<void>}
+ */
+async function cancelCardWindow() {
+  const status = document.getElementById('admin-users-status');
+  let res = null;
+  try {
+    res = await fetch('/api/dashboard/card-window/cancel', {
+      method: 'POST',
+      headers: dashboardAdminHeaders(),
+    });
+  } catch (_) {
+    return;
+  }
+  if (res.status === 401) {
+    sessionStorage.removeItem(ADMIN_SECRET_KEY);
+    if (status) status.textContent = 'Admin authorization failed. Open Admin to enter the secret.';
+    stopCardWindowPolling();
+    return;
+  }
+  if (!res.ok) return;
+  stopCardWindowPolling();
+  if (status) status.textContent = 'Card window cancelled.';
+  fetchAdminTables();
 }
 
 
@@ -1782,6 +1922,9 @@ function initEvents() {
       if (e.key === 'Enter') addPerson();
     });
   }
+
+  const cardWindowCancel = document.getElementById('admin-card-window-cancel');
+  if (cardWindowCancel) cardWindowCancel.addEventListener('click', () => cancelCardWindow());
 
   const deviceCancel = document.getElementById('device-cancel');
   if (deviceCancel) deviceCancel.addEventListener('click', closeDeviceDialog);

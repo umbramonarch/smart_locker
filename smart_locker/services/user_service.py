@@ -127,19 +127,24 @@ def update_person(
     *,
     role: str | None = None,
     is_active: bool | None = None,
+    actor: str | None = None,
 ) -> User:
     """Apply People-screen edits to one user row.
 
-    The role accepts "admin"/"user". Demoting or deactivating the last active
-    admin is refused — the locker must never strand itself without an admin —
-    and deactivation is refused while the person holds a borrowed device.
-    Both checks read the database at write time.
+    The role accepts "admin"/"user" (surrounding whitespace is stripped, like
+    the add-person path). Demoting or deactivating the last active admin is
+    refused — the locker must never strand itself without an admin — and
+    deactivation is refused while the person holds a borrowed device. Both
+    checks read the database at write time; the caller serializes the
+    check+write pair so two racing edits cannot both pass the count.
 
     Args:
         db_session: Active database session.
         user: User row to edit.
         role: New role, or None to leave unchanged.
         is_active: New active flag, or None to leave unchanged.
+        actor: Who made the edit (kiosk admin name or "dashboard") — appended
+            to the audit log line when given.
 
     Returns:
         The updated User row (flushed, not committed).
@@ -154,7 +159,7 @@ def update_person(
 
     if role is not None:
         try:
-            new_role = UserRole(role)
+            new_role = UserRole(str(role).strip())
         except ValueError as exc:
             raise ValueError("Role must be 'user' or 'admin'.") from exc
     else:
@@ -186,13 +191,17 @@ def update_person(
     if is_active is not None:
         user.is_active = is_active
     db_session.flush()
-    logger.info(
-        "Updated person %s (id=%d): role=%s active=%s",
+    log_msg = "Updated person %s (id=%d): role=%s active=%s"
+    log_args: tuple = (
         user.display_name,
         user.id,
         user.role.value,
         user.is_active,
     )
+    if actor:
+        log_msg += " by %s"
+        log_args += (actor,)
+    logger.info(log_msg, *log_args)
     return user
 
 

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import enum
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from sqlalchemy.orm import Session
@@ -392,7 +393,7 @@ def dispatch_insert(
     db_session: Session,
     card_uid_hex: str,
     hmac_key: bytes,
-    enc_key: bytes | None,
+    enc_key_provider: Callable[[], bytes] | None,
     session_mgr: SessionManager,
     *,
     registration_display_name: str | None = None,
@@ -409,8 +410,9 @@ def dispatch_insert(
     ``db_session``.  Pending values are scalar snapshots, never ORM rows.
     Expired registration ends an overlay session before normal classification
     so its tap can log in rather than log out, matching registration completion.
-    ``enc_key`` is required only when ``registration_display_name`` is set —
-    callers resolve it lazily so a missing ENC key cannot break plain taps.
+    ``enc_key_provider`` is invoked only in the card-registration lane, right
+    before enrollment — a sticker tap falling through to ordinary handling
+    never resolves the AES key, so a missing ENC key cannot break it.
     Handler failures roll the session back before returning a failure result,
     so the caller's auto-commit is a no-op instead of re-raising.
     """
@@ -438,17 +440,38 @@ def dispatch_insert(
             # A sticker tap does not consume a card window: it falls through
             # to ordinary handling (idle return, in-session auto-intent) and
             # the armed registration/replace keeps waiting for a card.
-            result = handle_insert(
-                db_session,
-                card_uid_hex,
-                hmac_key,
-                session_mgr,
-                admin_overlay_open=admin_overlay_open,
-                reader_name=reader_name,
-                classified_uid=(kind, tap_user, tap_device),
-            )
+            try:
+                result = handle_insert(
+                    db_session,
+                    card_uid_hex,
+                    hmac_key,
+                    session_mgr,
+                    admin_overlay_open=admin_overlay_open,
+                    reader_name=reader_name,
+                    classified_uid=(kind, tap_user, tap_device),
+                )
+            except Exception:
+                logger.exception(
+                    "Device-tag fall-through failed during an armed card window."
+                )
+                db_session.rollback()
+                result = TapResult(
+                    event="device_action",
+                    payload={
+                        "success": False,
+                        "action": "error",
+                        "message": "Something went wrong. Please try again.",
+                    },
+                )
+            # A fall-through failure is not a card-window outcome: no clears,
+            # no leftover-session end — the window stays armed.
             return TapDispatchOutcome(result)
         try:
+            # Resolve the AES key only now that a card tap is enrolling or
+            # replacing; a provider raise is a normal registration_failed.
+            enc_key = (
+                enc_key_provider() if enc_key_provider is not None else None
+            )
             result = handle_registration_tap(
                 db_session,
                 card_uid_hex,

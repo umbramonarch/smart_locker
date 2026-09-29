@@ -287,3 +287,28 @@ def test_second_dashboard_arm_conflicts(e2e, monkeypatch):
     pending = h.ctx.pending_registration
     assert pending is not None
     assert pending.display_name == "Window Holder"
+
+
+def test_dashboard_armed_window_latches_card_result(e2e, monkeypatch):
+    """The dashboard-armed replace window resolves on the kiosk tap; the LAN
+    dashboard learns the outcome from ctx.last_card_result because SSE is
+    loopback-only."""
+    monkeypatch.setenv("SMART_LOCKER_DASHBOARD_ADMIN_SECRET", DASHBOARD_SECRET)
+    h = e2e()
+    user_id = add_user(h, OLD_CARD_UID, display_name="Card Holder")
+
+    r = h.client.post(
+        f"/api/dashboard/users/{user_id}/replace-card",
+        headers=_dashboard_headers(),
+    )
+    assert r.status_code == 200
+    assert h.ctx.last_card_result is None
+
+    h.tap(NEW_CARD_UID)
+    h.wait_event("registration_success")
+
+    result = h.ctx.last_card_result
+    assert result["outcome"] == "success"
+    assert result["display_name"] == "Card Holder"
+    assert result["replace_user_id"] == user_id
+    assert result["user"]["id"] == user_id

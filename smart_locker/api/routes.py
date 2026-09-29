@@ -29,7 +29,9 @@ import asyncio
 import ipaddress
 import json
 import logging
+import math
 import secrets
+import threading
 import time
 
 from fastapi import (
@@ -47,6 +49,7 @@ import smart_locker.api.app_context as ctx_module
 from smart_locker.api.app_context import (
     PendingRegistration,
     PendingTagBind,
+    REGISTRATION_TIMEOUT_SECONDS,
     arm_pending_registration,
     arm_pending_tag_bind,
     assign_pending_registration,
@@ -276,12 +279,20 @@ def get_db() -> Session:
         session.close()
 
 
-def require_session(request: Request) -> UserSession:
+def require_session(
+    request: Request,
+    db: Session = Depends(get_db),
+) -> UserSession:
     """Require an active kiosk session from a loopback client.
 
     FastAPI dependency that checks for an active session and returns it.
     Automatically calls ``touch()`` to reset the inactivity timer on
     every request that uses this dependency.
+
+    The session's cached ``user`` is a snapshot frozen at login — the row is
+    re-fetched on every request so a mid-session deactivation ends the kiosk
+    session outright and a mid-session demote stops passing the admin gate
+    on the very next call.
 
     A process-global session started from the Riverdi is not authorization
     for a LAN browser: bind, unbind, borrow, export, and session-end stay
@@ -290,13 +301,15 @@ def require_session(request: Request) -> UserSession:
 
     Args:
         request: Incoming ASGI request (client address, not X-Forwarded-For).
+        db: Request database session (injected by ``get_db``).
 
     Returns:
-        UserSession: The currently active kiosk session.
+        UserSession: The currently active kiosk session, with ``user``
+            refreshed to the live row.
 
     Raises:
         HTTPException: 403 if the client is not loopback; 401 if no session
-            is active.
+            is active or the account was deactivated/deleted mid-session.
     """
     if not _is_loopback_request(request):
         raise HTTPException(
@@ -308,6 +321,22 @@ def require_session(request: Request) -> UserSession:
     session = ctx_module.context.session_mgr.current_session
     if session is None:
         raise HTTPException(status_code=401, detail="No active session.")
+    fresh = UserRepository.find_by_id(db, session.user.id)
+    if fresh is None or not fresh.is_active:
+        # The account is gone or deactivated — end the session (this emits
+        # session_ended so the kiosk kicks back to idle) and refuse. A dead
+        # session must not extend its own timer, so no touch() here.
+        ctx_module.context.end_kiosk_session(reason="account_inactive")
+        raise HTTPException(
+            status_code=401,
+            detail="Session ended — this account is no longer active.",
+        )
+    session.user = fresh
+    # Detach the live row into a plain snapshot: get_db commits/rolls back and
+    # closes ``db`` at request end, which would otherwise leave session.user
+    # expired-and-detached — an unreadable .id on the very next call. Every
+    # consumer reads only loaded scalars (id, display_name, role).
+    db.expunge(fresh)
     ctx_module.context.session_mgr.touch()
     return session
 
@@ -474,6 +503,29 @@ def _pending_nfc_conflict() -> str | None:
     if ctx.pending_tag_bind is not None:
         return "A device-tag bind is already waiting for a sticker tap."
     return None
+
+
+def _latch_card_result(ctx, outcome: str, reg: PendingRegistration) -> None:
+    """Record a card window's terminal outcome for the dashboard status poll.
+
+    ``AppContext.last_card_result`` is the latch the NFC bridge writes on
+    tap resolution; the HTTP side writes the same shape when a window ends
+    without a tap (dashboard cancel, or expiry observed by a status poll).
+    ``AppContext`` owns the attribute — this only assigns it.
+
+    Args:
+        ctx: Application context (or test double with the same attribute).
+        outcome: Terminal outcome — ``"cancelled"`` or ``"expired"``.
+        reg: The registration window being dropped.
+    """
+    ctx.last_card_result = {
+        "outcome": outcome,
+        "reason": None,
+        "user": None,
+        "display_name": reg.display_name,
+        "replace_user_id": reg.replace_user_id,
+        "at": time.monotonic(),
+    }
 
 
 # --- SSE Event Stream -------------------------------------------------------
@@ -1050,8 +1102,12 @@ def cancel_registration(_: None = Depends(require_loopback)):
         keep_dashboard_reg = reg is not None and bool(
             getattr(reg, "from_dashboard", False)
         )
-        was_pending = (reg is not None and not keep_dashboard_reg) or (
-            bind is not None and not keep_dashboard_bind
+        # An already-expired window is still cleared, but it does not count as
+        # a cancellation — nothing the user could tap was waiting on it.
+        was_pending = (
+            reg is not None and not reg.is_expired and not keep_dashboard_reg
+        ) or (
+            bind is not None and not bind.is_expired and not keep_dashboard_bind
         )
         if not keep_dashboard_reg:
             assign_pending_registration(ctx, None)
@@ -1255,7 +1311,8 @@ def start_admin_session(
 
     Raises:
         HTTPException: 403 if not loopback, 503 if system not ready, 404 if
-                       no active admin users exist in the database.
+                       no active admin users exist in the database, 409 if a
+                       registration/bind window owns the reader.
     """
     if ctx_module.context is None:
         raise HTTPException(status_code=503, detail="System not ready.")
@@ -1287,6 +1344,14 @@ def start_admin_session(
             status_code=404,
             detail="No active admin users found. Enroll an admin card first.",
         )
+
+    # A live card/bind window owns the reader — a new session would swallow
+    # the awaited tap as a login and its end would kill the window. Refuse
+    # while one is armed. (The existing-session overlay branch above stays
+    # reachable: updating the flag does not touch the reader.)
+    conflict = _pending_nfc_conflict()
+    if conflict:
+        raise HTTPException(status_code=409, detail=conflict)
 
     ctx_module.context.session_mgr.start_session(admin_user)
     ctx_module.context.admin_overlay_open = overlay
@@ -1364,27 +1429,53 @@ def _require_admin_session(user_session: UserSession) -> None:
         raise HTTPException(status_code=403, detail="Admin access required.")
 
 
-def _apply_person_edit(db: Session, user_id: int, body: UserUpdateBody) -> dict:
+# People edits (role / active flag) serialize across the kiosk and dashboard
+# request threads: the last-active-admin count must be checked and written
+# under one lock or two racing PATCHes could both see ">1 admin" and leave
+# the locker with none.
+_person_edit_lock = threading.Lock()
+
+
+def _apply_person_edit(
+    db: Session,
+    user_id: int,
+    body: UserUpdateBody,
+    *,
+    actor: str | None = None,
+) -> dict:
     """Apply a People row edit; map service refusals to HTTP errors.
+
+    The whole check+write+commit runs under ``_person_edit_lock``. The commit
+    on lock entry ends the request session's pre-lock read snapshot, so
+    ``update_person``'s last-admin and holds-device checks see every write
+    committed before this request waited on the lock. (It commits nothing
+    meaningful in production — the edit itself is what follows.)
 
     Args:
         db: Active database session (auto-committed by ``get_db``).
         user_id: Primary key of the user being edited.
         body: Role and/or active flag.
+        actor: Who made the edit (kiosk admin name or "dashboard"), for the
+            audit log line.
 
     Returns:
         dict: The updated ``person_record``.
     """
-    user = UserRepository.find_by_id(db, user_id)
-    if user is None:
-        raise HTTPException(status_code=404, detail="Person not found.")
-    try:
-        update_person(db, user, role=body.role, is_active=body.is_active)
-    except (LastAdminError, PersonHoldsDeviceError) as e:
-        raise HTTPException(status_code=409, detail=str(e)) from e
-    except ValueError as e:
-        raise HTTPException(status_code=422, detail=str(e)) from e
-    return person_record(user)
+    with _person_edit_lock:
+        db.commit()
+        user = UserRepository.find_by_id(db, user_id)
+        if user is None:
+            raise HTTPException(status_code=404, detail="Person not found.")
+        try:
+            update_person(
+                db, user, role=body.role, is_active=body.is_active, actor=actor
+            )
+        except (LastAdminError, PersonHoldsDeviceError) as e:
+            raise HTTPException(status_code=409, detail=str(e)) from e
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e)) from e
+        db.commit()
+        return person_record(user)
 
 
 def _parse_person_role(role: str) -> str:
@@ -1461,7 +1552,9 @@ def edit_person_kiosk(
             still-holding-device refusal, 422 bad role or empty edit.
     """
     _require_admin_session(user_session)
-    return _apply_person_edit(db, user_id, body)
+    return _apply_person_edit(
+        db, user_id, body, actor=user_session.user.display_name
+    )
 
 
 @router.post("/api/admin/users")
@@ -2819,7 +2912,7 @@ def edit_person_dashboard(
         HTTPException: 401 without secret; 404 unknown person; 409 last-admin /
             still-holding-device refusal; 422 bad role or empty edit.
     """
-    return _apply_person_edit(db, user_id, body)
+    return _apply_person_edit(db, user_id, body, actor="dashboard")
 
 
 @router.post("/api/dashboard/users")
@@ -2902,3 +2995,100 @@ def replace_card_dashboard(
         "ok": True,
         "message": f"Tap the new card for {user.display_name} on the kiosk.",
     }
+
+
+@router.get("/api/dashboard/card-window")
+def dashboard_card_window_status(
+    _: None = Depends(require_dashboard_admin),
+) -> dict:
+    """Poll the card-window state (dashboard admin secret required).
+
+    The dashboard People editor arms 60s windows remotely but the card is
+    tapped on the locker — this is how the remote screen learns the window
+    is waiting, saw its tap resolve, or went back to idle.
+
+    A still-armed registration reports ``armed``; a resolved one reports the
+    latch the NFC bridge wrote (or ``cancelled``/``expired`` when the window
+    ended without a tap); otherwise ``idle``. An expired window is dropped
+    here the same way the bridge drops it, and its latch becomes ``expired``.
+
+    Returns:
+        dict: ``{"state": "armed"|"resolved"|"idle", ...}`` — armed carries
+              ``display_name``, ``replace``, ``seconds_left``; resolved
+              carries ``outcome``, ``reason``, ``user``, ``display_name``,
+              ``replace``.
+
+    Raises:
+        HTTPException: 401 without secret; 503 if system not ready.
+    """
+    ctx = ctx_module.context
+    if ctx is None:
+        raise HTTPException(status_code=503, detail="System not ready.")
+
+    with pending_state_lock:
+        reg = ctx.pending_registration
+        if reg is not None and reg.is_expired:
+            _latch_card_result(ctx, "expired", reg)
+            assign_pending_registration(ctx, None)
+            reg = None
+        if reg is not None:
+            elapsed = time.monotonic() - reg.created_at
+            return {
+                "state": "armed",
+                "display_name": reg.display_name,
+                "replace": reg.replace_user_id is not None,
+                "seconds_left": max(
+                    0, math.ceil(REGISTRATION_TIMEOUT_SECONDS - elapsed)
+                ),
+            }
+        result = getattr(ctx, "last_card_result", None)
+
+    if isinstance(result, dict):
+        return {
+            "state": "resolved",
+            "outcome": result.get("outcome"),
+            "reason": result.get("reason"),
+            "user": result.get("user"),
+            "display_name": result.get("display_name"),
+            "replace": result.get("replace_user_id") is not None,
+        }
+    return {"state": "idle"}
+
+
+@router.post("/api/dashboard/card-window/cancel")
+def dashboard_cancel_card_window(
+    _: None = Depends(require_dashboard_admin),
+) -> dict:
+    """Cancel an armed card/bind window the dashboard itself armed.
+
+    Requires ``X-Smart-Locker-Admin``. Only ``from_dashboard`` windows are
+    cleared — a window armed at the kiosk (a self-registration the user is
+    about to tap into, or a kiosk tag bind) is not the dashboard's to kill.
+    Cancelling a registration latches ``last_card_result`` as ``cancelled``
+    so the status poll reports a settled outcome instead of going silent.
+
+    Returns:
+        dict: ``{"ok": True, "cancelled": bool}`` — ``cancelled`` is True if
+              a dashboard-armed window was actually pending and dropped.
+
+    Raises:
+        HTTPException: 401 without secret; 503 if system not ready.
+    """
+    ctx = ctx_module.context
+    if ctx is None:
+        raise HTTPException(status_code=503, detail="System not ready.")
+
+    cancelled = False
+    with pending_state_lock:
+        reg = ctx.pending_registration
+        if reg is not None and bool(getattr(reg, "from_dashboard", False)):
+            _latch_card_result(ctx, "cancelled", reg)
+            assign_pending_registration(ctx, None)
+            cancelled = True
+        bind = ctx.pending_tag_bind
+        if bind is not None and bool(getattr(bind, "from_dashboard", False)):
+            assign_pending_tag_bind(ctx, None)
+            cancelled = True
+    if cancelled:
+        logger.info("Dashboard cancelled its armed card/bind window.")
+    return {"ok": True, "cancelled": cancelled}

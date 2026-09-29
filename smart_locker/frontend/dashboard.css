@@ -796,6 +796,10 @@ body {
   min-width: 14rem;
 }
 
+#admin-card-window-cancel {
+  margin-bottom: 0.6rem;
+}
+
 .role-select {
   font-family: var(--font-body);
   font-size: 0.8rem;

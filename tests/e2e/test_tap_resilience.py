@@ -18,9 +18,13 @@ import time
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
+import smart_locker.auth.tap_router as tap_router
+
 from smart_locker.api.app_context import (
     PendingRegistration,
+    PendingTagBind,
     assign_pending_registration,
+    assign_pending_tag_bind,
 )
 from smart_locker.database.models import DeviceStatus
 from smart_locker.database.repositories import (
@@ -28,7 +32,7 @@ from smart_locker.database.repositories import (
     RegistrantRepository,
     UserRepository,
 )
-from smart_locker.security.key_manager import key_manager
+from smart_locker.security.key_manager import KeyManager, key_manager
 
 from tests.e2e.helpers import add_device, add_user, get_device, uid_hmac_for
 
@@ -140,6 +144,92 @@ def test_missing_enc_key_breaks_registration_only(e2e, monkeypatch):
     h.wait_event("auth_success")
 
 
+def test_sticker_tap_during_card_window_never_resolves_enc_key(
+    e2e, monkeypatch
+):
+    """A sticker tap during an armed card window must not resolve the AES key:
+    the provider runs only in the card lane. A stray sticker while
+    SMART_LOCKER_ENC_KEY is broken used to fail the whole tap with
+    registration_failed and kill the window."""
+    h = e2e()
+    add_device(
+        h, name="Tagged Tool", pm_number="PM-EK", locker_slot=3, tag_uid=TAG_UID
+    )
+    _add_registrant(h, "New Person")
+
+    enc_reads = []
+    broken = {"on": True}
+
+    def gated_enc_key(self):
+        enc_reads.append(1)
+        if broken["on"]:
+            raise EnvironmentError("missing SMART_LOCKER_ENC_KEY")
+        return b"\x01" * 32
+
+    monkeypatch.setattr(KeyManager, "enc_key", property(gated_enc_key))
+
+    r = h.client.post("/api/register", json={"name": "New Person"})
+    assert r.status_code == 200
+    assert h.ctx.pending_registration is not None
+
+    h.tap(TAG_UID)
+    h.wait_event("device_tag_idle")
+
+    # The provider was never invoked and the card window is still armed.
+    assert enc_reads == []
+    assert h.ctx.pending_registration is not None
+    h.assert_no_event("registration_failed", within=1.0)
+
+    # In the card lane the provider does run — unbreak the key and enroll.
+    broken["on"] = False
+    h.tap(NEW_CARD_UID)
+    h.wait_event("registration_success")
+    assert enc_reads != []
+    assert h.ctx.pending_registration is None
+
+
+def test_sticker_fallthrough_db_fault_keeps_card_window(e2e, monkeypatch):
+    """A DB fault inside the device-tag fall-through reports a generic
+    device_action error — it must not escalate to registration_failed, must
+    not clear the armed card window, and the next card tap still completes."""
+    h = e2e()
+    add_device(
+        h, name="Tagged Tool", pm_number="PM-FT", locker_slot=4, tag_uid=TAG_UID
+    )
+    _add_registrant(h, "New Person")
+
+    r = h.client.post("/api/register", json={"name": "New Person"})
+    assert r.status_code == 200
+
+    real_handle_insert = tap_router.handle_insert
+    state = {"fail": True}
+
+    def flaky_handle_insert(*args, **kwargs):
+        if state["fail"]:
+            state["fail"] = False
+            raise OperationalError(
+                "SELECT devices", {}, Exception("database is locked")
+            )
+        return real_handle_insert(*args, **kwargs)
+
+    monkeypatch.setattr(tap_router, "handle_insert", flaky_handle_insert)
+
+    h.tap(TAG_UID)
+    payload = h.wait_event("device_action")
+    assert payload["success"] is False
+    assert payload["action"] == "error"
+    assert "went wrong" in payload["message"].lower()
+
+    # Not a card-window outcome: the window stays armed, the latch stays empty.
+    assert h.ctx.pending_registration is not None
+    assert h.ctx.last_card_result is None
+    h.assert_no_event("registration_failed", within=1.0)
+
+    h.tap(NEW_CARD_UID)
+    h.wait_event("registration_success")
+    assert h.ctx.pending_registration is None
+
+
 def test_commit_failure_on_borrow_reports_error_and_next_tap_works(e2e, monkeypatch):
     """A commit-level failure (database is locked) on the borrow path emits a
     device_action failure SSE, rolls the change back, and leaves the session
@@ -224,6 +314,31 @@ def test_end_kiosk_session_expected_pending_spares_newer_window(e2e):
     # The default call still clears unconditionally.
     h.ctx.end_kiosk_session(emit=False)
     assert h.ctx.pending_registration is None
+
+
+def test_end_kiosk_session_preserves_dashboard_armed_windows(e2e):
+    """A kiosk session end clears kiosk-armed pending windows, but a remote
+    (from_dashboard) arm is not kiosk-session state — it must survive for
+    both the registration and the tag-bind window."""
+    h = e2e()
+
+    # Kiosk-armed windows are kiosk-session state: both clear.
+    assign_pending_registration(
+        h.ctx, PendingRegistration(display_name="Kiosk Window")
+    )
+    assign_pending_tag_bind(h.ctx, PendingTagBind(device_id=1))
+    h.ctx.end_kiosk_session(emit=False)
+    assert h.ctx.pending_registration is None
+    assert h.ctx.pending_tag_bind is None
+
+    # Dashboard-armed windows are remote state: both survive a session end.
+    reg = PendingRegistration(display_name="Remote Window", from_dashboard=True)
+    bind = PendingTagBind(device_id=2, from_dashboard=True)
+    assign_pending_registration(h.ctx, reg)
+    assign_pending_tag_bind(h.ctx, bind)
+    h.ctx.end_kiosk_session(emit=False)
+    assert h.ctx.pending_registration is reg
+    assert h.ctx.pending_tag_bind is bind
 
 
 def test_dispatch_exception_during_bind_emits_tag_bind_failed(e2e, monkeypatch):

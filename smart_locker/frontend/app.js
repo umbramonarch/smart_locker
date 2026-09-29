@@ -118,6 +118,13 @@ const DEMO_REGISTRANTS = [
   'Irene Schwarz', 'Jan Lehmann', 'Katrin Braun', 'Lars Werner',
 ];
 
+/** @type {Array<Object>} Demo people rows for the People admin overlay (?demo). */
+const DEMO_PEOPLE = [
+  { id: 1, display_name: 'Alex Johnson', role: 'admin', is_active: true,  registered_at: '2025-11-02T09:14:00' },
+  { id: 2, display_name: 'Jamie Lee',    role: 'user',  is_active: true,  registered_at: '2025-11-18T15:42:00' },
+  { id: 3, display_name: 'Morgan Chen',  role: 'user',  is_active: false, registered_at: '2026-01-07T11:05:00' },
+];
+
 /* ============================================================
    API — real fetch() calls with demo fallback
 ============================================================ */
@@ -3140,6 +3147,14 @@ let peopleCountdownTimer = null;
 let peopleAfterTimer = null;
 /** 'add' or 'replace' while the tap step owns the card window, else null. */
 let peopleTapMode = null;
+/**
+ * True once a people add/replace card resolved (success or failed). The
+ * backend silently ends the admin session on resolve, so the NFC bridge
+ * emits a synthetic session_timeout right after — this flag keeps that
+ * timeout from tearing down the result step early; the overlay leaves on
+ * its own schedulePeopleLeave timer instead.
+ */
+let peopleCardResolved = false;
 /** Role picked on the people add step ('user' or 'admin'). */
 let peopleAddRole = 'user';
 /** Name typed on the add step — shown on the tap step and result. */
@@ -3171,6 +3186,7 @@ function hidePeopleOverlay() {
   clearInterval(peopleCountdownTimer);
   clearTimeout(peopleAfterTimer);
   peopleTapMode = null;
+  peopleCardResolved = false;
   const overlay = document.getElementById('overlay-people');
   if (!overlay || overlay.style.display === 'none') return;
   overlay.classList.add('hidden-left');
@@ -3204,6 +3220,7 @@ async function adminPeople() {
   const overlay = document.getElementById('overlay-people');
   overlay.style.display = '';
   S.screen = 'admin';
+  peopleCardResolved = false; // defensive: no card resolved on a fresh open
   armIdle();
   requestAnimationFrame(() => requestAnimationFrame(() => {
     overlay.classList.add('visible');
@@ -3221,17 +3238,21 @@ async function adminPeople() {
 async function populatePeopleList() {
   const list = document.getElementById('people-list');
   if (!list) return;
-  try {
-    const res = await fetch('/api/admin/users');
-    if (!res.ok) {
-      const data = await res.json().catch(() => ({}));
-      showToast(data.detail || 'Could not load people', 'error');
-      if (res.status === 401 || res.status === 403) leavePeopleOverlay(); // admin session is gone
-      return;
+  if (USE_DEMO) {
+    peopleRows = DEMO_PEOPLE;
+  } else {
+    try {
+      const res = await fetch('/api/admin/users');
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        showToast(data.detail || 'Could not load people', 'error');
+        if (res.status === 401 || res.status === 403) leavePeopleOverlay(); // admin session is gone
+        return;
+      }
+      peopleRows = await res.json();
+    } catch (_) {
+      showToast('Could not load people', 'error');
     }
-    peopleRows = await res.json();
-  } catch (_) {
-    showToast('Could not load people', 'error');
   }
   const rows = [...peopleRows].sort((a, b) => {
     if (!!a.is_active !== !!b.is_active) return a.is_active ? -1 : 1;
@@ -3250,7 +3271,7 @@ async function populatePeopleList() {
     nameEl.textContent = user.display_name || '';
     const metaEl = document.createElement('div');
     metaEl.className = 'bind-row-meta';
-    const registered = user.registered_at ? ` · card ${user.registered_at.slice(0, 10)}` : '';
+    const registered = user.registered_at ? ` · added ${user.registered_at.slice(0, 10)}` : '';
     metaEl.textContent =
       `${user.role === 'admin' ? 'Admin' : 'User'}${user.is_active ? '' : ' · inactive'}${registered}`;
     info.appendChild(nameEl);
@@ -3270,7 +3291,7 @@ async function populatePeopleList() {
     cardBtn.type = 'button';
     cardBtn.className = 'bind-unbind';
     cardBtn.textContent = 'Replace card';
-    cardBtn.addEventListener('click', () => { clickSound(); peopleReplaceCard(user); });
+    cardBtn.addEventListener('click', () => { clickSound(); peopleReplaceCard(user, cardBtn); });
     actions.appendChild(cardBtn);
 
     const activeBtn = document.createElement('button');
@@ -3293,6 +3314,10 @@ async function populatePeopleList() {
  * @returns {Promise<void>}
  */
 async function peopleSetRole(user, btn) {
+  if (USE_DEMO) {
+    showToast('Demo preview — People admin is Pi only', 'success');
+    return;
+  }
   btn.disabled = true;
   try {
     const res = await fetch(`/api/admin/users/${user.id}`, {
@@ -3329,6 +3354,10 @@ async function peopleToggleActive(user, btn) {
     const orig = btn.textContent;
     btn.textContent = 'Sure?';
     setTimeout(() => { btn.dataset.armed = ''; btn.textContent = orig; }, 3000);
+    return;
+  }
+  if (USE_DEMO) {
+    showToast('Demo preview — People admin is Pi only', 'success');
     return;
   }
   btn.disabled = true;
@@ -3392,6 +3421,10 @@ async function submitPeopleAdd() {
   const err = document.getElementById('people-add-error');
   const name = document.getElementById('people-add-name').value.trim();
   if (!name) { err.textContent = 'Enter a name.'; return; }
+  if (USE_DEMO) {
+    showToast('Demo preview — People admin is Pi only', 'success');
+    return;
+  }
   btn.disabled = true;
   err.textContent = '';
   try {
@@ -3419,9 +3452,16 @@ async function submitPeopleAdd() {
 /**
  * Arm a 60s replace-card window for one person; the tapped card rebinds them.
  * @param {Object} user - Person row (id, display_name).
+ * @param {HTMLElement} btn - The Replace card button (disabled in flight so a
+ *   double-click cannot POST twice — the second arm would come back 409).
  * @returns {Promise<void>}
  */
-async function peopleReplaceCard(user) {
+async function peopleReplaceCard(user, btn) {
+  if (USE_DEMO) {
+    showToast('Demo preview — People admin is Pi only', 'success');
+    return;
+  }
+  btn.disabled = true;
   try {
     const res = await fetch(`/api/admin/users/${user.id}/replace-card`, { method: 'POST' });
     const data = await res.json().catch(() => ({}));
@@ -3435,6 +3475,8 @@ async function peopleReplaceCard(user) {
     peopleShowTap('TAP THE NEW CARD', `Replacing the card for ${user.display_name}`);
   } catch (_) {
     showToast('Could not arm card replace.', 'error');
+  } finally {
+    btn.disabled = false;
   }
 }
 
@@ -3487,6 +3529,7 @@ function startPeopleCountdown() {
 function handlePeopleCardSuccess(data) {
   const mode = peopleTapMode || 'add';
   peopleTapMode = null;
+  peopleCardResolved = true;
   clearInterval(peopleCountdownTimer);
   const name = (data.user && data.user.name) || peopleTapName || 'the person';
   showPeopleStep('people-step-success');
@@ -3501,6 +3544,7 @@ function handlePeopleCardSuccess(data) {
  */
 function handlePeopleCardFailed(data) {
   peopleTapMode = null;
+  peopleCardResolved = true;
   clearInterval(peopleCountdownTimer);
   showPeopleStep('people-step-error');
   document.getElementById('people-error-msg').textContent =
@@ -3919,7 +3963,11 @@ function connectSSE() {
     // After admin enroll the backend drops the overlay session immediately so
     // the next work-card tap is login. The NFC bridge then sees "session gone"
     // and would emit timeout; ignore it while the welcome/error step is up.
-    if (S.screen === 'register' || S.screen === 'setup') return;
+    // Same for a resolved people add/replace card — the overlay's result step
+    // leaves on its own schedulePeopleLeave timer, not on this timeout. A real
+    // idle timeout on the list step is untouched (the flag only goes up after
+    // a card result).
+    if (S.screen === 'register' || S.screen === 'setup' || peopleCardResolved) return;
     endSession(true, true);
   });
 

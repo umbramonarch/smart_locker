@@ -2095,6 +2095,13 @@ body::after {
   align-items: center;
   justify-content: center;
 }
+#overlay-people {
+  background: rgba(24,29,36,0.92);
+  backdrop-filter: blur(20px);
+  z-index: 56; /* above #overlay-admin (55) while its clip-path close plays */
+  align-items: center;
+  justify-content: center;
+}
 .bind-panel {
   width: 92%;
   max-width: 640px;
@@ -2419,6 +2426,7 @@ html.lite .card-hover-icon,
 html.lite #overlay-inactivity,
 html.lite #overlay-admin,
 html.lite #overlay-register-device,
+html.lite #overlay-people,
 html.lite #overlay-update,
 html.lite #overlay-power,
 html.lite #overlay-slot {
@@ -2429,6 +2437,7 @@ html.lite .card-slot         { background: rgba(24,29,36,0.92); }
 html.lite #overlay-inactivity { background: rgba(24,29,36,0.97); }
 html.lite #overlay-admin      { background: rgba(24,29,36,0.97); }
 html.lite #overlay-register-device { background: rgba(24,29,36,0.97); }
+html.lite #overlay-people     { background: rgba(24,29,36,0.97); }
 html.lite #overlay-update     { background: rgba(24,29,36,0.97); }
 html.lite #overlay-power      { background: rgba(24,29,36,0.97); }
 html.lite #overlay-slot       { background: rgba(24,29,36,0.97); }

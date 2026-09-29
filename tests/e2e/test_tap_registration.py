@@ -441,3 +441,69 @@ def test_dashboard_bind_survives_register_cancel_and_completes(
     assert payload["device_id"] == device_id
     assert get_device(h, device_id).tag_hmac == uid_hmac_for(DASH_STICKER_UID)
     assert h.ctx.pending_tag_bind is None
+
+
+def test_card_window_latch_records_success_and_resets_on_rearm(e2e):
+    """SSE is loopback-only, so the LAN dashboard reads the card-window
+    outcome from ctx.last_card_result — set on success, cleared on re-arm."""
+    h = e2e()
+    _add_registrant(h, "New Person")
+
+    r = h.client.post("/api/register", json={"name": "New Person"})
+    assert r.status_code == 200
+    assert h.ctx.last_card_result is None
+
+    h.tap(NEW_CARD_UID)
+    h.wait_event("registration_success")
+    result = h.ctx.last_card_result
+    assert result["outcome"] == "success"
+    assert result["display_name"] == "New Person"
+    assert result["user"]["name"] == "New Person"
+    assert result["replace_user_id"] is None
+
+    # Re-arming clears the stale result so it cannot masquerade as the new
+    # window's outcome.
+    r = h.client.post("/api/register", json={"name": "New Person"})
+    assert r.status_code == 200
+    assert h.ctx.last_card_result is None
+
+
+def test_card_window_latch_records_failure(e2e):
+    """A refused tap inside an armed window latches outcome 'failed' with the
+    same reason the SSE carried."""
+    h = e2e()
+    add_user(h, ENROLLED_UID, display_name="Existing User")
+    _add_registrant(h, "New Person")
+
+    r = h.client.post("/api/register", json={"name": "New Person"})
+    assert r.status_code == 200
+
+    h.tap(ENROLLED_UID)
+    payload = h.wait_event("registration_failed")
+    result = h.ctx.last_card_result
+    assert result["outcome"] == "failed"
+    assert result["reason"] == payload["reason"]
+    assert result["display_name"] == "New Person"
+    assert result["user"] is None
+
+
+def test_card_window_latch_records_expiry(e2e):
+    """A window that expires in dispatch latches outcome 'expired' with the
+    window's identity, while the tap still classifies normally."""
+    h = e2e()
+    user_id = add_user(h, WORK_UID, display_name="Known Worker")
+    _add_registrant(h, "New Person")
+
+    r = h.client.post("/api/register", json={"name": "New Person"})
+    assert r.status_code == 200
+    h.ctx.pending_registration.created_at -= 120
+
+    h.tap(WORK_UID)
+    payload = h.wait_event("auth_success")
+    assert payload["user"]["id"] == user_id
+
+    result = h.ctx.last_card_result
+    assert result["outcome"] == "expired"
+    assert result["display_name"] == "New Person"
+    assert result["user"] is None
+    assert result["replace_user_id"] is None

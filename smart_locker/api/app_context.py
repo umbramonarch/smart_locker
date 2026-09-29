@@ -39,7 +39,7 @@ class PendingRegistration:
     the default "user". ``replace_user_id`` turns the window into a card
     replacement: the tapped card rebinds that existing user instead of
     enrolling a new one (``display_name`` stays as the screen label).
-    ``from_dashboard`` marks a secret-armed window so public
+    ``from_dashboard`` marks a secret-armed window so loopback-only
     ``POST /api/register/cancel`` cannot clear it.
     """
 
@@ -63,7 +63,7 @@ class PendingTagBind:
     dashboard staff arm a bind with the admin secret. Valid for
     ``REGISTRATION_TIMEOUT_SECONDS`` (60s). The next insert binds that row
     instead of borrowing. ``from_dashboard`` marks a secret-armed window so
-    public ``POST /api/register/cancel`` cannot clear it.
+    loopback-only ``POST /api/register/cancel`` cannot clear it.
     """
 
     device_id: int
@@ -134,6 +134,9 @@ def arm_pending_registration(ctx, pending: PendingRegistration) -> str | None:
         if ctx.pending_tag_bind is not None:
             return "A device-tag bind is already waiting for a sticker tap."
         ctx.pending_registration = pending
+        # A new window must not inherit the previous window's outcome — the
+        # dashboard polls last_card_result because SSE is loopback-only.
+        ctx.last_card_result = None
         return None
 
 
@@ -224,6 +227,10 @@ class AppContext:
         self.admin_overlay_open: bool = False
         # Last kiosk screen id heartbeated from the Riverdi UI (Display tab).
         self.kiosk_screen: str = "idle"
+        # Last card-window outcome ({outcome, reason, user, display_name,
+        # replace_user_id, at}). The LAN dashboard polls this via
+        # /api/dashboard/card-window because /api/events is loopback-only.
+        self.last_card_result: dict | None = None
 
     async def start(self) -> None:
         """Start NFC reader and launch the bridge task.
@@ -331,15 +338,26 @@ class AppContext:
 
         When ``expected_pending`` is given (the dispatch snapshot), a pending
         window is cleared only if it is still that exact object — a window an
-        HTTP route armed after the snapshot survives. Without it, both pending
-        windows are cleared unconditionally (session end, timeout, reader
-        disconnect).
+        HTTP route armed after the snapshot survives. Without it, pending
+        windows are cleared unless ``from_dashboard``-armed — a remote arm is
+        not kiosk-session state (session end, timeout, reader disconnect).
         """
         self.session_mgr.end_session()
         self.admin_overlay_open = False
         if expected_pending is None:
-            assign_pending_registration(self, None)
-            assign_pending_tag_bind(self, None)
+            with pending_state_lock:
+                reg = self.pending_registration
+                bind = self.pending_tag_bind
+                keep_dashboard_reg = reg is not None and bool(
+                    getattr(reg, "from_dashboard", False)
+                )
+                keep_dashboard_bind = bind is not None and bool(
+                    getattr(bind, "from_dashboard", False)
+                )
+                if not keep_dashboard_reg:
+                    assign_pending_registration(self, None)
+                if not keep_dashboard_bind:
+                    assign_pending_tag_bind(self, None)
         else:
             exp_reg, exp_bind = expected_pending
             with pending_state_lock:
@@ -430,6 +448,16 @@ class AppContext:
             expired_reg = bool(pending_reg is not None and pending_reg.is_expired)
             expired_bind = bool(pending_bind is not None and pending_bind.is_expired)
             if expired_reg:
+                # Latch the expiry for the dashboard poll before the snapshot
+                # is dropped — SSE never reaches the LAN.
+                self.last_card_result = {
+                    "outcome": "expired",
+                    "reason": None,
+                    "user": None,
+                    "display_name": pending_reg.display_name,
+                    "replace_user_id": pending_reg.replace_user_id,
+                    "at": time.monotonic(),
+                }
                 assign_pending_registration(self, None)
                 pending_reg = None
             if expired_bind:
@@ -460,8 +488,13 @@ class AppContext:
                     uid,
                     hmac_key,
                     # The AES key is needed only to enroll; resolving it lazily
-                    # keeps a missing SMART_LOCKER_ENC_KEY from failing taps.
-                    key_manager.enc_key if pending_reg is not None else None,
+                    # keeps a missing SMART_LOCKER_ENC_KEY from failing taps —
+                    # dispatch_insert invokes the provider only for a card tap.
+                    (
+                        (lambda: key_manager.enc_key)
+                        if pending_reg is not None
+                        else None
+                    ),
                     session_mgr,
                     registration_display_name=(
                         pending_reg.display_name if pending_reg is not None else None
@@ -493,6 +526,23 @@ class AppContext:
             self._report_dispatch_failure(pending_reg, pending_bind)
             return
         result = outcome.result
+
+        if pending_reg is not None and result.event in (
+            "registration_success",
+            "registration_failed",
+        ):
+            self.last_card_result = {
+                "outcome": (
+                    "success"
+                    if result.event == "registration_success"
+                    else "failed"
+                ),
+                "reason": result.payload.get("reason"),
+                "user": result.payload.get("user"),
+                "display_name": pending_reg.display_name,
+                "replace_user_id": pending_reg.replace_user_id,
+                "at": time.monotonic(),
+            }
 
         if outcome.clear_pending_registration:
             with pending_state_lock:
@@ -529,6 +579,14 @@ class AppContext:
         for card" until the window expires, and the bridge would have died.
         """
         if pending_reg is not None:
+            self.last_card_result = {
+                "outcome": "failed",
+                "reason": "Registration failed. Please try again.",
+                "user": None,
+                "display_name": pending_reg.display_name,
+                "replace_user_id": pending_reg.replace_user_id,
+                "at": time.monotonic(),
+            }
             self._end_leftover_session(
                 expected_pending=(pending_reg, pending_bind)
             )
