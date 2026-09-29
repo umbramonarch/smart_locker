@@ -2601,3 +2601,93 @@ html.lite .reveal-inner {
   color: var(--text);
 }
 .handover-cancel:hover { transform: scale(1.04); }
+
+/* ============================================================
+   ON-SCREEN KEYBOARD — one shared touch keyboard (keyboard.js)
+   Opens when any kiosk input gains focus; closes on Done or
+   blur. Fixed to the bottom, above every overlay (z 80), below
+   the scanline/cursor layers (9998+). Flat surfaces only — no
+   blur or looping animation, cheap on the Riverdi panel.
+============================================================ */
+.kbd {
+  position: fixed;
+  left: 50%;
+  bottom: 0;
+  width: min(1080px, 96vw);
+  padding: 0.9rem 1rem 1rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-bottom: none;
+  border-radius: 20px 20px 0 0;
+  box-shadow: 0 -18px 60px rgba(0, 0, 0, 0.45);
+  z-index: 80;
+  visibility: hidden;
+  transform: translate(-50%, 105%);
+  transition: transform 0.35s var(--ease-smooth), visibility 0.35s;
+}
+.kbd.kbd-open {
+  visibility: visible;
+  transform: translate(-50%, 0);
+}
+
+.kbd-row { display: flex; gap: 0.5rem; }
+.kbd-row + .kbd-row { margin-top: 0.5rem; }
+
+.kbd-key {
+  flex: 1 1 0%;
+  min-width: 0;
+  padding: 0.95rem 0;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  color: var(--text);
+  font-family: var(--font-display);
+  font-size: 1.3rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-align: center;
+  user-select: none;
+  touch-action: manipulation;
+  transition: background 0.12s ease, transform 0.12s ease;
+}
+.kbd-key:active {
+  background: var(--surface-3);
+  transform: scale(0.94);
+}
+.kbd-key-shift,
+.kbd-key-back,
+.kbd-key-sym,
+.kbd-key-abc,
+.kbd-key-tab {
+  background: var(--surface-3);
+  font-size: 1.1rem;
+}
+.kbd-key-space {
+  color: var(--text-muted);
+  font-size: 1rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.kbd-key-done {
+  background: var(--accent);
+  border-color: var(--border-accent);
+  color: #fff;
+}
+.kbd-key-done:active { background: #00b34c; }
+.kbd-key.kbd-shift-on {
+  background: var(--accent-dim);
+  border-color: var(--border-accent);
+  color: var(--accent);
+}
+.kbd-key.kbd-shift-caps {
+  background: var(--accent);
+  border-color: var(--border-accent);
+  color: #fff;
+}
+
+/* Content push-up while the keyboard is open: keyboard.js sets
+   --kbd-shift to the overlap so the focused field clears the keys. */
+.screen.kbd-shift, .overlay.kbd-shift {
+  transform: translateY(calc(-1 * var(--kbd-shift, 0px)));
+  transition: transform 0.35s var(--ease-smooth);
+}

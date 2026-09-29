@@ -6,8 +6,9 @@
     Register Device, software update, and appliance shut down.
   Project: smart_locker/frontend
   Notes: Served as a static file by FastAPI. Requires app.js and style.css.
-    Shared clock/config behavior is in shared.js; interactivity is in app.js.
-    Offline: system fonts only.
+    Shared clock/config behavior is in shared.js; interactivity is in app.js;
+    the touch on-screen keyboard is keyboard.js (inputmode="none" keeps any
+    native OSK closed). Offline: system fonts only.
 -->
 <!DOCTYPE html>
 <html lang="en">
@@ -136,7 +137,7 @@
           </p>
           <div class="register-search-group">
             <svg class="register-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
-            <input type="text" id="register-search" class="register-input register-search-input" placeholder="Search your name..." autocomplete="off" spellcheck="false">
+            <input type="text" id="register-search" class="register-input register-search-input" placeholder="Search your name..." autocomplete="off" spellcheck="false" inputmode="none">
             <div class="register-input-glow"></div>
           </div>
         </div>
@@ -164,7 +165,7 @@
           <span class="reveal-wrap"><span class="reveal-inner" style="transition-delay:0.22s">Enter the user's full name</span></span>
         </p>
         <div class="register-input-group">
-          <input type="text" id="register-name-admin" class="register-input" placeholder="Full name" maxlength="100" autocomplete="off" spellcheck="false">
+          <input type="text" id="register-name-admin" class="register-input" placeholder="Full name" maxlength="100" autocomplete="off" spellcheck="false" inputmode="none">
           <div class="register-input-glow"></div>
         </div>
         <button class="register-next-btn" id="register-next-btn-admin" disabled>
@@ -240,11 +241,11 @@
           <span class="reveal-wrap"><span class="reveal-inner" style="transition-delay:0.22s">Enroll the first administrator card</span></span>
         </p>
         <div class="register-input-group">
-          <input type="text" id="setup-name" class="register-input" placeholder="Admin full name" maxlength="100" autocomplete="off" spellcheck="false">
+          <input type="text" id="setup-name" class="register-input" placeholder="Admin full name" maxlength="100" autocomplete="off" spellcheck="false" inputmode="none">
           <div class="register-input-glow"></div>
         </div>
         <div class="register-input-group">
-          <input type="password" id="setup-password" class="register-input" placeholder="Dashboard password (required)" maxlength="200" autocomplete="off" spellcheck="false">
+          <input type="password" id="setup-password" class="register-input" placeholder="Dashboard password (required)" maxlength="200" autocomplete="off" spellcheck="false" inputmode="none">
           <div class="register-input-glow"></div>
         </div>
         <p class="register-hint" id="setup-password-hint">Choose the dashboard admin password — it unlocks the dashboard on the network.</p>
@@ -650,7 +651,7 @@
         <button type="button" class="bind-add-open" id="bind-add-open">Add device</button>
         <div class="register-search-group bind-search-group">
           <svg class="register-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
-          <input type="text" id="bind-search" class="register-input register-search-input" placeholder="Search name or PM…" autocomplete="off" spellcheck="false">
+          <input type="text" id="bind-search" class="register-input register-search-input" placeholder="Search name or PM…" autocomplete="off" spellcheck="false" inputmode="none">
           <div class="register-input-glow"></div>
         </div>
         <div class="bind-device-list" id="bind-device-list"></div>
@@ -660,7 +661,7 @@
         <p class="bind-hint" id="bind-add-hint">Pick a unit waiting for the locker, choose a free slot, then tap the sticker.</p>
         <div class="register-search-group bind-search-group">
           <svg class="register-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
-          <input type="text" id="bind-add-search" class="register-input register-search-input" placeholder="Search name or PM…" autocomplete="off" spellcheck="false">
+          <input type="text" id="bind-add-search" class="register-input register-search-input" placeholder="Search name or PM…" autocomplete="off" spellcheck="false" inputmode="none">
           <div class="register-input-glow"></div>
         </div>
         <div class="bind-device-list bind-registerable-list" id="bind-registerable-list"></div>
@@ -745,7 +746,7 @@
       <div class="bind-step hidden" id="people-step-add">
         <p class="bind-hint">Type the person's name and pick a role, then have them tap their card on this reader.</p>
         <div class="register-input-group">
-          <input type="text" id="people-add-name" class="register-input" placeholder="Full name" maxlength="100" autocomplete="off" spellcheck="false">
+          <input type="text" id="people-add-name" class="register-input" placeholder="Full name" maxlength="100" autocomplete="off" spellcheck="false" inputmode="none">
           <div class="register-input-glow"></div>
         </div>
         <div class="people-role-row" role="group" aria-label="Role">
@@ -854,5 +855,6 @@
 
   <script src="shared.js"></script>
   <script src="app.js"></script>
+  <script src="keyboard.js"></script>
 </body>
 </html>
