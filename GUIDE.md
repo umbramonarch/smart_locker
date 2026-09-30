@@ -671,6 +671,35 @@ At this point there's no real device data yet — that's expected, it comes in S
 
 When that works, make it permanent — Section 5.
 
+### 4.8 Develop without NFC hardware (dev machines only)
+
+On a PC with no reader, the app runs a simulated NFC reader instead:
+
+```bash
+# .env (dev box only — never on the Pi):
+SMART_LOCKER_FAKE_READER=1
+SMART_LOCKER_DB_PATH=dev_locker.db
+# demo catalog: adopt the sample sheet as the mirror
+SMART_LOCKER_MIRROR_PATH=sim/data/Messmittelliste.sample.xlsx
+```
+
+Boot (`python -m smart_locker.app`), open the kiosk, and a red **Simulate tap**
+button sits in the corner — F2 taps the `SMART_LOCKER_FAKE_DEFAULT_UID` value (or
+prompts once when unset), and preset keys fire the fixed UIDs from
+`smart_locker/nfc/fake_reader.py`: **1/2/3** are work cards, **A/S/D** are device
+stickers. Seed them in one step so taps resolve to real users and units:
+
+```bash
+python -m scripts.seed_fake_nfc            # or --pm PM-xxx per tag
+```
+
+A typical loop: mark catalog rows `Locker` on the dashboard, **Register Device**
+(kiosk 5-tap → admin), press **A** to bind a sticker, **1** to log in as the fake
+admin, **A** again to borrow that unit, **A** once more to return it.
+`POST /api/dev/tap {"uid": "..."}` injects any other UID (loopback only — a LAN
+client cannot inject taps). These endpoints 404 unless the fake reader is the
+running reader, so the production surface is unchanged.
+
 ---
 
 ## 5. Run as a kiosk appliance (autostart on boot)
@@ -779,7 +808,7 @@ ways catalog rows arrive:
 - **Register a locker unit.** A catalog row becomes a locker device when an admin
   uses **Register Device** at the kiosk: pick a registerable row (no slot yet,
   Location = the in-locker word; the field filters the list), pick a
-  **free slot**, tap the NFC sticker. A taken slot → error, no ghost row.
+  **slot**, tap the NFC sticker. Slot numbers may be shared.
 
 Hand edits to the sheet are never merged silently — Section 8 covers how the
 dashboard flags them and what **Apply** / **Keep database** do.
@@ -919,7 +948,7 @@ Pi on the LAN can use them — the lock is **physical access**, not a password.
      treat the tap as logout).
    - **Register Device** — promote a catalog row into a locker unit: the field
      filters the registerable list (no slot, Location = the in-locker word),
-     pick a row, pick a **free slot**, tap the sticker. Existing rows can
+     pick a row, pick a **slot**, tap the sticker. Existing rows can
      bind / unbind / change slot (unbind is refused while the unit is
      borrowed). The list shows **name + PM** (and slot).
    - **Software Update** — plug in the USB stick (`locker-updates/` from
@@ -1466,9 +1495,10 @@ stays open. A **work-card** tap
 still logs out; a device tag does not. An unknown UID while logged in stays logged in.
 
 **Register Device** (hidden admin panel): pick a registerable catalog row (no slot,
-Location = the in-locker word) or enter its **PM**, pick a **free slot**, tap the
+Location = the in-locker word) or enter its **PM**, pick a **slot**, tap the
 sticker. The row is already in SQLite — registering assigns the slot, nothing is
-copied from a file. Unknown PM or a taken slot fails with no ghost row. Existing
+copied from a file. Slots may be shared; an unknown PM fails with no ghost row.
+Existing
 rows can bind / unbind / change slot (unbind is refused while the unit is
 borrowed). The list shows **name + PM**. CLI bind-only:
 `python -m scripts.enroll_device_tag --pm PM-001` (or `--uid HEX`, `--force` to replace).

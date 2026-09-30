@@ -618,15 +618,24 @@ def dev_status():
     control; production always reports inactive.
 
     Returns:
-        dict: ``fake_reader`` (bool) and ``default_uid_set`` (bool).
+        dict: ``fake_reader`` (bool), ``default_uid_set`` (bool), and
+            ``presets`` — the fixed card/sticker UIDs behind the dev-panel
+            keys when the harness is active, else None.
     """
     import os
+
+    from smart_locker.nfc.fake_reader import FAKE_CARD_UIDS, FAKE_TAG_UIDS
 
     reader = ctx_module.context.reader if ctx_module.context is not None else None
     active = fake_reader_enabled() and reader is not None and hasattr(reader, "simulate_tap")
     return {
         "fake_reader": bool(active),
         "default_uid_set": bool(os.getenv("SMART_LOCKER_FAKE_DEFAULT_UID")),
+        "presets": (
+            {"card_uids": list(FAKE_CARD_UIDS), "tag_uids": list(FAKE_TAG_UIDS)}
+            if active
+            else None
+        ),
     }
 
 
@@ -1707,10 +1716,11 @@ def register_locker_device(
     db: Session = Depends(get_db),
     user_session: UserSession = Depends(require_session),
 ):
-    """Promote a catalog row into a locker slot (PM + free slot) and arm NFC bind.
+    """Promote a catalog row into a locker slot (PM + slot) and arm NFC bind.
 
     Looks up the PM in the SQLite catalog, assigns the chosen slot, then
-    waits for the sticker tap (same window as bind-tag).
+    waits for the sticker tap (same window as bind-tag). Slots are shared
+    labels — an occupied number is still a valid pick.
 
     Args:
         body: PM number and locker slot.
@@ -1722,7 +1732,7 @@ def register_locker_device(
 
     Raises:
         HTTPException: 503 if not ready, 403 if not admin,
-            404 if PM unknown, 409 if PM or slot taken or the row is not
+            404 if PM unknown, 409 if PM already registered or the row is not
             marked for the locker.
     """
     if ctx_module.context is None:
@@ -1739,7 +1749,6 @@ def register_locker_device(
         AlreadyRegistered,
         InvalidSlot,
         NotRegisterable,
-        SlotTaken,
         UnknownPm,
         register_locker_device as create_from_catalog,
     )
@@ -1748,7 +1757,7 @@ def register_locker_device(
         device = create_from_catalog(db, body.pm_number, body.locker_slot)
     except UnknownPm as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
-    except (SlotTaken, AlreadyRegistered, NotRegisterable) as e:
+    except (AlreadyRegistered, NotRegisterable) as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
     except InvalidSlot as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
@@ -1797,7 +1806,9 @@ def set_device_slot(
     db: Session = Depends(get_db),
     user_session: UserSession = Depends(require_session),
 ):
-    """Move an existing locker device to a different free slot (admin).
+    """Move an existing locker device to a different slot (admin).
+
+    Slots are shared labels — an occupied number is still a valid pick.
 
     Args:
         device_id: Primary key of the locker device.
@@ -1810,7 +1821,7 @@ def set_device_slot(
 
     Raises:
         HTTPException: 403 if not admin, 404 if missing, 409 if the row is
-            not a locker unit or the slot is taken.
+            not a locker unit.
     """
     if user_session.user.role != UserRole.ADMIN:
         raise HTTPException(status_code=403, detail="Admin access required.")
@@ -1826,14 +1837,11 @@ def set_device_slot(
 
     from smart_locker.services.device_registration import (
         InvalidSlot,
-        SlotTaken,
         set_locker_slot,
     )
 
     try:
         set_locker_slot(db, device, body.locker_slot)
-    except SlotTaken as e:
-        raise HTTPException(status_code=409, detail=str(e)) from e
     except InvalidSlot as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
 

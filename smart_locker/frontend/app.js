@@ -41,12 +41,12 @@ function applyAssetLabel(label) {
   const listHint = document.getElementById('bind-list-hint');
   if (listHint) {
     listHint.textContent =
-      `Add a catalog unit (${text} + free slot), then tap its sticker. Existing rows can bind, unbind, or change slot.`;
+      `Add a catalog unit (${text} + slot), then tap its sticker. Existing rows can bind, unbind, or change slot.`;
   }
   const addHint = document.getElementById('bind-add-hint');
   if (addHint) {
     addHint.textContent =
-      'Pick a unit waiting for the locker, choose a free slot, then tap the sticker.';
+      'Pick a unit waiting for the locker, choose a slot, then tap the sticker.';
   }
   const search = document.getElementById('bind-search');
   if (search) search.placeholder = `Search name or ${text}…`;
@@ -2803,7 +2803,9 @@ let slotChangeDevice = null;
 let selectedChangeSlot = null;
 
 /**
- * Occupied locker slot numbers, optionally ignoring one device (the one being moved).
+ * Occupied locker slot numbers, optionally ignoring one device (the one being
+ * moved). Slots are shared labels — the map marks occupancy for orientation,
+ * never to forbid a pick.
  * @param {number|null} [exceptId]
  * @returns {Set<number>}
  */
@@ -2818,7 +2820,8 @@ function occupiedSlots(exceptId) {
 }
 
 /**
- * Render a 1..N slot picker. Occupied slots are disabled.
+ * Render a 1..N slot picker. Occupied slots are marked but stay selectable —
+ * a slot number may be shared.
  * @param {string} containerId
  * @param {Set<number>} occupied
  * @param {number|null} selected
@@ -2838,7 +2841,7 @@ function renderSlotGrid(containerId, occupied, selected, onPick) {
     btn.textContent = String(n);
     if (occupied.has(n)) {
       btn.classList.add('taken');
-      btn.disabled = true;
+      btn.title = 'In use — slots may be shared.';
     }
     if (selected === n) btn.classList.add('selected');
     btn.addEventListener('click', () => { clickSound(); onPick(n); });
@@ -2938,7 +2941,7 @@ function renderRegisterableList() {
 
 
 /**
- * Open the Add device step (catalog unit + free slot). The slot grid waits on
+ * Open the Add device step (catalog unit + slot). The slot grid waits on
  * a fresh admin feed: painting from a stale or empty ``bindDevices`` would
  * show occupied slots as free.
  * @returns {Promise<void>}
@@ -3001,7 +3004,7 @@ async function submitRegisterDevice() {
     return;
   }
   if (!selectedAddSlot) {
-    err.textContent = 'Pick a free slot.';
+    err.textContent = 'Pick a slot.';
     return;
   }
   btn.disabled = true;
@@ -4124,15 +4127,30 @@ if (USE_DEMO) {
    running (SMART_LOCKER_FAKE_READER). In production /api/dev/status
    returns fake_reader:false, so nothing below is wired up and there
    is zero visible footprint. Provides a floating "Simulate tap"
-   button plus the F2 keyboard shortcut; both POST /api/dev/tap, which
-   flows through the real NFC bridge exactly like a physical card tap
+   button plus keyboard shortcuts; all POST /api/dev/tap, which flows
+   through the real NFC bridge exactly like a physical card tap
    (work-card login/logout, device-tag auto-intent, or pending bind).
+   Keys 1..n fire the preset work-card UIDs and A/S/D the preset
+   sticker UIDs (scripts/seed_fake_nfc.py enrolls/binds them); F2 or
+   the button use the default UID (or prompt once when unset).
 ============================================================ */
 (function initDevTap() {
   fetch('/api/dev/status')
     .then(r => (r.ok ? r.json() : null))
     .then(status => {
       if (!status || !status.fake_reader) return;   // not in simulation mode
+
+      // Preset keys: cards on 1..n, stickers on A/S/D (array order).
+      const presets = status.presets || {};
+      const keyMap = {};
+      const cardKeys = ['1', '2', '3'];
+      const tagKeys = ['a', 's', 'd'];
+      (presets.card_uids || []).forEach((uid, i) => {
+        if (cardKeys[i]) keyMap[cardKeys[i]] = uid;
+      });
+      (presets.tag_uids || []).forEach((uid, i) => {
+        if (tagKeys[i]) keyMap[tagKeys[i]] = uid;
+      });
 
       async function simulateTap(uid) {
         try {
@@ -4170,10 +4188,20 @@ if (USE_DEMO) {
       document.body.appendChild(btn);
 
       document.addEventListener('keydown', (e) => {
-        if (e.key === 'F2') { e.preventDefault(); simulateTap(); }
+        // The on-screen keyboard shares these keys — preset taps are for
+        // hardware keys, so skip while a text field is being edited.
+        const t = e.target;
+        if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return;
+        if (e.key === 'F2') { e.preventDefault(); simulateTap(); return; }
+        const uid = keyMap[e.key.toLowerCase()];
+        if (uid) { e.preventDefault(); simulateTap(uid); }
       });
 
-      console.info('[sim] Fake NFC reader active — press F2 or the corner button to inject a tap.');
+      console.info(
+        '[sim] Fake NFC reader active — F2/button: default tap; ' +
+        'keys 1-3: preset work cards; A/S/D: preset device stickers ' +
+        '(seed with: python -m scripts.seed_fake_nfc).'
+      );
     })
     .catch(() => { /* dev status unavailable — ignore */ });
 })();

@@ -365,20 +365,6 @@ class DeviceRepository:
         ).scalar_one_or_none()
 
     @staticmethod
-    def find_by_slot(session: Session, locker_slot: int) -> Device | None:
-        """Look up the locker device occupying a physical slot.
-
-        Args:
-            session: Active database session.
-            locker_slot: Cabinet slot number.
-
-        Returns:
-            Device object or None if the slot is free.
-        """
-        stmt = select(Device).where(Device.locker_slot == locker_slot)
-        return session.execute(stmt).scalar_one_or_none()
-
-    @staticmethod
     def find_by_serial(session: Session, serial_number: str) -> Device | None:
         """Look up a device by manufacturer serial number.
 
