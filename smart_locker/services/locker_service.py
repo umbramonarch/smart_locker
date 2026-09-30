@@ -162,6 +162,13 @@ class LockerService:
             except InvalidRequestError:
                 # The row was deleted mid-race — a plain refusal.
                 return LoanOutcome(False)
+            if device.tag_hmac is None:
+                logger.warning(
+                    "Borrow failed: device %d (%s) lost its sticker during the check.",
+                    device_id,
+                    device.name,
+                )
+                return LoanOutcome(False, "no sticker bound")
             reason = (
                 "in maintenance"
                 if device.status == DeviceStatus.MAINTENANCE

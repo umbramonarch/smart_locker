@@ -105,8 +105,11 @@ def location_candidates() -> list[str]:
 class CatalogRow:
     """Catalog fields parsed from one workbook row.
 
-    ``present`` names the catalog fields whose columns exist on this
-    sheet so callers can skip missing columns instead of wiping fields.
+    ``present`` names the catalog fields this sheet actually carries:
+    optional fields count whenever their column exists (an empty cell is an
+    intentional clear), required name/device_type only when non-blank so a
+    fallback value is never read as a clear, and calibration_due when the
+    column exists and the cell is blank or parses as a date.
     """
 
     pm_number: str
@@ -404,12 +407,14 @@ def catalog_from_row(
         present.add("name")
     if cols["type"] is not None and row[cols["type"]]:
         present.add("device_type")
-    if cols["serial"] is not None and _cell_str(row, cols["serial"]):
+    if cols["serial"] is not None:
         present.add("serial_number")
-    if cols["manufacturer"] is not None and manufacturer:
+    if cols["manufacturer"] is not None:
         present.add("manufacturer")
-    if cols["model"] is not None and model_val:
+    if cols["model"] is not None:
         present.add("model")
+    if cols["location"] is not None:
+        present.add("location")
 
     if compose_name:
         name_parts = []
@@ -428,7 +433,7 @@ def catalog_from_row(
     calibration_due = None
     if cols["calibration"] is not None:
         calibration_due = parse_date(row[cols["calibration"]])
-        if calibration_due is not None:
+        if calibration_due is not None or not _cell_str(row, cols["calibration"]):
             present.add("calibration_due")
 
     return CatalogRow(

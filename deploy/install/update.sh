@@ -317,6 +317,8 @@ rollback() {
   # with a stale "updating" status forever.
   trap - ERR
   set +e
+  local restore_ok=1
+  local code_restored=0
   rm -rf "$BACKUP_DIR"/.restore-* 2>/dev/null
   sudo systemctl stop "$SERVICE" 2>/dev/null || true
   if [ -n "$CODE_BACKUP" ] && [ -f "$CODE_BACKUP" ]; then
@@ -329,28 +331,51 @@ rollback() {
     local restore_dir="$BACKUP_DIR/.restore-$STAMP"
     rm -rf "$restore_dir"
     mkdir -p "$restore_dir"
-    tar -xzf "$CODE_BACKUP" -C "$restore_dir"
-    # --delete only onto a snapshot that still looks like a tree — a corrupt
-    # or truncated backup must not wipe the current code into nothing. The
-    # backup predicate stays loose: a snapshot of an older install may
-    # legitimately lack files added later (e.g. frontend/keyboard.js).
-    if is_code_tree "$restore_dir"; then
+    # --delete only onto a snapshot that verified, extracted cleanly, and
+    # still looks like a tree — a corrupt or truncated backup must not wipe
+    # the current code into nothing. The backup predicate stays loose: a
+    # snapshot of an older install may legitimately lack files added later
+    # (e.g. frontend/keyboard.js).
+    if tar -tzf "$CODE_BACKUP" >/dev/null 2>&1 \
+        && tar -xzf "$CODE_BACKUP" -C "$restore_dir" \
+        && is_code_tree "$restore_dir"; then
       local restore_excludes=()
       for p in "${BACKUP_SKIP[@]}"; do restore_excludes+=( --exclude="/$p" ); done
-      rsync -a --delete "${restore_excludes[@]}" "$restore_dir"/ "$APP_DIR"/
-      log "Restored code from $CODE_BACKUP"
+      if rsync -a --delete "${restore_excludes[@]}" "$restore_dir"/ "$APP_DIR"/; then
+        code_restored=1
+        log "Restored code from $CODE_BACKUP"
+      else
+        restore_ok=0
+        log "WARNING: code restore rsync failed — $APP_DIR may hold a mixed tree."
+      fi
     else
-      log "WARNING: $CODE_BACKUP did not extract to a valid tree — code left as-is."
+      restore_ok=0
+      log "WARNING: $CODE_BACKUP did not verify or extract to a valid tree — code left as-is."
     fi
     rm -rf "$restore_dir"
+  elif [ -n "$CODE_BACKUP" ]; then
+    restore_ok=0
+    log "WARNING: code snapshot $CODE_BACKUP not found — code left as-is."
   fi
   if [ -n "$DB_BACKUP" ] && [ -f "$DB_BACKUP" ]; then
     rm -f "$DB_PATH-wal" "$DB_PATH-shm"
-    cp -f "$DB_BACKUP" "$DB_PATH"
-    log "Restored DB from $DB_BACKUP"
+    if cp -f "$DB_BACKUP" "$DB_PATH"; then
+      log "Restored DB from $DB_BACKUP"
+    else
+      restore_ok=0
+      log "WARNING: DB restore from $DB_BACKUP failed."
+    fi
+  elif [ -n "$DB_BACKUP" ]; then
+    restore_ok=0
+    log "WARNING: DB snapshot $DB_BACKUP not found — database left as-is."
   fi
-  if [ -n "$OLD_VERSION" ]; then
-    printf '%s\n' "$OLD_VERSION" > "$VERSION_FILE"
+  if [ -n "$OLD_VERSION" ] && [ "$code_restored" = "1" ]; then
+    if printf '%s\n' "$OLD_VERSION" > "$VERSION_FILE"; then
+      log "Restored VERSION=$OLD_VERSION"
+    else
+      restore_ok=0
+      log "WARNING: could not write $VERSION_FILE."
+    fi
   fi
   # The restore left the tree root:root again — re-apply the same runtime
   # ownership the swap performs, or the service account cannot read .env or
@@ -359,12 +384,17 @@ rollback() {
   apply_runtime_permissions
   refresh_service_unit
   sudo systemctl start "$SERVICE" 2>/dev/null || true
-  if wait_for_health; then
+  local healthy=0
+  wait_for_health && healthy=1
+  local rollback_ver="unknown"
+  [ "$code_restored" = "1" ] && rollback_ver="${OLD_VERSION:-unknown}"
+  if [ "$restore_ok" = "1" ] && [ "$healthy" = "1" ] \
+      && { [ "$code_restored" = "1" ] || [ -z "$CODE_BACKUP" ]; }; then
     log "Rollback healthy — running previous version ${OLD_VERSION:-?}."
     write_status "rolled_back" "Update failed; reverted to previous version and recovered." "$OLD_VERSION"
   else
-    log "WARNING: service did not report healthy after rollback — check 'journalctl -u $SERVICE'."
-    write_status "rollback_unhealthy" "Update failed and the service is not healthy after rollback — manual check needed." "$OLD_VERSION"
+    log "WARNING: rollback incomplete or service not healthy — check 'journalctl -u $SERVICE'."
+    write_status "rollback_unhealthy" "Update failed and the rollback could not be fully verified — manual check needed." "$rollback_ver"
   fi
 }
 

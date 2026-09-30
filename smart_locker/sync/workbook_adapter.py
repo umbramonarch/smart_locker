@@ -7,6 +7,7 @@ Notes: Keeps openpyxl and workbook filesystem handling out of sync policy.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import tempfile
@@ -26,6 +27,24 @@ _RETRY_DELAY_SECONDS = 1.0
 
 class WorkbookStaleError(Exception):
     """The source workbook changed after its edit copy was made."""
+
+
+def _file_digest(path: Path) -> str:
+    """SHA-256 hex digest of a file's bytes, streamed."""
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _file_identity(path: Path) -> tuple | None:
+    """Stat identity (dev, ino, mtime_ns, size), or None when missing."""
+    try:
+        st = path.stat()
+    except FileNotFoundError:
+        return None
+    return (st.st_dev, st.st_ino, st.st_mtime_ns, st.st_size)
 
 
 def _catalog_worksheet(wb):
@@ -66,6 +85,7 @@ class WorkbookAdapter:
             path: Source ``.xlsx`` file.
         """
         self.path = Path(path)
+        self.last_written_digest: str | None = None
 
     def read_rows(self, sheet_name: str | None = None) -> WorkbookRows:
         """Read values from a copied workbook so an open share file can be read.
@@ -105,13 +125,31 @@ class WorkbookAdapter:
         except OSError as exc:
             return WorkbookRows(None, f"Source file unavailable: {self.path} ({exc})")
 
+    def content_digest(self) -> str:
+        """SHA-256 hex digest of the workbook's current bytes.
+
+        Returns:
+            The digest string.
+
+        Raises:
+            OSError: The file could not be read.
+        """
+        return _file_digest(self.path)
+
     def edit_active_sheet(
         self,
         edit: Callable[[object], bool],
         expected_mtime: float | None = None,
         pick_sheet: Callable[[object], object] | None = None,
+        expected_digest: str | None = None,
     ) -> bool:
         """Copy, edit, and atomically replace the workbook when ``edit`` changes it.
+
+        The replace is bound to the exact bytes that were copied: identity
+        (dev/ino/mtime_ns/size) and SHA-256 are re-compared right before every
+        replace attempt, so an external edit — even one that restores mtime —
+        raises instead of being silently overwritten. That check-to-replace
+        gap is inherently small; nothing here pretends to lock against Excel.
 
         Args:
             edit: Receives the chosen worksheet and returns True when it changed.
@@ -119,6 +157,8 @@ class WorkbookAdapter:
                 the copy to an earlier detection stat.
             pick_sheet: Optional chooser ``wb -> worksheet``; default is the
                 active sheet.
+            expected_digest: When given, the copied bytes must carry this
+                SHA-256 — binds the copy to an earlier detection digest.
 
         Returns:
             True when a changed workbook was saved and replaced; False when
@@ -126,16 +166,20 @@ class WorkbookAdapter:
 
         Raises:
             WorkbookStaleError: The source changed after it was copied, or
-                does not match ``expected_mtime``.
+                does not match ``expected_mtime``/``expected_digest``.
             OSError: The workbook could not be copied, loaded, saved, or replaced.
         """
         mtime = self.path.stat().st_mtime
         if expected_mtime is not None and mtime != expected_mtime:
             raise WorkbookStaleError()
+        identity = _file_identity(self.path)
         dest_path: Path | None = None
         wb = None
         try:
             with self._copied_workbook() as work_path:
+                copy_digest = _file_digest(work_path)
+                if expected_digest is not None and copy_digest != expected_digest:
+                    raise WorkbookStaleError()
                 wb = load_workbook(work_path)
                 ws = pick_sheet(wb) if pick_sheet is not None else wb.active
                 if not edit(ws):
@@ -149,12 +193,13 @@ class WorkbookAdapter:
                 wb.save(dest_path)
                 wb.close()
                 wb = None
-                try:
-                    if self.path.stat().st_mtime != mtime:
-                        raise WorkbookStaleError()
-                except FileNotFoundError:
-                    raise WorkbookStaleError() from None
-                self._replace_into(dest_path)
+                staged_digest = _file_digest(dest_path)
+                self._replace_into(
+                    dest_path,
+                    expected_digest=copy_digest,
+                    expected_identity=identity,
+                )
+                self.last_written_digest = staged_digest
                 dest_path = None
                 return True
         finally:
@@ -171,6 +216,7 @@ class WorkbookAdapter:
         headers: list,
         rows: list[list],
         expected_mtime: float | None = None,
+        expected_digest: str | None = None,
     ) -> bool:
         """Rewrite the catalog sheet to exactly ``headers`` + ``rows``.
 
@@ -186,13 +232,16 @@ class WorkbookAdapter:
             expected_mtime: When given, the file's current mtime must match —
                 a changed file is refused so a hand edit is never rewritten
                 unreviewed.
+            expected_digest: When given, the file's current SHA-256 must match
+                — a changed file with an unchanged mtime is refused too.
 
         Returns:
             True when the workbook was saved and replaced.
 
         Raises:
-            WorkbookStaleError: The source changed after it was copied, or
-                does not match ``expected_mtime``.
+            WorkbookStaleError: The source changed after it was copied, does
+                not match ``expected_mtime``/``expected_digest``, or appeared
+                during a create write.
             OSError: The workbook could not be copied, loaded, saved, or replaced.
         """
         from smart_locker.sync.catalog_sheet import safe_cell_value
@@ -224,7 +273,9 @@ class WorkbookAdapter:
             try:
                 wb.save(dest_path)
                 wb.close()
-                self._replace_into(dest_path)
+                staged_digest = _file_digest(dest_path)
+                self._replace_into(dest_path, expected_absent=True)
+                self.last_written_digest = staged_digest
                 dest_path = None
                 return True
             finally:
@@ -241,11 +292,41 @@ class WorkbookAdapter:
             edit,
             expected_mtime=expected_mtime,
             pick_sheet=_catalog_worksheet,
+            expected_digest=expected_digest,
         )
 
-    def _replace_into(self, staged_path: Path) -> None:
-        """Replace the source workbook with a staged file, retrying a file lock."""
+    def _replace_into(
+        self,
+        staged_path: Path,
+        *,
+        expected_digest: str | None = None,
+        expected_identity: tuple | None = None,
+        expected_absent: bool = False,
+    ) -> None:
+        """Replace the source workbook with a staged file, retrying a file lock.
+
+        The source is re-verified before every attempt — a write that slept
+        on a PermissionError cannot clobber a file that changed (or, for
+        ``expected_absent``, appeared) during the delay.
+
+        Args:
+            staged_path: The new file to swap in.
+            expected_digest: When given, the current file's SHA-256 must match.
+            expected_identity: When given, the current file's stat identity
+                must match.
+            expected_absent: When True, the target must still not exist.
+
+        Raises:
+            WorkbookStaleError: A guard did not hold.
+            OSError/PermissionError: The replace itself failed.
+        """
         for attempt in range(1, WRITE_RETRY_ATTEMPTS + 1):
+            if expected_absent and self.path.exists():
+                raise WorkbookStaleError()
+            if expected_identity is not None and _file_identity(self.path) != expected_identity:
+                raise WorkbookStaleError()
+            if expected_digest is not None and _file_digest(self.path) != expected_digest:
+                raise WorkbookStaleError()
             try:
                 staged_path.replace(self.path)
                 return

@@ -146,14 +146,19 @@ async function apiAuthTap(uid_hmac) {
 
 /**
  * Fetch all devices from the API. Returns demo data when in demo mode.
- * @returns {Promise<Array<Object>>} Array of device objects, or empty array on error.
+ * Throws on a non-OK response or a non-array payload — a failed GET must
+ * never be mistaken for an empty locker, so callers keep the last good
+ * list instead of painting slots from bad data.
+ * @returns {Promise<Array<Object>>} Array of device objects.
  */
 async function apiGetDevices() {
   // Tagged units plus any on loan — same predicate as list_kiosk_devices.
   if (USE_DEMO) { await sleep(280); return DEMO_DEVICES.filter(d => d.has_tag || d.status === 'borrowed'); } // simulate fetch latency
   const res = await fetch('/api/devices');
-  if (!res.ok) return [];
-  return await res.json();
+  if (!res.ok) throw new Error(`devices ${res.status}`);
+  const list = await res.json();
+  if (!Array.isArray(list)) throw new Error('devices: unexpected payload');
+  return list;
 }
 
 /**
@@ -709,16 +714,15 @@ function fillMainMenu(user) {
 
 /**
  * Refresh the optional N/5 borrowed line on the scan-first main menu.
- * @returns {Promise<void>}
+ * @returns {Promise<boolean>} True when a fresh list was fetched and applied.
  */
 async function updateMenuBorrowCount() {
-  const el = document.getElementById('menu-borrow-count');
-  if (!el) return;
   try {
     const devices = await apiGetDevices();
     S.devices = devices;
     setMenuBorrowCount(devices);
-  } catch (_) { /* leave the last count */ }
+    return true;
+  } catch (_) { /* leave the last count */ return false; }
 }
 
 /**
@@ -741,7 +745,10 @@ function setMenuBorrowCount(devices) {
  * @returns {Promise<void>}
  */
 async function refreshAfterDeviceAction(data) {
-  await updateMenuBorrowCount();
+  if (!(await updateMenuBorrowCount())) {
+    showToast('Could not refresh the device list.', 'error');
+    return;
+  }
   const devices = S.devices || [];
   const detailOpen = S.screen === 'device-detail';
   const gridScreen = detailOpen ? S.prevScreen : S.screen;
@@ -810,8 +817,14 @@ function setLockerBadge(devices) {
  */
 async function openBorrow() {
   navigate('borrow');
-  const devices = await apiGetDevices();
-  S.devices = devices;
+  let devices;
+  try {
+    devices = await apiGetDevices();
+    S.devices = devices;
+  } catch (_) {
+    showToast('Could not refresh the device list.', 'error');
+    devices = S.devices || [];
+  }
   setLockerBadge(devices);
   setMenuBorrowCount(devices);
   buildGrid('borrow-grid', devices, 'borrow');
@@ -824,8 +837,14 @@ async function openBorrow() {
  */
 async function openReturn() {
   navigate('return');
-  const devices = await apiGetDevices();
-  S.devices = devices;
+  let devices;
+  try {
+    devices = await apiGetDevices();
+    S.devices = devices;
+  } catch (_) {
+    showToast('Could not refresh the device list.', 'error');
+    devices = S.devices || [];
+  }
   const mine = devices.filter(d => d.borrower_name === 'You').length;
   document.getElementById('return-badge').textContent =
     `${mine} item${mine !== 1 ? 's' : ''} to return`;
@@ -1440,20 +1459,22 @@ async function acceptHandover() {
     } else if (from === 'return') {
       await openReturn();
     } else if (from === 'device-detail') {
-      const devices = await apiGetDevices();
-      if (!devices.length) {
-        // Failed or empty refresh: keep the last known list and drop the stale detail.
+      let devices;
+      try {
+        devices = await apiGetDevices();
+      } catch (_) {
+        // Failed refresh: keep the last known list and drop the stale detail.
         closeDetail();
         showToast('Could not refresh the device list.', 'error');
-      } else {
-        S.devices = devices;
-        setMenuBorrowCount(devices);
-        const gridMode = S.prevScreen === 'return' ? 'return' : 'borrow';
-        buildGrid(gridMode + '-grid', devices, gridMode);
-        const updated = S.selected ? devices.find(d => d.id === S.selected.id) : null;
-        if (updated) openDetail(updated, S.mode || 'borrow');
-        else closeDetail();
+        return;
       }
+      S.devices = devices;
+      setMenuBorrowCount(devices);
+      const gridMode = S.prevScreen === 'return' ? 'return' : 'borrow';
+      buildGrid(gridMode + '-grid', devices, gridMode);
+      const updated = S.selected ? devices.find(d => d.id === S.selected.id) : null;
+      if (updated) openDetail(updated, S.mode || 'borrow');
+      else closeDetail();
     } else {
       await updateMenuBorrowCount();
     }

@@ -238,15 +238,21 @@ class DeviceRepository:
 
         Returns:
             True when the borrow landed; False when the row was no longer
-            available (the caller refreshes to read the winning state).
+            available or its sticker changed underneath (the caller refreshes
+            to read the winning state).
         """
-        return DeviceRepository.transition_status(
-            session,
-            device,
-            DeviceStatus.AVAILABLE,
-            DeviceStatus.BORROWED,
-            current_borrower_id=user_id,
+        stmt = (
+            update(Device)
+            .where(Device.id == device.id, Device.status == DeviceStatus.AVAILABLE)
+            .values(status=DeviceStatus.BORROWED, current_borrower_id=user_id)
         )
+        if device.tag_hmac is not None:
+            stmt = stmt.where(Device.tag_hmac == device.tag_hmac)
+        result = session.execute(stmt)
+        if result.rowcount != 1:
+            return False
+        session.refresh(device)
+        return True
 
     @staticmethod
     def return_device(session: Session, device: Device) -> None:
@@ -429,15 +435,30 @@ class DeviceRepository:
         session.flush()
 
     @staticmethod
-    def unbind_tag(session: Session, device: Device) -> None:
-        """Clear the NFC sticker HMAC on a device.
+    def unbind_tag(session: Session, device: Device) -> bool:
+        """Clear the NFC sticker HMAC on a device that is not borrowed.
+
+        The clear is conditional: a borrow that committed between the
+        caller's availability check and this write wins, and the stale
+        unbind touches nothing — a borrowed row never loses its sticker.
 
         Args:
             session: Active database session.
             device: Device row to unbind.
+
+        Returns:
+            True when the tag was cleared; False when the row is borrowed.
         """
-        device.tag_hmac = None
-        session.flush()
+        stmt = (
+            update(Device)
+            .where(Device.id == device.id, Device.status != DeviceStatus.BORROWED)
+            .values(tag_hmac=None)
+        )
+        result = session.execute(stmt)
+        if result.rowcount != 1:
+            return False
+        session.refresh(device)
+        return True
 
     @staticmethod
     def update_metadata(session: Session, device: Device, **kwargs) -> bool:

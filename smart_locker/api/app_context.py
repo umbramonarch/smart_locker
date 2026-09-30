@@ -481,39 +481,45 @@ class AppContext:
         hmac_key = key_manager.hmac_key
         pending_snapshots = (pending_reg, pending_bind)
 
+        pre_dispatch_session = session_mgr.current_session
+        dispatch_session: list = []
+
         def _run_insert():
             with get_session() as db_session:
-                return dispatch_insert(
-                    db_session,
-                    uid,
-                    hmac_key,
-                    # The AES key is needed only to enroll; resolving it lazily
-                    # keeps a missing SMART_LOCKER_ENC_KEY from failing taps —
-                    # dispatch_insert invokes the provider only for a card tap.
-                    (
-                        (lambda: key_manager.enc_key)
-                        if pending_reg is not None
-                        else None
-                    ),
-                    session_mgr,
-                    registration_display_name=(
-                        pending_reg.display_name if pending_reg is not None else None
-                    ),
-                    registration_role=(
-                        pending_reg.role if pending_reg is not None else "user"
-                    ),
-                    registration_replace_user_id=(
-                        pending_reg.replace_user_id
-                        if pending_reg is not None
-                        else None
-                    ),
-                    registration_expired=expired_reg,
-                    tag_bind_device_id=(
-                        pending_bind.device_id if pending_bind is not None else None
-                    ),
-                    admin_overlay_open=overlay,
-                    reader_name=reader_name,
-                )
+                try:
+                    return dispatch_insert(
+                        db_session,
+                        uid,
+                        hmac_key,
+                        # The AES key is needed only to enroll; resolving it lazily
+                        # keeps a missing SMART_LOCKER_ENC_KEY from failing taps —
+                        # dispatch_insert invokes the provider only for a card tap.
+                        (
+                            (lambda: key_manager.enc_key)
+                            if pending_reg is not None
+                            else None
+                        ),
+                        session_mgr,
+                        registration_display_name=(
+                            pending_reg.display_name if pending_reg is not None else None
+                        ),
+                        registration_role=(
+                            pending_reg.role if pending_reg is not None else "user"
+                        ),
+                        registration_replace_user_id=(
+                            pending_reg.replace_user_id
+                            if pending_reg is not None
+                            else None
+                        ),
+                        registration_expired=expired_reg,
+                        tag_bind_device_id=(
+                            pending_bind.device_id if pending_bind is not None else None
+                        ),
+                        admin_overlay_open=overlay,
+                        reader_name=reader_name,
+                    )
+                finally:
+                    dispatch_session.append(session_mgr.current_session)
 
         try:
             outcome = await asyncio.to_thread(_run_insert)
@@ -523,6 +529,13 @@ class AppContext:
             # (locked DB, IO error) lands here. The bridge must survive and the
             # kiosk must not sit on "waiting for card" forever.
             logger.exception("NFC tap dispatch failed; reporting to kiosk.")
+            created = dispatch_session[0] if dispatch_session else None
+            if (
+                pre_dispatch_session is None
+                and created is not None
+                and session_mgr.current_session is created
+            ):
+                session_mgr.end_session()
             self._report_dispatch_failure(pending_reg, pending_bind)
             return
         result = outcome.result

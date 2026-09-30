@@ -587,6 +587,7 @@ def _handle_idle(
                 event="auth_failed",
                 cli_message="Unknown card. Please contact an administrator to enroll.",
             )
+        db_session.expunge(user)
         session_mgr.start_session(user)
         return TapResult(
             event="auth_success",

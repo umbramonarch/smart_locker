@@ -19,6 +19,8 @@ Notes: The secret cannot go in .env: on the installed appliance .env is
 
 import logging
 import os
+import tempfile
+from pathlib import Path
 
 from sqlalchemy.orm import Session
 
@@ -63,13 +65,23 @@ def write_dashboard_secret(secret: str) -> None:
 
     # Write to a sibling temp file then rename — a torn file would lose the
     # only copy of the dashboard password.
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(secret + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    fd, tmp_name = tempfile.mkstemp(prefix=path.name + ".", dir=str(path.parent))
+    tmp = Path(tmp_name)
     try:
-        os.chmod(path, 0o640)
-    except OSError:
         # Non-POSIX host (dev box) has no real mode bits — harmless.
-        logger.debug("Could not chmod %s to 640.", path)
+        if os.name == "posix":
+            os.fchmod(fd, 0o640)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fd = None
+            fh.write(secret + "\n")
+        os.replace(tmp, path)
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if tmp.exists():
+            tmp.unlink(missing_ok=True)
 
     logger.info("Dashboard admin secret written to %s.", path)

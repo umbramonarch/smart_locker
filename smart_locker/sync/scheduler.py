@@ -39,6 +39,9 @@ def _try_dashboard_launcher() -> None:
         logger.exception("Dashboard launcher retry failed.")
 
 
+_startup_pending: threading.Event | None = None
+
+
 def sync_in_progress() -> bool:
     """Whether a mirror tick holds the mutex right now.
 
@@ -46,6 +49,9 @@ def sync_in_progress() -> bool:
     catalog is still adopting" — the startup tick runs on a worker
     thread, so the registrants table can lag boot by seconds on a slow share.
     """
+    pending = _startup_pending
+    if pending is not None and pending.is_set():
+        return True
     from smart_locker.sync import mirror
 
     return mirror.tick_in_progress()
@@ -106,12 +112,27 @@ def start_scheduler(engine, interval_seconds: int = 60) -> None:
 
     # Startup tick on a plain thread: a one-shot date job races the
     # scheduler's own remove_job on shutdown and dies with JobLookupError.
-    threading.Thread(
-        target=_scheduled_tick,
-        args=(engine, "startup"),
-        name="mirror-startup-tick",
-        daemon=True,
-    ).start()
+    global _startup_pending
+    startup_done = threading.Event()
+    startup_done.set()
+    _startup_pending = startup_done
+
+    def _startup_tick() -> None:
+        try:
+            _scheduled_tick(engine, "startup")
+        finally:
+            startup_done.clear()
+
+    try:
+        threading.Thread(
+            target=_startup_tick,
+            name="mirror-startup-tick",
+            daemon=True,
+        ).start()
+    except Exception:
+        startup_done.clear()
+        _startup_pending = None
+        raise
 
     _scheduler = BackgroundScheduler()
     _scheduler.add_job(
@@ -134,8 +155,9 @@ def stop_scheduler() -> None:
     Returns:
         None.
     """
-    global _scheduler
+    global _scheduler, _startup_pending
 
+    _startup_pending = None
     if _scheduler is not None:
         _scheduler.shutdown(wait=False)
         _scheduler = None

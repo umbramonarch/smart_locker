@@ -201,7 +201,8 @@ def unbind_device_tag(session, device: Device) -> None:
     """
     if device.status == DeviceStatus.BORROWED:
         raise DeviceBorrowed(f"{device.pm_number} is borrowed — return it first.")
-    DeviceRepository.unbind_tag(session, device)
+    if not DeviceRepository.unbind_tag(session, device):
+        raise DeviceBorrowed(f"{device.pm_number} is borrowed — return it first.")
 
 
 def _mark_mirror_dirty(session: Session) -> None:

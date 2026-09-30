@@ -53,6 +53,7 @@ from smart_locker.sync.catalog_sheet import (
 from smart_locker.sync.workbook_adapter import (
     WorkbookAdapter,
     WorkbookStaleError,
+    _file_digest,
 )
 
 logger = logging.getLogger(__name__)
@@ -170,6 +171,7 @@ def _load_state() -> dict:
         "last_write_rows": [],
         "last_seen_mtime": None,
         "last_seen_size": None,
+        "last_seen_digest": None,
         "last_error": None,
     }
     try:
@@ -262,7 +264,8 @@ def _save_state(state: dict) -> None:
                 if (disk_write or "") > (state_write or ""):
                     for key in (
                         "last_write_at", "last_write_rows",
-                        "last_seen_mtime", "last_seen_size", "last_error",
+                        "last_seen_mtime", "last_seen_size",
+                        "last_seen_digest", "last_error",
                     ):
                         value = disk.get(key)
                         state[key] = (
@@ -517,9 +520,12 @@ def _adopt(engine, parsed: list[CatalogRow]) -> int:
                     updates["calibration_due"] = row.calibration_due
                 try:
                     DeviceRepository.update_metadata(session, existing, **updates)
-                    # The maintenance word on a cabinet unit does the same
-                    # thing as the dashboard action, adoption included.
-                    apply_place_word(session, existing, row.location)
+                    if is_registered(existing):
+                        # The maintenance word on a cabinet unit does the same
+                        # thing as the dashboard action, adoption included.
+                        apply_place_word(session, existing, row.location)
+                    elif "location" in row.present:
+                        existing.location = _stored_place(row.location)
                     session.commit()
                 except (IntegrityError, OperationalError, CatalogError):
                     # One bad row — or a raced borrow/locked-database flush
@@ -592,6 +598,27 @@ def _stat_path(path: Path):
     return _call_with_timeout(
         path.stat, _IO_TIMEOUT_SECONDS, gate=_reader_lock
     )
+
+
+def _digest_path(path: Path):
+    """SHA-256 of the file inside the reader I/O timebox, or None on failure.
+
+    Same wedge semantics as ``_stat_path``: a dead share blocks the read
+    in-kernel, so the digest runs on the gated worker — while a wedged
+    reader holds the gate this returns None instead of leaking a thread.
+
+    Args:
+        path: Workbook path.
+
+    Returns:
+        The hex digest, or None when the file could not be read in time.
+    """
+    try:
+        return _call_with_timeout(
+            lambda: _file_digest(path), _IO_TIMEOUT_SECONDS, gate=_reader_lock
+        )
+    except (OSError, TimeoutError):
+        return None
 
 
 def _read_sheet(workbook: WorkbookAdapter) -> tuple[list[list[str]], str | None]:
@@ -810,18 +837,27 @@ def _apply_catalog_row(
 ) -> None:
     """Copy every sheet field onto an existing non-registered row."""
     updates = {}
-    for key in ("name", "device_type", "manufacturer", "model"):
-        value = getattr(row, key)
-        if value:
-            updates[key] = value
-    if row.serial_number:
-        holder = DeviceRepository.find_by_serial(session, row.serial_number)
-        if holder is None or holder.id == device.id:
-            updates["serial_number"] = row.serial_number
-    if row.calibration_due is not None:
+    for key in ("name", "device_type"):
+        if key in row.present and getattr(row, key):
+            updates[key] = getattr(row, key)
+    for key in ("manufacturer", "model"):
+        if key in row.present:
+            updates[key] = getattr(row, key)
+    if "serial_number" in row.present:
+        if row.serial_number:
+            holder = DeviceRepository.find_by_serial(session, row.serial_number)
+            if holder is None or holder.id == device.id:
+                updates["serial_number"] = row.serial_number
+        else:
+            updates["serial_number"] = None
+    if "calibration_due" in row.present:
         updates["calibration_due"] = row.calibration_due
     DeviceRepository.update_metadata(session, device, **updates)
-    if include_location and not is_registered(device):
+    if (
+        include_location
+        and "location" in row.present
+        and not is_registered(device)
+    ):
         device.location = _stored_place(row.location)
         session.flush()
 
@@ -837,7 +873,7 @@ def _apply_field(session: Session, device: Device, field: str, row: CatalogRow) 
         "calibration": "calibration_due",
         "location": "location",
     }.get(field)
-    if attr is None:
+    if attr is None or attr not in row.present:
         return False
     if attr == "location":
         if is_registered(device):
@@ -848,10 +884,13 @@ def _apply_field(session: Session, device: Device, field: str, row: CatalogRow) 
         session.flush()
         return True
     if attr == "serial_number":
-        # An empty cell is a no-op like the other fields — sheet edits do
-        # not clear stored values.
+        # A blank cell on a sheet that carries the column is an approved
+        # clear — write NULL. Uniqueness is only checked for a real value.
         if not row.serial_number:
-            return False
+            DeviceRepository.update_metadata(
+                session, device, serial_number=None
+            )
+            return True
         holder = DeviceRepository.find_by_serial(session, row.serial_number)
         if holder is not None and holder.id != device.id:
             return False
@@ -860,15 +899,15 @@ def _apply_field(session: Session, device: Device, field: str, row: CatalogRow) 
         )
         return True
     if attr == "calibration_due":
-        if row.calibration_due is None:
-            return False
         DeviceRepository.update_metadata(
             session, device, calibration_due=row.calibration_due
         )
         return True
     value = getattr(row, attr)
     if not value:
-        return False
+        if attr in ("name", "device_type"):
+            return False
+        value = None
     DeviceRepository.update_metadata(session, device, **{attr: value})
     return True
 
@@ -950,6 +989,42 @@ def tick(engine, trigger: str = "interval") -> dict:
             _remember_write(result)
         if result.get("skipped") in (None, "external_changes"):
             _record_tick(trigger, result)
+        if result.get("seeded"):
+            _rescan_photos(engine)
+
+
+_photo_scan_lock = threading.Lock()
+
+
+def _rescan_photos(engine) -> None:
+    """Assign existing photos after a catalog adoption.
+
+    Rows adopted from the sheet may match images already sitting in the
+    photo input dir (e.g. after a share outage). Runs timeboxed on a
+    dedicated gate so a wedged CIFS scan is bounded and never piles up
+    workers — and it never raises into the tick.
+
+    Args:
+        engine: SQLAlchemy engine for database access.
+    """
+    try:
+        from config.settings import PHOTO_INPUT_PATH, PHOTO_SERVE_DIR
+
+        if not PHOTO_INPUT_PATH:
+            return
+        from smart_locker.sync.photo_watcher import scan_existing_photos
+
+        count = _call_with_timeout(
+            lambda: scan_existing_photos(
+                Path(PHOTO_INPUT_PATH), Path(PHOTO_SERVE_DIR), engine
+            ),
+            _IO_TIMEOUT_SECONDS,
+            gate=_photo_scan_lock,
+        )
+        if count:
+            logger.info("Post-adoption photo scan: %d device(s) updated.", count)
+    except Exception as e:
+        logger.warning("Post-adoption photo scan skipped: %s", e)
 
 
 def _record_tick(trigger: str, result: dict) -> None:
@@ -1012,13 +1087,19 @@ def _adopt_or_mark(engine, path: Path, state: dict, result: dict) -> None:
     except OSError:
         state["last_seen_mtime"] = None
         state["last_seen_size"] = None
+    state["last_seen_digest"] = None
     result["seeded"] = True
     result["adopted"] = adopted
     logger.info("Mirror adopted %d catalog row(s) from %s.", adopted, path)
 
 
 def _detect(path: Path, workbook: WorkbookAdapter, state: dict, result: dict) -> None:
-    """Compare the file to what the Pi last wrote; flag hand edits."""
+    """Compare the file to what the Pi last wrote; flag hand edits.
+
+    There is no stat fast-path: an edit that preserves mtime and size is
+    invisible to ``stat`` but not to the digest — every tick hashes the file,
+    and only changed bytes are parsed and fingerprinted.
+    """
     try:
         st = _stat_path(path)
     except FileNotFoundError:
@@ -1026,6 +1107,7 @@ def _detect(path: Path, workbook: WorkbookAdapter, state: dict, result: dict) ->
         # and a pending write recreates the mirror.
         state["last_seen_mtime"] = None
         state["last_seen_size"] = None
+        state["last_seen_digest"] = None
         state["external_pending"] = False
         state["external_decided_at"] = _now_iso()
         return
@@ -1037,10 +1119,12 @@ def _detect(path: Path, workbook: WorkbookAdapter, state: dict, result: dict) ->
         state["last_error"] = err
         result["error"] = err
         return
-    if (
-        st.st_mtime == state.get("last_seen_mtime")
-        and st.st_size == state.get("last_seen_size")
-    ):
+    digest_pre = _digest_path(path)
+    if digest_pre is None:
+        state["last_error"] = "unavailable"
+        result["error"] = "unavailable"
+        return
+    if digest_pre == state.get("last_seen_digest"):
         result["external"] = bool(state.get("external_pending"))
         return
     # Stamp the decision BEFORE the read: an admin dismiss/apply saved
@@ -1051,8 +1135,15 @@ def _detect(path: Path, workbook: WorkbookAdapter, state: dict, result: dict) ->
         state["last_error"] = _error_category(err)
         result["error"] = err
         return
+    digest_post = _digest_path(path)
+    if digest_post is None or digest_post != digest_pre:
+        state["last_seen_digest"] = None
+        state["external_pending"] = True
+        result["external"] = True
+        return
     state["last_seen_mtime"] = st.st_mtime
     state["last_seen_size"] = st.st_size
+    state["last_seen_digest"] = digest_post
     state["last_error"] = None
     written = state.get("last_write_rows") or []
     if _fingerprint(sheet_rows) != _fingerprint(written):
@@ -1125,6 +1216,7 @@ def _flush(
 
     result["write_attempted"] = True
     expected_mtime = state.get("last_seen_mtime")
+    expected_digest = state.get("last_seen_digest")
     create_only = not state["seeded"]
 
     def _write() -> bool:
@@ -1138,6 +1230,7 @@ def _flush(
                 MIRROR_HEADERS,
                 _write_values(expected),
                 expected_mtime=expected_mtime,
+                expected_digest=expected_digest,
             )
         finally:
             _writer_lock.release()
@@ -1193,6 +1286,7 @@ def _flush(
     except OSError:
         state["last_seen_mtime"] = None
         state["last_seen_size"] = None
+    state["last_seen_digest"] = workbook.last_written_digest
     # A successful write IS the seed: this file's baseline is ours, so the
     # next tick detects hand edits against it instead of re-adopting the
     # file we just created (which would silently bless edits made between
