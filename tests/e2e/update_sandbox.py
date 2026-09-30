@@ -357,6 +357,12 @@ class UpdateSandbox:
                 "VERSION": "1.0.0\n",
                 "smart_locker/__init__.py": "",
                 "smart_locker/app.py": 'APP_MARK = "old-1.0.0"\n',
+                # Kiosk frontend — is_repo_tree refuses a tree without it.
+                "smart_locker/frontend/index.html": "html\n",
+                "smart_locker/frontend/app.js": "js\n",
+                "smart_locker/frontend/style.css": "css\n",
+                "smart_locker/frontend/shared.js": "js\n",
+                "smart_locker/frontend/keyboard.js": "js\n",
                 # A committed UI asset and a runtime device photo — a rollback
                 # must keep the photo while removing payload-only assets.
                 "smart_locker/frontend/images/hero_bg.jpg": "bg\n",
@@ -482,6 +488,12 @@ class UpdateSandbox:
             "smart_locker/app.py": f'APP_MARK = "new-{version}"\n',
             # Only in the new tree — a rollback must remove it again.
             "smart_locker/new_feature.py": "NEW = True\n",
+            # Kiosk frontend — is_repo_tree refuses a tree without it.
+            "smart_locker/frontend/index.html": "html\n",
+            "smart_locker/frontend/app.js": "js\n",
+            "smart_locker/frontend/style.css": "css\n",
+            "smart_locker/frontend/shared.js": "js\n",
+            "smart_locker/frontend/keyboard.js": "js\n",
             # Committed UI asset added by the release — a rollback must
             # remove it while leaving runtime photos untouched.
             "smart_locker/frontend/images/new_ui.png": "png\n",

@@ -311,8 +311,10 @@ rollback() {
     mkdir -p "$restore_dir"
     tar -xzf "$CODE_BACKUP" -C "$restore_dir"
     # --delete only onto a snapshot that still looks like a tree — a corrupt
-    # or truncated backup must not wipe the current code into nothing.
-    if is_repo_tree "$restore_dir"; then
+    # or truncated backup must not wipe the current code into nothing. The
+    # backup predicate stays loose: a snapshot of an older install may
+    # legitimately lack files added later (e.g. frontend/keyboard.js).
+    if is_code_tree "$restore_dir"; then
       local restore_excludes=()
       for p in "${BACKUP_SKIP[@]}"; do restore_excludes+=( --exclude="/$p" ); done
       rsync -a --delete "${restore_excludes[@]}" "$restore_dir"/ "$APP_DIR"/
@@ -370,6 +372,24 @@ on_err() {
 
 # --- Incoming tree discovery ---------------------------------------------------
 is_repo_tree() {
+  local d="${1:-}"
+  # The kiosk frontend is load-bearing: a payload missing it would pass a
+  # code-only check and rsync --delete it off the installed tree.
+  [ -n "$d" ] && [ -d "$d" ] \
+    && [ -f "$d/smart_locker/app.py" ] \
+    && [ -f "$d/requirements.txt" ] \
+    && [ -f "$d/deploy/install/update.sh" ] \
+    && [ -f "$d/smart_locker/frontend/index.html" ] \
+    && [ -f "$d/smart_locker/frontend/app.js" ] \
+    && [ -f "$d/smart_locker/frontend/style.css" ] \
+    && [ -f "$d/smart_locker/frontend/shared.js" ] \
+    && [ -f "$d/smart_locker/frontend/keyboard.js" ]
+}
+
+# A backup snapshot only has to look like a code tree — snapshots of older
+# installs may legitimately lack files added later, so this predicate stays
+# at the original three markers and is used only on the rollback path.
+is_code_tree() {
   local d="${1:-}"
   [ -n "$d" ] && [ -d "$d" ] \
     && [ -f "$d/smart_locker/app.py" ] \

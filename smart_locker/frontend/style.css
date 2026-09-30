@@ -142,7 +142,9 @@ body::after {
   display: flex;
   flex-direction: column;
   clip-path: circle(0% at var(--reveal-x, 50%) var(--reveal-y, 50%));
-  transition: clip-path 1.6s var(--ease-smooth);
+  /* transform is the on-screen keyboard's push-up (.kbd-shift); keeping it
+     in the base list lets clip-path and shift animate independently. */
+  transition: clip-path 1.6s var(--ease-smooth), transform 0.35s var(--ease-smooth);
   z-index: 10;
   overflow: hidden;
 }
@@ -151,7 +153,7 @@ body::after {
 }
 .screen.exit {
   clip-path: circle(0% at var(--reveal-x, 50%) var(--reveal-y, 50%));
-  transition: clip-path 1.2s var(--ease-smooth);
+  transition: clip-path 1.2s var(--ease-smooth), transform 0.35s var(--ease-smooth);
 }
 
 /* ============================================================
@@ -164,7 +166,7 @@ body::after {
   display: flex;
   background: var(--bg);
   clip-path: polygon(100% 0, 100% 0, 100% 100%, 100% 100%);
-  transition: clip-path 0.9s var(--ease-smooth);
+  transition: clip-path 0.9s var(--ease-smooth), transform 0.35s var(--ease-smooth);
   /* Hidden / closing overlays must not eat hover on the menu underneath
      (lite fades with opacity only; clip-path none still covers the viewport). */
   pointer-events: none;
@@ -176,13 +178,13 @@ body::after {
 /* Close toward the left (used by inactivity overlay) */
 .overlay.hidden-left {
   clip-path: polygon(0 0, 0 0, 0 100%, 0 100%);
-  transition: clip-path 0.7s var(--ease-smooth);
+  transition: clip-path 0.7s var(--ease-smooth), transform 0.35s var(--ease-smooth);
   pointer-events: none;
 }
 /* Close toward the right — reverses the opening wipe (used by device detail) */
 .overlay.hidden-right {
   clip-path: polygon(100% 0, 100% 0, 100% 100%, 100% 100%);
-  transition: clip-path 0.7s var(--ease-smooth);
+  transition: clip-path 0.7s var(--ease-smooth), transform 0.35s var(--ease-smooth);
   pointer-events: none;
 }
 
@@ -2472,7 +2474,8 @@ html.lite .screen {
   clip-path: none !important;
   opacity: 0;
   visibility: hidden;
-  transition: opacity 0.25s ease, visibility 0.25s ease;
+  transition: opacity 0.25s ease, visibility 0.25s ease,
+              transform 0.35s var(--ease-smooth);
 }
 html.lite .screen.active    { opacity: 1; visibility: visible; }
 html.lite .screen.exit      { opacity: 0; visibility: hidden; }
@@ -2482,7 +2485,7 @@ html.lite .overlay {
   clip-path: none !important;
   opacity: 0;
   pointer-events: none;
-  transition: opacity 0.2s ease;
+  transition: opacity 0.2s ease, transform 0.35s var(--ease-smooth);
 }
 html.lite .overlay.visible       { opacity: 1; pointer-events: auto; }
 html.lite .overlay.hidden-left,
@@ -2620,13 +2623,19 @@ html.lite .reveal-inner {
   border-bottom: none;
   border-radius: 20px 20px 0 0;
   box-shadow: 0 -18px 60px rgba(0, 0, 0, 0.45);
-  z-index: 80;
+  /* Above every overlay (max 70) and the toast (9990); below scanlines
+     (9998) and the cursor (9999) so the CRT finish still covers it. */
+  z-index: 9995;
   visibility: hidden;
+  /* pointer-events off while .kbd-open is absent — the slide-in/out surface
+     must not swallow taps meant for the UI beneath it. */
+  pointer-events: none;
   transform: translate(-50%, 105%);
   transition: transform 0.35s var(--ease-smooth), visibility 0.35s;
 }
 .kbd.kbd-open {
   visibility: visible;
+  pointer-events: auto;
   transform: translate(-50%, 0);
 }
 
@@ -2658,6 +2667,7 @@ html.lite .reveal-inner {
 .kbd-key-back,
 .kbd-key-sym,
 .kbd-key-abc,
+.kbd-key-acc,
 .kbd-key-tab {
   background: var(--surface-3);
   font-size: 1.1rem;
@@ -2686,8 +2696,10 @@ html.lite .reveal-inner {
 }
 
 /* Content push-up while the keyboard is open: keyboard.js sets
-   --kbd-shift to the overlap so the focused field clears the keys. */
+   --kbd-shift to the overlap so the focused field clears the keys.
+   No transition here — transform already lives in the hosts' own
+   transition lists, so a shifted screen still exits at its clip-path
+   pace and the settle animates instead of popping. */
 .screen.kbd-shift, .overlay.kbd-shift {
   transform: translateY(calc(-1 * var(--kbd-shift, 0px)));
-  transition: transform 0.35s var(--ease-smooth);
 }

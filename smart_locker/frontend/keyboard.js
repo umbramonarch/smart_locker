@@ -11,14 +11,17 @@
  *        focused input never loses focus. Every mutation dispatches a
  *        bubbling 'input' event so existing search filters and Continue
  *        validators fire unchanged. Done dispatches a synthetic Enter
- *        keydown first, so flows that treat Enter as submit still work.
+ *        keydown first — flagged __kbdEnter so handlers skip their own
+ *        click sound — so flows that treat Enter as submit still work.
  *        Styles live in style.css under ON-SCREEN KEYBOARD.
  */
 (function () {
   'use strict';
 
-  /* ---------- what counts as a typeable field ------------------------- */
-  const TEXT_TYPES = new Set(['text', 'password', 'search', 'email', 'url', 'tel', 'number']);
+  /* ---------- what counts as a typeable field -------------------------
+     'number' is deliberately absent: commit() writes via .value= and a
+     number input coerces non-numeric text to "" — silent corruption. */
+  const TEXT_TYPES = new Set(['text', 'password', 'search', 'email', 'url', 'tel']);
   function isField(el) {
     if (!el || el.disabled || el.readOnly) return false;
     if (el.tagName === 'TEXTAREA') return true;
@@ -26,10 +29,10 @@
   }
 
   /* ---------- layout ---------------------------------------------------
-     Rows are arrays of keys. A key is a character string or [id, flex].
-     Special ids: shift, back, space, done, sym (to symbols), abc (to
-     letters). Flex values make each row total 10 units. */
-  const SPECIAL_FLEX = { shift: 1.5, back: 1.5, space: 3, done: 2, sym: 1.5, abc: 2, tab: 1.5 };
+     Rows are arrays of key ids — a single character, or a special key id
+     from SPECIAL_LABEL. SPECIAL_FLEX weights each row to ~10 units; the
+     middle letter rows run narrower for the home-row stagger. */
+  const SPECIAL_FLEX = { shift: 1.5, back: 1.5, space: 3, done: 2, sym: 1.5, abc: 2, acc: 1, tab: 1.5 };
   const PAGES = {
     letters: [
       [...'1234567890'],
@@ -42,20 +45,29 @@
       [...'!@#$%&*()_'],
       [...'+-=/?;:\'",'],
       [...'.<>[]{}\\|~'],
-      ['abc', 'tab', 'space', 'back', 'done'],
+      ['abc', 'acc', 'tab', 'space', 'back', 'done'],
+    ],
+    accents: [
+      [...'áàâäãåæā'],
+      [...'éèêëíìîï'],
+      [...'óòôöõøúùûü'],
+      [...'ñçýÿšž'],
+      ['abc', 'sym', 'tab', 'space', 'back', 'done'],
     ],
   };
   const SPECIAL_LABEL = {
-    shift: '⇧', back: '⌫', space: 'Space', done: 'Done', sym: '!@#', abc: 'ABC', tab: 'Tab',
+    shift: '⇧', back: '⌫', space: 'Space', done: 'Done', sym: '!@#', abc: 'ABC', acc: 'áé', tab: 'Tab',
   };
+  /* Pages whose character keys respond to Shift (symbols never shift). */
+  const SHIFTABLE = new Set(['letters', 'accents']);
 
   /* ---------- state ---------------------------------------------------- */
   let bound = null;          // input currently receiving keystrokes
-  let hideTimer = 0;         // deferred blur-hide so focus hops don't flicker
   let shiftMode = 'none';    // 'none' | 'shift' (one char) | 'caps'
   let page = 'letters';
   let shifted = null;        // screen/overlay pushed up so the field clears the keys
-  let shiftedPx = 0;         // shift applied to `shifted`
+  let repeatDelay = 0;       // hold-to-repeat warmup on Backspace
+  let repeatTimer = 0;       // hold-to-repeat interval on Backspace
 
   /* ---------- DOM ------------------------------------------------------ */
   const kbd = document.createElement('div');
@@ -63,31 +75,24 @@
   kbd.className = 'kbd';
   kbd.setAttribute('aria-hidden', 'true');
 
-  function normKey(spec) {
-    if (Array.isArray(spec)) return { id: spec[0], flex: spec[1] };
-    return { id: spec, flex: SPECIAL_FLEX[spec] || 1 };
-  }
-
   function render() {
     kbd.textContent = '';
+    const shifting = SHIFTABLE.has(page) && shiftMode !== 'none';
     for (const rowSpec of PAGES[page]) {
       const row = document.createElement('div');
       row.className = 'kbd-row';
       for (const spec of rowSpec) {
-        const { id, flex } = normKey(spec);
         const key = document.createElement('button');
         key.type = 'button';
         key.tabIndex = -1;
-        key.dataset.key = id;
-        const isChar = id.length === 1;
-        const label = isChar && page === 'letters' && shiftMode !== 'none'
-          ? id.toUpperCase()
-          : (SPECIAL_LABEL[id] || id);
-        key.textContent = label;
-        key.className = 'kbd-key' + (isChar ? '' : ` kbd-key-${id}`);
-        if (id === 'shift' && shiftMode !== 'none') {
+        key.dataset.key = spec;
+        const isChar = spec.length === 1;
+        key.textContent = isChar && shifting ? spec.toUpperCase() : (SPECIAL_LABEL[spec] || spec);
+        key.className = 'kbd-key' + (isChar ? '' : ` kbd-key-${spec}`);
+        if (spec === 'shift' && shiftMode !== 'none') {
           key.classList.add(shiftMode === 'caps' ? 'kbd-shift-caps' : 'kbd-shift-on');
         }
+        const flex = SPECIAL_FLEX[spec] || 1;
         if (flex !== 1) key.style.flex = `${flex} 1 0%`;
         row.appendChild(key);
       }
@@ -132,13 +137,15 @@
      bottom would sit under the keyboard. Instead of scrolling we push the
      field's whole screen/overlay up by the overlap — the mobile "content
      shift" pattern. Controls the keyboard still covers (Continue, Cancel)
-     are reached after Done or a blur, same as a phone. */
+     are reached after Done or a blur, same as a phone. The shift transform
+     animates because transform lives in the hosts' own transition lists —
+     .kbd-shift adds only the transform, so screen/overlay exits keep their
+     clip-path/opacity timing while shifted. */
   function clearShift() {
     if (shifted) {
       shifted.classList.remove('kbd-shift');
       shifted.style.removeProperty('--kbd-shift');
       shifted = null;
-      shiftedPx = 0;
     }
   }
 
@@ -156,12 +163,24 @@
     host.style.setProperty('--kbd-shift', `${need}px`);
     host.classList.add('kbd-shift');
     shifted = host;
-    shiftedPx = need;
+  }
+
+  function stopRepeat() {
+    clearTimeout(repeatDelay);
+    clearInterval(repeatTimer);
+    repeatDelay = repeatTimer = 0;
   }
 
   function open(el) {
-    clearTimeout(hideTimer);
+    stopRepeat();
     bound = el;
+    /* Fresh keyboard per field — a previous user's symbols/accents page or
+       caps-lock must not leak into the next session's field. */
+    if (page !== 'letters' || shiftMode !== 'none') {
+      page = 'letters';
+      shiftMode = 'none';
+      render();
+    }
     if (!kbd.classList.contains('kbd-open')) {
       kbd.classList.add('kbd-open');
       kbd.setAttribute('aria-hidden', 'false');
@@ -170,7 +189,7 @@
   }
 
   function hide() {
-    clearTimeout(hideTimer);
+    stopRepeat();
     bound = null;
     clearShift();
     kbd.classList.remove('kbd-open');
@@ -178,35 +197,65 @@
   }
 
   /* Focused inputs can be stranded when their step (.hidden), screen
-     (.active), or overlay (.visible / inline display) leaves view — none of
-     those reliably fire focusout. The same walk guards open(): a stale
-     .focus() timer can land on a screen the user already navigated away
-     from (screens clip away but keep their layout). */
+     (.active / .exit), or overlay (.visible / .hidden-left|right / inline
+     display) leaves view — none of those reliably fire focusout. The same
+     walk guards open(): a stale .focus() timer can land on a host the user
+     already navigated away from. Departure classes count as gone the moment
+     they appear — .exit/.hidden-* keep .active/.visible through the close
+     animation, which is exactly the window stale focus timers land in. */
   function fieldGone(el) {
+    if (!el || !el.isConnected) return true;
     for (let cur = el; cur && cur !== document.body; cur = cur.parentElement) {
       const c = cur.classList;
       if (c.contains('hidden')) return true;
+      if (c.contains('exit') || c.contains('hidden-left') || c.contains('hidden-right')) return true;
       if (c.contains('screen') && !c.contains('active')) return true;
       if (c.contains('overlay') && !c.contains('visible')) return true;
       if (cur.style.display === 'none') return true;
     }
     return false;
   }
+
+  /* Two-way guard: (1) a bound field leaving view — hidden step, departing
+     or deactivated host, detach, disable — closes the keyboard; (2) a field
+     that still holds DOM focus while its host becomes visible — a .focus()
+     that landed in the double-rAF open gap, or a screen regaining .active
+     with the field already focused — opens the keyboard on the next DOM
+     mutation, so a stranded focus never leaves a dead field. Covering
+     overlays (handover, inactivity, slot, update) can't be detected here —
+     the host stays .visible — so app.js blurs the field when it opens one. */
   new MutationObserver(() => {
-    if (bound && fieldGone(bound)) { bound.blur(); hide(); }
-  }).observe(document.body, { subtree: true, attributes: true, attributeFilter: ['class', 'style'] });
+    if (bound) {
+      if (fieldGone(bound) || !isField(bound)) { bound.blur(); hide(); }
+    } else {
+      const ae = document.activeElement;
+      if (isField(ae) && !fieldGone(ae)) open(ae);
+    }
+  }).observe(document.body, {
+    subtree: true,
+    childList: true,
+    attributes: true,
+    attributeFilter: ['class', 'style', 'disabled', 'readonly'],
+  });
 
   document.addEventListener('focusin', e => {
-    if (isField(e.target) && !fieldGone(e.target)) open(e.target);
+    if (!isField(e.target) || fieldGone(e.target)) return;
+    /* Inputs added after load don't carry the inputmode="none" markup —
+       keep any native OSK suppressed on touch-capable browsers. */
+    if (e.target.inputMode !== 'none') e.target.inputMode = 'none';
+    open(e.target);
   });
   document.addEventListener('focusout', e => {
     if (e.target !== bound) return;
-    /* Bound input blurred — drop it now so a key tap inside the hide grace
-       window cannot write into a field that already lost focus. A focus
-       hop to the next field cancels the hide via focusin. */
+    stopRepeat();
     bound = null;
-    clearTimeout(hideTimer);
-    hideTimer = setTimeout(hide, 120);
+    /* focusout fires after focus has already moved: hop straight to a newly
+       focused field; when focus left the document entirely (body), close at
+       once — a visible keyboard with no bound field is a dead window for
+       taps. */
+    const ae = document.activeElement;
+    if (isField(ae) && !fieldGone(ae)) open(ae);
+    else hide();
   });
 
   /* ---------- key handling ----------------------------------------------
@@ -217,7 +266,14 @@
   kbd.addEventListener('mousedown', e => e.preventDefault());
 
   function handleKey(id) {
-    const el = bound;
+    let el = bound;
+    if (!el) {
+      /* Bound was cleared by a blur but focus already landed on another
+         field (hop raced focusin, or the observer hasn't run yet): write
+         to the field that actually holds focus instead of eating the tap. */
+      const ae = document.activeElement;
+      if (isField(ae) && !fieldGone(ae)) bound = el = ae;
+    }
     if (!el) return;
     if (typeof clickSound === 'function') clickSound();
     switch (id) {
@@ -228,27 +284,31 @@
       case 'back':  backspace(el); return;
       case 'space': insertText(el, ' '); return;
       case 'sym':   page = 'symbols'; render(); return;
+      case 'acc':   page = 'accents'; render(); return;
       case 'abc':   page = 'letters'; render(); return;
       case 'tab': {
         /* Fields under the keyboard can't be tapped — Tab hops focus to the
            next visible input in the same screen/overlay instead. */
         const host = el.closest('.screen, .overlay') || document;
         const fields = [...host.querySelectorAll('input, textarea')]
-          .filter(f => isField(f) && f.getBoundingClientRect().width > 0);
+          .filter(f => isField(f) && !fieldGone(f) && f.getBoundingClientRect().width > 0);
         const next = fields[(fields.indexOf(el) + 1) % fields.length];
         if (next && next !== el) next.focus();
         return;
       }
       case 'done': {
-        /* Let flows that accept Enter (Continue-equivalents) see the key,
-           then close and release the field. */
-        el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+        /* Let flows that accept Enter (Continue-equivalents) see the key —
+           __kbdEnter tells those handlers the keyboard already played the
+           click — then close and release the field. */
+        const ev = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true });
+        ev.__kbdEnter = true;
+        el.dispatchEvent(ev);
         hide();
         el.blur();
         return;
       }
       default: {
-        const ch = page === 'letters' && shiftMode !== 'none' ? id.toUpperCase() : id;
+        const ch = SHIFTABLE.has(page) && shiftMode !== 'none' ? id.toUpperCase() : id;
         insertText(el, ch);
         if (shiftMode === 'shift') { shiftMode = 'none'; render(); }
       }
@@ -257,6 +317,19 @@
 
   kbd.addEventListener('pointerdown', e => {
     const key = e.target.closest('.kbd-key');
-    if (key) handleKey(key.dataset.key);
+    if (!key) return;
+    stopRepeat(); // a second touch cancels a running repeat
+    handleKey(key.dataset.key);
+    /* Held Backspace repeats like a real keyboard — field clearing. */
+    if (key.dataset.key === 'back' && bound) {
+      repeatDelay = setTimeout(() => {
+        repeatTimer = setInterval(() => {
+          if (bound) handleKey('back');
+          else stopRepeat();
+        }, 55);
+      }, 420);
+    }
   });
+  document.addEventListener('pointerup', stopRepeat);
+  document.addEventListener('pointercancel', stopRepeat);
 })();

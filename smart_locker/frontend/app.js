@@ -341,6 +341,17 @@ function setRevealOrigin(el) {
 let detailHideTimer;
 
 /**
+ * Release DOM focus from whatever input/textarea holds it. Called before a
+ * transition or covering overlay opens so the shared on-screen keyboard
+ * (keyboard.js) closes via its focusout path instead of staying bound to a
+ * field it can no longer see — the keyboard floats above every overlay.
+ */
+function blurActiveInput() {
+  const ae = document.activeElement;
+  if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')) ae.blur();
+}
+
+/**
  * Navigate to a different screen or overlay using circle-reveal (screens) or
  * polygon-wipe (overlays) transitions. Handles exit animations on the outgoing
  * screen and entrance animations on the incoming one.
@@ -348,6 +359,7 @@ let detailHideTimer;
  */
 function navigate(toId) {
   if (S.screen === toId) return;
+  blurActiveInput();
 
   const fromEl = getEl(S.screen);
   const toEl   = getEl(toId);
@@ -551,6 +563,7 @@ function armIdle() {
  */
 function showInactivity() {
   if (S.updating) return;
+  blurActiveInput();
   S.prevScreen = S.screen;
   const overlay = document.getElementById('overlay-inactivity');
   overlay.style.display = '';
@@ -1297,6 +1310,7 @@ let slotHideTimer;
 function showSlotOverlay(name, slot) {
   const overlay = document.getElementById('overlay-slot');
   if (!overlay) return;
+  blurActiveInput();
   document.getElementById('slot-return-name').textContent = name || 'Device';
   const putEl = document.getElementById('slot-return-put');
   const numEl = document.getElementById('slot-return-num');
@@ -1349,6 +1363,7 @@ let handoverHideTimer;
  */
 function openHandover(data) {
   if (S.updating) return;
+  blurActiveInput();
   handoverData = data;
   S.handoverDeviceId = data.device_id;
   const msgEl = document.getElementById('handover-msg');
@@ -1708,6 +1723,9 @@ function selectRegistrantName(name, btn) {
 async function submitRegistrationName() {
   let name;
   let endpoint;
+  const btn = document.getElementById(
+    S.adminRegistration ? 'register-next-btn-admin' : 'register-next-btn');
+  if (btn.disabled) return; // a registration POST is already in flight
 
   if (S.adminRegistration) {
     // Admin manual registration — get name from text input
@@ -1722,8 +1740,7 @@ async function submitRegistrationName() {
   }
 
   // Disable the appropriate continue button to prevent double-submit
-  const btnId = S.adminRegistration ? 'register-next-btn-admin' : 'register-next-btn';
-  document.getElementById(btnId).disabled = true;
+  btn.disabled = true;
 
   document.getElementById('register-confirm-name').textContent = name;
   showRegisterStep('register-step-tap');
@@ -1751,7 +1768,7 @@ async function submitRegistrationName() {
   } catch (_) { /* fall through to the error step */ }
   if (!result || !result.success) {
     clearInterval(registerCountdownTimer);
-    document.getElementById(btnId).disabled = false;
+    btn.disabled = false;
     showRegisterStep('register-step-error');
     document.getElementById('register-error-msg').textContent =
       (result && (result.detail || result.message)) || 'Could not start registration.';
@@ -2079,6 +2096,7 @@ async function toggleAdminPanel() {
  */
 async function openAdminPanel() {
   clickSound();
+  blurActiveInput();
   const wasIdle = S.screen === 'idle';
   if (wasIdle) S.screen = 'admin';
   armIdle();
@@ -2308,6 +2326,7 @@ function isFreshUpdateStatus(data, launchedAt) {
 function showUpdateOverlay() {
   updatePollGen += 1;
   S.updating = true;
+  blurActiveInput();
   clearTimeout(S.idleTimer);
   clearInterval(S.cdTimer);
   const overlay = document.getElementById('overlay-update');
@@ -2620,6 +2639,7 @@ function closeRegisterDevice() {
  */
 async function adminRegisterDevice() {
   closeAdminPanel();
+  blurActiveInput();
   await sleep(300);
   const overlay = document.getElementById('overlay-register-device');
   overlay.style.display = '';
@@ -3216,6 +3236,7 @@ function closePeople() {
  */
 async function adminPeople() {
   closeAdminPanel();
+  blurActiveInput();
   await sleep(300);
   const overlay = document.getElementById('overlay-people');
   overlay.style.display = '';
@@ -3419,6 +3440,7 @@ function syncPeopleRoleButtons() {
 async function submitPeopleAdd() {
   const btn = document.getElementById('people-add-submit');
   const err = document.getElementById('people-add-error');
+  if (btn.disabled) return; // an add POST is already in flight
   const name = document.getElementById('people-add-name').value.trim();
   if (!name) { err.textContent = 'Enter a name.'; return; }
   if (USE_DEMO) {
@@ -3619,6 +3641,7 @@ async function adminStopSystem() {
  */
 function showPowerOverlay() {
   S.updating = true;
+  blurActiveInput();
   clearTimeout(S.idleTimer);
   clearInterval(S.cdTimer);
   const overlay = document.getElementById('overlay-power');
@@ -3680,19 +3703,23 @@ async function adminShutdown() {
  * Creates a brief oscillator sweep from 900Hz to 420Hz over 70ms.
  * Silently ignored if audio is not available.
  */
+/** Shared AudioContext — one per page, not one per beep (keyboard.js calls
+ * this on every keystroke; Chrome throttles context churn). */
+let audioCtx = null;
 function clickSound() {
   try {
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
-    const osc = ctx.createOscillator();
-    const g   = ctx.createGain();
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    const osc = audioCtx.createOscillator();
+    const g   = audioCtx.createGain();
     osc.connect(g);
-    g.connect(ctx.destination);
-    osc.frequency.setValueAtTime(900, ctx.currentTime);
-    osc.frequency.exponentialRampToValueAtTime(420, ctx.currentTime + 0.07);
-    g.gain.setValueAtTime(0.07, ctx.currentTime);
-    g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.09);
+    g.connect(audioCtx.destination);
+    osc.frequency.setValueAtTime(900, audioCtx.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(420, audioCtx.currentTime + 0.07);
+    g.gain.setValueAtTime(0.07, audioCtx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.09);
     osc.start();
-    osc.stop(ctx.currentTime + 0.09);
+    osc.stop(audioCtx.currentTime + 0.09);
   } catch (_) { /* audio not available — silently ignore */ }
 }
 
@@ -3743,6 +3770,14 @@ document.getElementById('register-search').addEventListener('input', (e) => {
     }
   }
 });
+// Enter/Done on the search field acts like the occluded Continue button —
+// submits only when a list name is actually selected.
+document.getElementById('register-search').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !document.getElementById('register-next-btn').disabled) {
+    if (!e.__kbdEnter) clickSound();
+    submitRegistrationName();
+  }
+});
 
 // Registration — admin manual (free-text input)
 const regAdminInput = document.getElementById('register-name-admin');
@@ -3750,7 +3785,7 @@ regAdminInput.addEventListener('input', () => {
   document.getElementById('register-next-btn-admin').disabled = !regAdminInput.value.trim();
 });
 regAdminInput.addEventListener('keydown', e => {
-  if (e.key === 'Enter' && regAdminInput.value.trim()) { clickSound(); submitRegistrationName(); }
+  if (e.key === 'Enter' && regAdminInput.value.trim()) { if (!e.__kbdEnter) clickSound(); submitRegistrationName(); }
 });
 document.getElementById('register-next-btn-admin').addEventListener('click', () => {
   clickSound(); submitRegistrationName();
@@ -3767,12 +3802,12 @@ setupNameInput.addEventListener('input', refreshSetupNext);
 setupPasswordInput.addEventListener('input', refreshSetupNext);
 setupNameInput.addEventListener('keydown', e => {
   if (e.key === 'Enter' && !document.getElementById('setup-next-btn').disabled) {
-    clickSound(); submitSetup();
+    if (!e.__kbdEnter) clickSound(); submitSetup();
   }
 });
 setupPasswordInput.addEventListener('keydown', e => {
   if (e.key === 'Enter' && !document.getElementById('setup-next-btn').disabled) {
-    clickSound(); submitSetup();
+    if (!e.__kbdEnter) clickSound(); submitSetup();
   }
 });
 document.getElementById('setup-next-btn').addEventListener('click', () => { clickSound(); submitSetup(); });
@@ -3807,7 +3842,7 @@ peopleNameInput.addEventListener('input', () => {
   document.getElementById('people-add-submit').disabled = !peopleNameInput.value.trim();
 });
 peopleNameInput.addEventListener('keydown', e => {
-  if (e.key === 'Enter' && peopleNameInput.value.trim()) { clickSound(); submitPeopleAdd(); }
+  if (e.key === 'Enter' && peopleNameInput.value.trim()) { if (!e.__kbdEnter) clickSound(); submitPeopleAdd(); }
 });
 document.getElementById('bind-device-close').addEventListener('click', () => { clickSound(); closeRegisterDevice(); });
 document.getElementById('bind-search').addEventListener('input', () => {

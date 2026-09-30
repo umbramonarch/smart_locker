@@ -197,6 +197,24 @@ def test_health_failure_rolls_back_code_and_db(sandbox):
 
     assert r.returncode == 1
     _assert_rolled_back(sandbox, env_before)
+
+
+def test_rollback_restores_backup_from_pre_keyboard_install(sandbox):
+    # An appliance installed before the on-screen keyboard shipped has no
+    # frontend/keyboard.js — its backup snapshot legitimately fails the
+    # strict payload check, so the restore uses the looser code-tree check.
+    # Otherwise a failed update would leave the new code in place.
+    env_before = sandbox.env_file.read_bytes()
+    _write_mirror_runtime_files(sandbox)
+    sandbox.path("smart_locker/frontend/keyboard.js").unlink()
+    sandbox.write_payload("1.1.0", boot_fail=True)
+
+    r = sandbox.run_update()
+
+    assert r.returncode == 1
+    _assert_rolled_back(sandbox, env_before)
+    # The restore mirrored the old install exactly — keyboard.js stays absent.
+    assert not sandbox.path("smart_locker/frontend/keyboard.js").exists()
     # The restore rsync --delete (BACKUP_SKIP) keeps the mirror files too.
     _assert_mirror_files_intact(sandbox)
     # stop -> swap -> start new (never healthy) -> rollback stop -> start old
@@ -370,6 +388,20 @@ def test_bad_or_older_payload_never_stops_the_service(sandbox):
     r = sandbox.run_update()
     assert r.returncode == 1
     assert sandbox.status_json()["state"] == "failed"
+    assert sandbox.systemctl_calls() == []
+    assert sandbox.service_state() == "running"
+    assert sandbox.version() == "1.0.0"
+
+
+def test_payload_missing_frontend_file_is_refused(sandbox):
+    # A tree that has app.py/requirements.txt/update.sh but lost the kiosk
+    # frontend (hand-assembled or partial copy) must not rsync in and
+    # --delete the installed UI — it is not a repo tree.
+    sandbox.write_payload("1.1.0")
+    (sandbox.updates_dir / "smart_locker/frontend/keyboard.js").unlink()
+    r = sandbox.run_update()
+    assert r.returncode == 0
+    assert sandbox.status_json()["state"] == "idle"
     assert sandbox.systemctl_calls() == []
     assert sandbox.service_state() == "running"
     assert sandbox.version() == "1.0.0"
