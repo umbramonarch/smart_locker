@@ -610,17 +610,21 @@ def _running_fake_reader():
 
 
 @router.get("/api/dev/status")
-def dev_status():
+def dev_status(_: None = Depends(require_loopback)):
     """Report whether the no-hardware simulation harness is active.
 
     Always present, but only reports True when the fake reader is the running
     reader. The kiosk UI calls this to decide whether to show the simulated-tap
-    control; production always reports inactive.
+    control; production always reports inactive. Kiosk-local only — a LAN
+    host must not learn whether the harness is on or see its preset UIDs.
 
     Returns:
         dict: ``fake_reader`` (bool), ``default_uid_set`` (bool), and
             ``presets`` — the fixed card/sticker UIDs behind the dev-panel
             keys when the harness is active, else None.
+
+    Raises:
+        HTTPException: 403 if the client is not loopback.
     """
     import os
 
@@ -669,7 +673,9 @@ def dev_tap(request: Request, body: TapRequest):
             status_code=403,
             detail="Kiosk-local access required.",
         )
-    uid = (body.uid or os.getenv("SMART_LOCKER_FAKE_DEFAULT_UID") or "").strip()
+    uid = "".join(
+        (body.uid or os.getenv("SMART_LOCKER_FAKE_DEFAULT_UID") or "").split()
+    )
     if not uid:
         raise HTTPException(
             status_code=400,
@@ -1732,8 +1738,9 @@ def register_locker_device(
 
     Raises:
         HTTPException: 503 if not ready, 403 if not admin,
-            404 if PM unknown, 409 if PM already registered or the row is not
-            marked for the locker.
+            404 if PM unknown, 409 if PM already registered, the row is not
+            marked for the locker, or a stale UNIQUE slot index rejects the
+            write.
     """
     if ctx_module.context is None:
         raise HTTPException(status_code=503, detail="System not ready.")
@@ -1755,14 +1762,24 @@ def register_locker_device(
 
     try:
         device = create_from_catalog(db, body.pm_number, body.locker_slot)
+        db.flush()
     except UnknownPm as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
     except (AlreadyRegistered, NotRegisterable) as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
     except InvalidSlot as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
+    except IntegrityError as e:
+        # A UNIQUE index on locker_slot that survived migration (restored
+        # backup, code swap outside update.sh) fails the flush — report a
+        # conflict and the fix, not a bare 500.
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Slot could not be saved — the database may need: "
+            "python -m scripts.migrate_db",
+        ) from e
 
-    db.flush()
     # Arm before committing: a bind conflict rolls the slot assignment back
     # so a 409 never leaves the registration half-applied.
     bind = PendingTagBind(device_id=device.id)
@@ -1821,7 +1838,7 @@ def set_device_slot(
 
     Raises:
         HTTPException: 403 if not admin, 404 if missing, 409 if the row is
-            not a locker unit.
+            not a locker unit or a stale UNIQUE slot index rejects the write.
     """
     if user_session.user.role != UserRole.ADMIN:
         raise HTTPException(status_code=403, detail="Admin access required.")
@@ -1844,6 +1861,15 @@ def set_device_slot(
         set_locker_slot(db, device, body.locker_slot)
     except InvalidSlot as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
+    except IntegrityError as e:
+        # Same stale-schema case as register: a surviving UNIQUE index on
+        # locker_slot fails the flush — conflict plus the fix, not a 500.
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Slot could not be saved — the database may need: "
+            "python -m scripts.migrate_db",
+        ) from e
 
     # The committed slot change is a catalog change: the after-commit
     # listener turns this flag into mark_dirty + schedule_flush.

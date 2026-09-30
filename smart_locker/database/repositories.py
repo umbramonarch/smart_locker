@@ -486,7 +486,11 @@ class DeviceRepository:
         Returns:
             List of matching Device objects (may be empty).
         """
-        stmt = select(Device).where(func.lower(Device.model) == model.strip().lower())
+        stmt = (
+            select(Device)
+            .where(func.lower(Device.model) == model.strip().lower())
+            .order_by(Device.id)
+        )
         return list(session.execute(stmt).scalars().all())
 
     @staticmethod
