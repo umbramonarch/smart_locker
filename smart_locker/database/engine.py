@@ -14,7 +14,7 @@ import logging
 from contextlib import contextmanager
 from typing import Generator
 
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -90,9 +90,82 @@ def get_session(url: str | None = None) -> Generator[Session, None, None]:
         session.close()
 
 
+def _drop_legacy_unique_slot_indexes(engine) -> None:
+    """Drop pre-shared-slots UNIQUE indexes on devices.locker_slot.
+
+    Locker slots are shared labels, but a database that never ran
+    ``scripts/migrate_db`` (a git pull, a restored backup, a code swap
+    outside update.sh) still carries the UNIQUE variant — every slot
+    write then fails with IntegrityError. Droppable indexes (origin
+    'c', created by CREATE INDEX) are removed and the model's plain
+    index recreated (create_all does not add indexes to a table that
+    already exists). An in-table UNIQUE constraint (origin 'u' or 'pk')
+    cannot be dropped — that database needs a manual table rebuild or
+    ``python -m scripts.migrate_db``, so it is only logged. No-op when
+    the devices table does not exist yet.
+    """
+    with engine.connect() as conn:
+        table = conn.execute(
+            text(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='table' AND name='devices'"
+            )
+        ).fetchone()
+        if table is None:
+            return
+        cols_present = {
+            r[1] for r in conn.execute(text("PRAGMA table_info(devices)"))
+        }
+        if "locker_slot" not in cols_present:
+            # A devices table this old predates the column entirely —
+            # scripts/migrate_db adds the column first, then fixes indexes.
+            return
+        rows = conn.execute(
+            text(
+                'SELECT name, "unique", origin '
+                "FROM pragma_index_list('devices')"
+            )
+        ).fetchall()
+        for name, is_unique, origin in rows:
+            if not is_unique:
+                continue
+            cols = [
+                r[0]
+                for r in conn.execute(
+                    text("SELECT name FROM pragma_index_info(:name)"),
+                    {"name": name},
+                )
+            ]
+            if cols != ["locker_slot"]:
+                continue
+            if origin != "c" or '"' in name:
+                logger.error(
+                    "UNIQUE constraint on devices.locker_slot (%s) cannot be "
+                    "dropped — rebuild the devices table or run: "
+                    "python -m scripts.migrate_db",
+                    name,
+                )
+                continue
+            conn.execute(text(f'DROP INDEX "{name}"'))
+            logger.warning(
+                "dropped legacy UNIQUE index %s on devices.locker_slot "
+                "— slots are shared",
+                name,
+            )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_devices_locker_slot "
+                "ON devices (locker_slot)"
+            )
+        )
+        conn.commit()
+
+
 def init_db(url: str | None = None) -> None:
     """Create all tables."""
     engine = get_engine(url)
+    if engine.dialect.name == "sqlite":
+        _drop_legacy_unique_slot_indexes(engine)
     Base.metadata.create_all(engine)
     logger.info("Database tables created.")
 

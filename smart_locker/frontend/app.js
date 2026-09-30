@@ -2803,18 +2803,20 @@ let slotChangeDevice = null;
 let selectedChangeSlot = null;
 
 /**
- * Occupied locker slot numbers, optionally ignoring one device (the one being
- * moved). Slots are shared labels — the map marks occupancy for orientation,
- * never to forbid a pick.
+ * Occupied locker slot numbers and the names of the devices holding each,
+ * optionally ignoring one device (the one being moved). Slots are shared
+ * labels — the map marks occupancy for orientation, never to forbid a pick.
  * @param {number|null} [exceptId]
- * @returns {Set<number>}
+ * @returns {Map<number, string[]>}
  */
 function occupiedSlots(exceptId) {
-  const used = new Set();
+  const used = new Map();
   bindDevices.forEach(d => {
     if (d.locker_slot == null) return;
     if (exceptId != null && d.id === exceptId) return;
-    used.add(d.locker_slot);
+    const names = used.get(d.locker_slot);
+    if (names) names.push(d.name);
+    else used.set(d.locker_slot, [d.name]);
   });
   return used;
 }
@@ -2823,7 +2825,7 @@ function occupiedSlots(exceptId) {
  * Render a 1..N slot picker. Occupied slots are marked but stay selectable —
  * a slot number may be shared.
  * @param {string} containerId
- * @param {Set<number>} occupied
+ * @param {Map<number, string[]>} occupied - slot -> names of the devices in it
  * @param {number|null} selected
  * @param {function(number): void} onPick
  */
@@ -2832,16 +2834,20 @@ function renderSlotGrid(containerId, occupied, selected, onPick) {
   if (!el) return;
   el.innerHTML = '';
   let maxUsed = 0;
-  occupied.forEach(n => { if (n > maxUsed) maxUsed = n; });
-  const max = Math.min(SLOT_GRID_MAX, Math.max(SLOT_GRID_MIN, maxUsed + 1));
+  occupied.forEach((names, n) => { if (n > maxUsed) maxUsed = n; });
+  const max = Math.min(SLOT_GRID_MAX, Math.max(SLOT_GRID_MIN, maxUsed + 1, selected || 0));
   for (let n = 1; n <= max; n++) {
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'bind-slot-btn';
     btn.textContent = String(n);
-    if (occupied.has(n)) {
+    const occupants = occupied.get(n);
+    if (occupants) {
       btn.classList.add('taken');
-      btn.title = 'In use — slots may be shared.';
+      // Cap long lists at two names plus a count of the rest.
+      const extra = occupants.length - 2;
+      const names = occupants.slice(0, 2).join(', ') + (extra > 0 ? ` +${extra} more` : '');
+      btn.title = `In use by ${names} — tap to share.`;
     }
     if (selected === n) btn.classList.add('selected');
     btn.addEventListener('click', () => { clickSound(); onPick(n); });
@@ -4145,14 +4151,18 @@ if (USE_DEMO) {
       const keyMap = {};
       const cardKeys = ['1', '2', '3'];
       const tagKeys = ['a', 's', 'd'];
-      (presets.card_uids || []).forEach((uid, i) => {
+      const cardUids = Array.isArray(presets.card_uids) ? presets.card_uids : [];
+      const tagUids = Array.isArray(presets.tag_uids) ? presets.tag_uids : [];
+      cardUids.forEach((uid, i) => {
         if (cardKeys[i]) keyMap[cardKeys[i]] = uid;
       });
-      (presets.tag_uids || []).forEach((uid, i) => {
+      tagUids.forEach((uid, i) => {
         if (tagKeys[i]) keyMap[tagKeys[i]] = uid;
       });
 
       async function simulateTap(uid) {
+        // The update overlay owns the UI — SSE handlers ignore taps too.
+        if (S.updating) return;
         try {
           const res = await fetch('/api/dev/tap', {
             method: 'POST',
@@ -4192,6 +4202,8 @@ if (USE_DEMO) {
         // hardware keys, so skip while a text field is being edited.
         const t = e.target;
         if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return;
+        // Key autorepeat and browser shortcuts (Ctrl/Alt/Meta) never fire taps.
+        if (e.repeat || e.ctrlKey || e.altKey || e.metaKey) return;
         if (e.key === 'F2') { e.preventDefault(); simulateTap(); return; }
         const uid = keyMap[e.key.toLowerCase()];
         if (uid) { e.preventDefault(); simulateTap(uid); }

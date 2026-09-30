@@ -99,3 +99,49 @@ def test_migrate_slot_index_idempotent(db_path):
     migrate_db.migrate()
     migrate_db.migrate()
     assert _slot_index_unique(db_path) is False
+
+
+def test_migrate_drops_differently_named_unique_slot_index(db_path):
+    """A UNIQUE index on locker_slot under another name is found by column
+    coverage, not by the canonical index name."""
+    _bootstrap_devices(db_path, unique_slot_index=False)
+    con = sqlite3.connect(db_path)
+    con.execute("DROP INDEX ix_devices_locker_slot")
+    con.execute("CREATE UNIQUE INDEX slot_uniq ON devices (locker_slot)")
+    con.execute("INSERT INTO devices (name, locker_slot) VALUES ('a', 1)")
+    con.commit()
+    con.close()
+
+    migrate_db.migrate()
+
+    assert _slot_index_unique(db_path) is False
+    con = sqlite3.connect(db_path)
+    names = {
+        r[1] for r in con.execute("PRAGMA index_list('devices')").fetchall()
+    }
+    assert "slot_uniq" not in names
+    # The shared-slot write the stale index would have rejected now works.
+    con.execute("INSERT INTO devices (name, locker_slot) VALUES ('b', 1)")
+    con.commit()
+    con.close()
+
+
+def test_migrate_errors_on_in_table_unique_slot(db_path, capsys):
+    """An in-table UNIQUE on locker_slot is an undroppable sqlite_autoindex
+    — migrate must fail loudly instead of leaving shared-slot writes broken."""
+    con = sqlite3.connect(db_path)
+    con.execute(
+        "CREATE TABLE devices ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  name VARCHAR(200) NOT NULL,"
+        "  device_type VARCHAR(100) NOT NULL DEFAULT 'general',"
+        "  serial_number VARCHAR(100),"
+        "  locker_slot INTEGER UNIQUE)"
+    )
+    con.commit()
+    con.close()
+
+    with pytest.raises(SystemExit) as exc:
+        migrate_db.migrate()
+    assert exc.value.code == 1
+    assert "ERROR" in capsys.readouterr().out

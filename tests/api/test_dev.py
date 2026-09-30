@@ -92,6 +92,34 @@ class TestDevEndpoints:
         assert resp.status_code == 403
         assert mock_context.reader.poll_event() is None
 
+    def test_dev_status_lan_403(self, lan_client, mock_context, monkeypatch):
+        """GET /api/dev/status is loopback-only — a LAN host must not learn
+        the harness is on or see its preset UIDs."""
+        from smart_locker.nfc.fake_reader import FakeNFCReader
+
+        monkeypatch.setenv("SMART_LOCKER_FAKE_READER", "1")
+        mock_context.reader = FakeNFCReader()
+        resp = lan_client.get("/api/dev/status")
+        assert resp.status_code == 403
+
+    def test_dev_tap_strips_uid_whitespace(self, client, mock_context, monkeypatch):
+        """A typed UID with interior spaces must HMAC identically to the
+        compact form — the tap normalizes all whitespace out."""
+        from smart_locker.nfc.card_observer import CardEvent, CardEventType
+        from smart_locker.nfc.fake_reader import FakeNFCReader
+
+        monkeypatch.setenv("SMART_LOCKER_FAKE_READER", "1")
+        reader = FakeNFCReader()
+        mock_context.reader = reader
+
+        resp = client.post("/api/dev/tap", json={"uid": "AA BB CC DD"})
+        assert resp.status_code == 200
+
+        event = reader.poll_event()
+        assert isinstance(event, CardEvent)
+        assert event.event_type == CardEventType.INSERTED
+        assert event.uid == "AABBCCDD"
+
     def test_dev_status_exposes_presets_only_when_active(
         self, client, mock_context, monkeypatch
     ):

@@ -138,6 +138,9 @@ def test_good_payload_is_healthy_and_preserves_runtime_files(sandbox):
     (sandbox.updates_dir / "smart_locker_catalog.xlsx").write_text(
         "stale\n", encoding="utf-8"
     )
+    # The sandbox DB carries the pre-shared-slots UNIQUE slot index — the
+    # payload's real migrate_db.py must downgrade it during the update.
+    assert sandbox.slot_index_unique() is True
 
     r = sandbox.run_update()
 
@@ -162,6 +165,9 @@ def test_good_payload_is_healthy_and_preserves_runtime_files(sandbox):
     assert sandbox.env_file.read_bytes() == env_before
     assert sandbox.device_rows() == [OLD_ROW]
     _assert_mirror_files_intact(sandbox)
+    # The migrated index exists but is no longer UNIQUE — shared-slot writes
+    # keep working after the update.
+    assert sandbox.slot_index_unique() is False
     # The health gate saw the NEW version answering.
     assert '"version":"1.1.0"' in sandbox.curl_answers()[-1]
 

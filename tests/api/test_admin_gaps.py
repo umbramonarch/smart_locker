@@ -14,7 +14,7 @@ import json
 import subprocess
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 import smart_locker.api.app_context as ctx_module
 import smart_locker.api.routes as routes_module
@@ -190,6 +190,31 @@ class TestSetDeviceSlotGaps:
         db_session.expire_all()
         assert test_devices[0].locker_slot == occupied
         assert test_devices[1].locker_slot == occupied
+
+    def test_set_slot_stale_unique_slot_index_is_409(
+        self, client, mock_context, admin_user, test_devices, db_session
+    ):
+        """A DB that skipped migrate_db keeps UNIQUE locker_slot — the
+        shared-slot write is 409 pointing at the migration, not a 500."""
+        mock_context.session_mgr.start_session(admin_user)
+        db_session.commit()
+        db_session.execute(text("DROP INDEX ix_devices_locker_slot"))
+        db_session.execute(
+            text(
+                "CREATE UNIQUE INDEX ix_devices_locker_slot "
+                "ON devices (locker_slot)"
+            )
+        )
+        db_session.commit()
+
+        resp = client.post(
+            f"/api/admin/devices/{test_devices[0].id}/slot",
+            json={"locker_slot": test_devices[1].locker_slot},
+        )
+        assert resp.status_code == 409
+        assert "migrate" in resp.json()["detail"].lower()
+        db_session.expire_all()
+        assert test_devices[0].locker_slot == 1
 
 
 class TestRegisterGatingGaps:

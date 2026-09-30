@@ -383,7 +383,10 @@ is_repo_tree() {
     && [ -f "$d/smart_locker/frontend/app.js" ] \
     && [ -f "$d/smart_locker/frontend/style.css" ] \
     && [ -f "$d/smart_locker/frontend/shared.js" ] \
-    && [ -f "$d/smart_locker/frontend/keyboard.js" ]
+    && [ -f "$d/smart_locker/frontend/keyboard.js" ] \
+    && [ -f "$d/smart_locker/frontend/dashboard.html" ] \
+    && [ -f "$d/smart_locker/frontend/dashboard.js" ] \
+    && [ -f "$d/smart_locker/frontend/dashboard.css" ]
 }
 
 # A backup snapshot only has to look like a code tree — snapshots of older

@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import text
 
 from smart_locker.api.app_context import PendingRegistration, PendingTagBind
 from smart_locker.api.routes import router
@@ -327,6 +328,37 @@ class TestRegisterDeviceApi:
         assert resp.status_code == 200
         db_session.expire_all()
         assert device.locker_slot == test_devices[0].locker_slot
+
+    def test_register_stale_unique_slot_index_is_409(
+        self, client, mock_context, admin_user, test_devices, db_session
+    ):
+        """A DB that skipped migrate_db still carries UNIQUE locker_slot —
+        the shared-slot write must surface 409 pointing at the migration,
+        not a bare 500, and must not arm the sticker bind."""
+        db_session.execute(text("DROP INDEX ix_devices_locker_slot"))
+        db_session.execute(
+            text(
+                "CREATE UNIQUE INDEX ix_devices_locker_slot "
+                "ON devices (locker_slot)"
+            )
+        )
+        device = DeviceRepository.create(
+            db_session,
+            name="Scope",
+            device_type="Tool",
+            pm_number="PM-NEW",
+        )
+        device.location = "locker"  # registerable rows carry the place word
+        db_session.commit()
+        mock_context.session_mgr.start_session(admin_user)
+
+        resp = client.post(
+            "/api/admin/devices/register",
+            json={"pm_number": "PM-NEW", "locker_slot": test_devices[0].locker_slot},
+        )
+        assert resp.status_code == 409
+        assert "migrate" in resp.json()["detail"].lower()
+        assert mock_context.pending_tag_bind is None
 
     def test_set_slot_accepts_admin(
         self, client, mock_context, admin_user, test_devices, db_session

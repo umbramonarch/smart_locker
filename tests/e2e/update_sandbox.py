@@ -363,6 +363,9 @@ class UpdateSandbox:
                 "smart_locker/frontend/style.css": "css\n",
                 "smart_locker/frontend/shared.js": "js\n",
                 "smart_locker/frontend/keyboard.js": "js\n",
+                "smart_locker/frontend/dashboard.html": "html\n",
+                "smart_locker/frontend/dashboard.js": "js\n",
+                "smart_locker/frontend/dashboard.css": "css\n",
                 # A committed UI asset and a runtime device photo — a rollback
                 # must keep the photo while removing payload-only assets.
                 "smart_locker/frontend/images/hero_bg.jpg": "bg\n",
@@ -494,6 +497,9 @@ class UpdateSandbox:
             "smart_locker/frontend/style.css": "css\n",
             "smart_locker/frontend/shared.js": "js\n",
             "smart_locker/frontend/keyboard.js": "js\n",
+            "smart_locker/frontend/dashboard.html": "html\n",
+            "smart_locker/frontend/dashboard.js": "js\n",
+            "smart_locker/frontend/dashboard.css": "css\n",
             # Committed UI asset added by the release — a rollback must
             # remove it while leaving runtime photos untouched.
             "smart_locker/frontend/images/new_ui.png": "png\n",
@@ -643,3 +649,16 @@ class UpdateSandbox:
         cols = [r[1] for r in con.execute("PRAGMA table_info(devices)")]
         con.close()
         return cols
+
+    def slot_index_unique(self) -> bool | None:
+        """The ix_devices_locker_slot index's UNIQUE flag on the appliance
+        DB — None when the index is absent. create_db plants the UNIQUE
+        variant, so post-update falsy proves the payload's real
+        migrate_db.py downgraded it (shared slots survive a code swap)."""
+        con = sqlite3.connect(self.db)
+        row = con.execute(
+            'SELECT "unique" FROM pragma_index_list(\'devices\') '
+            "WHERE name='ix_devices_locker_slot'"
+        ).fetchone()
+        con.close()
+        return None if row is None else bool(row[0])

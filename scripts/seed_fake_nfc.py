@@ -11,10 +11,12 @@ Notes: Usage:
          SMART_LOCKER_FAKE_READER=1 python -m scripts.seed_fake_nfc
          SMART_LOCKER_FAKE_READER=1 python -m scripts.seed_fake_nfc \\
              --pm PM-101 --pm PM-102 --pm PM-103
-       Without --pm, tags bind to the first untagged locker units in slot
-       order. Preset UIDs live in smart_locker/nfc/fake_reader.py and the
-       dev-status feed — change all three together. Raw UIDs are masked in
-       output and never logged.
+       Without --pm, the still-unbound preset tags bind to the first
+       untagged locker units in slot order; a unit already carrying a
+       different sticker is never overwritten. Preset UIDs live in
+       smart_locker/nfc/fake_reader.py and the dev-status feed — change
+       all three together. Raw UIDs are masked in output and never
+       logged.
 """
 
 import argparse
@@ -46,11 +48,16 @@ PRESET_PEOPLE = [
 def _enroll_cards(session, user_svc) -> tuple[int, list[str]]:
     """Enroll each preset card UID as a user; skip ones already present.
 
+    A digest miss on a name that already exists means a stale row left by
+    an old HMAC key — it can never match a card. The new row is still
+    enrolled (the old digest is dead) but the collision is noted.
+
     Returns:
         Tuple of (newly enrolled count, error strings).
     """
     enrolled = 0
     errors: list[str] = []
+    existing_names = {u.display_name for u in UserRepository.list_all(session)}
     for (name, role), uid in zip(PRESET_PEOPLE, FAKE_CARD_UIDS):
         uid_hmac = compute_uid_hmac(uid, key_manager.hmac_key)
         if UserRepository.find_by_uid_hmac(session, uid_hmac) is not None:
@@ -63,14 +70,21 @@ def _enroll_cards(session, user_svc) -> tuple[int, list[str]]:
             continue
         enrolled += 1
         print(f"  OK    {name} ({role}) - card {mask_uid(uid)}")
+        if name in existing_names:
+            print(
+                f"  NOTE  {name}: a stale row with this name exists "
+                "(old HMAC key?) — it will never match a card"
+            )
     return enrolled, errors
 
 
 def _bind_tags(session, pms: list[str]) -> tuple[int, list[str]]:
     """Bind each preset tag UID to a locker unit.
 
-    With ``--pm`` each UID binds to that PM in order; without it, UIDs bind
-    to the first untagged locker units in slot order.
+    With ``--pm`` each UID binds to that PM in order; without it, the
+    preset UIDs not bound anywhere bind to the first untagged locker
+    units in slot order. A unit already carrying a different sticker is
+    never clobbered — that needs an explicit unbind first.
 
     Returns:
         Tuple of (newly bound count, error strings).
@@ -78,6 +92,9 @@ def _bind_tags(session, pms: list[str]) -> tuple[int, list[str]]:
     bound = 0
     errors: list[str] = []
     if pms:
+        # Positional pairing is operator intent: the nth --pm flag takes
+        # the nth preset UID, and bad flags leave no hole.
+        uids = FAKE_TAG_UIDS
         targets = []
         for pm in pms:
             device = DeviceRepository.find_by_pm(session, pm)
@@ -88,7 +105,24 @@ def _bind_tags(session, pms: list[str]) -> tuple[int, list[str]]:
             else:
                 targets.append(device)
     else:
-        targets = [d for d in DeviceRepository.list_by_slot(session) if d.tag_hmac is None]
+        # A rerun must not re-pair a live binding onto a newly registered
+        # unit — only preset UIDs with no current owner may take a target.
+        uids = []
+        for uid in FAKE_TAG_UIDS:
+            owner = DeviceRepository.find_by_tag_hmac(
+                session, compute_uid_hmac(uid, key_manager.hmac_key)
+            )
+            if owner is not None:
+                print(
+                    f"  SKIP  tag {mask_uid(uid)} already bound to "
+                    f"{owner.name} ({owner.pm_number})"
+                )
+            else:
+                uids.append(uid)
+        targets = [
+            d for d in DeviceRepository.list_by_slot(session)
+            if d.tag_hmac is None
+        ]
         if not targets:
             # Not a failure — the catalog may simply be unregistered yet;
             # the user enrollment above still stands on its own.
@@ -96,10 +130,23 @@ def _bind_tags(session, pms: list[str]) -> tuple[int, list[str]]:
                 "  NOTE  no untagged locker units - register devices first "
                 "(or pass --pm to target specific rows)."
             )
-    for uid, device in zip(FAKE_TAG_UIDS, targets):
+        unbound = len(uids) - len(targets)
+        if unbound > 0:
+            print(
+                f"  NOTE  {unbound} preset sticker(s) stay unbound - "
+                "their dev keys inject an UNKNOWN tag until more locker "
+                "units register (or pass --pm)."
+            )
+    for uid, device in zip(uids, targets):
         tag_hmac = compute_uid_hmac(uid, key_manager.hmac_key)
         if device.tag_hmac == tag_hmac:
             print(f"  SKIP  {device.pm_number} (tag {mask_uid(uid)} already bound)")
+            continue
+        if device.tag_hmac is not None:
+            errors.append(
+                f"{device.pm_number} already has a different tag bound — "
+                "unbind it first"
+            )
             continue
         try:
             bind_uid_to_device(session, device, uid, key_manager.hmac_key)
@@ -141,7 +188,13 @@ def main() -> None:
         raise SystemExit(1)
 
     init_db()
-    user_svc = UserService(enc_key=key_manager.enc_key, hmac_key=key_manager.hmac_key)
+    try:
+        user_svc = UserService(
+            enc_key=key_manager.enc_key, hmac_key=key_manager.hmac_key
+        )
+    except (EnvironmentError, ValueError) as e:
+        print(f"ERROR: {e}")
+        raise SystemExit(1)
 
     print("Seeding fake-reader presets...")
     with get_session() as session:

@@ -2248,8 +2248,13 @@ body::after {
   color: var(--accent);
 }
 .bind-slot-btn.taken {
-  opacity: 0.55;
   border-style: dashed;
+  border-color: var(--warning);
+}
+.bind-slot-btn.taken.selected {
+  border-color: var(--accent);
+  background: var(--accent-dim);
+  color: var(--accent);
 }
 .bind-add-actions {
   display: flex;

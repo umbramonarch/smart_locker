@@ -83,6 +83,11 @@ def migrate() -> None:
 
     Returns:
         None. Progress is printed to stdout.
+
+    Raises:
+        SystemExit: 1 when locker_slot carries an in-table UNIQUE
+            constraint (undroppable sqlite_autoindex) — the table must be
+            rebuilt manually, so the update must not report success.
     """
     print(f"Migrating database: {DB_PATH}")
     con = sqlite3.connect(DB_PATH)
@@ -118,16 +123,37 @@ def migrate() -> None:
         )
         print("  CREATE UNIQUE INDEX ix_devices_tag_hmac")
 
-    # Locker slots are shared labels — a pre-shared-slots database carries the
-    # UNIQUE version, which is dropped and recreated as a plain index.
+    # Locker slots are shared labels — a pre-shared-slots database carries a
+    # UNIQUE index on locker_slot, which is dropped and recreated as a plain
+    # index. The stale index may carry any name (hand-created variants), so
+    # enumerate every index on the table. An in-table UNIQUE constraint is an
+    # undroppable sqlite_autoindex — the table must be rebuilt by hand, and
+    # leaving it in place would keep every shared-slot write failing.
     cur.execute(
-        "SELECT \"unique\" FROM pragma_index_list('devices') "
-        "WHERE name='ix_devices_locker_slot'"
+        'SELECT name, "unique", origin FROM pragma_index_list(\'devices\')'
     )
-    row = cur.fetchone()
-    if row and row[0]:
-        cur.execute("DROP INDEX ix_devices_locker_slot")
-        print("  DROP  ix_devices_locker_slot (was UNIQUE - slots are shared)")
+    slot_uniques = []
+    for idx_name, is_unique, origin in cur.fetchall():
+        if not is_unique:
+            continue
+        cur.execute("SELECT name FROM pragma_index_info(?)", (idx_name,))
+        if [r[0] for r in cur.fetchall()] == ["locker_slot"]:
+            slot_uniques.append((idx_name, origin))
+    blocked = False
+    for idx_name, origin in slot_uniques:
+        if origin == "c":
+            cur.execute(f'DROP INDEX "{idx_name.replace(chr(34), chr(34) * 2)}"')
+            print(f"  DROP  {idx_name} (was UNIQUE - slots are shared)")
+        else:
+            print(
+                f"  ERROR  {idx_name} is an in-table UNIQUE on "
+                "devices.locker_slot - rebuild the devices table manually; "
+                "slots are shared"
+            )
+            blocked = True
+    if blocked:
+        con.close()
+        sys.exit(1)
     if _index_exists(cur, "ix_devices_locker_slot"):
         print("  SKIP  ix_devices_locker_slot (already exists)")
     else:
