@@ -9,9 +9,12 @@ Notes: The secret cannot go in .env: on the installed appliance .env is
        replace it — and must not, since update.sh parses .env as root.
        dashboard.secret is created and owned by the service account, survives
        rsync --delete via update.sh PRESERVE, and is re-owned by
-       apply_runtime_permissions after every update. The write also updates
-       os.environ so the running process accepts the password immediately.
-       The secret value is never logged.
+       apply_runtime_permissions after every update. The write deliberately
+       does not touch os.environ: dashboard_admin_secret() re-reads the file
+       on every call, so the password applies without a restart, and a
+       Setup-written file secret must not masquerade as an operator-chosen
+       env secret (the Setup arm gate treats them differently). The secret
+       value is never logged.
 """
 
 import logging
@@ -19,10 +22,7 @@ import os
 
 from sqlalchemy.orm import Session
 
-from config.settings import (
-    DASHBOARD_ADMIN_SECRET_ENV_VAR,
-    dashboard_secret_path,
-)
+from config.settings import dashboard_secret_path
 from smart_locker.database.repositories import UserRepository
 
 logger = logging.getLogger(__name__)
@@ -38,13 +38,16 @@ def setup_needed(db_session: Session) -> bool:
 
 
 def write_dashboard_secret(secret: str) -> None:
-    """Persist the dashboard admin password and apply it to this process.
+    """Persist the dashboard admin password for this process.
 
     Atomically writes ``secret`` to ``dashboard_secret_path()`` (temp file +
     rename — the service owns the target, so this works inside the sticky
-    root-owned app directory), applies mode 640, and sets ``os.environ`` so
-    ``dashboard_admin_secret()`` returns it without a restart. Callers must
-    check ``dashboard_admin_secret()`` first — this function always writes.
+    root-owned app directory) and applies mode 640.
+    ``dashboard_admin_secret()`` re-reads the file on every call, so the new
+    password takes effect without a restart — no ``os.environ`` poke, which
+    would make a Setup-written secret indistinguishable from an
+    operator-configured env secret. Callers must check
+    ``dashboard_admin_secret()`` first — this function always writes.
 
     Args:
         secret: The password to store. Must not contain CR/LF.
@@ -69,5 +72,4 @@ def write_dashboard_secret(secret: str) -> None:
         # Non-POSIX host (dev box) has no real mode bits — harmless.
         logger.debug("Could not chmod %s to 640.", path)
 
-    os.environ[DASHBOARD_ADMIN_SECRET_ENV_VAR] = secret
     logger.info("Dashboard admin secret written to %s.", path)

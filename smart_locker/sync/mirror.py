@@ -2,7 +2,7 @@
 File: mirror.py
 Description: The hidden catalog mirror. SQLite is the catalog; the .xlsx is a
              Pi-written copy of it. A database change marks the mirror dirty
-             and the next tick regenerates the active sheet. A locked or
+             and the next tick regenerates the catalog sheet. A locked or
              missing file defers the write; a file changed by hand is listed
              on the dashboard for an admin to apply or keep — never merged
              silently. The first sight of a populated sheet adopts it as the
@@ -104,6 +104,33 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
 
+_seq_lock = threading.Lock()
+_seq_high_water = 0
+
+
+def _note_seq(value) -> None:
+    """Raise the local dirty-generation high-water mark past a persisted seq."""
+    global _seq_high_water
+    if isinstance(value, bool) or not isinstance(value, int):
+        return
+    with _seq_lock:
+        _seq_high_water = max(_seq_high_water, value)
+
+
+def _alloc_dirty_seq() -> int:
+    """Allocate a dirty generation above every one seen this run.
+
+    Dirty events get process-unique generations, so a ``mark_dirty`` that
+    races a flush lands strictly above that flush's ``flushed_seq`` in the
+    ``_save_state`` merge — it can never collide with a generation the
+    tick allocated but had not persisted yet.
+    """
+    global _seq_high_water
+    with _seq_lock:
+        _seq_high_water += 1
+        return _seq_high_water
+
+
 def _valid_state_value(key: str, value) -> bool:
     """Whether a persisted state value has the shape its key expects.
 
@@ -113,6 +140,8 @@ def _valid_state_value(key: str, value) -> bool:
     """
     if key in ("seeded", "pending_writes", "external_pending"):
         return isinstance(value, bool)
+    if key in ("dirty_seq", "flushed_seq"):
+        return isinstance(value, int) and not isinstance(value, bool)
     if key == "last_write_rows":
         return isinstance(value, list)
     if key in ("last_seen_mtime", "last_seen_size"):
@@ -133,6 +162,8 @@ def _load_state() -> dict:
     state = {
         "seeded": False,
         "pending_writes": False,
+        "dirty_seq": 0,
+        "flushed_seq": 0,
         "external_pending": False,
         "external_decided_at": None,
         "last_write_at": None,
@@ -149,6 +180,10 @@ def _load_state() -> dict:
         for key in state:
             if key in data and _valid_state_value(key, data[key]):
                 state[key] = data[key]
+        # Generations read from disk raise the allocator's floor so a seq
+        # persisted before a restart is never handed out again.
+        _note_seq(state["dirty_seq"])
+        _note_seq(state["flushed_seq"])
     return state
 
 
@@ -156,8 +191,12 @@ def _save_state(state: dict) -> None:
     """Write the mirror state atomically. Never raises.
 
     Monotonic fields are merged with what is on disk so a writer whose
-    snapshot predates a concurrent save cannot regress them:
-    ``pending_writes`` and ``seeded`` OR-merge (True is sticky),
+    snapshot predates a concurrent save cannot regress them: ``seeded``
+    OR-merges (True is sticky), the ``dirty_seq``/``flushed_seq``
+    generations take the max, and a disk ``pending_writes`` survives only
+    while its dirty generation is newer than the merged ``flushed_seq`` —
+    a dirty event that raced the flush is kept, while the flag the flush
+    itself cleared stays cleared instead of resurrecting on every tick.
     ``external_pending`` follows the newer ``external_decided_at`` (an
     admin decision saved mid-tick outranks the tick's stale flag), and the
     write snapshot (``last_write_*``, ``last_seen_mtime``, ``last_error``)
@@ -174,11 +213,33 @@ def _save_state(state: dict) -> None:
             except Exception:
                 disk = {}
             if isinstance(disk, dict):
+                for key in ("dirty_seq", "flushed_seq"):
+                    disk_seq = disk.get(key)
+                    if not _valid_state_value(key, disk_seq):
+                        disk_seq = 0
+                    state_seq = state.get(key)
+                    if not _valid_state_value(key, state_seq):
+                        state_seq = 0
+                    state[key] = max(disk_seq, state_seq)
+                # A racing save's generations raise the allocator floor so
+                # the next dirty event still lands above them.
+                _note_seq(state["dirty_seq"])
+                _note_seq(state["flushed_seq"])
                 # Strict ``is True``: a hand-edited truthy value must not
                 # fake the sticky flags (a forged seeded=True would skip
-                # adoption entirely).
+                # adoption entirely). The pending flag is sticky only while
+                # it names a dirty generation the flush did not cover — a
+                # seq-less (pre-upgrade) flag is honored once, after which
+                # the generations this save writes let the merge clear it.
                 if disk.get("pending_writes") is True:
-                    state["pending_writes"] = True
+                    disk_dirty = disk.get("dirty_seq")
+                    if not _valid_state_value("dirty_seq", disk_dirty):
+                        disk_dirty = None
+                    if (
+                        disk_dirty is None
+                        or disk_dirty > state["flushed_seq"]
+                    ):
+                        state["pending_writes"] = True
                 if disk.get("seeded") is True:
                     state["seeded"] = True
                 disk_decided = disk.get("external_decided_at")
@@ -373,10 +434,24 @@ def mirror_status() -> dict:
     }
 
 
+def _flag_dirty(state: dict) -> None:
+    """Record a new dirty event on the state.
+
+    ``pending_writes`` is the flag the tick flushes on; ``dirty_seq`` is
+    the generation ``_save_state`` compares with ``flushed_seq`` so a
+    dirty event that raced a flush is not mistaken for the stale flag a
+    pre-flush save left on disk.
+    """
+    state["pending_writes"] = True
+    state["dirty_seq"] = max(
+        state.get("dirty_seq") or 0, _alloc_dirty_seq()
+    )
+
+
 def mark_dirty() -> None:
     """Flag that the database catalog changed and the mirror owes a write."""
     state = _load_state()
-    state["pending_writes"] = True
+    _flag_dirty(state)
     _save_state(state)
 
 
@@ -724,7 +799,7 @@ def apply_external(engine) -> dict:
 
     state["external_pending"] = False
     state["external_decided_at"] = _now_iso()
-    state["pending_writes"] = True
+    _flag_dirty(state)
     _save_state(state)
     schedule_flush()
     return {"applied": applied, "skipped": skipped}
@@ -808,7 +883,7 @@ def dismiss_external() -> None:
     state = _load_state()
     state["external_pending"] = False
     state["external_decided_at"] = _now_iso()
-    state["pending_writes"] = True
+    _flag_dirty(state)
     _save_state(state)
     schedule_flush()
 
@@ -910,7 +985,7 @@ def _adopt_or_mark(engine, path: Path, state: dict, result: dict) -> None:
         _stat_path(path)
     except FileNotFoundError:
         # No sheet yet — the pending write below creates the mirror file.
-        state["pending_writes"] = True
+        _flag_dirty(state)
         result["file_missing"] = True
         return
     except OSError as e:
@@ -925,7 +1000,7 @@ def _adopt_or_mark(engine, path: Path, state: dict, result: dict) -> None:
         return
     adopted = _adopt(engine, parsed)
     state["seeded"] = True
-    state["pending_writes"] = True
+    _flag_dirty(state)
     # Baseline for hand-edit detection is the sheet as adopted — not the
     # regenerated rows — so the pending first write is not mistaken for a
     # hand edit.
@@ -1040,7 +1115,7 @@ def _refuse_shadow_create(path: Path, create_only: bool) -> None:
 def _flush(
     engine, path: Path, workbook: WorkbookAdapter, state: dict, result: dict
 ) -> None:
-    """Regenerate the active sheet from the database. Serialized + timeboxed.
+    """Regenerate the catalog sheet from the database. Serialized + timeboxed.
 
     ``expected_mtime`` binds the write to the stat ``_detect`` just took:
     a file that changed since refuses the write as a hand edit.
@@ -1124,6 +1199,9 @@ def _flush(
     # creation and the following tick).
     state["seeded"] = True
     state["pending_writes"] = False
+    # The flush covered every dirty event up to this generation — a disk
+    # pending flag with a higher dirty_seq is a later event and survives.
+    state["flushed_seq"] = state.get("dirty_seq") or 0
     state["external_pending"] = False
     state["external_decided_at"] = _now_iso()
     state["last_write_at"] = _now_iso()

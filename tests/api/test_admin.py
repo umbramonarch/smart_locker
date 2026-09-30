@@ -176,6 +176,37 @@ class TestAdminOverlaySession:
         assert mock_context.admin_overlay_open is False
         assert mock_context.session_mgr.current_session.user.id == admin_user.id
 
+    def test_admin_session_deactivated_user_ends_session(
+        self, client, mock_context, admin_user, db_session
+    ):
+        """A session whose account was deactivated dies on the next overlay
+        POST — the cached role must not bless a dead session."""
+        mock_context.session_mgr.start_session(admin_user)
+        admin_user.is_active = False
+        db_session.commit()
+
+        resp = client.post("/api/admin/session")
+        assert resp.status_code == 401
+        assert not mock_context.session_mgr.has_active_session
+        events = [c.args[0] for c in mock_context.broadcast_sse.call_args_list]
+        assert {
+            "event": "session_ended", "reason": "account_inactive"
+        } in events
+
+    def test_admin_session_demoted_admin_is_403(
+        self, client, mock_context, admin_user, db_session
+    ):
+        """A mid-session demote stops passing the admin overlay gate — the
+        role is re-read, not trusted from the login snapshot."""
+        mock_context.session_mgr.start_session(admin_user)
+        admin_user.role = UserRole.USER
+        db_session.commit()
+
+        resp = client.post("/api/admin/session")
+        assert resp.status_code == 403
+        # The session survives — it is a live user, just no longer admin.
+        assert mock_context.session_mgr.has_active_session
+
     def test_admin_session_refuses_lan(
         self, lan_client, mock_context, admin_user
     ):
@@ -451,6 +482,29 @@ class TestAdminSyncAndUpdateEndpoints:
         mock_context.session_mgr.start_session(test_user)
         resp = client.post("/api/admin/update")
         assert resp.status_code == 403
+
+    def test_trigger_update_deactivated_session_is_401(
+        self, client, mock_context, admin_user, db_session
+    ):
+        """A deactivated account's session does not authorize an update —
+        the loopback-session gate re-reads the user row."""
+        mock_context.session_mgr.start_session(admin_user)
+        admin_user.is_active = False
+        db_session.commit()
+        resp = client.post("/api/admin/update")
+        assert resp.status_code == 401
+        assert not mock_context.session_mgr.has_active_session
+
+    def test_trigger_update_demoted_admin_is_403(
+        self, client, mock_context, admin_user, db_session
+    ):
+        """A mid-session demote loses update authorization on the live role."""
+        mock_context.session_mgr.start_session(admin_user)
+        admin_user.role = UserRole.USER
+        db_session.commit()
+        resp = client.post("/api/admin/update")
+        assert resp.status_code == 403
+        assert mock_context.session_mgr.has_active_session
 
     def test_trigger_update_unavailable_off_pi(self, client, mock_context, admin_user, monkeypatch):
         """When systemd-run isn't present (dev/CI host), the endpoint refuses cleanly

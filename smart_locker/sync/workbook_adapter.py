@@ -71,7 +71,9 @@ class WorkbookAdapter:
         """Read values from a copied workbook so an open share file can be read.
 
         Args:
-            sheet_name: Sheet to read, or None for the active sheet.
+            sheet_name: Sheet to read, or None for the catalog sheet — the
+                same sheet the writer picks, so a workbook left open on a
+                scratch tab (Notes, a pivot, …) still reads its catalog.
 
         Returns:
             WorkbookRows with all cell values or an existing user-facing error.
@@ -92,7 +94,7 @@ class WorkbookAdapter:
                                 )
                             ws = wb[sheet_name]
                         else:
-                            ws = wb.active
+                            ws = _catalog_worksheet(wb)
                         return WorkbookRows(list(ws.iter_rows(values_only=True)))
                     finally:
                         wb.close()

@@ -31,6 +31,10 @@
 #        boot. Extra .whl files in the incoming locker-updates tree are copied
 #        into the Pi wheelhouse when the Pi does not already have that filename.
 #        Missing wheels are not a refuse; pip failure after backup rolls back.
+#        SIGTERM/SIGINT (`systemctl stop smart-locker-update`, poweroff) take
+#        the same guarded rollback path — status "interrupted", exit 128+signo.
+#        log() never fails (a full SD card must not abort error handling), and
+#        backup pruning runs on failure exits too, not only on success.
 #        Set SMART_LOCKER_UPDATE_LIB=1 before sourcing this file from tests.
 #
 set -Eeuo pipefail
@@ -146,7 +150,11 @@ done
 mkdir -p "$BACKUP_DIR" "$APP_DIR/logs"
 
 # --- Logging ----------------------------------------------------------------
-log() { printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" | tee -a "$LOG_FILE"; }
+# tee fails when the SD card is full or the log path is not writable; under
+# pipefail + set -e that fires the ERR trap — fatal inside on_err, where a
+# failing log line would abort the handler before rollback runs. A log-write
+# failure must never abort error handling, so log() can never return nonzero.
+log() { printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" | tee -a "$LOG_FILE" || true; }
 
 _status_python() {
   if [ -x "${PY:-}" ]; then
@@ -210,6 +218,18 @@ with d:
 s.close(); d.close()
 PYEOF
   log "DB snapshot -> $DB_BACKUP"
+}
+
+# --- Backup pruning (keep the newest KEEP_BACKUPS of each kind) -------------
+# Runs on the success path AND on every nonzero exit that took a snapshot —
+# repeated failed updates would otherwise pile up code-*.tar.gz / db-*.sqlite
+# until they fill the SD card (a full card then breaks logging itself).
+# Best-effort everywhere it runs: never masks the real exit code, and the
+# failure paths only call it after rollback has completed.
+prune_backups() {
+  ls -1t "$BACKUP_DIR"/code-*.tar.gz 2>/dev/null | tail -n +"$((KEEP_BACKUPS+1))" | xargs -r rm -f || true
+  ls -1t "$BACKUP_DIR"/db-*.sqlite   2>/dev/null | tail -n +"$((KEEP_BACKUPS+1))" | xargs -r rm -f || true
+  rm -rf "$BACKUP_DIR"/.restore-* 2>/dev/null || true
 }
 
 # --- Ownership/permissions after any rsync into $APP_DIR --------------------
@@ -363,11 +383,49 @@ on_err() {
   log "ERROR on line $line."
   if [ "$BACKED_UP" = "1" ]; then
     rollback
+    # Only after the restore finished: failed runs prune too, or repeated
+    # failures fill the card with snapshots. Best-effort; exit stays 1.
+    prune_backups
   else
     write_status "failed" "Update aborted before any change was applied (line $line)."
   fi
   rm -rf "$STAGING_DIR"
   exit 1
+}
+
+# --- Interrupted by a signal (systemctl stop, poweroff, Ctrl-C) -------------
+# Same guarded path as on_err: without a TERM/INT trap, `systemctl stop
+# smart-locker-update` or a poweroff between the service stop and the restart
+# strands the box on a half-swapped tree with the service down — a crash-loop
+# on the next boot. The handler exits with the conventional 128+signo code.
+on_sig() {
+  local sig="$1" code="$2"
+  # Never re-enter: disarm ERR, and IGNORE further INT/TERM while the restore
+  # runs — a second signal must not cut this rollback short too.
+  trap - ERR
+  trap '' INT TERM
+  # Same subshell guard as on_err — only the top-level shell restores.
+  if [ "${BASH_SUBSHELL:-0}" -gt 0 ]; then
+    exit 1
+  fi
+  # Best-effort from here: nothing below may abort the handler before the
+  # rollback attempt or the exit with the conventional code.
+  set +e
+  log "Caught SIG$sig — update interrupted."
+  if [ "$BACKED_UP" = "1" ]; then
+    write_status "interrupted" "Update interrupted by SIG$sig; rolling back to ${OLD_VERSION:-the previous version}."
+    # If the signal cut off an in-progress rollback, ROLLBACK_RAN would
+    # suppress the retry and strand the box on a half-restored tree. The
+    # restore steps are idempotent (stop, extract, rsync --delete, cp, start),
+    # so clear the done-flag and run the restore to completion.
+    [ "$ROLLBACK_RAN" = "1" ] && ROLLBACK_RAN=0
+    rollback
+    prune_backups
+  else
+    write_status "interrupted" "Update interrupted by SIG$sig before any change was applied."
+  fi
+  rm -rf "$STAGING_DIR"
+  exit "$code"
 }
 
 # --- Incoming tree discovery ---------------------------------------------------
@@ -610,6 +668,11 @@ if [ "${SMART_LOCKER_UPDATE_LIB:-}" = "1" ]; then
 fi
 
 trap 'on_err $LINENO' ERR
+# `systemctl stop smart-locker-update` / poweroff mid-update take the same
+# guarded rollback path as an error — otherwise the box is left stopped on a
+# half-swapped tree and crash-loops on the next boot.
+trap 'on_sig INT 130' INT
+trap 'on_sig TERM 143' TERM
 
 # ============================================================================
 # 1. Preconditions
@@ -767,15 +830,14 @@ if wait_for_health; then
     fi
   fi
   rm -rf "$STAGING_DIR"
-  # Prune old backups, keep the most recent KEEP_BACKUPS of each kind. A prune
-  # hiccup must not fail a run that already wrote "success".
-  ls -1t "$BACKUP_DIR"/code-*.tar.gz 2>/dev/null | tail -n +"$((KEEP_BACKUPS+1))" | xargs -r rm -f || true
-  ls -1t "$BACKUP_DIR"/db-*.sqlite   2>/dev/null | tail -n +"$((KEEP_BACKUPS+1))" | xargs -r rm -f || true
-  rm -rf "$BACKUP_DIR"/.restore-* 2>/dev/null || true
+  # A prune hiccup must not fail a run that already wrote "success".
+  prune_backups
   exit 0
 else
   log "New version did NOT become healthy within ${HEALTH_TIMEOUT}s — rolling back."
   rollback
+  # Only after the restore finished — best-effort, the exit stays 1.
+  prune_backups
   rm -rf "$STAGING_DIR"
   exit 1
 fi

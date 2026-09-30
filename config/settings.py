@@ -241,6 +241,20 @@ def dashboard_secret_path() -> Path:
     return Path(override) if override else BASE_DIR / "dashboard.secret"
 
 
+def dashboard_secret_from_env() -> str:
+    """Operator-configured dashboard admin secret (env or .env), or ``""``.
+
+    ``dashboard_admin_secret()`` also falls back to the Setup-written file;
+    this stays env-only so the first-boot Setup route can tell a deliberate
+    operator secret (``X-Smart-Locker-Admin`` required) apart from a file an
+    earlier incomplete Setup left behind (overwritable while no admin
+    exists). ``write_dashboard_secret`` deliberately does not set the env
+    var — a file secret poked into ``os.environ`` would masquerade as
+    operator-configured and wedge the retry path in the same process.
+    """
+    return (os.getenv(DASHBOARD_ADMIN_SECRET_ENV_VAR) or "").strip()
+
+
 def dashboard_admin_secret() -> str:
     """Shared secret for dashboard admin mutations.
 
@@ -253,7 +267,7 @@ def dashboard_admin_secret() -> str:
     Returns:
         Stripped dashboard admin secret, or ``""``.
     """
-    env = (os.getenv(DASHBOARD_ADMIN_SECRET_ENV_VAR) or "").strip()
+    env = dashboard_secret_from_env()
     if env:
         return env
     try:

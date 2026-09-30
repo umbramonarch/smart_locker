@@ -6,10 +6,14 @@ Project: smart_locker/tests/api
 Notes: Run with: python -m pytest tests/api/test_session.py -v
 """
 import asyncio
+import sys
+import threading
 from unittest.mock import MagicMock
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sqlalchemy.orm import Session
 
 from smart_locker.api.app_context import PendingRegistration, PendingTagBind
 from smart_locker.api.routes import router
@@ -19,6 +23,8 @@ from smart_locker.database.repositories import DeviceRepository, RegistrantRepos
 from smart_locker.security.hashing import compute_uid_hmac
 
 import smart_locker.api.app_context as ctx_module
+
+from tests.api.helpers import dashboard_admin_headers
 
 class TestSessionEndpoints:
     """Tests for session management API — get status, end session, touch."""
@@ -134,4 +140,96 @@ class TestSessionEndpoints:
         """Verify POST /api/session/touch returns 401 when no session exists."""
         resp = client.post("/api/session/touch")
         assert resp.status_code == 401
+
+
+class TestCommitBeforeResponse:
+    """Read-your-writes: a mutation must commit before its response leaves.
+
+    Regression for the yield-dependency teardown ordering on fastapi>=0.106:
+    ``get_db``'s post-yield ``session.commit()`` ran AFTER the response was
+    sent, so a back-to-back request could read the pre-commit snapshot —
+    verified as a return (200) followed by a deactivation refused 409
+    "still holds 1 borrowed device". ``CommitBeforeResponseRoute`` commits
+    the request session (stashed on ``request.state`` by ``get_db``) before
+    the Response is handed back.
+    """
+
+    def test_mutation_session_commits_before_response_sent(
+        self, _db_setup, mock_context, db_session, test_user, test_devices,
+        monkeypatch,
+    ):
+        """No pending work may remain uncommitted once the response is sent.
+
+        The ASGI wrapper flags when the response body goes out; the
+        ``Session.commit`` spy flags any commit that still had an open
+        transaction after that point. Under the old get_db-only commit this
+        fails deterministically — the teardown commit is exactly such a
+        late commit — no timing luck required.
+        """
+        response_sent = threading.Event()
+        late_commits: list[str] = []
+
+        class _SentBoundary:
+            """ASGI wrapper that flags the moment the response body is sent."""
+
+            def __init__(self, app):
+                self.app = app
+
+            async def __call__(self, scope, receive, send):
+                async def wrapped_send(message):
+                    if (
+                        scope["type"] == "http"
+                        and message["type"] == "http.response.body"
+                        and not message.get("more_body")
+                    ):
+                        response_sent.set()
+                    await send(message)
+
+                await self.app(scope, receive, wrapped_send)
+
+        original_commit = Session.commit
+
+        def commit_spy(session):
+            if session.in_transaction() and response_sent.is_set():
+                late_commits.append(sys._getframe(1).f_code.co_name)
+            return original_commit(session)
+
+        monkeypatch.setattr(Session, "commit", commit_spy)
+
+        app = FastAPI()
+        app.include_router(router)
+        sending_client = TestClient(_SentBoundary(app), client=("127.0.0.1", 50000))
+
+        mock_context.session_mgr.start_session(test_user)
+        resp = sending_client.post(f"/api/devices/{test_devices[0].id}/borrow")
+        assert resp.status_code == 200
+        assert resp.json()["success"] is True
+        assert late_commits == []
+
+    def test_return_then_deactivate_succeeds(
+        self, client, lan_client, mock_context, test_user, test_devices,
+        dashboard_secret,
+    ):
+        """The verified race verbatim: return, then immediately deactivate.
+
+        The return's commit must be visible to the very next request — the
+        dashboard People edit must not still count the unit as borrowed.
+        """
+        mock_context.session_mgr.start_session(test_user)
+        device_id = test_devices[0].id
+
+        resp = client.post(f"/api/devices/{device_id}/borrow")
+        assert resp.status_code == 200
+        assert resp.json()["success"] is True
+        resp = client.post(f"/api/devices/{device_id}/return")
+        assert resp.status_code == 200
+        assert resp.json()["success"] is True
+
+        resp = lan_client.patch(
+            f"/api/dashboard/users/{test_user.id}",
+            json={"is_active": False},
+            headers=dashboard_admin_headers(dashboard_secret),
+        )
+        assert resp.status_code == 200
+        assert resp.json()["is_active"] is False
 

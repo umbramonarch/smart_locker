@@ -17,6 +17,7 @@ from smart_locker.api.app_context import PendingRegistration, PendingTagBind
 
 from config.settings import (
     DASHBOARD_ADMIN_SECRET_ENV_VAR,
+    dashboard_admin_secret,
     dashboard_secret_path,
 )
 
@@ -223,8 +224,12 @@ class TestSetupPassword:
         # it is never parsed by update.sh as root the way .env is.
         assert path.read_text(encoding="utf-8").strip() == "s3cret pw"
         assert resp.text.find("s3cret pw") == -1
-        # The running process accepts the password without a restart.
-        assert os.environ[DASHBOARD_ADMIN_SECRET_ENV_VAR] == "s3cret pw"
+        # The running process accepts the password without a restart —
+        # dashboard_admin_secret() re-reads the file, and the write must NOT
+        # poke os.environ: a file secret impersonating an env secret is what
+        # wedged Setup behind a forgotten password.
+        assert dashboard_admin_secret() == "s3cret pw"
+        assert not os.environ.get(DASHBOARD_ADMIN_SECRET_ENV_VAR)
 
         if os.name == "posix":
             assert stat.S_IMODE(path.stat().st_mode) == 0o640
@@ -249,3 +254,50 @@ class TestSetupPassword:
         assert resp.status_code == 500
         assert not dashboard_secret_path().exists()
         assert mock_context.pending_registration is None
+
+    def test_failed_arm_is_retryable_without_header(
+        self, client, mock_context
+    ):
+        """A file secret left by an incomplete Setup does not wedge the
+        retry: while no admin exists the next arm overwrites it — no header
+        needed. Only an env-configured secret is operator-owned."""
+        r = client.post(
+            "/api/setup", json={"name": "First Admin", "password": "pw-A"}
+        )
+        assert r.status_code == 200
+        assert (
+            dashboard_secret_path().read_text(encoding="utf-8").strip()
+            == "pw-A"
+        )
+
+        # The window ends without a tap — this was the wedge: the next POST
+        # used to hit the secret gate and 401 forever.
+        cancel = client.post("/api/register/cancel")
+        assert cancel.status_code == 200
+        assert cancel.json()["cancelled"] is True
+        assert mock_context.pending_registration is None
+
+        r = client.post(
+            "/api/setup", json={"name": "First Admin", "password": "pw-B"}
+        )
+        assert r.status_code == 200
+        assert (
+            dashboard_secret_path().read_text(encoding="utf-8").strip()
+            == "pw-B"
+        )
+        assert dashboard_admin_secret() == "pw-B"
+        pending = mock_context.pending_registration
+        assert pending is not None and pending.role == "admin"
+
+    def test_file_secret_arm_accepts_blank_password(
+        self, client, mock_context
+    ):
+        """A leftover file secret counts as configured — a blank-password
+        retry keeps it instead of demanding a new one."""
+        dashboard_secret_path().write_text("typed-before\n", encoding="utf-8")
+        r = client.post("/api/setup", json={"name": "First Admin"})
+        assert r.status_code == 200
+        assert (
+            dashboard_secret_path().read_text(encoding="utf-8").strip()
+            == "typed-before"
+        )

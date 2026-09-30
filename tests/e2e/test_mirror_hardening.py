@@ -8,7 +8,10 @@ Description: Adversarial-review hardening coverage for the catalog mirror.
              mark_dirty/dismiss_external; a same-mtime size-changing edit is
              still detected; a timed-out write that lands late is not flagged
              as a hand edit; a busy reader fails fast; write_sheet rewrites
-             the PM-column sheet rather than whatever sheet is active; and
+             the PM-column sheet rather than whatever sheet is active, and
+             the read paths pick that same sheet; a flush's own save cannot
+             resurrect pending_writes while a raced mark_dirty stays pending;
+             and
              apply_external skips a diff whose commit raises IntegrityError
              or whose field write flushes into an OperationalError, while a
              unit registered after the baseline write diffs as "added" yet
@@ -483,6 +486,177 @@ def test_write_targets_catalog_sheet_not_active(e2e, tmp_path, monkeypatch):
         assert any(r[pm_col] == "PM-900" for r in rows[1:])
     finally:
         wb.close()
+
+
+def test_reads_target_catalog_sheet_not_active(e2e, tmp_path, monkeypatch):
+    """The read side of the sheet picker: adopt, detect, diffs, apply, and
+    the flush all operate on the sheet carrying the PM column even while a
+    scratch tab is the workbook's active sheet."""
+    _no_scheduler(monkeypatch)
+    path = catalog_workbook(tmp_path, [
+        CATALOG_HEADERS,
+        ["PM-900", "Fluke 87V", "Multimeter", "Fluke", "87V", "SN-9", "Bench"],
+    ])
+    # Leave the workbook "open" on a scratch tab before the mirror sees it.
+    wb = load_workbook(path)
+    notes = wb.create_sheet("Notes")
+    notes.append(["hand notes", "do not touch"])
+    wb.active = wb.sheetnames.index("Notes")
+    wb.save(path)
+    wb.close()
+    _point_mirror_at(monkeypatch, path)
+    h = e2e()
+
+    # Adoption reads the catalog sheet even though Notes is active.
+    result = _tick_now()
+    assert result["error"] is None
+    assert result["seeded"] is True
+    with h.db() as db:
+        adopted = DeviceRepository.find_by_pm(db, "PM-900")
+        assert adopted is not None
+        assert adopted.location == "Bench"
+
+    # The same tick's flush rewrote the catalog sheet canonically; the
+    # scratch tab is untouched and still the active sheet.
+    wb = load_workbook(path)
+    try:
+        assert wb.active.title == "Notes"
+        assert [c.value for c in wb["Notes"][1]] == ["hand notes", "do not touch"]
+        headers = [
+            str(c.value).strip() if c.value else "" for c in wb["Sheet"][1]
+        ]
+        assert headers == MIRROR_HEADERS
+    finally:
+        wb.close()
+
+    # A hand edit on the catalog sheet is detected — the reader does not
+    # settle for the active tab.
+    wb = load_workbook(path)
+    try:
+        ws = wb["Sheet"]
+        ws.cell(row=2, column=MIRROR_HEADERS.index("Location") + 1,
+                value="Moved by hand")
+        wb.save(path)
+    finally:
+        wb.close()
+    result = _tick_now()
+    assert result["external"] is True
+    assert result["error"] is None
+
+    diffs, err = mirror.external_diffs()
+    assert err is None
+    assert any(d["kind"] == "changed" for d in diffs)
+
+    outcome = mirror.apply_external(get_engine())
+    assert outcome["applied"] >= 1
+    with h.db() as db:
+        assert DeviceRepository.find_by_pm(db, "PM-900").location == "Moved by hand"
+
+    # Apply schedules a flush; the next tick converges and clears the gate.
+    _drain_mirror()
+    state = mirror._load_state()
+    assert state["external_pending"] is False
+    assert state["pending_writes"] is False
+    wb = load_workbook(path)
+    try:
+        assert wb.active.title == "Notes"
+        assert [c.value for c in wb["Notes"][1]] == ["hand notes", "do not touch"]
+    finally:
+        wb.close()
+
+
+def test_pending_writes_stays_cleared_after_flush(e2e, tmp_path, monkeypatch):
+    """The tick's own pre-flush save must not resurrect pending_writes:
+    after a successful write the persisted flag stays cleared and later
+    ticks do not rewrite the workbook."""
+    _no_scheduler(monkeypatch)
+    path = tmp_path / "mirror.xlsx"
+    _point_mirror_at(monkeypatch, path)
+    h = e2e()
+    add_device(h, name="Camera", pm_number="PM-100", locker_slot=1)
+
+    result = _tick_now()
+    assert result["flushed"] is True
+    saved = json.loads(mirror._state_path().read_text(encoding="utf-8"))
+    assert saved["pending_writes"] is False
+
+    # Clean state: no pending flag means no rewrite and an "ok" status.
+    result = _tick_now()
+    assert result["write_attempted"] is False
+    assert mirror.mirror_status()["state"] == "ok"
+    assert mirror.mirror_status()["pending_writes"] is False
+
+    # A real dirty event flushes once and still lands on a cleared flag.
+    mirror.mark_dirty()
+    result = _tick_now()
+    assert result["flushed"] is True
+    saved = json.loads(mirror._state_path().read_text(encoding="utf-8"))
+    assert saved["pending_writes"] is False
+    result = _tick_now()
+    assert result["write_attempted"] is False
+    assert (
+        json.loads(mirror._state_path().read_text(encoding="utf-8"))
+        ["pending_writes"] is False
+    )
+
+
+def test_dirty_racing_flush_survives_then_clears(e2e, tmp_path, monkeypatch):
+    """A mark_dirty saved while a flush was in flight is a dirty generation
+    newer than the flush's flushed_seq — the merge keeps it pending and the
+    next tick rewrites, instead of the flag being cleared out from under it."""
+    _no_scheduler(monkeypatch)
+    path = tmp_path / "mirror.xlsx"
+    _point_mirror_at(monkeypatch, path)
+    h = e2e()
+    add_device(h, name="Camera", pm_number="PM-100", locker_slot=1)
+    result = _tick_now()
+    assert result["flushed"] is True
+
+    # Deterministic replay of the race through the merge itself: a tick's
+    # snapshot cleared by its flush saves AFTER a mark_dirty that already
+    # allocated a newer dirty generation onto disk.
+    flushed = mirror._load_state()
+    flushed["pending_writes"] = False
+    flushed["flushed_seq"] = flushed["dirty_seq"]
+    mirror.mark_dirty()               # the racing save: pending, dirty_seq+1
+    mirror._save_state(flushed)       # the tick's own late save must not drop it
+    state = mirror._load_state()
+    assert state["pending_writes"] is True
+    assert state["dirty_seq"] > state["flushed_seq"]
+
+    # The surviving flag still drives a real rewrite, then clears.
+    result = _tick_now()
+    assert result["flushed"] is True
+    saved = json.loads(mirror._state_path().read_text(encoding="utf-8"))
+    assert saved["pending_writes"] is False
+
+
+def test_legacy_pending_state_flushes_then_clears(e2e, tmp_path, monkeypatch):
+    """A pre-upgrade mirror_state.json (pending_writes with no generations)
+    is honored conservatively — the mirror flushes — and once generations
+    exist on disk the flag clears instead of rewriting every tick."""
+    _no_scheduler(monkeypatch)
+    path = tmp_path / "mirror.xlsx"
+    _point_mirror_at(monkeypatch, path)
+    h = e2e()
+    add_device(h, name="Camera", pm_number="PM-100", locker_slot=1)
+    mirror._state_path().write_text(
+        json.dumps({"seeded": True, "pending_writes": True}),
+        encoding="utf-8",
+    )
+
+    result = _tick_now()
+    assert result["flushed"] is True       # the legacy pending was honored
+
+    # The seq-less disk flag survives one merge, so the next tick writes
+    # once more — then the saved generations let the flag stay cleared.
+    result = _tick_now()
+    assert result["flushed"] is True
+    result = _tick_now()
+    assert result["write_attempted"] is False
+    saved = json.loads(mirror._state_path().read_text(encoding="utf-8"))
+    assert saved["pending_writes"] is False
+    assert mirror.mirror_status()["state"] == "ok"
 
 
 def test_external_diffs_missing_file_reports_via_read(tmp_path, monkeypatch):

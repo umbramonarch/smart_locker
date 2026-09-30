@@ -419,6 +419,20 @@ class TestDashboardPeopleApi:
         assert pending.role == "user"
         assert pending.from_dashboard is True
 
+    def test_add_person_admin_role_refused(
+        self, client, mock_context, dashboard_secret
+    ):
+        """The dashboard secret must not mint a card credential — a tapped
+        card is persistent auth, so admin cards enroll at the kiosk only."""
+        resp = client.post(
+            "/api/dashboard/users",
+            json={"name": "Remote Admin", "role": "admin"},
+            headers=dashboard_admin_headers(dashboard_secret),
+        )
+        assert resp.status_code == 422
+        assert "kiosk" in resp.json()["detail"].lower()
+        assert mock_context.pending_registration is None
+
     def test_add_person_refused_during_kiosk_session(
         self, client, mock_context, admin_user, dashboard_secret
     ):
@@ -444,6 +458,19 @@ class TestDashboardPeopleApi:
         assert pending is not None
         assert pending.replace_user_id == test_user.id
         assert pending.from_dashboard is True
+
+    def test_replace_card_on_admin_refused(
+        self, client, mock_context, admin_user, dashboard_secret
+    ):
+        """The dashboard secret must not rebind an admin's card to a new
+        UID — admin card replacement runs at the kiosk admin panel."""
+        resp = client.post(
+            f"/api/dashboard/users/{admin_user.id}/replace-card",
+            headers=dashboard_admin_headers(dashboard_secret),
+        )
+        assert resp.status_code == 422
+        assert "kiosk" in resp.json()["detail"].lower()
+        assert mock_context.pending_registration is None
 
     def test_replace_card_refused_during_kiosk_session(
         self, client, mock_context, admin_user, test_user, dashboard_secret

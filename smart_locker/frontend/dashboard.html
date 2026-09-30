@@ -264,8 +264,9 @@
         <div class="people-add-row">
           <input type="text" class="search-input" id="user-add-name" placeholder="Full name" maxlength="100" autocomplete="off">
           <select class="role-select" id="user-add-role" aria-label="Role">
+            <!-- Admin cards are enrolled at the kiosk admin panel — the
+                 dashboard API refuses role=admin, so do not offer it here. -->
             <option value="user" selected>User</option>
-            <option value="admin">Admin</option>
           </select>
           <button type="button" class="admin-tag-btn admin-tag-bind" id="user-add-btn">Add person</button>
         </div>

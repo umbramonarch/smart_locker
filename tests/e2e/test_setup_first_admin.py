@@ -89,6 +89,40 @@ def test_setup_window_expires_and_tap_is_normal(e2e, monkeypatch):
     assert h.client.get("/api/setup").json()["needed"] is True
 
 
+def test_setup_retry_after_expired_window_writes_new_secret(e2e, monkeypatch):
+    """A failed first arm must not wedge Setup: the dashboard.secret it left
+    is a leftover, not an operator secret — the retry overwrites it without
+    any admin header and the new password is the one that sticks."""
+    import smart_locker.api.app_context as app_context
+    from config.settings import dashboard_secret_path
+
+    h = e2e()
+    r = h.client.post(
+        "/api/setup", json={"name": "First Admin", "password": "pw-A"}
+    )
+    assert r.status_code == 200
+    assert dashboard_secret_path().read_text(encoding="utf-8").strip() == "pw-A"
+
+    # The window expires unused (mistyped password or walked away).
+    pending = h.ctx.pending_registration
+    monkeypatch.setattr(
+        pending, "created_at",
+        pending.created_at - app_context.REGISTRATION_TIMEOUT_SECONDS - 1,
+    )
+
+    # Retry with the corrected password — no X-Smart-Locker-Admin header.
+    r = h.client.post(
+        "/api/setup", json={"name": "First Admin", "password": "pw-B"}
+    )
+    assert r.status_code == 200, r.text
+    assert dashboard_secret_path().read_text(encoding="utf-8").strip() == "pw-B"
+
+    h.tap(SETUP_CARD_UID)
+    payload = h.wait_event("registration_success")
+    assert payload["user"]["role"] == "admin"
+    assert dashboard_secret_path().read_text(encoding="utf-8").strip() == "pw-B"
+
+
 def test_setup_arm_refuses_lan(lan):
     """A LAN caller cannot arm the physical Setup window — the public GET
     stays a status probe, but the POST is loopback-only."""

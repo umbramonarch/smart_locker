@@ -14,6 +14,7 @@ from smart_locker.api.app_context import (
     clear_pending_tag_bind_for_device,
     clear_pending_tag_bind_if,
 )
+from smart_locker.database.models import DeviceStatus
 from smart_locker.database.repositories import DeviceRepository
 
 from tests.api.helpers import dashboard_admin_headers
@@ -57,7 +58,7 @@ class TestSetSlotRegisteredOnly:
         assert resp.status_code == 200
         db_session.expire_all()
         assert test_devices[0].locker_slot == 9
-        # get_db's commit ran the after-commit listener → mark_dirty.
+        # The request session's commit ran the after-commit listener → mark_dirty.
         assert mirror.mirror_status()["pending_writes"] is True
 
 
@@ -102,6 +103,35 @@ class TestKioskBindTagGuards:
         assert resp.status_code == 409
         assert mock_context.pending_registration is not None
         assert mock_context.pending_registration.display_name == "Someone"
+        assert mock_context.pending_tag_bind is None
+
+    def test_bind_tag_borrowed_is_409(
+        self, client, mock_context, admin_user, test_devices, db_session
+    ):
+        """Arming a rebind on a borrowed unit is refused — the sticker
+        physically on the loaned unit is what returns the loan."""
+        test_devices[0].status = DeviceStatus.BORROWED
+        test_devices[0].current_borrower_id = admin_user.id
+        db_session.commit()
+        mock_context.session_mgr.start_session(admin_user)
+        resp = client.post(f"/api/admin/devices/{test_devices[0].id}/bind-tag")
+        assert resp.status_code == 409
+        assert "borrowed" in resp.json()["detail"].lower()
+        assert mock_context.pending_tag_bind is None
+
+    def test_dashboard_bind_tag_borrowed_is_409(
+        self, client, mock_context, test_devices, db_session, dashboard_secret
+    ):
+        """The dashboard bind arm has the same borrowed-unit refusal."""
+        test_devices[0].status = DeviceStatus.BORROWED
+        db_session.commit()
+        resp = client.post(
+            "/api/dashboard/bind-tag",
+            json={"pm_number": test_devices[0].pm_number},
+            headers=dashboard_admin_headers(dashboard_secret),
+        )
+        assert resp.status_code == 409
+        assert "borrowed" in resp.json()["detail"].lower()
         assert mock_context.pending_tag_bind is None
 
 

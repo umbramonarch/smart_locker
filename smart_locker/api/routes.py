@@ -41,9 +41,11 @@ from fastapi import (
     HTTPException,
     Request,
 )
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.routing import APIRoute
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 import smart_locker.api.app_context as ctx_module
 from smart_locker.api.app_context import (
@@ -65,6 +67,7 @@ from config.settings import (
     DASHBOARD_ADMIN_HEADER,
     MAX_LOCKER_SLOT,
     dashboard_admin_secret,
+    dashboard_secret_from_env,
 )
 from smart_locker.database.engine import get_session, get_session_factory
 from sqlalchemy import select
@@ -113,7 +116,52 @@ from smart_locker.sync import sync_status
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+
+class CommitBeforeResponseRoute(APIRoute):
+    """APIRoute that commits the request's DB session before the response.
+
+    On fastapi>=0.106 the post-yield teardown of a dependency like
+    ``get_db`` runs AFTER ``await response(scope, receive, send)`` — the
+    client already holds its answer (and may have sent the next request)
+    while the commit is still pending. A back-to-back request then reads
+    the pre-commit snapshot; verified failure: ``POST /return`` reported
+    success, then an immediate People deactivation was refused 409
+    "still holds 1 borrowed device".
+
+    ``get_db`` stashes the request session on ``request.state.db_session``;
+    this handler commits it — on a worker thread, so a lock wait can never
+    stall the event loop — before the Response object leaves the route
+    handler. On exception the session is rolled back and the exception
+    re-raised, so error responses commit nothing. ``get_db``'s teardown
+    stays as the safety net that closes (and, if ever wired without this
+    class, still commits/rolls back) the session.
+    """
+
+    def get_route_handler(self):
+        original = super().get_route_handler()
+
+        async def commit_before_response(request: Request) -> Response:
+            try:
+                response = await original(request)
+            except Exception:
+                session = getattr(request.state, "db_session", None)
+                if session is not None:
+                    try:
+                        await run_in_threadpool(session.rollback)
+                    except Exception:
+                        logger.exception(
+                            "db_session rollback failed during request error handling."
+                        )
+                raise
+            session = getattr(request.state, "db_session", None)
+            if session is not None and session.in_transaction():
+                await run_in_threadpool(session.commit)
+            return response
+
+        return commit_before_response
+
+
+router = APIRouter(route_class=CommitBeforeResponseRoute)
 
 # Static frontend directory (index.html, dashboard.html, …) — used to serve the
 # dashboard at the documented bare "/dashboard" URL below.
@@ -255,20 +303,27 @@ def health() -> dict:
 
 # --- Dependencies -----------------------------------------------------------
 
-def get_db() -> Session:
+def get_db(request: Request) -> Session:
     """Yield a database session for the request, with auto-commit/rollback.
 
     FastAPI dependency that provides a SQLAlchemy session bound to this
-    request. Commits on success, rolls back on exception, and closes this
-    session on completion. The factory is a plain sessionmaker (NOT a
-    scoped_session) — see engine.get_session_factory for why that matters
-    under FastAPI's reused thread pool.
+    request. The session is stashed on ``request.state.db_session`` so
+    ``CommitBeforeResponseRoute`` can commit it BEFORE the response is
+    sent — this teardown runs after the response on fastapi>=0.106, which
+    is too late: a follow-up request could already have read the pre-commit
+    snapshot. The post-yield commit stays as a no-op safety net (committing
+    an already-committed session commits nothing) for any context that
+    yields ``get_db`` without the route wrapper. Rolls back on exception
+    and closes the session on completion. The factory is a plain
+    sessionmaker (NOT a scoped_session) — see engine.get_session_factory
+    for why that matters under FastAPI's reused thread pool.
 
     Yields:
         Session: An active SQLAlchemy database session.
     """
     factory = get_session_factory()
     session = factory()
+    request.state.db_session = session
     try:
         yield session
         session.commit()
@@ -1170,10 +1225,12 @@ def get_registrants(db: Session = Depends(get_db)):
 class SetupRequest(BaseModel):
     """Setup arm: the first admin's name, plus the dashboard admin password.
 
-    ``password`` is written to the service-owned ``dashboard.secret`` file when
-    no dashboard secret is configured; when one already exists it must arrive
-    in the ``X-Smart-Locker-Admin`` header (the typed password then doubles as
-    authorization) and the file is left alone.
+    ``password`` is written to the service-owned ``dashboard.secret`` file
+    whenever the secret is not operator-configured in the environment. When
+    it IS env-configured, the arm requires the ``X-Smart-Locker-Admin``
+    header (the typed password then doubles as authorization) and the file
+    is left alone. A leftover file secret is overwritten while no admin
+    exists — that is how a failed arm stays retryable.
     """
 
     name: str = Field(..., min_length=1, max_length=100)
@@ -1211,9 +1268,15 @@ def start_setup(
     Loopback only, like every registration arm: a LAN caller must not plant a
     dashboard password of their choosing or squat the enrollment window the
     kiosk operator needs. Setup is open only while the database has no active
-    admin — the moment one exists, this returns 404 and Setup is gone. Once
-    ``SMART_LOCKER_DASHBOARD_ADMIN_SECRET`` is configured, arming requires it
-    in the ``X-Smart-Locker-Admin`` header.
+    admin — the moment one exists, this returns 404 and Setup is gone.
+
+    A failed arm must stay retryable: the ``X-Smart-Locker-Admin`` header is
+    enforced only while ``SMART_LOCKER_DASHBOARD_ADMIN_SECRET`` is genuinely
+    operator-configured in the environment. A ``dashboard.secret`` file with
+    no admin enrolled can only be a leftover from an earlier incomplete
+    Setup (mistyped password, expired window) — the next arm overwrites it
+    without the header, so first boot can never wedge behind a password the
+    operator no longer knows.
 
     Args:
         request: Incoming ASGI request (admin header check).
@@ -1226,9 +1289,10 @@ def start_setup(
     Raises:
         HTTPException: 403 if not loopback; 503 if system not ready or the NFC
                        reader is down; 404 once an admin exists; 401 when the
-                       stored secret does not match; 422 for a blank name or a
-                       missing password while no secret is configured; 409 when
-                       a registration/bind window already owns the reader.
+                       env-configured secret does not match; 422 for a blank
+                       name or a missing password while no secret is
+                       configured; 409 when a registration/bind window
+                       already owns the reader.
     """
     ctx = ctx_module.context
     if ctx is None:
@@ -1237,10 +1301,10 @@ def start_setup(
     if not setup_needed(db):
         raise HTTPException(status_code=404, detail="Setup is already complete.")
 
-    secret = dashboard_admin_secret()
-    if secret:
+    env_secret = dashboard_secret_from_env()
+    if env_secret:
         provided = request.headers.get(DASHBOARD_ADMIN_HEADER) or ""
-        if not _secret_matches(provided, secret):
+        if not _secret_matches(provided, env_secret):
             raise HTTPException(
                 status_code=401,
                 detail="Dashboard admin authorization required.",
@@ -1251,10 +1315,11 @@ def start_setup(
         raise HTTPException(status_code=422, detail="Admin name is required.")
 
     password = body.password.strip()
-    if not password and not secret:
+    if not password and not dashboard_admin_secret():
         # Setup is the only UI writer of the dashboard secret — a blank
         # password here would leave every admin-gated dashboard route dead
-        # (401 fail-closed) with no later UI path to set it.
+        # (401 fail-closed) with no later UI path to set it. A leftover file
+        # secret still counts as configured: a blank password keeps it.
         raise HTTPException(
             status_code=422, detail="Dashboard password is required."
         )
@@ -1273,7 +1338,10 @@ def start_setup(
         conflict = _pending_nfc_conflict()
         if conflict:
             raise HTTPException(status_code=409, detail=conflict)
-        if password and not secret:
+        if password and not env_secret:
+            # Only an env-configured secret is off-limits to the kiosk —
+            # anything else in dashboard.secret is a leftover from an
+            # incomplete Setup and the retry overwrites it.
             try:
                 write_dashboard_secret(password)
             except (OSError, ValueError) as e:
@@ -1339,6 +1407,21 @@ def start_admin_session(
         user = session.user if session is not None else None
         if user is None:
             raise HTTPException(status_code=401, detail="No active session.")
+        # session.user is the login-time snapshot — re-read the row like
+        # require_session, so a deactivated/deleted account ends its session
+        # here instead of being blessed as admin again on the cached role.
+        fresh = UserRepository.find_by_id(db, user.id)
+        if fresh is None or not fresh.is_active:
+            ctx_module.context.end_kiosk_session(reason="account_inactive")
+            raise HTTPException(
+                status_code=401,
+                detail="Session ended — this account is no longer active.",
+            )
+        session.user = fresh
+        # Detach the live row into a plain snapshot (see require_session):
+        # get_db closes this session at request end.
+        db.expunge(fresh)
+        user = fresh
         if user.role != UserRole.ADMIN:
             raise HTTPException(
                 status_code=403,
@@ -1894,6 +1977,8 @@ def start_device_tag_bind(
 
     Does not create a device. The next sticker tap binds ``tag_hmac`` on this
     row (re-bind replaces). A work card or another device's tag fails the bind.
+    Refused while the unit is borrowed — the sticker physically on it is what
+    returns the loan, so it cannot be rebound until the unit is back.
 
     Args:
         device_id: Primary key of the locker device to bind.
@@ -1906,7 +1991,7 @@ def start_device_tag_bind(
     Raises:
         HTTPException: 503 if system not ready, 403 if not admin, 404 if
             the device does not exist or is not a locker unit, 409 if a
-            pending window owns the reader.
+            pending window owns the reader or the unit is borrowed.
     """
     if ctx_module.context is None:
         raise HTTPException(status_code=503, detail="System not ready.")
@@ -1917,6 +2002,13 @@ def start_device_tag_bind(
     device = DeviceRepository.find_by_id(db, device_id)
     if device is None or not is_registered(device):
         raise HTTPException(status_code=404, detail="Device not found.")
+    if device.status == DeviceStatus.BORROWED:
+        # Rebinding a borrowed unit would orphan the sticker physically on
+        # it — the loan owns the tag until it is returned (same as unbind).
+        raise HTTPException(
+            status_code=409,
+            detail=f"{device.pm_number} is borrowed — return it first.",
+        )
 
     conflict = arm_pending_tag_bind(
         ctx_module.context, PendingTagBind(device_id=device.id)
@@ -2143,7 +2235,20 @@ def _require_update_authorized(request: Request, db: Session) -> None:
         ctx = ctx_module.context
         session = ctx.session_mgr.current_session if ctx is not None else None
         if session is not None:
-            if session.user.role == UserRole.ADMIN:
+            # The cached session.user is a login-time snapshot — re-read the
+            # row like require_session. A deactivated/deleted account loses
+            # authorization (and its session); a demoted admin gets 403 on
+            # the live role, not the role held at login.
+            fresh = UserRepository.find_by_id(db, session.user.id)
+            if fresh is None or not fresh.is_active:
+                ctx.end_kiosk_session(reason="account_inactive")
+                raise HTTPException(
+                    status_code=401,
+                    detail="Session ended — this account is no longer active.",
+                )
+            session.user = fresh
+            db.expunge(fresh)
+            if fresh.role == UserRole.ADMIN:
                 return
             raise HTTPException(status_code=403, detail="Admin access required.")
         if not secret and UserRepository.first_active_admin(db) is None:
@@ -2782,7 +2887,8 @@ def dashboard_bind_tag(
 
     Raises:
         HTTPException: 401 without secret; 503 if not ready; 409 if a session
-            or pending window is active; 404 if the PM is not a locker device.
+            or pending window is active or the unit is borrowed; 404 if the
+            PM is not a locker device.
     """
     if ctx_module.context is None:
         raise HTTPException(status_code=503, detail="System not ready.")
@@ -2801,6 +2907,13 @@ def dashboard_bind_tag(
     device = DeviceRepository.find_by_pm(db, pm)
     if device is None or not is_registered(device):
         raise HTTPException(status_code=404, detail="Device not found.")
+    if device.status == DeviceStatus.BORROWED:
+        # Rebinding a borrowed unit would orphan the sticker physically on
+        # it — the loan owns the tag until it is returned (same as unbind).
+        raise HTTPException(
+            status_code=409,
+            detail=f"{device.pm_number} is borrowed — return it first.",
+        )
 
     conflict = arm_pending_tag_bind(
         ctx_module.context,
@@ -2958,22 +3071,32 @@ def add_person_dashboard(
 
     A remote PC cannot write a card by itself — this only arms the window;
     the new card is tapped on the locker. Refused while a kiosk session is
-    live, like ``/api/dashboard/bind-tag``.
+    live, like ``/api/dashboard/bind-tag``. Admin cards are never enrolled
+    here — only the kiosk admin panel may mint a card credential.
 
     Args:
-        body: Display name plus role ("user" or "admin").
+        body: Display name plus role ("user" only — "admin" is refused).
 
     Returns:
         dict: ``ok`` plus the instruction message.
 
     Raises:
-        HTTPException: 401 without secret; 503 if not ready; 422 blank name or
-            bad role; 409 if a session or pending window owns the reader.
+        HTTPException: 401 without secret; 503 if not ready; 422 blank name,
+            bad role, or a request to enroll an admin card; 409 if a session
+            or pending window owns the reader.
     """
     name = body.name.strip()
     if not name:
         raise HTTPException(status_code=422, detail="Name is required.")
     role = _parse_person_role(body.role)
+    if role == UserRole.ADMIN.value:
+        # The shared dashboard secret manages people remotely but must not
+        # mint persistent card credentials — admin cards enroll at the
+        # kiosk under a real admin session.
+        raise HTTPException(
+            status_code=422,
+            detail="Admin cards are enrolled at the kiosk admin panel.",
+        )
     _arm_card_window(
         PendingRegistration(display_name=name, role=role, from_dashboard=True),
         require_idle=True,
@@ -2995,7 +3118,8 @@ def replace_card_dashboard(
     """Arm the cabinet reader 60s; the tapped card rebinds this person's card.
 
     Requires ``X-Smart-Locker-Admin``. The replacement happens on the locker
-    reader — the LAN request only opens the window.
+    reader — the LAN request only opens the window. Admin cards cannot be
+    rebound here — that stays at the kiosk under a real admin session.
 
     Args:
         user_id: Primary key of the user receiving the new card.
@@ -3006,11 +3130,20 @@ def replace_card_dashboard(
 
     Raises:
         HTTPException: 401 without secret; 503 if not ready; 404 unknown
-            person; 409 if a session or pending window owns the reader.
+            person; 422 for an admin's card; 409 if a session or pending
+            window owns the reader.
     """
     user = UserRepository.find_by_id(db, user_id)
     if user is None:
         raise HTTPException(status_code=404, detail="Person not found.")
+    if user.role == UserRole.ADMIN:
+        # An admin's card is a persistent credential — the dashboard secret
+        # must not rebind it; replacement runs at the kiosk under a real
+        # admin session.
+        raise HTTPException(
+            status_code=422,
+            detail="Admin cards are rebound at the kiosk admin panel.",
+        )
     _arm_card_window(
         PendingRegistration(
             display_name=user.display_name,

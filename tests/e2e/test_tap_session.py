@@ -17,10 +17,10 @@ Notes: Event names follow tap_router._handle_idle / _handle_logged_in: an
 """
 
 from smart_locker.api.app_context import PendingRegistration, PendingTagBind
-from smart_locker.database.models import User
+from smart_locker.database.models import Device, DeviceStatus, User, UserRole
 from smart_locker.nfc.reader_observer import ReaderEvent, ReaderEventType
 
-from tests.e2e.helpers import add_user
+from tests.e2e.helpers import add_device, add_user, get_device
 
 WORK_UID = "04AA00000001"
 OTHER_UID = "04AA00000002"
@@ -28,6 +28,10 @@ INACTIVE_UID = "04AA00000003"
 TIMEOUT_UID = "04AA00000004"
 LAN_UID = "04AA00000005"
 UNKNOWN_UID = "04DEADBEEF99"
+STALE_UID = "04AA00000006"          # card deactivated mid-session
+DEMOTED_UID = "04AA00000007"        # admin card demoted mid-session
+STALE_TAG_UID = "04DD00000001"      # sticker tapped after deactivation
+BORROWED_TAG_UID = "04DD00000002"   # sticker on a borrowed device
 
 
 def _set_user_active(h, user_id: int, active: bool) -> None:
@@ -206,6 +210,78 @@ def test_reader_disconnect_preserves_dashboard_pending_state(e2e):
     assert h.ctx.pending_registration is None
     assert h.ctx.pending_tag_bind is bind
     assert h.client.get("/api/session").json()["active"] is False
+
+
+def test_deactivated_user_sticker_tap_ends_session_without_borrow(
+    e2e, monkeypatch
+):
+    """A user deactivated mid-session must not borrow on the next sticker
+    tap — the tap path re-reads the user row, matching require_session."""
+    monkeypatch.setenv("SMART_LOCKER_DASHBOARD_ADMIN_SECRET", "e2e-secret")
+    h = e2e()
+    user_id = add_user(h, STALE_UID, display_name="Leaving User")
+    device_id = add_device(
+        h, name="Stale Meter", pm_number="PM-S1", locker_slot=9,
+        tag_uid=STALE_TAG_UID,
+    )
+
+    h.tap(STALE_UID)
+    h.wait_event("auth_success")
+
+    # Deactivate through the real dashboard People route.
+    r = h.client.patch(
+        f"/api/dashboard/users/{user_id}",
+        json={"is_active": False},
+        headers={"X-Smart-Locker-Admin": "e2e-secret"},
+    )
+    assert r.status_code == 200
+
+    h.tap(STALE_TAG_UID)
+    payload = h.wait_event("session_ended")
+    assert payload["reason"] == "account_inactive"
+
+    # No borrow happened and the dead session is gone.
+    h.assert_no_event("device_action", within=1.5)
+    assert h.client.get("/api/session").json()["active"] is False
+    device = get_device(h, device_id)
+    assert device.status == DeviceStatus.AVAILABLE
+    assert device.current_borrower_id is None
+
+
+def test_demoted_admin_sticker_tap_offers_handover_not_admin_return(e2e):
+    """A mid-session demote loses return-on-behalf on the next tap: the
+    demoted admin gets the handover offer like any other user."""
+    h = e2e()
+    admin_id = add_user(h, DEMOTED_UID, display_name="Demotable Admin", role="admin")
+    borrower_id = add_user(h, OTHER_UID, display_name="Borrower")
+    device_id = add_device(
+        h, name="Loaned Meter", pm_number="PM-S2", locker_slot=10,
+        tag_uid=BORROWED_TAG_UID, status="borrowed",
+    )
+    with h.db() as db:
+        device = db.get(Device, device_id)
+        device.current_borrower_id = borrower_id
+        db.commit()
+
+    h.tap(DEMOTED_UID)
+    h.wait_event("auth_success")
+
+    # Demote on the row — the session's cached role is now stale.
+    with h.db() as db:
+        user = db.get(User, admin_id)
+        user.role = UserRole.USER
+        db.commit()
+
+    h.tap(BORROWED_TAG_UID)
+    payload = h.wait_event("handover_requested")
+    assert payload["device_id"] == device_id
+    assert payload["user_id"] == admin_id
+
+    # No admin return happened; the live session stays alive (still active).
+    device = get_device(h, device_id)
+    assert device.status == DeviceStatus.BORROWED
+    assert device.current_borrower_id == borrower_id
+    assert h.client.get("/api/session").json()["active"] is True
 
 
 def test_dev_status_reports_running_fake_reader(e2e):

@@ -326,6 +326,17 @@ def handle_tag_bind_tap(
         return TapResult(
             event="tag_bind_failed", payload={"reason": "Device not found."}
         ), True
+    if target.status == DeviceStatus.BORROWED:
+        # The bind target went out on loan between arm and tap — rebinding
+        # now would orphan the sticker physically on the borrowed unit.
+        # (The BORROWED check above is the *tapped* tag's device, not the
+        # bind target — a borrowed tag still returns normally.)
+        return TapResult(
+            event="tag_bind_failed",
+            payload={
+                "reason": f"{target.pm_number} is borrowed — return it first."
+            },
+        ), True
     try:
         bind_uid_to_device(db_session, target, card_uid_hex, hmac_key)
     except ValueError as exc:
@@ -620,7 +631,31 @@ def _handle_logged_in(
     admin_overlay_open: bool,
     reader_name: str,
 ) -> TapResult:
-    """Active session: work card logs out; device tag auto-intents."""
+    """Active session: work card logs out; device tag auto-intents.
+
+    The session's cached ``user`` is a snapshot frozen at login — the row is
+    re-fetched on every tap so a mid-session deactivation or delete ends the
+    session here instead of letting a dead account keep borrowing, and a
+    mid-session demote loses admin return-on-behalf on this tap. The HTTP
+    gate ``require_session`` already enforces the same on the request path.
+    """
+    active = session_mgr.current_session
+    if active is not None:
+        fresh = UserRepository.find_by_id(db_session, active.user.id)
+        if fresh is None or not fresh.is_active:
+            session_mgr.end_session()
+            return TapResult(
+                event="session_ended",
+                payload={"reason": "account_inactive"},
+                cli_message=(
+                    "Session ended — this account is no longer active."
+                ),
+            )
+        # Refresh the snapshot so the role/status checks below see live data;
+        # detach like require_session — every consumer reads loaded scalars.
+        active.user = fresh
+        db_session.expunge(fresh)
+
     if kind == TapKind.WORK_CARD and user is not None:
         active = session_mgr.current_session
         name = active.user.display_name if active is not None else "user"

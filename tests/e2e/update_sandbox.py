@@ -27,6 +27,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -598,6 +599,47 @@ class UpdateSandbox:
             text=True,
             stdin=subprocess.DEVNULL,
             timeout=timeout,
+        )
+
+    def start_update(self) -> subprocess.Popen:
+        """Popen variant of run_update() for tests that signal the updater
+        mid-run. A launcher shim writes its own pid to <root>/update.pid
+        before exec'ing the script: under MSYS2/Git Bash the msys pid is not
+        the Win32 pid, so Popen.pid cannot be given to kill(1) — the pidfile
+        is the pid the sandbox's own bash can signal."""
+        self._update_pidfile = self.root / "update.pid"
+        self._update_pidfile.unlink(missing_ok=True)
+        return subprocess.Popen(
+            [
+                self.bash,
+                "-c",
+                f'echo $$ > "{_posix(self._update_pidfile)}"; '
+                f'exec bash "{_posix(UPDATE_SH)}"',
+            ],
+            env=self._env(),
+            cwd=str(self.root),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            stdin=subprocess.DEVNULL,
+        )
+
+    def signal_update(self, signame: str) -> None:
+        """Deliver a signal to the running updater through the same msys
+        runtime's kill(1). os.kill()/TerminateProcess on Windows is a hard
+        kill that never runs the script's traps — this is a real POSIX-style
+        signal, deferred to the foreground command boundary as on the Pi."""
+        deadline = time.time() + 10
+        while not self._update_pidfile.exists():
+            if time.time() > deadline:
+                raise TimeoutError("updater never wrote its pidfile")
+            time.sleep(0.05)
+        mpid = self._update_pidfile.read_text(encoding="utf-8").strip()
+        subprocess.run(
+            [self.bash, "-c", f"kill -{signame} {mpid}"],
+            capture_output=True,
+            timeout=10,
+            check=True,
         )
 
     # -- inspection --------------------------------------------------------

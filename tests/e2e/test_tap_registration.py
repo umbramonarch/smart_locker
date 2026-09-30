@@ -21,7 +21,7 @@ from contextlib import contextmanager
 
 import smart_locker.database.engine as engine_module
 
-from smart_locker.database.models import DeviceStatus
+from smart_locker.database.models import Device, DeviceStatus
 from smart_locker.database.repositories import (
     DeviceRepository,
     RegistrantRepository,
@@ -409,6 +409,35 @@ def test_borrowed_tag_during_armed_bind_returns_and_keeps_window(
     bound = h.wait_event("tag_bind_success")
     assert bound["device_id"] == target_id
     assert get_device(h, target_id).tag_hmac == uid_hmac_for(DASH_STICKER_UID)
+
+
+def test_borrowed_between_arm_and_tap_fails_bind(e2e, monkeypatch):
+    """A unit borrowed between arm and tap is never rebound — the tap-time
+    check fires on the bind *target*, emitting tag_bind_failed and leaving
+    tag_hmac (and the loan) untouched."""
+    monkeypatch.setenv("SMART_LOCKER_DASHBOARD_ADMIN_SECRET", DASHBOARD_SECRET)
+    h = e2e()
+    borrower_id = add_user(h, WORK_UID, display_name="Borrower")
+    target_id = add_device(h, name="Bind Target", pm_number="PM-B5", locker_slot=8)
+
+    _arm_dashboard_bind(h, "PM-B5")
+
+    # The unit goes out on loan while the bind window waits for its sticker.
+    with h.db() as db:
+        target = db.get(Device, target_id)
+        target.status = DeviceStatus.BORROWED
+        target.current_borrower_id = borrower_id
+        db.commit()
+
+    h.tap(DASH_STICKER_UID)
+    payload = h.wait_event("tag_bind_failed")
+    assert "borrowed" in payload["reason"].lower()
+    assert h.ctx.pending_tag_bind is None
+
+    target = get_device(h, target_id)
+    assert target.tag_hmac is None
+    assert target.status == DeviceStatus.BORROWED
+    assert target.current_borrower_id == borrower_id
 
 
 def test_dashboard_bind_survives_register_cancel_and_completes(

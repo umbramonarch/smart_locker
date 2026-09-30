@@ -13,7 +13,11 @@ Notes: Each case boots a fabricated "old" appliance (VERSION, .env, real
        scripts.migrate_db, the /api/health gate, and rollback run for real.
 """
 
+import os
 import shutil
+import subprocess
+import time
+from pathlib import Path
 
 import pytest
 
@@ -477,3 +481,165 @@ def test_failed_boot_after_migration_restores_pre_migration_db(sandbox_no_cal):
     assert "calibration_due" not in sandbox_no_cal.device_columns()
     assert sandbox_no_cal.device_rows() == [OLD_ROW]
     _assert_rolled_back(sandbox_no_cal, env_before)
+
+
+# ---------------------------------------------------------------------------
+# A signal mid-update (`systemctl stop smart-locker-update`, poweroff, Ctrl-C)
+# takes the same guarded rollback path as an error — without TERM/INT traps
+# the box is left stopped on a half-swapped tree and crash-loops on boot.
+# ---------------------------------------------------------------------------
+
+
+def _signal_mid_update(sandbox: UpdateSandbox, signame: str) -> subprocess.CompletedProcess:
+    """Run the updater, deliver *signame* the moment the fake systemctl logs
+    the service stop — the snapshot exists by then, so the trap must take the
+    rollback path wherever in the swap/install the signal actually lands."""
+    proc = sandbox.start_update()
+    try:
+        deadline = time.time() + 60
+        while time.time() < deadline and proc.poll() is None:
+            if any("stop" in c for c in sandbox.systemctl_calls()):
+                break
+            time.sleep(0.05)
+        assert any("stop" in c for c in sandbox.systemctl_calls()), (
+            f"updater never reached the service stop (rc={proc.poll()})\n"
+            f"--- update.log ---\n{sandbox.update_log()}"
+        )
+        sandbox.signal_update(signame)
+        out, err = proc.communicate(timeout=120)
+    except BaseException:
+        proc.kill()
+        proc.communicate()
+        raise
+    return subprocess.CompletedProcess(proc.args, proc.returncode, out, err)
+
+
+@pytest.mark.parametrize("signame,code", [("TERM", 143), ("INT", 130)])
+def test_signal_mid_update_rolls_back_and_exits_128_plus_signo(
+    sandbox, signame, code
+):
+    # boot_fail keeps the updater inside the health gate for the full
+    # HEALTH_TIMEOUT window — a wide, deterministic landing zone for the
+    # signal even under slow Git Bash process spawns.
+    env_before = sandbox.env_file.read_bytes()
+    sandbox.write_payload("1.1.0", boot_fail=True)
+
+    r = _signal_mid_update(sandbox, signame)
+
+    assert r.returncode == code, (
+        f"expected 128+signo={code}, got {r.returncode}\n"
+        f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}\n"
+        f"--- update.log ---\n{sandbox.update_log()}"
+    )
+    assert f"Caught SIG{signame}" in sandbox.update_log()
+    # Same end state as _assert_rolled_back, minus the swap-side perms count:
+    # the signal can land before the forward swap's own fixup pass, so only
+    # the rollback's apply_runtime_permissions is guaranteed to have run.
+    status = sandbox.status_json()
+    assert status["state"] == "rolled_back", (
+        f"status={status!r}\n--- update.log ---\n{sandbox.update_log()}"
+    )
+    assert status["version"] == "1.0.0"
+    _assert_old_tree_restored(sandbox)
+    assert sandbox.env_file.read_bytes() == env_before
+    assert sandbox.service_state() == "running"
+    last_answer = sandbox.curl_answers()[-1]
+    assert '"version":"1.0.0"' in last_answer and "api/health" in last_answer
+    calls = sandbox.systemctl_calls()
+    # The update's stop came first and the rollback's start came last — the
+    # interrupted run never leaves the service stopped.
+    assert calls[0] == "systemctl stop e2e-locker"
+    assert calls[-1] == "systemctl start e2e-locker"
+
+
+# ---------------------------------------------------------------------------
+# A log write that always fails (full SD card, dead path) must not fire the
+# ERR trap — inside on_err that would kill the handler before rollback runs.
+# ---------------------------------------------------------------------------
+
+
+def test_log_write_failure_cannot_abort_rollback(sandbox):
+    """logs/update.log as a directory: every `tee -a` fails — and so does the
+    pip step's >> redirect, mid-swap with the service stopped. log() must
+    stay infallible so on_err reaches rollback."""
+    env_before = sandbox.env_file.read_bytes()
+    (sandbox.app / "logs" / "update.log").mkdir()
+    sandbox.write_payload("1.1.0")
+
+    r = sandbox.run_update()
+
+    assert r.returncode == 1
+    # tee still copied the log lines to stdout even though the file write
+    # failed on every call.
+    assert "Smart Locker update check" in r.stdout
+    assert "ROLLBACK" in r.stdout
+    _assert_rolled_back(sandbox, env_before)
+    # pip's >>"$LOG_FILE" failed before the new-version start: the swap stop,
+    # then rollback's stop + start.
+    assert sandbox.systemctl_calls() == [
+        "systemctl stop e2e-locker",
+        "systemctl stop e2e-locker",
+        "systemctl start e2e-locker",
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Backup pruning runs on failure exits too — repeated failed updates must not
+# pile up snapshots until they fill the SD card.
+# ---------------------------------------------------------------------------
+
+
+def _seed_old_backups(sandbox: UpdateSandbox, count: int = 6) -> Path:
+    """Precreate *count* old snapshots of each kind with distinct old mtimes
+    (index = age order) so `ls -1t` pruning is deterministic."""
+    backups = sandbox.path("backups")
+    backups.mkdir(parents=True, exist_ok=True)
+    for i in range(count):
+        for prefix, ext in (("code", "tar.gz"), ("db", "sqlite")):
+            p = backups / f"{prefix}-2000010{i}-000000.{ext}"
+            p.write_text(f"old backup {i}\n", encoding="utf-8")
+            os.utime(p, (1_000_000_000 + i, 1_000_000_000 + i))
+    return backups
+
+
+@pytest.mark.parametrize("fail_kind", ["boot_fail", "migrate_fail"])
+def test_failed_update_prunes_old_backups(sandbox, fail_kind):
+    """boot_fail drives the not-healthy exit path, migrate_fail the ERR trap
+    path — both take a snapshot, roll back, then prune."""
+    sandbox.env_file.write_text(
+        "E2E_MARKER=keepme\nSMART_LOCKER_KEEP_BACKUPS=3\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    env_before = sandbox.env_file.read_bytes()
+    backups = _seed_old_backups(sandbox)
+    sandbox.write_payload("1.1.0", **{fail_kind: True})
+
+    r = sandbox.run_update()
+
+    assert r.returncode == 1
+    _assert_rolled_back(sandbox, env_before)
+    # KEEP=3: this run's own snapshot plus the two newest pre-seeded ones.
+    code_left = sorted(p.name for p in backups.glob("code-*.tar.gz"))
+    db_left = sorted(p.name for p in backups.glob("db-*.sqlite"))
+    assert len(code_left) == 3, f"code backups left: {code_left}"
+    assert len(db_left) == 3, f"db backups left: {db_left}"
+    for survivor in ("20000104", "20000105"):
+        assert f"code-{survivor}-000000.tar.gz" in code_left
+        assert f"db-{survivor}-000000.sqlite" in db_left
+    assert not any("20000100" in n for n in code_left + db_left)
+
+
+def test_abort_before_backup_keeps_existing_backups(sandbox):
+    """The prune is gated on a snapshot having been taken — a pre-backup
+    abort adds nothing, so it must leave the retained snapshots untouched."""
+    backups = _seed_old_backups(sandbox)
+    sandbox.write_payload("1.1.0")
+    (sandbox.root / "TAR_CREATE_FAIL").write_text("1\n", encoding="utf-8")
+
+    r = sandbox.run_update()
+
+    assert r.returncode == 1
+    assert sandbox.status_json()["state"] == "failed"
+    assert len(list(backups.glob("code-*.tar.gz"))) == 6
+    assert len(list(backups.glob("db-*.sqlite"))) == 6

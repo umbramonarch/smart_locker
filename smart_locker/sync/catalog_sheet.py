@@ -366,7 +366,7 @@ def load_rows(
 
     Args:
         path: Path to the source ``.xlsx``.
-        sheet_name: Sheet to read, or None for the active sheet.
+        sheet_name: Sheet to read, or None for the catalog sheet.
 
     Returns:
         ``(rows, None)`` on success, or ``(None, error_message)``.
@@ -449,11 +449,11 @@ def read_catalog_rows(
     sheet_name: str | None = None,
     column_overrides: dict[str, str] | None = None,
 ) -> tuple[list[CatalogRow], str | None]:
-    """Parse a workbook's active sheet into catalog rows.
+    """Parse a workbook's catalog sheet into catalog rows.
 
     Args:
         path: Workbook path.
-        sheet_name: Sheet to read, or None for the active sheet.
+        sheet_name: Sheet to read, or None for the catalog sheet.
         column_overrides: Optional header-name overrides.
 
     Returns:
