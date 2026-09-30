@@ -118,14 +118,23 @@ def migrate() -> None:
         )
         print("  CREATE UNIQUE INDEX ix_devices_tag_hmac")
 
-    # Unique locker slots (SQLite UNIQUE still allows multiple NULLs).
+    # Locker slots are shared labels — a pre-shared-slots database carries the
+    # UNIQUE version, which is dropped and recreated as a plain index.
+    cur.execute(
+        "SELECT \"unique\" FROM pragma_index_list('devices') "
+        "WHERE name='ix_devices_locker_slot'"
+    )
+    row = cur.fetchone()
+    if row and row[0]:
+        cur.execute("DROP INDEX ix_devices_locker_slot")
+        print("  DROP  ix_devices_locker_slot (was UNIQUE - slots are shared)")
     if _index_exists(cur, "ix_devices_locker_slot"):
         print("  SKIP  ix_devices_locker_slot (already exists)")
     else:
         cur.execute(
-            "CREATE UNIQUE INDEX ix_devices_locker_slot ON devices (locker_slot)"
+            "CREATE INDEX ix_devices_locker_slot ON devices (locker_slot)"
         )
-        print("  CREATE UNIQUE INDEX ix_devices_locker_slot")
+        print("  CREATE INDEX ix_devices_locker_slot")
 
     # Unique PM/serial: ALTER TABLE-added columns cannot carry UNIQUE, so
     # databases that grew through migrations get the constraint as a
@@ -142,7 +151,7 @@ def migrate() -> None:
             print(f"  CREATE UNIQUE INDEX {idx}")
         except sqlite3.IntegrityError:
             print(
-                f"  WARN  {idx} NOT created — duplicate {col} values exist; "
+                f"  WARN  {idx} NOT created - duplicate {col} values exist; "
                 "dedupe manually"
             )
 

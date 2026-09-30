@@ -310,6 +310,7 @@ class TestRegisterDeviceApi:
     def test_register_duplicate_slot(
         self, client, mock_context, admin_user, test_devices, db_session
     ):
+        """Slots are shared labels — an occupied slot is still a valid pick."""
         device = DeviceRepository.create(
             db_session,
             name="Scope",
@@ -323,7 +324,9 @@ class TestRegisterDeviceApi:
             "/api/admin/devices/register",
             json={"pm_number": "PM-NEW", "locker_slot": test_devices[0].locker_slot},
         )
-        assert resp.status_code == 409
+        assert resp.status_code == 200
+        db_session.expire_all()
+        assert device.locker_slot == test_devices[0].locker_slot
 
     def test_set_slot_accepts_admin(
         self, client, mock_context, admin_user, test_devices, db_session
@@ -343,6 +346,20 @@ class TestRegisterDeviceApi:
             json={"locker_slot": 9},
         )
         assert resp.status_code == 401
+
+    def test_set_slot_shared_slot_allowed(
+        self, client, mock_context, admin_user, test_devices, db_session
+    ):
+        """Change-slot accepts a slot another unit already holds."""
+        db_session.commit()
+        mock_context.session_mgr.start_session(admin_user)
+        resp = client.post(
+            f"/api/admin/devices/{test_devices[0].id}/slot",
+            json={"locker_slot": test_devices[1].locker_slot},
+        )
+        assert resp.status_code == 200
+        db_session.expire_all()
+        assert test_devices[0].locker_slot == test_devices[1].locker_slot
 
     def test_register_slot_over_cap_is_422(
         self, client, mock_context, admin_user

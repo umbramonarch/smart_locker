@@ -31,6 +31,12 @@ Event = Union[CardEvent, ReaderEvent]
 # Synthetic reader name surfaced to logs / status — clearly marked as simulated.
 FAKE_READER_NAME = "FAKE-ACR1252U (simulated)"
 
+# Fixed preset UIDs behind the kiosk dev panel (keys 1..n for work cards,
+# A/S/D for device stickers). scripts/seed_fake_nfc.py enrolls and binds these
+# same values — change all three places together. Fake values, never a real UID.
+FAKE_CARD_UIDS = ["040000A1", "040000A2", "040000A3"]
+FAKE_TAG_UIDS = ["050000B1", "050000B2", "050000B3"]
+
 
 class FakeNFCReader:
     """Simulated NFC reader that injects card taps instead of reading hardware.

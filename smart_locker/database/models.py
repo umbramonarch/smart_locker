@@ -225,7 +225,7 @@ class Device(Base):
 
     __table_args__ = (
         Index("ix_devices_tag_hmac", "tag_hmac", unique=True),
-        Index("ix_devices_locker_slot", "locker_slot", unique=True),
+        Index("ix_devices_locker_slot", "locker_slot"),
     )
 
 

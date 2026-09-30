@@ -92,3 +92,24 @@ class TestDevEndpoints:
         assert resp.status_code == 403
         assert mock_context.reader.poll_event() is None
 
+    def test_dev_status_exposes_presets_only_when_active(
+        self, client, mock_context, monkeypatch
+    ):
+        """The dev-panel key map ships with the harness — the seed script
+        enrolls/binds these exact UIDs, so they come from one source."""
+        from smart_locker.nfc.fake_reader import (
+            FAKE_CARD_UIDS,
+            FAKE_TAG_UIDS,
+            FakeNFCReader,
+        )
+
+        monkeypatch.delenv("SMART_LOCKER_FAKE_READER", raising=False)
+        mock_context.reader = None
+        assert client.get("/api/dev/status").json()["presets"] is None
+
+        monkeypatch.setenv("SMART_LOCKER_FAKE_READER", "1")
+        mock_context.reader = FakeNFCReader()
+        presets = client.get("/api/dev/status").json()["presets"]
+        assert presets["card_uids"] == list(FAKE_CARD_UIDS)
+        assert presets["tag_uids"] == list(FAKE_TAG_UIDS)
+

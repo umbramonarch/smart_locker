@@ -433,9 +433,9 @@ class UpdateSandbox:
             p.write_text(content, encoding="utf-8", newline="\n")
 
     def create_db(self, *, include_calibration_column: bool = True) -> None:
-        """Create the appliance SQLite file. Fully migrated by default so the
-        payload's real migrate_db.py is a no-op; drop ``calibration_due`` to
-        make the migration visibly add a column."""
+        """Create the appliance SQLite file with the pre-shared-slots schema
+        (unique slot index — the payload's migrate_db.py downgrades it);
+        drop ``calibration_due`` to make the migration visibly add a column."""
         cal_col = "calibration_due DATE," if include_calibration_column else ""
         con = sqlite3.connect(self.db)
         con.executescript(
