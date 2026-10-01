@@ -10,8 +10,8 @@ Description: End-to-end coverage of the photo sync pipeline and the dashboard
 Project: smart_locker/tests/e2e
 Notes: The photo watcher keeps a module-level Observer singleton — every
        watcher test stops it in a finally so no thread leaks into the next
-       test. EXCEL_AUTO_EXPORT is pinned off per test so a developer .env
-       cannot trigger a side-effect export during photo processing.
+        test. Photo processing updates only the database and frontend image
+        directory; Excel downloads remain an explicit admin action.
 """
 
 import time
@@ -40,10 +40,9 @@ def _input_photo(tmp_path, name: str, content: bytes = JPEG_BYTES):
     return input_dir, photo
 
 
-def test_process_photo_updates_every_matching_model(e2e, tmp_path, monkeypatch):
+def test_process_photo_updates_every_matching_model(e2e, tmp_path):
     """A photo named after a model covers ALL units of that model — filename
     stem matching is case-insensitive against the stored model string."""
-    monkeypatch.setattr("config.settings.EXCEL_AUTO_EXPORT", False)
     h = e2e()
     cam_a = add_device(
         h, name="Cam A", pm_number="PM-300", locker_slot=11, model="CamX"
@@ -66,12 +65,9 @@ def test_process_photo_updates_every_matching_model(e2e, tmp_path, monkeypatch):
     assert get_device(h, other).image_path is None
 
 
-def test_process_photo_without_matching_model_touches_no_device(
-    e2e, tmp_path, monkeypatch
-):
+def test_process_photo_without_matching_model_touches_no_device(e2e, tmp_path):
     """A filename that matches no model is still copied to the serve dir but
     leaves every device row unchanged."""
-    monkeypatch.setattr("config.settings.EXCEL_AUTO_EXPORT", False)
     h = e2e()
     device_id = add_device(
         h, name="Cam", pm_number="PM-303", locker_slot=14, model="CamX"
@@ -96,10 +92,9 @@ def test_process_photo_missing_file_returns_zero(e2e, tmp_path):
     assert get_device(h, device_id).image_path is None
 
 
-def test_photo_watcher_scans_existing_photo_on_start(e2e, tmp_path, monkeypatch):
+def test_photo_watcher_scans_existing_photo_on_start(e2e, tmp_path):
     """The startup scan applies photos already in the input folder — no
     filesystem event or debounce wait needed (deterministic)."""
-    monkeypatch.setattr("config.settings.EXCEL_AUTO_EXPORT", False)
     h = e2e()
     device_id = add_device(
         h, name="Scanner Cam", pm_number="PM-310", locker_slot=16, model="ScanCam"
@@ -116,10 +111,9 @@ def test_photo_watcher_scans_existing_photo_on_start(e2e, tmp_path, monkeypatch)
         stop_photo_watcher()
 
 
-def test_photo_watcher_applies_dropped_photo(e2e, tmp_path, monkeypatch):
+def test_photo_watcher_applies_dropped_photo(e2e, tmp_path):
     """Live watch: a file dropped into the input folder fires the watchdog,
     waits out the 2s debounce, then copies and stamps matching devices."""
-    monkeypatch.setattr("config.settings.EXCEL_AUTO_EXPORT", False)
     h = e2e()
     device_id = add_device(
         h, name="Drop Cam", pm_number="PM-311", locker_slot=17, model="DropCam"

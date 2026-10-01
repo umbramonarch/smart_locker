@@ -685,8 +685,7 @@ body {
 }
 
 /* Dialogs sit above the users overlay. */
-#rename-dialog, #user-add-dialog { z-index: 50; }
-.admin-users-head { margin: 0 0 0.5rem; }
+#rename-dialog { z-index: 50; }
 .user-role-select { font-family: var(--font-body); font-size: 0.85rem; padding: 0.25rem 0.5rem; border-radius: 4px; border: 1px solid var(--border); background: var(--surface-2); color: var(--text); }
 
 .user-role-controls,

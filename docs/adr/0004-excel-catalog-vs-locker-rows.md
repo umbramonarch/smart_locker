@@ -19,7 +19,7 @@ Status: accepted
 
 ## Decision
 
-We pick **option 2** because a locker row exists only after admin Register Device (PM + free slot + NFC). Sync (`source_import.py`) is a catalog refresh. Person names in Location still replace the self-register list (names that leave Excel are removed). Scheduler: startup + every 6 hours + admin Sync.
+We pick **option 2** because a locker row exists only after admin Register Device (PM + free slot + NFC). Sync (`source_import.py`) is a catalog refresh. Person names in Location still replace the self-register list (names that leave Excel are removed). Scheduler: startup + every 5 minutes + admin Sync.
 
 ## Consequences
 

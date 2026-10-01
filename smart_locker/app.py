@@ -24,7 +24,7 @@ from config.settings import (
     PUBLIC_URL,
     SESSION_TIMEOUT_SECONDS,
     SOURCE_EXCEL_PATH,
-    SOURCE_SYNC_INTERVAL_HOURS,
+    SOURCE_SYNC_INTERVAL_MINUTES,
 )
 from smart_locker.auth.session_manager import SessionManager
 from smart_locker.auth.tap_router import handle_insert
@@ -55,7 +55,7 @@ def _start_background_sync() -> None:
         try:
             from smart_locker.sync.scheduler import start_scheduler
             start_scheduler(
-                get_engine(), SOURCE_EXCEL_PATH, SOURCE_SYNC_INTERVAL_HOURS
+                get_engine(), SOURCE_EXCEL_PATH, SOURCE_SYNC_INTERVAL_MINUTES
             )
         except Exception:
             logger.exception(

@@ -1584,8 +1584,7 @@ def export_excel(user_session: UserSession = Depends(require_session)):
 
     Generates a three-sheet ``.xlsx`` file (Devices, Transactions, Users) in
     memory and returns it as an HTTP file download. No file is written to disk,
-    so there are no Windows file-locking issues. This replaces the old automatic
-    Excel sync that wrote to ``SMART_LOCKER_EXCEL_PATH`` on every DB change.
+    so there are no Windows file-locking issues.
 
     Args:
         user_session: The active admin session (injected by ``require_session``).

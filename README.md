@@ -78,12 +78,12 @@ smart_locker/
 │   │   ├── owner_edit.py        # Dashboard Inventory owner change (Excel; not locker PMs)
 │   │   └── user_service.py      # User enrollment, public/admin views
 │   └── sync/
-│       ├── excel_sync.py        # On-demand / auto Excel export (Devices / Transactions / Users)
+│       ├── excel_sync.py        # On-demand in-memory Excel download (Devices / Transactions / Users)
 │       ├── source_import.py     # Catalog refresh for locker PMs (no insert, English headers)
 │       ├── location_writeback.py    # Pi → Excel: Location by PM only
 │       ├── inventory_reader.py  # Dashboard Inventory tab: live Excel, not SQLite
 │       ├── dashboard_launcher.py # Share HTML + .url redirect to live /dashboard
-│       ├── scheduler.py         # Source import + write-back: startup + 6h interval (+ local FS watch)
+│       ├── scheduler.py         # Source import + write-back: startup + 5-minute poll (+ local FS watch)
 │       ├── photo_watcher.py     # Auto-assign device photos by model number
 │       └── fs_utils.py          # Detect network (CIFS/NFS) paths so watchers skip unreliable inotify
 ├── deploy/                      # Raspberry Pi provisioning: systemd, CIFS mount, kiosk, offline install
@@ -128,7 +128,7 @@ smart_locker/
 | FastAPI REST API | ✅ Done | Session, device, registration, admin, dashboard endpoints + SSE |
 | Self-registration | ✅ Done | Approved-name list + NFC tap; admin manual registration |
 | Excel export | ✅ Done | On-demand `.xlsx` (Devices + Transactions + Users) — replaces old auto-sync |
-| Source import | ✅ Done | Startup + 6h interval + file-watch on local FS; catalog-only, no insert |
+| Source import | ✅ Done | Startup + 5-minute poll + file-watch on local FS; catalog-only, no insert |
 | Location write-back | ✅ Done | Pi writes Location by PM (`Locker` / borrower); locked file skipped |
 | Device import | ✅ Done | English Excel headers and aliases, PM-based catalog update, no auto locker insert |
 | Photo import | ✅ Done | By PM number (`update_device`) or by model (photo watcher) |

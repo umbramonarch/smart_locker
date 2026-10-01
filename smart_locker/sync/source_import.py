@@ -573,8 +573,6 @@ def import_from_source_excel(
 
     from sqlalchemy.orm import Session as EngineSession
 
-    from smart_locker.sync.excel_sync import export_to_excel
-
     if engine is None:
         result.errors += 1
         result.error_details.append("No database engine.")
@@ -648,14 +646,6 @@ def import_from_source_excel(
             result.errors += 1
             result.error_details.append(f"Registrant sync: {e}")
 
-    if result.updated > 0:
-        from config.settings import EXCEL_AUTO_EXPORT, EXCEL_SYNC_PATH
-        if EXCEL_AUTO_EXPORT:
-            try:
-                export_to_excel(engine, EXCEL_SYNC_PATH)
-            except Exception as e:
-                logger.warning("Excel sync after import failed: %s", e)
-
     logger.info(
         "Source import done: %d updated, %d unchanged, %d not in locker, %d errors, "
         "%d registrants added.",
@@ -663,4 +653,3 @@ def import_from_source_excel(
         result.registrants_added,
     )
     return result
-

@@ -549,16 +549,10 @@ is Section 11 — this is the same information, walked through in the order it a
 - `SMART_LOCKER_SOURCE_EXCEL_PATH` — the company device master list to **import from** the share.
   Empty disables automatic import entirely. Point this at the real filename once you know
   it (Section 6.2) — until then it can stay as the template's placeholder.
-- `SMART_LOCKER_EXCEL_PATH` — the workbook the app **writes back to** the share (devices,
-  transactions, users). Different from the line above — one is read-from, this one is
-  written-to.
-- `SMART_LOCKER_EXCEL_AUTO_EXPORT` — `1` means "refresh that exported workbook
-  automatically after every import/photo change." Off in the Pi template (status
-  lives on the dashboard and admin **Export Excel**). Existing Pi `.env` files
-  keep their old value across `update.sh` — set this to `0` by hand if it is still `1`.
-- `SMART_LOCKER_SOURCE_SYNC_INTERVAL_HOURS` — hours between automatic re-imports from
-  the share (default `6`). Startup import and admin **Sync Source** still run. Older
-  `SMART_LOCKER_SOURCE_SYNC_HOUR` / `_MINUTE` / `_POLL_SECONDS` keys are ignored.
+- `SMART_LOCKER_SOURCE_SYNC_INTERVAL_MINUTES` — minutes between automatic re-imports from
+  the share (default `5`, minimum `1`). Startup import and admin **Sync Source** still run.
+  CIFS/SMB paths are polled because inotify cannot see remote writes; local paths also use
+  a file watcher for prompt updates.
 - `SMART_LOCKER_LAST_SYNC_PATH` — JSON snapshot for the admin "Last sync" line. Empty
   stores `last_sync.json` next to the SQLite database (local disk, not the share).
   `update.sh` keeps that file across code swaps.
@@ -669,7 +663,7 @@ Everything up to here works with **zero** network access. This section is the on
 Pi needs the company network — and it's deliberately the *last* thing you set up, matching
 how the share is usually actually provisioned (IT connects it once the appliance itself is
 proven working, not before). The mount is a **soft dependency**: if the share is ever down
-after this point, borrow/return keeps working from the local database — only import/export
+after this point, borrow/return keeps working from the local database — only import and Location write-back
 pause until it's back (see Section 5's systemd unit comments, and Section 9).
 
 ### 6.1 Mount the locker share (CIFS)
@@ -682,7 +676,6 @@ in the **root of that share**, not inside a git working copy.
 /mnt/locker/                    (same folder your PC sees as the locker share)
   device-list.xlsx          import — device master list
   photos/                       optional; filename = model, e.g. 87V.jpg
-  smart_locker_data.xlsx        written by the Pi; open it, don't edit it
 ```
 
 1. Create the mount point and a root-only credentials file (skip if `install.sh` already
@@ -747,7 +740,7 @@ PM number. A re-import **never** inserts a locker row and **never** overwrites `
 serial, manufacturer, model, calibration) still update. Barcode is not imported.
 
 Once running as a service, this same catalog refresh also happens **automatically**: once on
-startup, every 6 hours (configurable), and on demand from the hidden admin panel. (See
+startup, every 5 minutes (configurable), and on demand from the hidden admin panel. (See
 Section 8 for why the live "watch the file" mode is off for network shares.)
 
 ### 6.3 Add device photos
@@ -874,7 +867,8 @@ Pi on the LAN can use them — the lock is **physical access**, not a password.
 
 ## 8. Excel, the locker share, and the dashboard
 
-There are two ways to see live data — a web dashboard and the Excel workbook on the share.
+The web dashboard shows live locker data; the Excel workbook on the share remains the source
+catalog and receives Location write-back.
 
 ### How the locker reads Excel
 
@@ -889,9 +883,10 @@ usually succeeds.
    That is the master list sitting in the locker share root. Change the filename in `.env`
    if yours is different.
 
-2. Import runs when the service starts, every 6 hours (`SMART_LOCKER_SOURCE_SYNC_INTERVAL_HOURS`),
+2. Import runs when the service starts, every 5 minutes (`SMART_LOCKER_SOURCE_SYNC_INTERVAL_MINUTES`),
    and when you use **Sync Source** in the admin panel. Linux cannot see "file changed"
-   events for a file another computer wrote on a CIFS share, so there is no 30-second poll.
+   events for a file another computer wrote on a CIFS share, so CIFS is polled; local files
+   also use a file watcher.
 
 3. Sync **never inserts** locker devices. It updates catalog fields for PMs already
    in SQLite. A device enters the locker only via admin **Register Device**
@@ -907,10 +902,6 @@ usually succeeds.
 
 5. Values in **Location** that are not locker/cabinet locations are treated as person
    names and become the self-register list. Names that leave Location are removed.
-
-6. If `SMART_LOCKER_EXCEL_AUTO_EXPORT=1`, after a real import the Pi writes
-   `smart_locker_data.xlsx` next to the source file (Devices, Transactions, Users). Don't
-   edit that file by hand.
 
 Re-import matches devices by PM number. It leaves `locker_slot`, `image_path`,
 `description`, `status`, and the current borrower alone. Catalog fields still update.
@@ -930,17 +921,13 @@ arm-bind in the client. Tag binds still complete at the kiosk: tap the sticker o
 locker reader. If `SMART_LOCKER_PUBLIC_URL` and `SMART_LOCKER_DASHBOARD_SHARE_PATH` are set,
 startup writes `dashboard.url` on the share so a double-click opens the live page.
 
-**Status workbook on the share:** the Pi can write `smart_locker_data.xlsx`
-at `SMART_LOCKER_EXCEL_PATH` (Devices + Transactions + Users) when
-`SMART_LOCKER_EXCEL_AUTO_EXPORT=1`. The Pi template leaves this **off** — live status is
-the dashboard, and you can download a snapshot any time from the admin panel's
-**Export Excel**. After `update.sh`, set `SMART_LOCKER_EXCEL_AUTO_EXPORT=0` in the live
-`.env` if it is still `1` (the incoming tree does not overwrite `.env`).
+**Download Excel:** the admin panel can generate a Devices / Transactions / Users snapshot
+in memory for download. It does not write an export workbook to the share.
 
 **Why the import is scheduled, not instant:** the Pi can't reliably get a "file changed"
 notification for a file that lives on a network share (the Linux mechanism for this,
 *inotify*, doesn't see edits made by other computers on a CIFS/SMB mount). So instead of a
-live file-watch, the system imports on startup and every 6 hours. To pull changes in
+live file-watch, the system imports on startup and every 5 minutes. To pull changes in
 immediately, use **Sync source** in the admin panel, or run
 `python -m scripts.sync_source`.
 
@@ -1131,9 +1118,7 @@ All settings live in `.env` (loaded by `config/settings.py`). The Pi template
 | `SMART_LOCKER_API_HOST` | `0.0.0.0` | Web server bind address |
 | `SMART_LOCKER_API_PORT` | `8000` | Web server port |
 | `SMART_LOCKER_SOURCE_EXCEL_PATH` | (empty) | Device master list on the share to import; empty disables auto-import |
-| `SMART_LOCKER_EXCEL_PATH` | `smart_locker_data.xlsx` | Where the exported workbook is written (the share path on the Pi) |
-| `SMART_LOCKER_EXCEL_AUTO_EXPORT` | (off) | `1` = auto-refresh the exported workbook after each import/photo change |
-| `SMART_LOCKER_SOURCE_SYNC_INTERVAL_HOURS` | `6` | Hours between automatic source imports (startup + admin Sync still run) |
+| `SMART_LOCKER_SOURCE_SYNC_INTERVAL_MINUTES` | `5` | Minutes between automatic source imports (startup + admin Sync still run); CIFS paths are polled |
 | `SMART_LOCKER_LAST_SYNC_PATH` | `last_sync.json` next to the DB | Admin last-sync snapshot; keep on the Pi's local disk |
 | `SMART_LOCKER_PUBLIC_URL` | (empty) | Origin of this Pi as other PCs see it (e.g. `http://192.168.1.10:8000`); with the share path, startup writes a dashboard launcher |
 | `SMART_LOCKER_DASHBOARD_SHARE_PATH` | (empty) | Folder (or `.html` path) on the locker share for `dashboard.url`; empty skips the launcher |
@@ -1148,7 +1133,7 @@ All settings live in `.env` (loaded by `config/settings.py`). The Pi template
 timeout, device tracking with the full schema, NFC **device tags** (same ACR1252U; auto
 borrow/return after login), borrow/return with admin overrides and per-user limits,
 self-service registration, Excel catalog refresh (no locker insert), Location
-write-back into `device-list.xlsx`, on-demand/auto export, photo assignment, the
+write-back into `device-list.xlsx`, on-demand Excel download, photo assignment, the
 `/dashboard` (Inventory / Locker / Display; public catalog GET; owner/bind/unbind, user rename, and users/tx/owners are all public; share launcher), the FastAPI REST API + SSE bridge, the
 6-screen kiosk UI, **Raspberry Pi appliance deployment** (systemd service, CIFS mount,
 Chromium kiosk, fully offline install including the no-PyPI-wheel `pyscard` case), and a

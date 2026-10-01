@@ -60,7 +60,7 @@ table at the end.
 - [ ] `mount | grep /mnt/locker` shows the CIFS mount; the workbook is readable.
 - [ ] Admin panel → **Sync Source** → preview shows add/update/skip counts → confirm → counts applied.
 - [ ] Edit a catalog field (name / manufacturer / model) in the workbook on the share from
-      another PC → **Sync Source** (or wait for the 6-hour interval) imports the catalog
+      another PC → **Sync Source** (or wait for the 5-minute interval) imports the catalog
       change (check `journalctl` for source import). **Location** on locker PMs
       is not taken from Excel; the Pi writes it back instead.
 - [ ] Borrow or return on the kiosk updates **Location** in
@@ -69,8 +69,8 @@ table at the end.
       works; the cell updates on the next sync or the next successful write.
 - [ ] Reboot with the share **unavailable** → boot still completes (nofail), service starts, kiosk loads.
       Admin last-sync line is not "never" if a previous import was recorded.
-- [ ] Auto-export of `smart_locker_data.xlsx` is off unless `SMART_LOCKER_EXCEL_AUTO_EXPORT=1`.
-      Admin **Export Excel** still downloads a snapshot.
+- [ ] Admin **Export Excel** downloads an in-memory snapshot without writing an export file
+      to the share.
 - [ ] Software update from USB `locker-updates/` (`python -m scripts.copy_update` on Windows): admin **Software Update** overlay, or SSH `sudo bash deploy/install/update.sh`. Do not overlay the stick onto `/home/locker/smart_locker` in the file manager.
 - [ ] Admin **Register Device**: Add from Excel (PM in the sheet + slot; an occupied slot is fine) creates the locker row and waits for the sticker; unknown PM / share down does not create a row. Existing rows Bind / **Replace tag** / Unbind / Slot still work. **Sync Source** updates catalog only (does not add locker devices).
 - [ ] Chromium starts without a browser keyring/password prompt (`--password-store=basic` in `start-kiosk.sh`).

@@ -253,12 +253,42 @@ def test_start_scheduler_runs_immediate_startup_import(e2e, tmp_path):
     ])
 
     try:
-        scheduler.start_scheduler(get_engine(), str(path), interval_hours=1)
+        scheduler.start_scheduler(get_engine(), str(path), interval_minutes=1)
         snap = _wait_for_trigger("startup", timeout=5.0)
         assert snap["ok"] is True
         assert snap["updated"] == 1
         assert get_device(h, device_id).name == "Boot Scope"
         assert get_device(h, device_id).serial_number == "SN-BOOT"
+    finally:
+        scheduler.stop_scheduler()
+
+
+def test_cifs_scheduler_polls_every_five_minutes_by_default(tmp_path, monkeypatch):
+    """CIFS skips its unreliable watcher and receives the five-minute interval."""
+    jobs = []
+
+    class FakeScheduler:
+        def add_job(self, *args, **kwargs):
+            jobs.append((args, kwargs))
+
+        def start(self):
+            pass
+
+        def shutdown(self, wait=False):
+            pass
+
+    source = tmp_path / "device-list.xlsx"
+    source.touch()
+    monkeypatch.setattr(scheduler, "BackgroundScheduler", FakeScheduler)
+    monkeypatch.setattr(scheduler, "is_network_path", lambda path: True)
+    monkeypatch.setattr(scheduler, "run_source_import_exclusive", lambda *args, **kwargs: None)
+    monkeypatch.setattr(scheduler, "_try_dashboard_launcher", lambda: None)
+
+    try:
+        scheduler.start_scheduler(object(), source)
+        assert scheduler._observer is None
+        assert len(jobs) == 1
+        assert jobs[0][1]["trigger"].interval.total_seconds() == 5 * 60
     finally:
         scheduler.stop_scheduler()
 
@@ -275,7 +305,7 @@ def test_file_watch_reimports_when_workbook_changes(e2e, tmp_path):
     ])
 
     try:
-        scheduler.start_scheduler(get_engine(), str(path), interval_hours=1)
+        scheduler.start_scheduler(get_engine(), str(path), interval_minutes=1)
         assert _wait_for_trigger("startup", timeout=5.0)["ok"] is True
 
         # Let the watchdog observer arm, then rewrite the file. Location stays

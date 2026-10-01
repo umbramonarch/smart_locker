@@ -77,30 +77,15 @@ MAX_LOCKER_SLOT = 48
 API_HOST = os.getenv("SMART_LOCKER_API_HOST", "0.0.0.0")
 API_PORT = _env_int("SMART_LOCKER_API_PORT", 8000)
 
-# --- Excel export ---
-# Path for the exported workbook (Devices / Transactions / Users sheets). On the
-# Raspberry Pi this points at the locker share (e.g.
-# /mnt/locker/smart_locker_data.xlsx) so the export lands where colleagues read it.
-EXCEL_SYNC_PATH = os.getenv("SMART_LOCKER_EXCEL_PATH") or str(
-    BASE_DIR / "smart_locker_data.xlsx"
-)
-
-# Auto-write the export to EXCEL_SYNC_PATH after each source import and photo change.
-# Off by default (export stays on-demand via admin Export Excel). Set to 1 only if
-# you still want smart_locker_data.xlsx refreshed on the locker share automatically.
-EXCEL_AUTO_EXPORT = os.getenv("SMART_LOCKER_EXCEL_AUTO_EXPORT", "").strip().lower() in {
-    "1", "true", "yes", "on",
-}
-
 # --- Source Excel ---
 # Catalog spreadsheet on the locker share (SMB/CIFS mount) — on the Pi this
 # is the mounted path, e.g. /mnt/locker/device-list.xlsx. Empty disables auto-import.
 SOURCE_EXCEL_PATH = os.getenv("SMART_LOCKER_SOURCE_EXCEL_PATH", "")
 
-# Hours between automatic source imports (startup import + admin Sync still run).
+# Minutes between automatic source imports (startup import + admin Sync still run).
 # Minimum 1. Values below 1 are raised to 1 so a zero env cannot spin the importer.
-SOURCE_SYNC_INTERVAL_HOURS = _env_int(
-    "SMART_LOCKER_SOURCE_SYNC_INTERVAL_HOURS", 6, minimum=1
+SOURCE_SYNC_INTERVAL_MINUTES = _env_int(
+    "SMART_LOCKER_SOURCE_SYNC_INTERVAL_MINUTES", 5, minimum=1
 )
 
 # Site overlay: display name and extra Excel header aliases. Storage/API stay

@@ -4,11 +4,11 @@ Description: Scheduled and reactive source Excel import, then Location
              write-back. Combines three trigger mechanisms: (1) an immediate
              import on application startup, (2) a watchdog file watcher on
              local filesystems, and (3) a periodic APScheduler interval job
-             (default 6 hours). After each successful import the Pi writes
+             (default 5 minutes). After each successful import the Pi writes
              Location for locker PMs back into the sheet.
 Project: smart_locker/sync
-Notes: Interval defaults to 6 hours, configurable via
-       SMART_LOCKER_SOURCE_SYNC_INTERVAL_HOURS. Disabled when
+Notes: Interval defaults to 5 minutes, configurable via
+       SMART_LOCKER_SOURCE_SYNC_INTERVAL_MINUTES. Disabled when
        SMART_LOCKER_SOURCE_EXCEL_PATH is empty.
        The file watcher uses a debounce window (default 3 s) so that rapid
        successive writes by Excel (save → temp → rename) collapse into a
@@ -264,7 +264,7 @@ class _SourceFileHandler(FileSystemEventHandler):
 def start_scheduler(
     engine,
     source_path: str | Path,
-    interval_hours: int = 6,
+    interval_minutes: int = 5,
 ) -> None:
     """Start the background scheduler, run an immediate import, and watch for changes.
 
@@ -272,12 +272,12 @@ def start_scheduler(
     1. Runs an immediate source import so the database is current on startup.
     2. Starts a watchdog file observer on the source directory when the path
        is a local filesystem (skipped on CIFS/NFS).
-    3. Starts an APScheduler interval job (default every 6 hours).
+    3. Starts an APScheduler interval job (default every 5 minutes).
 
     Args:
         engine: SQLAlchemy engine.
         source_path: Path to the source Excel file.
-        interval_hours: Hours between safety-net imports. Values below 1 are
+        interval_minutes: Minutes between safety-net imports. Values below 1 are
             raised to 1 so a zero/empty env cannot spin the importer.
 
     Returns:
@@ -290,12 +290,12 @@ def start_scheduler(
         return
 
     try:
-        hours = max(1, int(interval_hours))
+        minutes = max(1, int(interval_minutes))
     except (TypeError, ValueError):
         logger.warning(
-            "Invalid source-sync interval %r — using 6 hours.", interval_hours
+            "Invalid source-sync interval %r — using 5 minutes.", interval_minutes
         )
-        hours = 6
+        minutes = 5
     source = Path(source_path).resolve()
 
     # --- 1. Immediate import on startup ---
@@ -316,9 +316,9 @@ def start_scheduler(
     if on_network:
         logger.info(
             "Source Excel %s is on a network share (CIFS/NFS) — inotify is unreliable "
-            "there, so catalog changes are picked up every %d h (plus the startup "
+            "there, so catalog changes are picked up every %d minutes (plus the startup "
             "import and admin Sync Source).",
-            source, hours,
+            source, minutes,
         )
     elif source.parent.exists():
         handler = _SourceFileHandler(engine, source)
@@ -338,7 +338,7 @@ def start_scheduler(
     _scheduler = BackgroundScheduler()
     _scheduler.add_job(
         _interval_import,
-        trigger=IntervalTrigger(hours=hours),
+        trigger=IntervalTrigger(minutes=minutes),
         args=[engine, source, "interval"],
         id="source_excel_import",
         name="Periodic source Excel import",
@@ -348,8 +348,8 @@ def start_scheduler(
     )
     _scheduler.start()
     logger.info(
-        "Scheduler started: import every %d h; %s.",
-        hours,
+        "Scheduler started: import every %d minutes; %s.",
+        minutes,
         "network share (no live watch)" if on_network else "file watcher active",
     )
 

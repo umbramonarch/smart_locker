@@ -8,7 +8,7 @@ Project: smart_locker/scripts
 Notes: Usage: python -m scripts.update_device --list | --auto |
        --pm PM-042 --image photo.jpg --description "..." |
        --batch updates.txt
-       Changes are automatically synced to the output Excel file.
+       Changes are stored in the locker database.
 """
 
 import argparse
@@ -63,7 +63,7 @@ def update_device(pm_number: str, updates: dict) -> None:
     """Update a single device's fields by PM number.
 
     Looks up the device, applies each field update (skipping non-updatable
-    fields), flushes to the database, and triggers an Excel sync export.
+    fields), then flushes the changes to the database.
 
     Args:
         pm_number: The PM number identifying the device (e.g. ``"PM-042"``).
@@ -98,14 +98,6 @@ def update_device(pm_number: str, updates: dict) -> None:
 
         session.flush()
         print(f"Updated: {device.pm_number} ({device.name})")
-
-    # Trigger Excel sync
-    from config.settings import EXCEL_SYNC_PATH
-    from smart_locker.database.engine import get_engine
-    from smart_locker.sync.excel_sync import export_to_excel
-    export_to_excel(get_engine(), EXCEL_SYNC_PATH)
-    print(f"Excel sync: {EXCEL_SYNC_PATH}")
-
 
 def batch_update(batch_file: str) -> None:
     """Read device updates from a text file and apply them in bulk.

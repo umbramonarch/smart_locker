@@ -144,29 +144,6 @@
     </div>
   </div>
 
-  <!-- Add user dialog -->
-  <div class="owner-dialog" id="user-add-dialog" hidden>
-    <div class="owner-dialog-card" role="dialog" aria-labelledby="user-add-title">
-      <h3 class="owner-dialog-title" id="user-add-title">Add user</h3>
-      <div class="user-add-step" id="user-add-name-step">
-        <label class="owner-dialog-label" for="user-add-input">Display name</label>
-        <input type="text" id="user-add-input" class="search-input" maxlength="100" autocomplete="off">
-        <p class="error-msg" id="user-add-error" style="display:none"></p>
-        <div class="owner-dialog-actions">
-          <button type="button" class="owner-cancel" id="user-add-cancel">Cancel</button>
-          <button type="button" class="owner-confirm" id="user-add-continue">Continue</button>
-        </div>
-      </div>
-      <div class="user-add-step" id="user-add-tap-step" hidden>
-        <p class="owner-dialog-label" id="user-add-wait-msg"></p>
-        <p class="error-msg" id="user-add-tap-error" style="display:none"></p>
-        <div class="owner-dialog-actions">
-          <button type="button" class="owner-cancel" id="user-add-tap-cancel">Cancel</button>
-        </div>
-      </div>
-    </div>
-  </div>
-
   <div class="owner-dialog" id="rename-dialog" hidden>
     <div class="owner-dialog-card" role="dialog" aria-labelledby="rename-dialog-title">
       <h3 class="owner-dialog-title" id="rename-dialog-title">Rename user</h3>
@@ -209,9 +186,6 @@
 
       <section class="admin-section">
         <h3 class="admin-section-title">Registered Users</h3>
-        <div class="admin-users-head">
-          <button type="button" class="admin-tag-btn" id="add-user-btn">Add user</button>
-        </div>
         <div class="table-wrap">
           <table class="data-table" id="admin-users-table">
             <thead>
