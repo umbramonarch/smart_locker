@@ -53,7 +53,7 @@ smart_locker/
 │   │   ├── app.js               # Kiosk state machine, API calls, NFC-driven navigation
 │   │   ├── dashboard.html       # Network dashboard: tabs + 5-tap UI overlay
 │   │   ├── dashboard.css        # Dashboard styling (kiosk colours, desktop cursor)
-│   │   ├── dashboard.js         # Tabs, Excel/SQLite fetch, Display poll, owner edit (admin secret)
+│   │   ├── dashboard.js         # Tabs, Excel/SQLite fetch, Display poll, owner edit, 5-tap overlay
 │   │   └── images/              # Device photos + hero background
 │   ├── nfc/                     # NFC reader interface (pyscard + APDU)
 │   │   ├── apdu.py              # APDU command definitions + response parsing
@@ -132,7 +132,7 @@ smart_locker/
 | Location write-back | ✅ Done | Pi writes Location by PM (`Locker` / borrower); locked file skipped |
 | Device import | ✅ Done | English Excel headers and aliases, PM-based catalog update, no auto locker insert |
 | Photo import | ✅ Done | By PM number (`update_device`) or by model (photo watcher) |
-| Web dashboard | ✅ Done | `/dashboard` — public Inventory/Locker GET; owner/bind/unbind + users/tx/owners need admin secret; 5-tap is UI reveal |
+| Web dashboard | ✅ Done | `/dashboard` — all endpoints public; 5-tap clock opens the overlay |
 | Frontend UI | ✅ Done | 6-screen kiosk UI + overlays |
 | Unit tests | ✅ Done | ~371 tests, hardware-free |
 | NFC device tags | ✅ Done | Same ACR1252U; `devices.tag_hmac`; auto borrow/return after login |
@@ -224,20 +224,20 @@ The system runs as a kiosk: FastAPI serves the frontend as static files in a ful
 5. **Locker** — availability overlay; IN / OUT / YOURS / MAINT; PM number on each card; screen-pick borrow still works
 6. **Return** — device grid with PM on each card; the user's borrowed items highlighted
 
-Overlays: **device detail** (photo, PM, type, serial, confirm), **return slot** (put in slot N), **inactivity** countdown, and a **hidden admin panel** (5× tap on the clock) with Locker/Return/Sync/Register User/**Register Device**/Export/**Exit kiosk**/**Shut down**/End-Session shortcuts. Register Device uses **Replace tag** when a sticker is already bound.
+Overlays: **device detail** (photo, PM, type, serial, confirm), **return slot** (put in slot N), **inactivity** countdown, and a **hidden admin panel** (5× tap on the clock) with Locker/Return/Sync/Register User/**Register Device**/Export/**Stop system**/**Shut down**/End-Session shortcuts. Register Device uses **Replace tag** when a sticker is already bound.
 
 **Theme:** green (`#009641`) on dark charcoal (`#181d24`).
 
 ## Web Dashboard
 
-A dashboard is served at **`/dashboard`**. Public GET Inventory and Locker catalog stay unauthenticated. Dashboard mutations (owner POST, bind/unbind) and gated users/tx/owners GETs need `SMART_LOCKER_DASHBOARD_ADMIN_SECRET` (header `X-Smart-Locker-Admin`); 401 if unset (fail closed). The 5-tap overlay is a client UI reveal, not authorization (`overlay=true` is not auth).
+A dashboard is served at **`/dashboard`**. All `/api/dashboard/*` endpoints are public — catalog GETs, owner POST, bind/unbind, user rename, and the users/transactions/owners reads. The overlay is a client UI reveal, not authorization.
 Three tabs:
 
-- **Inventory** — live `device-list.xlsx` (full catalog). Search and sort. Click owner to change it (confirm) for PMs that are **not** in the locker — that POST needs the admin secret. Share down shows an error here only.
+- **Inventory** — live `device-list.xlsx` (full catalog). Search and sort. Click owner to change it (confirm) for PMs that are **not** in the locker. Share down shows an error here only.
 - **Locker** — SQLite devices registered into a slot (status, borrower, slot, Tagged / No tag). Owner is set at the kiosk (borrow/return), not here.
 - **Display** — what the kiosk is showing right now, plus the signed-in user. View only.
 
-Tap the header clock **5× within 3 s** (same gesture as the kiosk) to reveal registered users, the last 500 transactions, and NFC **Unbind** / **Bind** / **Replace tag**. Those GETs/POSTs still need the admin secret. Arm-bind waits for the sticker on the ACR1252U; the dashboard does not start a kiosk admin session.
+Tap the header clock **5× within 8 s** (same gesture as the kiosk) to reveal registered users — each row has a **Rename** action — the last 500 transactions, and NFC **Unbind** / **Bind** / **Replace tag**. Arm-bind waits for the sticker on the ACR1252U; the dashboard does not start a kiosk admin session.
 
 Colleagues can double-click `dashboard.url` on the locker share if the Pi is configured with `SMART_LOCKER_PUBLIC_URL` and `SMART_LOCKER_DASHBOARD_SHARE_PATH` (startup writes that file). The live page is still `GET /dashboard`.
 
@@ -282,7 +282,7 @@ Cheap NFC stickers on locker devices use the same ACR1252U as work cards (no USB
 
 - **Storage:** `devices.tag_hmac` (HMAC-SHA256 of the sticker UID, same key as work cards). The raw UID is never stored or logged.
 - **Flow:** tap work card → tap sticker (or pick on screen). Auto-intent from device status: borrow if available, return if you hold it. Session stays open for several devices. A work-card tap still logs out.
-- **Register Device** (hidden admin panel): **PM + free slot + NFC**. Catalog comes from Excel. Sync never inserts locker rows. The list shows **name + PM**. CLI bind: `python -m scripts.enroll_device_tag --pm PM-001` (or `--uid HEX`).
+- **Register Device** (hidden admin panel): **PM + slot + NFC** (slots may be shared). Catalog comes from Excel. Sync never inserts locker rows. The list shows **name + PM**. CLI bind: `python -m scripts.enroll_device_tag --pm PM-001` (or `--uid HEX`).
 - Excel barcode is unused leftover; re-import does **not** overwrite `tag_hmac`, locker status, or the current borrower.
 - After borrow/return (and after Register Device / Sync), the Pi writes **only** Location in the catalog workbook (`SMART_LOCKER_IN_LOCKER_TOKEN` in the locker, borrower name when out). Catalog columns stay. A locked workbook is skipped, not a kiosk crash. Extra Excel header names: `SMART_LOCKER_ID_HEADERS` / `SMART_LOCKER_LOCATION_HEADERS`. On-screen noun: `SMART_LOCKER_ASSET_LABEL`.
 

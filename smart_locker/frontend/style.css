@@ -142,7 +142,9 @@ body::after {
   display: flex;
   flex-direction: column;
   clip-path: circle(0% at var(--reveal-x, 50%) var(--reveal-y, 50%));
-  transition: clip-path 1.6s var(--ease-smooth);
+  /* transform is the on-screen keyboard's push-up (.kbd-shift); keeping it
+     in the base list lets clip-path and shift animate independently. */
+  transition: clip-path 1.6s var(--ease-smooth), transform 0.35s var(--ease-smooth);
   z-index: 10;
   overflow: hidden;
 }
@@ -151,7 +153,7 @@ body::after {
 }
 .screen.exit {
   clip-path: circle(0% at var(--reveal-x, 50%) var(--reveal-y, 50%));
-  transition: clip-path 1.2s var(--ease-smooth);
+  transition: clip-path 1.2s var(--ease-smooth), transform 0.35s var(--ease-smooth);
 }
 
 /* ============================================================
@@ -164,7 +166,7 @@ body::after {
   display: flex;
   background: var(--bg);
   clip-path: polygon(100% 0, 100% 0, 100% 100%, 100% 100%);
-  transition: clip-path 0.9s var(--ease-smooth);
+  transition: clip-path 0.9s var(--ease-smooth), transform 0.35s var(--ease-smooth);
   /* Hidden / closing overlays must not eat hover on the menu underneath
      (lite fades with opacity only; clip-path none still covers the viewport). */
   pointer-events: none;
@@ -176,13 +178,13 @@ body::after {
 /* Close toward the left (used by inactivity overlay) */
 .overlay.hidden-left {
   clip-path: polygon(0 0, 0 0, 0 100%, 0 100%);
-  transition: clip-path 0.7s var(--ease-smooth);
+  transition: clip-path 0.7s var(--ease-smooth), transform 0.35s var(--ease-smooth);
   pointer-events: none;
 }
 /* Close toward the right — reverses the opening wipe (used by device detail) */
 .overlay.hidden-right {
   clip-path: polygon(100% 0, 100% 0, 100% 100%, 100% 100%);
-  transition: clip-path 0.7s var(--ease-smooth);
+  transition: clip-path 0.7s var(--ease-smooth), transform 0.35s var(--ease-smooth);
   pointer-events: none;
 }
 
@@ -252,11 +254,15 @@ body::after {
   align-items: center;
 }
 
-/* Hero background image */
+/* Hero background photo over a designed charcoal gradient. When images/ is
+   emptied the photo request still 404s — the gradient underneath keeps the
+   backdrop designed instead of a flat void (see test_frontend_images.py). */
 .hero-bg {
   position: absolute;
   inset: 0;
-  background: url('images/hero_bg.jpg') center/cover no-repeat;
+  background:
+    url('images/hero_bg.jpg') center/cover no-repeat,
+    linear-gradient(155deg, #242d3a 0%, #141920 72%);
   opacity: 0.07;
   filter: blur(2px) saturate(1.4);
   animation: hero-drift 20s ease-in-out infinite alternate;
@@ -326,7 +332,9 @@ body::after {
   position: absolute;
   inset: 0;
   border-radius: 50%;
-  background: url('images/hero_bg.jpg') center/cover no-repeat;
+  background:
+    url('images/hero_bg.jpg') center/cover no-repeat,
+    linear-gradient(150deg, #1d3327 0%, #141920 75%);
   opacity: 0.35;
   clip-path: ellipse(0% 0% at 50% 50%);
   animation: nfc-reveal-breathe 4.5s ease-in-out infinite;
@@ -1021,12 +1029,34 @@ body::after {
   font-weight: 700;
   letter-spacing: 0.1em;
   text-transform: uppercase;
+  white-space: nowrap;
   z-index: 2;
 }
 .card-status.available { background: rgba(34,197,94,0.14);  border: 1px solid rgba(34,197,94,0.38);   color: var(--success); }
 .card-status.in-use    { background: rgba(100,116,139,0.1);  border: 1px solid rgba(100,116,139,0.25); color: var(--text-muted); }
 .card-status.mine-tag  { background: var(--info-dim);        border: 1px solid rgba(0,212,255,0.38);  color: var(--info); }
 .card-status.maint     { background: rgba(245,158,11,0.1);   border: 1px solid rgba(245,158,11,0.3);   color: var(--warning); }
+
+/* Calibration badge (under the status badge on the card image) */
+.card-cal {
+  position: absolute; top: 2.15rem; right: 0.65rem;
+  padding: 0.2rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  z-index: 2;
+}
+.card-cal.due_soon { background: rgba(245,158,11,0.1);  border: 1px solid rgba(245,158,11,0.3);  color: var(--warning); }
+.card-cal.due      { background: rgba(239,68,68,0.12);  border: 1px solid rgba(239,68,68,0.4);   color: var(--danger); }
+.card-cal.overdue  { background: rgba(239,68,68,0.12);  border: 1px solid rgba(239,68,68,0.4);   color: var(--danger); }
+
+/* Calibration value colors on the device-detail meta row */
+.meta-value.cal-due_soon { color: var(--warning); }
+.meta-value.cal-due      { color: var(--danger); }
+.meta-value.cal-overdue  { color: var(--danger); }
 
 .card-body { padding: 0.9rem 1rem 1.1rem; }
 .card-name {
@@ -2141,12 +2171,27 @@ body::after {
   width: 100%;
   cursor: pointer;
 }
-.bind-pm-group { width: 100%; max-width: 100%; }
 .bind-slot-grid {
   width: 100%;
   display: grid;
   grid-template-columns: repeat(6, 1fr);
   gap: 0.4rem;
+}
+/* Bind-list fetch failure note (hidden while empty) + inline retry. */
+.bind-list-note:empty { display: none; }
+.bind-note-retry {
+  font-family: var(--font-display);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 0.3rem 0.7rem;
+  margin-left: 0.5rem;
+  border-radius: 8px;
+  border: 1px solid var(--border-accent);
+  background: var(--accent-dim);
+  color: var(--accent);
+  cursor: pointer;
 }
 .bind-slot-btn {
   font-family: var(--font-display);
@@ -2165,9 +2210,36 @@ body::after {
   color: var(--accent);
 }
 .bind-slot-btn.taken {
-  opacity: 0.35;
-  cursor: not-allowed;
+  border-color: var(--accent);
+  position: relative;
 }
+.bind-slot-count {
+  display: block;
+  font-size: 0.65rem;
+  font-weight: 700;
+  color: var(--accent);
+}
+.bind-registerable-list {
+  max-height: 22vh;
+}
+.bind-registerable {
+  font-family: var(--font-display);
+  font-size: 0.82rem;
+  font-weight: 600;
+  text-align: left;
+  padding: 0.6rem 0.85rem;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+}
+.bind-registerable.selected {
+  border-color: var(--border-accent);
+  color: var(--accent);
+}
+.bind-registerable:only-child:empty { display: none; }
+.bind-registerable-list:empty { display: none; }
 .bind-add-actions {
   display: flex;
   gap: 0.6rem;
@@ -2361,7 +2433,8 @@ html.lite .screen {
   clip-path: none !important;
   opacity: 0;
   visibility: hidden;
-  transition: opacity 0.25s ease, visibility 0.25s ease;
+  transition: opacity 0.25s ease, visibility 0.25s ease,
+              transform 0.35s var(--ease-smooth);
 }
 html.lite .screen.active    { opacity: 1; visibility: visible; }
 html.lite .screen.exit      { opacity: 0; visibility: hidden; }
@@ -2371,7 +2444,7 @@ html.lite .overlay {
   clip-path: none !important;
   opacity: 0;
   pointer-events: none;
-  transition: opacity 0.2s ease;
+  transition: opacity 0.2s ease, transform 0.35s var(--ease-smooth);
 }
 html.lite .overlay.visible       { opacity: 1; pointer-events: auto; }
 html.lite .overlay.hidden-left,
@@ -2490,3 +2563,102 @@ html.lite .reveal-inner {
   color: var(--text);
 }
 .handover-cancel:hover { transform: scale(1.04); }
+
+/* ============================================================
+   ON-SCREEN KEYBOARD — one shared touch keyboard (keyboard.js)
+   Opens when any kiosk input gains focus; closes on Done or
+   blur. Fixed to the bottom, above every overlay (z 80), below
+   the scanline/cursor layers (9998+). Flat surfaces only — no
+   blur or looping animation, cheap on the Riverdi panel.
+============================================================ */
+.kbd {
+  position: fixed;
+  left: 50%;
+  bottom: 0;
+  width: min(1080px, 96vw);
+  padding: 0.9rem 1rem 1rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-bottom: none;
+  border-radius: 20px 20px 0 0;
+  box-shadow: 0 -18px 60px rgba(0, 0, 0, 0.45);
+  /* Above every overlay (max 70) and the toast (9990); below scanlines
+     (9998) and the cursor (9999) so the CRT finish still covers it. */
+  z-index: 9995;
+  visibility: hidden;
+  /* pointer-events off while .kbd-open is absent — the slide-in/out surface
+     must not swallow taps meant for the UI beneath it. */
+  pointer-events: none;
+  transform: translate(-50%, 105%);
+  transition: transform 0.35s var(--ease-smooth), visibility 0.35s;
+}
+.kbd.kbd-open {
+  visibility: visible;
+  pointer-events: auto;
+  transform: translate(-50%, 0);
+}
+
+.kbd-row { display: flex; gap: 0.5rem; }
+.kbd-row + .kbd-row { margin-top: 0.5rem; }
+
+.kbd-key {
+  flex: 1 1 0%;
+  min-width: 0;
+  padding: 0.95rem 0;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  color: var(--text);
+  font-family: var(--font-display);
+  font-size: 1.3rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-align: center;
+  user-select: none;
+  touch-action: manipulation;
+  transition: background 0.12s ease, transform 0.12s ease;
+}
+.kbd-key:active {
+  background: var(--surface-3);
+  transform: scale(0.94);
+}
+.kbd-key-shift,
+.kbd-key-back,
+.kbd-key-sym,
+.kbd-key-abc,
+.kbd-key-acc,
+.kbd-key-tab {
+  background: var(--surface-3);
+  font-size: 1.1rem;
+}
+.kbd-key-space {
+  color: var(--text-muted);
+  font-size: 1rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.kbd-key-done {
+  background: var(--accent);
+  border-color: var(--border-accent);
+  color: #fff;
+}
+.kbd-key-done:active { background: #00b34c; }
+.kbd-key.kbd-shift-on {
+  background: var(--accent-dim);
+  border-color: var(--border-accent);
+  color: var(--accent);
+}
+.kbd-key.kbd-shift-caps {
+  background: var(--accent);
+  border-color: var(--border-accent);
+  color: #fff;
+}
+
+/* Content push-up while the keyboard is open: keyboard.js sets
+   --kbd-shift to the overlap so the focused field clears the keys.
+   No transition here — transform already lives in the hosts' own
+   transition lists, so a shifted screen still exits at its clip-path
+   pace and the settle animates instead of popping. */
+.screen.kbd-shift, .overlay.kbd-shift {
+  transform: translateY(calc(-1 * var(--kbd-shift, 0px)));
+}

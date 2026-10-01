@@ -44,17 +44,17 @@ function applyAssetLabels(label) {
   const listHint = document.getElementById('bind-list-hint');
   if (listHint) {
     listHint.textContent =
-      `Add a unit from the Excel list (${text} + free slot), then tap its sticker. Existing rows can bind, unbind, or change slot.`;
+      `Add a unit from the Excel list (${text} + slot), then tap its sticker. Existing rows can bind, unbind, or change slot.`;
   }
   const addHint = document.getElementById('bind-add-hint');
   if (addHint) {
     addHint.textContent =
-      `Enter the ${text} from the catalog spreadsheet, pick a free slot, then continue to tap the sticker.`;
+      'Pick a unit waiting for the locker, choose a slot, then tap the sticker.';
   }
   const search = document.getElementById('bind-search');
   if (search) search.placeholder = `Search name or ${text}…`;
-  const pmInput = document.getElementById('bind-pm-input');
-  if (pmInput) pmInput.placeholder = text;
+  const addSearch = document.getElementById('bind-add-search');
+  if (addSearch) addSearch.placeholder = `Search name or ${text}…`;
 }
 
 /**
@@ -159,9 +159,21 @@ async function apiAuthTap(uid_hmac) {
  * @returns {Promise<Array<Object>>} Array of device objects, or empty array on error.
  */
 async function apiGetDevices() {
-  if (USE_DEMO) { await sleep(280); return DEMO_DEVICES; } // simulate fetch latency
+  if (USE_DEMO) { await sleep(280); return DEMO_DEVICES.filter(d => d.has_tag); } // simulate fetch latency
   const res = await fetch('/api/devices');
   if (!res.ok) return [];
+  return await res.json();
+}
+
+/**
+ * Fetch every locker unit for the admin manage list — untagged rows
+ * included, since binding a sticker is what the list is for.
+ * @returns {Promise<Array<Object>>} Array of device objects, or empty array on error.
+ */
+async function apiGetAdminDevices() {
+  if (USE_DEMO) { await sleep(280); return DEMO_DEVICES; }
+  const res = await fetch('/api/admin/devices');
+  if (!res.ok) throw new Error('admin devices fetch failed: ' + res.status);
   return await res.json();
 }
 
@@ -335,6 +347,17 @@ function setRevealOrigin(el) {
 let detailHideTimer;
 
 /**
+ * Release DOM focus from whatever input/textarea holds it. Called before a
+ * transition or covering overlay opens so the shared on-screen keyboard
+ * (keyboard.js) closes via its focusout path instead of staying bound to a
+ * field it can no longer see — the keyboard floats above every overlay.
+ */
+function blurActiveInput() {
+  const ae = document.activeElement;
+  if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')) ae.blur();
+}
+
+/**
  * Navigate to a different screen or overlay using circle-reveal (screens) or
  * polygon-wipe (overlays) transitions. Handles exit animations on the outgoing
  * screen and entrance animations on the incoming one.
@@ -342,6 +365,7 @@ let detailHideTimer;
  */
 function navigate(toId) {
   if (S.screen === toId) return;
+  blurActiveInput();
 
   const fromEl = getEl(S.screen);
   const toEl   = getEl(toId);
@@ -556,6 +580,7 @@ function armIdle() {
  */
 function showInactivity() {
   if (S.updating) return;
+  blurActiveInput();
   S.prevScreen = S.screen;
   const overlay = document.getElementById('overlay-inactivity');
   overlay.style.display = '';
@@ -837,6 +862,80 @@ function safeKioskImagePath(raw) {
   return path;
 }
 
+/* ============================================================
+   CALIBRATION STATE — badge before the due date; borrow blocked on/after it
+============================================================ */
+/**
+ * Days until a device's calibration date (negative when overdue), or null
+ * when there is no usable date. Trusts the API's calibration_days_left;
+ * falls back to the ISO calibration_due string for demo data.
+ * @param {Object} dev - Device record from the API or DEMO_DEVICES.
+ * @returns {number|null}
+ */
+function calDaysLeft(dev) {
+  if (typeof dev.calibration_days_left === 'number') return dev.calibration_days_left;
+  if (!dev.calibration_due) return null;
+  const due = new Date(`${String(dev.calibration_due).slice(0, 10)}T00:00:00`);
+  if (Number.isNaN(due.getTime())) return null;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  return Math.round((due - today) / 86400000);
+}
+
+/**
+ * Calibration state for a device: 'ok' | 'due_soon' | 'due' | 'overdue',
+ * or null when no date is set. Trusts the API's calibration_state;
+ * falls back to computing from the due date (demo data).
+ * @param {Object} dev - Device record.
+ * @returns {string|null}
+ */
+function calState(dev) {
+  if (typeof dev.calibration_state === 'string') return dev.calibration_state;
+  const n = calDaysLeft(dev);
+  if (n === null) return null;
+  if (n < 0) return 'overdue';
+  if (n === 0) return 'due';
+  const warn = Number.isInteger(window.SMART_LOCKER_CAL_WARN_DAYS)
+    ? window.SMART_LOCKER_CAL_WARN_DAYS : 14;
+  return n <= warn ? 'due_soon' : 'ok';
+}
+
+/**
+ * Whether calibration blocks a borrow of this device (due date reached).
+ * @param {Object} dev - Device record.
+ * @returns {boolean}
+ */
+function calBlocked(dev) {
+  const state = calState(dev);
+  return state === 'due' || state === 'overdue';
+}
+
+/**
+ * Short badge text for a device's calibration state, or null when the
+ * card shows no badge.
+ * @param {Object} dev - Device record.
+ * @returns {string|null}
+ */
+function calBadgeText(dev) {
+  const state = calState(dev);
+  const n = calDaysLeft(dev);
+  if (state === 'due_soon') return n === null ? 'CAL SOON' : `CAL ${n}d`;
+  if (state === 'due') return 'CAL DUE';
+  if (state === 'overdue') return 'CAL OVERDUE';
+  return null;
+}
+
+function buildCardImgPlaceholder(slotLabel) {
+  const ph = document.createElement('div');
+  ph.className = 'card-img-placeholder';
+  ph.innerHTML =
+    '<svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>';
+  const slotSpan = document.createElement('span');
+  slotSpan.textContent = slotLabel;
+  ph.appendChild(slotSpan);
+  return ph;
+}
+
 /**
  * Build one locker card with textContent / setAttribute (no catalog HTML).
  * @param {Object} dev
@@ -855,12 +954,6 @@ function buildDeviceCardEl(dev, cls, statusCls, statusTxt, slotLabel) {
   const imgPath = safeKioskImagePath(dev.image_path);
 
   if (imgPath) {
-    const img = document.createElement('img');
-    img.src = imgPath;
-    img.alt = dev.name || '';
-    img.loading = 'lazy';
-    cardImage.appendChild(img);
-
     const reveal = document.createElement('div');
     reveal.className = 'card-hover-reveal';
     const revealImg = document.createElement('div');
@@ -872,16 +965,20 @@ function buildDeviceCardEl(dev, cls, statusCls, statusTxt, slotLabel) {
       '<svg viewBox="0 0 24 24"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>';
     reveal.appendChild(revealImg);
     reveal.appendChild(revealIcon);
+
+    const img = document.createElement('img');
+    img.onerror = () => {
+      img.remove();
+      reveal.remove();
+      cardImage.appendChild(buildCardImgPlaceholder(slotLabel));
+    };
+    img.src = imgPath;
+    img.alt = dev.name || '';
+    img.loading = 'lazy';
+    cardImage.appendChild(img);
     cardImage.appendChild(reveal);
   } else {
-    const ph = document.createElement('div');
-    ph.className = 'card-img-placeholder';
-    ph.innerHTML =
-      '<svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>';
-    const slotSpan = document.createElement('span');
-    slotSpan.textContent = slotLabel;
-    ph.appendChild(slotSpan);
-    cardImage.appendChild(ph);
+    cardImage.appendChild(buildCardImgPlaceholder(slotLabel));
   }
 
   const slotEl = document.createElement('div');
@@ -892,6 +989,14 @@ function buildDeviceCardEl(dev, cls, statusCls, statusTxt, slotLabel) {
   statusEl.textContent = statusTxt;
   cardImage.appendChild(slotEl);
   cardImage.appendChild(statusEl);
+
+  const calText = calBadgeText(dev);
+  if (calText) {
+    const calEl = document.createElement('div');
+    calEl.className = `card-cal ${calState(dev)}`;
+    calEl.textContent = calText;
+    cardImage.appendChild(calEl);
+  }
 
   const body = document.createElement('div');
   body.className = 'card-body';
@@ -1025,7 +1130,7 @@ function buildGrid(gridId, devices, mode) {
       });
     }
 
-    card.addEventListener('click', () => { clickSound(); openDetail(dev, mode); });
+    card.addEventListener('click', () => { openDetail(dev, mode); });
     grid.appendChild(card);
   });
 
@@ -1043,6 +1148,14 @@ function buildGrid(gridId, devices, mode) {
  * @param {Object} dev - The device object to display details for.
  * @param {string} mode - Either 'borrow' or 'return', determines confirm button behavior.
  */
+/**
+ * Generation counter for detail-pane photo loads. Each openDetail bumps it;
+ * a slow img.onerror from a previously viewed device checks its captured
+ * generation and bails out instead of flipping the current placeholder.
+ * @type {number}
+ */
+let detailImgGen = 0;
+
 function openDetail(dev, mode) {
   S.selected   = dev;
   S.mode       = mode;
@@ -1071,6 +1184,23 @@ function openDetail(dev, mode) {
   // Color-code the status: cyan for yours, green for available, amber for maintenance
   statusEl.style.color =
     mine ? 'var(--info)' : avail ? 'var(--success)' : maint ? 'var(--warning)' : 'var(--text-muted)';
+
+  const calRow  = document.getElementById('detail-calibration-row');
+  const calEl   = document.getElementById('detail-calibration');
+  const calS    = calState(dev);
+  const calDays = calDaysLeft(dev);
+  if (dev.calibration_due && calS) {
+    const suffix = calDays === null   ? ''
+                 : calS === 'overdue' ? `${-calDays}d overdue`
+                 : calS === 'due'     ? 'due today'
+                 : calS === 'due_soon' ? `in ${calDays}d`
+                 : '';
+    calEl.textContent = dev.calibration_due + (suffix ? ` (${suffix})` : '');
+    calEl.className = `meta-value cal-${calS}`;
+    calRow.classList.remove('hidden');
+  } else {
+    calRow.classList.add('hidden');
+  }
   document.getElementById('detail-desc').textContent    =
     dev.description || 'No description available.';
 
@@ -1079,9 +1209,17 @@ function openDetail(dev, mode) {
   const placeholder = document.getElementById('detail-img-placeholder');
   const existingImg = imgPane.querySelector('img');
   if (existingImg) existingImg.remove();
+  // Invalidate any in-flight error from a previously opened device, even
+  // when the new device has no photo of its own.
+  const imgGen = ++detailImgGen;
   if (imgPath) {
     placeholder.classList.add('hidden');
     const img = document.createElement('img');
+    img.onerror = () => {
+      if (imgGen !== detailImgGen) return; // stale callback — a newer openDetail won
+      img.remove();
+      placeholder.classList.remove('hidden');
+    };
     img.src = imgPath;
     img.alt = dev.name || '';
     imgPane.appendChild(img);
@@ -1100,7 +1238,11 @@ function openDetail(dev, mode) {
   const btn = document.getElementById('confirm-btn');
   btn.className = 'confirm-btn';
   if (mode === 'borrow') {
-    if (avail)      { btn.textContent = 'Confirm Borrow';    btn.classList.add('do-borrow'); }
+    if (avail && calBlocked(dev)) {
+      btn.textContent = calState(dev) === 'due' ? 'Calibration Due' : 'Calibration Overdue';
+      btn.classList.add('disabled');
+    }
+    else if (avail) { btn.textContent = 'Confirm Borrow';    btn.classList.add('do-borrow'); }
     else if (maint) { btn.textContent = 'Under Maintenance'; btn.classList.add('disabled'); }
     else            { btn.textContent = 'Already Borrowed';  btn.classList.add('disabled'); }
   } else {
@@ -1197,6 +1339,7 @@ let slotHideTimer;
 function showSlotOverlay(name, slot) {
   const overlay = document.getElementById('overlay-slot');
   if (!overlay) return;
+  blurActiveInput();
   document.getElementById('slot-return-name').textContent = name || 'Device';
   const putEl = document.getElementById('slot-return-put');
   const numEl = document.getElementById('slot-return-num');
@@ -1249,6 +1392,7 @@ let handoverHideTimer;
  */
 function openHandover(data) {
   if (S.updating) return;
+  blurActiveInput();
   handoverData = data;
   S.handoverDeviceId = data.device_id;
   const msgEl = document.getElementById('handover-msg');
@@ -1341,6 +1485,7 @@ async function acceptHandover() {
     }
   } else {
     showToast((result && result.message) || 'Could not transfer device.', 'error');
+    closeHandover();
   }
 }
 
@@ -1569,7 +1714,7 @@ function populateNameList(names) {
     btn.textContent = name;
     // Cap stagger at 0.6s (20 × 0.03s), matching the previous entrance cap
     btn.style.setProperty('--i', String(Math.min(i, 20)));
-    btn.addEventListener('click', () => { clickSound(); selectRegistrantName(name, btn); });
+    btn.addEventListener('click', () => { selectRegistrantName(name, btn); });
     list.appendChild(btn);
   });
 }
@@ -1600,6 +1745,9 @@ function selectRegistrantName(name, btn) {
 async function submitRegistrationName() {
   let name;
   let endpoint;
+  const btn = document.getElementById(
+    S.adminRegistration ? 'register-next-btn-admin' : 'register-next-btn');
+  if (btn.disabled) return; // a registration POST is already in flight
 
   if (S.adminRegistration) {
     // Admin manual registration — get name from text input
@@ -1614,8 +1762,7 @@ async function submitRegistrationName() {
   }
 
   // Disable the appropriate continue button to prevent double-submit
-  const btnId = S.adminRegistration ? 'register-next-btn-admin' : 'register-next-btn';
-  document.getElementById(btnId).disabled = true;
+  btn.disabled = true;
 
   document.getElementById('register-confirm-name').textContent = name;
   showRegisterStep('register-step-tap');
@@ -1640,6 +1787,7 @@ async function submitRegistrationName() {
   const result = await endpoint(name);
   if (!result.success) {
     clearInterval(registerCountdownTimer);
+    btn.disabled = false;
     showRegisterStep('register-step-error');
     document.getElementById('register-error-msg').textContent =
       result.detail || result.message || 'Could not start registration.';
@@ -1726,16 +1874,16 @@ function handleRegistrationFailed(data) {
 }
 
 /* ============================================================
-   HIDDEN ADMIN PANEL — 5× tap on clock area within 3 seconds
+   HIDDEN ADMIN PANEL — 5× tap on clock area within 8 seconds
 ============================================================ */
 const adminTaps = [];
 const ADMIN_TAP_COUNT = 5;
-const ADMIN_TAP_WINDOW = 3000; // ms
+const ADMIN_TAP_WINDOW = 8000; // ms
 let adminSessionActive = false;
 
 /**
  * Record a tap on the clock area and check if the admin tap sequence (5 taps
- * within 3 seconds) has been completed. Opens the admin panel on success.
+ * within 8 seconds) has been completed. Opens the admin panel on success.
  */
 function checkAdminTapSequence() {
   const now = Date.now();
@@ -1764,11 +1912,11 @@ function toggleAdminPanel() {
 
 /**
  * Open the admin panel overlay with a polygon-wipe entrance animation.
- * Plays a click sound on activation.
  */
 async function openAdminPanel() {
-  clickSound();
-  if (S.screen === 'idle') S.screen = 'admin';
+  blurActiveInput();
+  const wasIdle = S.screen === 'idle';
+  if (wasIdle) S.screen = 'admin';
   armIdle();
   const overlay = document.getElementById('overlay-admin');
   overlay.style.display = '';
@@ -2057,6 +2205,7 @@ function isFreshUpdateStatus(data, launchedAt) {
 function showUpdateOverlay() {
   updatePollGen += 1;
   S.updating = true;
+  blurActiveInput();
   clearTimeout(S.idleTimer);
   clearInterval(S.cdTimer);
   const overlay = document.getElementById('overlay-update');
@@ -2308,6 +2457,26 @@ async function adminRegisterUser() {
 /** @type {number|null} Bind-window countdown interval. */
 let bindCountdownTimer = null;
 
+/** @type {Array<Object>} Locker units on the admin manage list (tagged or not). */
+let bindDevices = [];
+
+/**
+ * True when ``bindDevices`` came from a successful GET. A failed fetch must
+ * not clear the cache (the list would lie empty and every slot would read
+ * free), and the Add/change-slot steps must not paint a picker from it.
+ * @type {boolean}
+ */
+let adminDevicesOk = false;
+
+/** @type {Array<Object>} Catalog rows the Register Device add step offers. */
+let registerableRows = [];
+/** Last Register Device catalog-list load failure, or ''. */
+let registerableError = '';
+/** @type {string|null} PM of the catalog row picked on the add step. */
+let selectedAddPm = null;
+/** Debounce timer for the add-step search (filters registerableRows). */
+let addSearchTimer = 0;
+
 /**
  * Show a Register Device overlay step and hide the others.
  * @param {string} stepId - Element id of the step to show.
@@ -2348,6 +2517,7 @@ function closeRegisterDevice() {
  */
 async function adminRegisterDevice() {
   closeAdminPanel();
+  blurActiveInput();
   await sleep(300);
   const overlay = document.getElementById('overlay-register-device');
   overlay.style.display = '';
@@ -2368,18 +2538,35 @@ let bindSearchTimer = 0;
  * Fetch devices and render the bind list: name + PM (+ slot), unbound first.
  * Duplicate names stay as distinct rows (PM identifies the unit).
  * Search filters the cached list; pass refresh=true after a bind/register.
+ * The manage list needs untagged rows too, so it reads the admin feed — not
+ * the tagged-only kiosk list the borrow/return grids show.
  *
- * @param {boolean} [refresh=true] - When false, filter ``S.devices`` without a GET.
+ * @param {boolean} [refresh=true] - When false, filter ``bindDevices`` without a GET.
  * @returns {Promise<void>}
  */
 async function populateBindList(refresh) {
   const list = document.getElementById('bind-device-list');
+  const note = document.getElementById('bind-list-note');
   if (!list) return;
-  if (refresh !== false || !Array.isArray(S.devices)) {
-    const devices = await apiGetDevices();
-    S.devices = devices;
+  if (refresh !== false) {
+    try {
+      bindDevices = await apiGetAdminDevices();
+      adminDevicesOk = true;
+      if (note) note.textContent = '';
+    } catch (_) {
+      adminDevicesOk = false;
+      if (note) {
+        note.textContent = 'Device list unavailable — showing last known rows. ';
+        const retry = document.createElement('button');
+        retry.type = 'button';
+        retry.className = 'bind-note-retry';
+        retry.textContent = 'Retry';
+        retry.addEventListener('click', () => { populateBindList(); });
+        note.appendChild(retry);
+      }
+    }
   }
-  const devices = S.devices || [];
+  const devices = bindDevices;
   const query = (document.getElementById('bind-search').value || '').toLowerCase().trim();
   const filtered = devices.filter(d => {
     if (!query) return true;
@@ -2423,20 +2610,20 @@ async function populateBindList(refresh) {
     bindBtn.type = 'button';
     bindBtn.className = 'bind-go';
     bindBtn.textContent = tagged ? 'Replace tag' : 'Bind';
-    bindBtn.addEventListener('click', () => { clickSound(); startDeviceTagBind(dev); });
+    bindBtn.addEventListener('click', () => { startDeviceTagBind(dev); });
     actions.appendChild(bindBtn);
     const slotBtn = document.createElement('button');
     slotBtn.type = 'button';
     slotBtn.className = 'bind-unbind';
     slotBtn.textContent = 'Slot';
-    slotBtn.addEventListener('click', () => { clickSound(); openChangeSlot(dev); });
+    slotBtn.addEventListener('click', () => { openChangeSlot(dev); });
     actions.appendChild(slotBtn);
     if (tagged) {
       const unbindBtn = document.createElement('button');
       unbindBtn.type = 'button';
       unbindBtn.className = 'bind-unbind';
       unbindBtn.textContent = 'Unbind';
-      unbindBtn.addEventListener('click', () => { clickSound(); unbindDeviceTag(dev); });
+      unbindBtn.addEventListener('click', () => { unbindDeviceTag(dev); });
       actions.appendChild(unbindBtn);
     }
 
@@ -2498,24 +2685,29 @@ let slotChangeDevice = null;
 let selectedChangeSlot = null;
 
 /**
- * Occupied locker slot numbers, optionally ignoring one device (the one being moved).
+ * Device counts per locker slot, optionally ignoring one device (the one
+ * being moved). Slots are shared labels — a count above zero is a hint,
+ * not a block.
  * @param {number|null} [exceptId]
- * @returns {Set<number>}
+ * @returns {Map<number, number>} Slot number to device count.
  */
 function occupiedSlots(exceptId) {
-  const used = new Set();
-  (S.devices || []).forEach(d => {
+  const counts = new Map();
+  bindDevices.forEach(d => {
     if (d.locker_slot == null) return;
     if (exceptId != null && d.id === exceptId) return;
-    used.add(d.locker_slot);
+    counts.set(d.locker_slot, (counts.get(d.locker_slot) || 0) + 1);
   });
-  return used;
+  return counts;
 }
 
 /**
- * Render a 1..N slot picker. Occupied slots are disabled.
+ * Render a 1..N slot picker showing PREDICTED occupancy: base counts come
+ * from ``occupied`` (all units for Add, all-but-the-edited-unit for change
+ * slot) and the currently selected slot adds its in-flight +1 — so the
+ * numbers preview the state after saving, nothing is written on selection.
  * @param {string} containerId
- * @param {Set<number>} occupied
+ * @param {Map<number, number>} occupied Slot number to base device count.
  * @param {number|null} selected
  * @param {function(number): void} onPick
  */
@@ -2524,19 +2716,26 @@ function renderSlotGrid(containerId, occupied, selected, onPick) {
   if (!el) return;
   el.innerHTML = '';
   let maxUsed = 0;
-  occupied.forEach(n => { if (n > maxUsed) maxUsed = n; });
+  occupied.forEach((count, n) => { if (n > maxUsed) maxUsed = n; });
+  // The selected slot is in the grid even when above every occupied one.
+  if (selected != null && selected > maxUsed) maxUsed = selected;
   const max = Math.min(SLOT_GRID_MAX, Math.max(SLOT_GRID_MIN, maxUsed + 1));
   for (let n = 1; n <= max; n++) {
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'bind-slot-btn';
     btn.textContent = String(n);
-    if (occupied.has(n)) {
+    const count = (occupied.get(n) || 0) + (n === selected ? 1 : 0);
+    if (count > 0) {
       btn.classList.add('taken');
-      btn.disabled = true;
+      btn.title = `${count} unit${count === 1 ? '' : 's'} in this slot`;
+      const badge = document.createElement('span');
+      badge.className = 'bind-slot-count';
+      badge.textContent = `×${count}`;
+      btn.appendChild(badge);
     }
     if (selected === n) btn.classList.add('selected');
-    btn.addEventListener('click', () => { clickSound(); onPick(n); });
+    btn.addEventListener('click', () => { onPick(n); });
     el.appendChild(btn);
   }
 }
@@ -2567,17 +2766,109 @@ function startBindCountdown() {
 }
 
 /**
- * Open the Add from Excel step (PM + free slot).
+ * Fetch the catalog rows eligible for Register Device (Excel rows whose
+ * equipment id is not a locker device yet) into ``registerableRows``, then
+ * render the picker. The add-step field filters this list — the id a unit
+ * registers under always comes from a picked row, never free text.
+ * @returns {Promise<void>}
+ */
+async function loadRegisterableList() {
+  registerableError = '';
+  try {
+    const res = await fetch('/api/admin/devices/registerable');
+    if (res.ok) {
+      registerableRows = await res.json();
+    } else {
+      const body = await res.json().catch(() => ({}));
+      registerableRows = [];
+      registerableError = typeof body.detail === 'string'
+        ? body.detail : 'Could not load catalog units.';
+    }
+  } catch (_) {
+    registerableRows = [];
+    registerableError = 'Could not load catalog units. Check the connection.';
+  }
+  renderRegisterableList();
+}
+
+/**
+ * Render the registerable rows filtered by the add-step search input.
+ * Tapping a row selects it; a selection that falls outside the filter is
+ * cleared so Continue can only pick a visible row.
+ */
+function renderRegisterableList() {
+  const list = document.getElementById('bind-registerable-list');
+  if (!list) return;
+  const search = document.getElementById('bind-add-search');
+  const query = (search && search.value || '').toLowerCase().trim();
+  const rows = registerableRows.filter(r => {
+    if (!query) return true;
+    return (r.name || '').toLowerCase().includes(query)
+        || (r.pm_number || '').toLowerCase().includes(query);
+  });
+  if (selectedAddPm && !rows.some(r => r.pm_number === selectedAddPm)) {
+    selectedAddPm = null;
+  }
+  list.innerHTML = '';
+  if (registerableError) {
+    const failure = document.createElement('p');
+    failure.className = 'bind-hint';
+    failure.textContent = `${registerableError} `;
+    const retry = document.createElement('button');
+    retry.type = 'button';
+    retry.className = 'bind-note-retry';
+    retry.textContent = 'Retry';
+    retry.addEventListener('click', loadRegisterableList);
+    failure.appendChild(retry);
+    list.appendChild(failure);
+    return;
+  }
+  if (!rows.length) {
+    const empty = document.createElement('p');
+    empty.className = 'bind-hint';
+    empty.textContent = registerableRows.length
+      ? 'No units match the search.'
+      : 'No catalog units are waiting to be registered.';
+    list.appendChild(empty);
+    return;
+  }
+  rows.forEach(row => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'bind-registerable'
+      + (row.pm_number === selectedAddPm ? ' selected' : '');
+    btn.textContent = `${row.name} (${row.pm_number})`;
+    btn.addEventListener('click', () => {
+          selectedAddPm = row.pm_number === selectedAddPm ? null : row.pm_number;
+      document.getElementById('bind-add-error').textContent = '';
+      renderRegisterableList();
+    });
+    list.appendChild(btn);
+  });
+}
+
+/**
+ * Open the add step (pick a registerable unit + slot).
+ * The slot picker is not painted when the manage list failed to load —
+ * occupancy would be unknown and every slot would read free.
  */
 function openAddFromExcel() {
   if (USE_DEMO) {
-    showToast('Add from Excel is Pi only', 'error');
+    showToast('Add device is Pi only', 'error');
     return;
   }
-  document.getElementById('bind-pm-input').value = '';
+  document.getElementById('bind-add-search').value = '';
   document.getElementById('bind-add-error').textContent = '';
   selectedAddSlot = null;
+  selectedAddPm = null;
+  loadRegisterableList();
   const paint = () => {
+    if (!adminDevicesOk) {
+      // Slot occupancy is unknown — a picker painted now would show no counts.
+      document.getElementById('bind-add-error').textContent =
+        'Device list unavailable — back out and retry the list before picking a slot.';
+      return;
+    }
     renderSlotGrid('bind-slot-grid', occupiedSlots(), selectedAddSlot, n => {
       selectedAddSlot = n;
       paint();
@@ -2596,15 +2887,15 @@ async function submitRegisterDevice() {
     showToast('Add from Excel is Pi only', 'error');
     return;
   }
-  const pm = (document.getElementById('bind-pm-input').value || '').trim();
+  const pm = selectedAddPm;
   const err = document.getElementById('bind-add-error');
   err.textContent = '';
   if (!pm) {
-    err.textContent = `Enter the ${ASSET_LABEL}.`;
+    err.textContent = 'Pick a unit from the list.';
     return;
   }
   if (!selectedAddSlot) {
-    err.textContent = 'Pick a free slot.';
+    err.textContent = 'Pick a slot.';
     return;
   }
   try {
@@ -2639,6 +2930,12 @@ function openChangeSlot(dev) {
     `${dev.name} (${dev.pm_number})`;
   document.getElementById('bind-slot-error').textContent = '';
   const paint = () => {
+    if (!adminDevicesOk) {
+      // Slot occupancy is unknown — a picker painted now would show no counts.
+      document.getElementById('bind-slot-error').textContent =
+        'Device list unavailable — back out and retry the list before picking a slot.';
+      return;
+    }
     renderSlotGrid(
       'bind-change-slot-grid',
       occupiedSlots(dev.id),
@@ -2753,28 +3050,30 @@ function adminEndSession() {
 }
 
 /**
- * Close Chromium kiosk (backend stays up). Confirm first. Demo never POSTs.
+ * Stop the whole locker system: Chromium closes, then the smart-locker
+ * service stops. The Pi stays powered on and comes back on the next boot.
+ * Confirm first. Demo never POSTs.
  * @returns {Promise<void>}
  */
-async function adminExitKiosk() {
+async function adminStopSystem() {
   if (S.updating) return;
-  if (!confirm('Close the kiosk browser? The locker service stays running. Chromium will not come back until the next login or reboot.')) {
+  if (!confirm('Stop the locker system? The kiosk browser and the locker service will stop and stay stopped until the next boot. The Pi stays powered on.')) {
     return;
   }
   if (USE_DEMO) {
-    showToast('Demo preview — Exit kiosk is Pi only', 'success');
+    showToast('Demo preview — Stop system is Pi only', 'success');
     return;
   }
   try {
-    const res = await fetch('/api/admin/exit-kiosk', { method: 'POST' });
+    const res = await fetch('/api/admin/stop-system', { method: 'POST' });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      showToast(data.detail || 'Could not exit kiosk', 'error');
+      showToast(data.detail || 'Could not stop the system', 'error');
       return;
     }
-    showToast(data.message || 'Kiosk closing…', 'success');
+    showToast(data.message || 'Stopping the locker system…', 'success');
   } catch (_) {
-    showToast('Exit kiosk request failed', 'error');
+    showToast('Stop system request failed', 'error');
   }
 }
 
@@ -2785,6 +3084,7 @@ async function adminExitKiosk() {
  */
 function showPowerOverlay() {
   S.updating = true;
+  blurActiveInput();
   clearTimeout(S.idleTimer);
   clearInterval(S.cdTimer);
   const overlay = document.getElementById('overlay-power');
@@ -2839,51 +3139,27 @@ async function adminShutdown() {
 }
 
 /* ============================================================
-   AUDIO CLICK FEEDBACK
-============================================================ */
-/**
- * Play a short click/tap audio feedback sound using the Web Audio API.
- * Creates a brief oscillator sweep from 900Hz to 420Hz over 70ms.
- * Silently ignored if audio is not available.
- */
-function clickSound() {
-  try {
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
-    const osc = ctx.createOscillator();
-    const g   = ctx.createGain();
-    osc.connect(g);
-    g.connect(ctx.destination);
-    osc.frequency.setValueAtTime(900, ctx.currentTime);
-    osc.frequency.exponentialRampToValueAtTime(420, ctx.currentTime + 0.07);
-    g.gain.setValueAtTime(0.07, ctx.currentTime);
-    g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.09);
-    osc.start();
-    osc.stop(ctx.currentTime + 0.09);
-  } catch (_) { /* audio not available — silently ignore */ }
-}
-
-/* ============================================================
    EVENT LISTENERS
 ============================================================ */
-document.getElementById('btn-borrow').addEventListener('click', () => { clickSound(); openBorrow();  });
-document.getElementById('btn-return').addEventListener('click', () => { clickSound(); openReturn();  });
-document.getElementById('btn-end').addEventListener('click',    () => { clickSound(); endSession();  });
+document.getElementById('btn-borrow').addEventListener('click', () => { openBorrow();  });
+document.getElementById('btn-return').addEventListener('click', () => { openReturn();  });
+document.getElementById('btn-end').addEventListener('click',    () => { endSession();  });
 
 document.querySelectorAll('.back-btn').forEach(btn =>
-  btn.addEventListener('click', () => { clickSound(); navigate(btn.dataset.target); })
+  btn.addEventListener('click', () => { navigate(btn.dataset.target); })
 );
 
-document.getElementById('detail-close').addEventListener('click',  () => { clickSound(); closeDetail();      });
-document.getElementById('confirm-btn').addEventListener('click',   () => { clickSound(); confirmAction();    });
-document.getElementById('stay-btn').addEventListener('click',      () => { clickSound(); dismissInactivity(); });
-document.getElementById('overlay-slot').addEventListener('click',  () => { clickSound(); dismissSlotOverlay(); });
-document.getElementById('handover-accept').addEventListener('click', () => { clickSound(); acceptHandover(); });
-document.getElementById('handover-cancel').addEventListener('click', () => { clickSound(); cancelHandover(); });
+document.getElementById('detail-close').addEventListener('click',  () => { closeDetail();      });
+document.getElementById('confirm-btn').addEventListener('click',   () => { const b = document.getElementById('confirm-btn'); confirmAction(); });
+document.getElementById('stay-btn').addEventListener('click',      () => { dismissInactivity(); });
+document.getElementById('overlay-slot').addEventListener('click',  () => { dismissSlotOverlay(); });
+document.getElementById('handover-accept').addEventListener('click', () => { acceptHandover(); });
+document.getElementById('handover-cancel').addEventListener('click', () => { cancelHandover(); });
 
 // Registration — self-service (name list selection)
-document.getElementById('idle-register-link').addEventListener('click', () => { clickSound(); openRegister(); });
-document.getElementById('register-cancel-btn').addEventListener('click', () => { clickSound(); cancelRegistration(); });
-document.getElementById('register-next-btn').addEventListener('click', () => { clickSound(); submitRegistrationName(); });
+document.getElementById('idle-register-link').addEventListener('click', () => { openRegister(); });
+document.getElementById('register-cancel-btn').addEventListener('click', () => { cancelRegistration(); });
+document.getElementById('register-next-btn').addEventListener('click', () => { submitRegistrationName(); });
 
 // Registration — search/filter: filter the name list as the user types
 document.getElementById('register-search').addEventListener('input', (e) => {
@@ -2909,6 +3185,13 @@ document.getElementById('register-search').addEventListener('input', (e) => {
     }
   }
 });
+// Enter/Done on the search field acts like the occluded Continue button —
+// submits only when a list name is actually selected.
+document.getElementById('register-search').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !document.getElementById('register-next-btn').disabled) {
+    submitRegistrationName();
+  }
+});
 
 // Registration — admin manual (free-text input)
 const regAdminInput = document.getElementById('register-name-admin');
@@ -2916,10 +3199,10 @@ regAdminInput.addEventListener('input', () => {
   document.getElementById('register-next-btn-admin').disabled = !regAdminInput.value.trim();
 });
 regAdminInput.addEventListener('keydown', e => {
-  if (e.key === 'Enter' && regAdminInput.value.trim()) { clickSound(); submitRegistrationName(); }
+  if (e.key === 'Enter' && regAdminInput.value.trim()) { submitRegistrationName(); }
 });
 document.getElementById('register-next-btn-admin').addEventListener('click', () => {
-  clickSound(); submitRegistrationName();
+  submitRegistrationName();
 });
 
 // Admin panel — secret clock tap zone (5× tap within 3s)
@@ -2928,29 +3211,33 @@ document.querySelector('.clock').addEventListener('click', e => {
   checkAdminTapSequence();
 });
 
-document.getElementById('admin-close').addEventListener('click', () => { clickSound(); dismissAdminToIdle(); });
-document.getElementById('admin-goto-borrow').addEventListener('click', () => { clickSound(); adminGotoBorrow(); });
-document.getElementById('admin-goto-return').addEventListener('click', () => { clickSound(); adminGotoReturn(); });
-document.getElementById('admin-sync-source').addEventListener('click', () => { clickSound(); adminSyncSource(); });
-document.getElementById('admin-register-user').addEventListener('click', () => { clickSound(); adminRegisterUser(); });
-document.getElementById('admin-register-device').addEventListener('click', () => { clickSound(); adminRegisterDevice(); });
-document.getElementById('bind-device-close').addEventListener('click', () => { clickSound(); closeRegisterDevice(); });
+document.getElementById('admin-close').addEventListener('click', () => { dismissAdminToIdle(); });
+document.getElementById('admin-goto-borrow').addEventListener('click', () => { adminGotoBorrow(); });
+document.getElementById('admin-goto-return').addEventListener('click', () => { adminGotoReturn(); });
+document.getElementById('admin-sync-source').addEventListener('click', () => { adminSyncSource(); });
+document.getElementById('admin-register-user').addEventListener('click', () => { adminRegisterUser(); });
+document.getElementById('admin-register-device').addEventListener('click', () => { adminRegisterDevice(); });
+document.getElementById('bind-device-close').addEventListener('click', () => { closeRegisterDevice(); });
 document.getElementById('bind-search').addEventListener('input', () => {
   clearTimeout(bindSearchTimer);
   bindSearchTimer = setTimeout(() => { populateBindList(false); }, 200);
 });
-document.getElementById('bind-add-open').addEventListener('click', () => { clickSound(); openAddFromExcel(); });
-document.getElementById('bind-add-back').addEventListener('click', () => { clickSound(); showBindStep('bind-step-list'); populateBindList(); });
-document.getElementById('bind-add-submit').addEventListener('click', () => { clickSound(); submitRegisterDevice(); });
-document.getElementById('bind-slot-back').addEventListener('click', () => { clickSound(); showBindStep('bind-step-list'); });
-document.getElementById('bind-slot-submit').addEventListener('click', () => { clickSound(); submitChangeSlot(); });
-document.getElementById('admin-export-excel').addEventListener('click', () => { clickSound(); adminExportExcel(); });
-document.getElementById('admin-update').addEventListener('click', () => { clickSound(); adminUpdate(); });
-document.getElementById('admin-exit-kiosk').addEventListener('click', () => { clickSound(); adminExitKiosk(); });
-document.getElementById('admin-shutdown').addEventListener('click', () => { clickSound(); adminShutdown(); });
-document.getElementById('admin-end-session').addEventListener('click', () => { clickSound(); adminEndSession(); });
-document.getElementById('update-dismiss').addEventListener('click', () => { clickSound(); dismissUpdateOverlay(); });
-document.getElementById('power-dismiss').addEventListener('click', () => { clickSound(); hidePowerOverlay(); });
+document.getElementById('bind-add-search').addEventListener('input', () => {
+  clearTimeout(addSearchTimer);
+  addSearchTimer = setTimeout(renderRegisterableList, 200);
+});
+document.getElementById('bind-add-open').addEventListener('click', () => { openAddFromExcel(); });
+document.getElementById('bind-add-back').addEventListener('click', () => { showBindStep('bind-step-list'); populateBindList(); });
+document.getElementById('bind-add-submit').addEventListener('click', () => { submitRegisterDevice(); });
+document.getElementById('bind-slot-back').addEventListener('click', () => { showBindStep('bind-step-list'); });
+document.getElementById('bind-slot-submit').addEventListener('click', () => { submitChangeSlot(); });
+document.getElementById('admin-export-excel').addEventListener('click', () => { adminExportExcel(); });
+document.getElementById('admin-update').addEventListener('click', () => { adminUpdate(); });
+document.getElementById('admin-stop-system').addEventListener('click', () => { adminStopSystem(); });
+document.getElementById('admin-shutdown').addEventListener('click', () => { adminShutdown(); });
+document.getElementById('admin-end-session').addEventListener('click', () => { adminEndSession(); });
+document.getElementById('update-dismiss').addEventListener('click', () => { dismissUpdateOverlay(); });
+document.getElementById('power-dismiss').addEventListener('click', () => { hidePowerOverlay(); });
 
 /* ============================================================
    INIT
@@ -3179,8 +3466,8 @@ if (USE_DEMO) {
    Activates ONLY when the backend reports the fake NFC reader is
    running (SMART_LOCKER_FAKE_READER). In production /api/dev/status
    returns fake_reader:false, so nothing below is wired up and there
-   is zero visible footprint. Provides a floating "Simulate tap"
-   button plus the F2 keyboard shortcut; both POST /api/dev/tap, which
+   is zero visible footprint. Provides six preset tap buttons (cards 1/2/3,
+   tags A/S/D) plus the same keys; every one POSTs /api/dev/tap, which
    flows through the real NFC bridge exactly like a physical card tap
    (work-card login/logout, device-tag auto-intent, or pending bind).
 ============================================================ */
@@ -3190,19 +3477,28 @@ if (USE_DEMO) {
     .then(status => {
       if (!status || !status.fake_reader) return;   // not in simulation mode
 
+      /**
+       * Fixed preset UIDs for the fake-reader tap panel. Cards live in the
+       * 04… family, device tags in the 05… family so the two are visually
+       * distinct. Every value is contiguous uppercase hex with an even digit
+       * count, matching scripts/enroll_card.py `_normalize_uid` (which strips
+       * whitespace, upper-cases, and rejects anything `bytes.fromhex` rejects),
+       * so a seed script can enroll exactly these strings and later taps HMAC
+       * to the same digest. (04…/05… also mirror the leading byte of real
+       * 4-byte MIFARE UIDs without colliding with issued cards.)
+       * @type {string[]} FAKE_CARD_UIDS — 3 work cards (panel keys 1/2/3).
+       * @type {string[]} FAKE_TAG_UIDS — 3 device tags (panel keys A/S/D).
+       */
+      const FAKE_CARD_UIDS = ['040000A1', '040000A2', '040000A3'];
+      const FAKE_TAG_UIDS = ['050000B1', '050000B2', '050000B3'];
+
       async function simulateTap(uid) {
         try {
           const res = await fetch('/api/dev/tap', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(uid ? { uid } : {}),
+            body: JSON.stringify({ uid }),
           });
-          if (res.status === 400) {
-            // No default UID configured on the server — ask once and retry.
-            const entered = prompt('Simulated card UID (hex):');
-            if (entered) return simulateTap(entered.trim());
-            return;
-          }
           if (!res.ok) showToast('Simulated tap failed', 'error');
           // On success the auth_success / auth_failed SSE event drives the UI.
         } catch (_) {
@@ -3210,26 +3506,84 @@ if (USE_DEMO) {
         }
       }
 
-      const btn = document.createElement('button');
-      btn.id = 'dev-tap-btn';
-      btn.type = 'button';
-      btn.textContent = '⊙ Simulate tap (F2)';
-      btn.setAttribute('aria-label', 'Simulate an NFC card tap (developer tool)');
-      Object.assign(btn.style, {
+      /**
+       * Build one preset button that injects its UID via simulateTap.
+       * @param {string} label - Visible keycap text (1/2/3 or A/S/D).
+       * @param {string} uid - Fake UID to POST to /api/dev/tap.
+       * @param {string} kind - 'card' (solid) or 'tag' (outline).
+       * @returns {HTMLButtonElement}
+       */
+      function presetButton(label, uid, kind) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.textContent = label;
+        b.title = (kind === 'card' ? 'Work card ' : 'Device tag ') + uid;
+        b.setAttribute('aria-label', b.title + ' (developer tool)');
+        Object.assign(b.style, {
+          minWidth: '34px', padding: '6px 8px',
+          font: '600 13px Inter, system-ui, sans-serif', color: '#fff',
+          background: kind === 'card' ? '#009641' : 'transparent',
+          border: '1px solid #009641', borderRadius: '6px',
+          cursor: 'pointer',
+        });
+        b.addEventListener('click', () => simulateTap(uid));
+        return b;
+      }
+
+      // Dev-only floating panel (kiosk palette, inline styles like the rest
+      // of this block). Deliberately no entrance animation: the harness must
+      // stay inert under prefers-reduced-motion and add no motion otherwise.
+      const panel = document.createElement('div');
+      panel.id = 'dev-tap-panel';
+      Object.assign(panel.style, {
         position: 'fixed', right: '12px', bottom: '12px', zIndex: '9999',
-        padding: '8px 12px', font: '600 13px Inter, system-ui, sans-serif',
-        color: '#fff', background: 'rgba(150,20,20,.85)',
-        border: '1px solid rgba(255,255,255,.35)', borderRadius: '8px',
-        cursor: 'pointer', letterSpacing: '.02em',
+        display: 'flex', flexDirection: 'column', gap: '6px',
+        padding: '8px', background: '#181d24',
+        border: '1px solid rgba(255,255,255,.25)', borderRadius: '8px',
+        font: '600 12px Inter, system-ui, sans-serif', color: '#fff',
       });
-      btn.addEventListener('click', () => simulateTap());
-      document.body.appendChild(btn);
+      /**
+       * Build one labeled preset row (Card 1/2/3 or Tag A/S/D).
+       * @param {string} caption - Row label text.
+       * @param {string[]} labels - Keycap texts.
+       * @param {string[]} uids - Fake UIDs, one per keycap.
+       * @param {string} kind - 'card' or 'tag'.
+       * @returns {HTMLDivElement}
+       */
+      function presetRow(caption, labels, uids, kind) {
+        const row = document.createElement('div');
+        Object.assign(row.style, {
+          display: 'flex', alignItems: 'center', gap: '6px',
+        });
+        const cap = document.createElement('span');
+        cap.textContent = caption;
+        Object.assign(cap.style, { minWidth: '36px', opacity: '.8' });
+        row.appendChild(cap);
+        labels.forEach((label, i) => row.appendChild(presetButton(label, uids[i], kind)));
+        return row;
+      }
+      panel.appendChild(presetRow('Card', ['1', '2', '3'], FAKE_CARD_UIDS, 'card'));
+      panel.appendChild(presetRow('Tag', ['A', 'S', 'D'], FAKE_TAG_UIDS, 'tag'));
+      document.body.appendChild(panel);
 
       document.addEventListener('keydown', (e) => {
-        if (e.key === 'F2') { e.preventDefault(); simulateTap(); }
+        if (e.repeat) return; // held key must not auto-repeat taps
+        // This listener is only registered after fake_reader:true, so an
+        // inactive harness has no handler at all. Preset keys additionally
+        // stay out of editable focus and modified shortcuts (Ctrl+S etc.).
+        if (e.ctrlKey || e.metaKey || e.altKey) return;
+        const target = e.target;
+        const tag = target && target.tagName ? target.tagName.toUpperCase() : '';
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+        if (target && target.isContentEditable) return;
+        const key = (e.key || '').toLowerCase();
+        const cardIdx = '123'.indexOf(key);
+        if (cardIdx !== -1) { simulateTap(FAKE_CARD_UIDS[cardIdx]); return; }
+        const tagIdx = 'asd'.indexOf(key);
+        if (tagIdx !== -1) { simulateTap(FAKE_TAG_UIDS[tagIdx]); }
       });
 
-      console.info('[sim] Fake NFC reader active — press F2 or the corner button to inject a tap.');
+      console.info('[sim] Fake NFC reader active — tap panel keys 1/2/3 (cards) and A/S/D (tags).');
     })
     .catch(() => { /* dev status unavailable — ignore */ });
 })();

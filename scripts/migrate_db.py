@@ -74,6 +74,26 @@ def _index_exists(cursor: sqlite3.Cursor, index_name: str) -> bool:
     return cursor.fetchone() is not None
 
 
+def _index_is_unique(cursor: sqlite3.Cursor, table: str, index_name: str) -> bool:
+    """Whether a named index on a table is UNIQUE.
+
+    Uses ``PRAGMA index_list`` — the ``unique`` flag column — so a unique
+    index under the same name is detected and rebuilt, while an already
+    non-unique index is left alone.
+
+    Args:
+        cursor: An open SQLite cursor.
+        table: Table that owns the index.
+        index_name: Name of the index to inspect.
+
+    Returns:
+        True if the index exists and is unique, False otherwise.
+    """
+    cursor.execute(f"PRAGMA index_list({table})")
+    # Rows: (seq, name, unique, origin, partial)
+    return any(row[1] == index_name and row[2] for row in cursor.fetchall())
+
+
 def migrate() -> None:
     """Apply pending column migrations to the Smart Locker database.
 
@@ -117,14 +137,31 @@ def migrate() -> None:
         )
         print("  CREATE UNIQUE INDEX ix_devices_tag_hmac")
 
-    # Unique locker slots (SQLite UNIQUE still allows multiple NULLs).
-    if _index_exists(cur, "ix_devices_locker_slot"):
-        print("  SKIP  ix_devices_locker_slot (already exists)")
-    else:
-        cur.execute(
-            "CREATE UNIQUE INDEX ix_devices_locker_slot ON devices (locker_slot)"
-        )
-        print("  CREATE UNIQUE INDEX ix_devices_locker_slot")
+    # Locker slots are shared: several devices may sit in one slot, so the
+    # index is non-unique. A legacy UNIQUE index of the same name is dropped
+    # and recreated non-unique inside one explicit transaction — a failure
+    # mid-rebuild must roll back so the UNIQUE index is never lost without
+    # its replacement (SQLite cannot alter an index in place). An already
+    # non-unique index is skipped.
+    try:
+        cur.execute("BEGIN IMMEDIATE")
+        if _index_is_unique(cur, "devices", "ix_devices_locker_slot"):
+            cur.execute("DROP INDEX ix_devices_locker_slot")
+            cur.execute(
+                "CREATE INDEX ix_devices_locker_slot ON devices (locker_slot)"
+            )
+            print("  REBUILD ix_devices_locker_slot (unique -> non-unique)")
+        elif _index_exists(cur, "ix_devices_locker_slot"):
+            print("  SKIP  ix_devices_locker_slot (already non-unique)")
+        else:
+            cur.execute(
+                "CREATE INDEX ix_devices_locker_slot ON devices (locker_slot)"
+            )
+            print("  CREATE INDEX ix_devices_locker_slot")
+        con.commit()
+    except Exception:
+        con.rollback()
+        raise
 
     # --- Table creation: registrants (self-service registration name list) ---
     if _table_exists(cur, "registrants"):

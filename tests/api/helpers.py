@@ -1,18 +1,9 @@
 """
 File: helpers.py
-Description: Shared helpers for kiosk API tests (catalog workbook, dashboard
-             admin headers).
+Description: Shared helpers for kiosk API tests (catalog workbook).
 Project: smart_locker/tests/api
 Notes: Imported by tests/api/test_*.py. Not a pytest plugin.
 """
-
-
-def dashboard_admin_headers(secret: str) -> dict:
-    """JSON + X-Smart-Locker-Admin for dashboard bind/unbind."""
-    return {
-        "Content-Type": "application/json",
-        "X-Smart-Locker-Admin": secret,
-    }
 
 
 def catalog_workbook(tmp_path, rows):

@@ -38,6 +38,7 @@ def add_device(
     tag_uid: str | None = None,
     status: str | None = None,
     model: str | None = None,
+    calibration_due=None,
 ) -> int:
     """Create a locker device, optionally with a bound tag; returns the id."""
     with harness.db() as db:
@@ -49,6 +50,7 @@ def add_device(
             locker_slot=locker_slot,
             status=status,
             model=model,
+            calibration_due=calibration_due,
         )
         if tag_uid is not None:
             DeviceRepository.bind_tag(db, device, uid_hmac_for(tag_uid))

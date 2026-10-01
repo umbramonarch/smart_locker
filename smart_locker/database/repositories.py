@@ -13,7 +13,7 @@ Notes: All write operations call session.flush() to assign IDs immediately
 import logging
 from datetime import date, datetime, timezone
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from smart_locker.database.models import (
@@ -302,18 +302,21 @@ class DeviceRepository:
         ).scalar_one_or_none()
 
     @staticmethod
-    def find_by_slot(session: Session, locker_slot: int) -> Device | None:
-        """Look up the locker device occupying a physical slot.
+    def find_all_by_slot(session: Session, locker_slot: int) -> list[Device]:
+        """Look up every locker device in a physical slot.
+
+        Slots are shared — several devices may sit in one cabinet slot — so
+        this returns a list, never a single row.
 
         Args:
             session: Active database session.
             locker_slot: Cabinet slot number.
 
         Returns:
-            Device object or None if the slot is free.
+            List of Device objects in the slot (may be empty).
         """
         stmt = select(Device).where(Device.locker_slot == locker_slot)
-        return session.execute(stmt).scalar_one_or_none()
+        return list(session.execute(stmt).scalars().all())
 
     @staticmethod
     def find_by_serial(session: Session, serial_number: str) -> Device | None:
@@ -426,6 +429,33 @@ class DeviceRepository:
             List of matching Device objects (may be empty).
         """
         stmt = select(Device).where(func.lower(Device.model) == model.strip().lower())
+        return list(session.execute(stmt).scalars().all())
+
+    @staticmethod
+    def list_kiosk_feed(session: Session) -> list[Device]:
+        """Locker rows the kiosk borrow/return grids should show.
+
+        A unit needs a bound sticker to appear — with one exception: a
+        borrowed row stays listed even without a tag, so an unbind cannot
+        strand a unit mid-loan (it must remain returnable).
+
+        Args:
+            session: Active database session.
+
+        Returns:
+            Devices ordered by locker slot then name.
+        """
+        stmt = (
+            select(Device)
+            .where(
+                Device.locker_slot.is_not(None),
+                or_(
+                    Device.tag_hmac.is_not(None),
+                    Device.status == DeviceStatus.BORROWED,
+                ),
+            )
+            .order_by(Device.locker_slot, Device.name)
+        )
         return list(session.execute(stmt).scalars().all())
 
     @staticmethod

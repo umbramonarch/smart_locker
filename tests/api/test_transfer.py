@@ -228,9 +228,10 @@ class TestBorrowLimit:
         assert resp.status_code == 200
         data = resp.json()
         assert data["success"] is False
-        # The route only exposes the generic failure message; the
-        # "borrow limit" detail is logged by LockerService.
-        assert data["message"] == f"Could not borrow {test_devices[0].name}."
+        assert data["message"] == (
+            f"Could not borrow {test_devices[0].name}: "
+            f"borrow limit reached ({MAX_BORROWS}/{MAX_BORROWS})."
+        )
 
         db_session.expire_all()
         device = DeviceRepository.find_by_id(db_session, test_devices[0].id)

@@ -170,7 +170,7 @@ def test_maintenance_device_location_not_written(e2e, tmp_path, monkeypatch):
     h.tap(TAG_PM999)
     refused = h.wait_event("device_action")
     assert refused["success"] is False
-    assert refused["action"] == "borrow"
+    assert refused["action"] == "refused"
 
     # A real borrow drives the write-back pass over the whole sheet.
     h.tap(TAG_PM100)

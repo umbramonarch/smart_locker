@@ -289,10 +289,16 @@ def _auto_intent(
     name = device.name
 
     if device.status == DeviceStatus.AVAILABLE:
-        success = LockerService.borrow_device(db_session, user_session, device.id)
-        message = f"{name} borrowed." if success else f"Could not borrow {name}."
+        outcome = LockerService.borrow_device(db_session, user_session, device.id)
+        if outcome:
+            message = f"{name} borrowed."
+        else:
+            message = f"Could not borrow {name}"
+            if outcome.reason:
+                message += f": {outcome.reason}"
+            message += "."
         return _device_action(
-            device, success=success, action="borrow", message=message
+            device, success=outcome.success, action="borrow" if outcome else "refused", message=message
         )
 
     if device.status == DeviceStatus.BORROWED:
@@ -304,9 +310,20 @@ def _auto_intent(
                 device, success=success, action="return", message=message
             )
 
-        # Another user holds the device; offer a handover instead of failing.
+        # Another user holds the device; offer a handover instead of failing —
+        # but only when the transfer could actually succeed (the service owns
+        # the refusal ladder: calibration block, borrow limit, …).
         current_holder = device.current_borrower
         current_holder_name = current_holder.display_name if current_holder else "someone"
+        check = LockerService.check_transfer(db_session, user_session, device)
+        if not check:
+            message = f"Could not transfer {name}"
+            if check.reason:
+                message += f": {check.reason}"
+            message += "."
+            return _device_action(
+                device, success=False, action="refused", message=message
+            )
         return TapResult(
             event="handover_requested",
             payload={
@@ -320,5 +337,11 @@ def _auto_intent(
             cli_message=f"{name} is held by {current_holder_name}. Transfer to {user.display_name}?",
         )
 
-    message = f"Could not borrow {name}."
-    return _device_action(device, success=False, action="borrow", message=message)
+    # Maintenance and any later block state: the service is the authority on
+    # why a unit cannot be borrowed — ask it and report its reason.
+    outcome = LockerService.borrow_device(db_session, user_session, device.id)
+    message = f"Could not borrow {name}"
+    if outcome.reason:
+        message += f": {outcome.reason}"
+    message += "."
+    return _device_action(device, success=False, action="refused", message=message)

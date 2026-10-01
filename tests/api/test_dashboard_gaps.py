@@ -16,16 +16,14 @@ from smart_locker.database.repositories import (
     RegistrantRepository,
     TransactionRepository,
 )
-from tests.api.helpers import catalog_workbook, dashboard_admin_headers
+from tests.api.helpers import catalog_workbook
 
 
 class TestDashboardTransactionsPopulated:
     """GET /api/dashboard/transactions with real rows -- shape + ordering."""
 
     def test_transactions_list_populated_newest_first(
-        self, client, db_session, test_user, admin_user, test_devices,
-        dashboard_secret,
-    ):
+        self, client, db_session, test_user, admin_user, test_devices):
         """Seeded log rows serialize names and sort newest first."""
         borrow = TransactionRepository.log_borrow(
             db_session, test_user.id, test_devices[0].id,
@@ -47,7 +45,6 @@ class TestDashboardTransactionsPopulated:
 
         resp = client.get(
             "/api/dashboard/transactions",
-            headers=dashboard_admin_headers(dashboard_secret),
         )
         assert resp.status_code == 200
         rows = resp.json()
@@ -79,8 +76,7 @@ class TestDashboardOwnerGaps:
     """POST /api/dashboard/owner -- validation and catalog-miss mapping."""
 
     def test_owner_whitespace_pm_is_400(
-        self, client, tmp_path, monkeypatch, dashboard_secret
-    ):
+        self, client, tmp_path, monkeypatch):
         """A whitespace-only PM survives pydantic then fails set_owner -> 400."""
         path = catalog_workbook(tmp_path, [
             ["Equipment", "Name", "Location"],
@@ -90,24 +86,20 @@ class TestDashboardOwnerGaps:
         resp = client.post(
             "/api/dashboard/owner",
             json={"pm_number": "   ", "owner": "Alex"},
-            headers=dashboard_admin_headers(dashboard_secret),
         )
         assert resp.status_code == 400
 
     def test_owner_missing_pm_field_is_422(
-        self, client, dashboard_secret
-    ):
+        self, client):
         """A body without pm_number fails pydantic validation -> 422."""
         resp = client.post(
             "/api/dashboard/owner",
             json={"owner": "Alex"},
-            headers=dashboard_admin_headers(dashboard_secret),
         )
         assert resp.status_code == 422
 
     def test_owner_pm_not_in_catalog_is_404(
-        self, client, tmp_path, monkeypatch, dashboard_secret
-    ):
+        self, client, tmp_path, monkeypatch):
         """A PM absent from the Excel catalog maps UnknownPm -> 404."""
         path = catalog_workbook(tmp_path, [
             ["Equipment", "Name", "Location"],
@@ -117,7 +109,6 @@ class TestDashboardOwnerGaps:
         resp = client.post(
             "/api/dashboard/owner",
             json={"pm_number": "PM-ABSENT", "owner": "Alex"},
-            headers=dashboard_admin_headers(dashboard_secret),
         )
         assert resp.status_code == 404
 

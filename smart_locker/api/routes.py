@@ -6,37 +6,45 @@ Description: REST API endpoints and SSE event stream for the Smart Locker kiosk.
              manual registration, Register Device (PM + slot + NFC), device-tag
              bind/unbind, registrant list retrieval, source sync, dashboard
              (public Inventory from Excel and Locker from SQLite, Display
-             snapshot without person names, admin-secret owner edit and 5-tap
+             snapshot without person names, owner edit, user rename, and
              unbind / arm-bind), an admin-only Excel export download, admin
-             Exit kiosk / Shut down, and source sync that writes Location back.
+             Stop system / Shut down, and source sync that writes Location back.
 Project: smart_locker/api
 Notes: Kiosk session mutations require an active session AND a loopback
        client (require_session). LAN browsers must not ride the process-global
        kiosk session. SSE at /api/events is kiosk-loopback only (dashboard
        polls public GETs; it does not use EventSource). Self-registration
        validates against the approved registrants list; admin registration
-       bypasses this check. Catalog GETs
-       under /api/dashboard/ stay public. Dashboard mutations require
-       SMART_LOCKER_DASHBOARD_ADMIN_SECRET (header X-Smart-Locker-Admin), not
-       loopback. Appliance session/shutdown/exit/update are kiosk-loopback only.
+       bypasses this check. All /api/dashboard/ endpoints are public —
+       bind/unbind still keep their reader-conflict checks. Appliance
+       session/shutdown/stop-system/update are kiosk-loopback only.
 """
 
 import asyncio
 import ipaddress
 import json
 import logging
-import secrets
 import shutil
 import subprocess
+import threading
 import time
+import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    HTTPException,
+    Request,
+    Response,
+)
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session, selectinload
 
 import smart_locker.api.app_context as ctx_module
 from smart_locker.api.app_context import (
+    REGISTRATION_TIMEOUT_SECONDS,
     PendingRegistration,
     PendingTagBind,
     assign_pending_registration,
@@ -46,12 +54,10 @@ from smart_locker.api.app_context import (
 from smart_locker.auth.session_manager import UserSession
 from config.settings import (
     BASE_DIR,
-    DASHBOARD_ADMIN_HEADER,
     MAX_LOCKER_SLOT,
-    dashboard_admin_secret,
 )
 from smart_locker.database.engine import get_session, get_session_factory
-from sqlalchemy import select
+from sqlalchemy import func, select
 from smart_locker.database.models import (
     Device,
     DeviceStatus,
@@ -64,10 +70,11 @@ from smart_locker.nfc.factory import fake_reader_enabled
 from smart_locker.services.appliance import (
     ApplianceError,
     ApplianceUnavailable,
-    exit_kiosk,
     shutdown as appliance_shutdown,
+    stop_system,
 )
-from smart_locker.services.locker_service import LockerService
+from smart_locker.services.locker_service import LockerService, USER_STATE_LOCK
+from smart_locker.services.calibration import calibration_fields
 from smart_locker.services.owner_edit import (
     CatalogUnavailable,
     InvalidOwnerRequest,
@@ -107,10 +114,18 @@ def _last_update_status() -> dict | None:
         return None
     return data if isinstance(data, dict) else None
 
+# One-process invariant: last-active-admin checks in the public role/remove
+# endpoints must not interleave — concurrent thread-pool requests could both
+# pass the "another active admin exists" check and leave zero admins.
+_admin_user_lock = threading.RLock()
+
 # systemd-run presence marks a real Pi/systemd host. The admin "Update now"
 # button is disabled (clean 503) anywhere this is absent (dev box / Windows).
 # Resolved once at import — it cannot change while the process runs.
 _SYSTEMD_RUN = shutil.which("systemd-run")
+
+# Same for Stop system: systemctl must exist to stop the service.
+_SYSTEMCTL = shutil.which("systemctl")
 
 
 # --- Page routes ------------------------------------------------------------
@@ -140,11 +155,16 @@ def public_config() -> dict:
     use ``pm_number``. Excel header extras are not needed in the browser.
 
     Returns:
-        dict: ``asset_label`` from ``SMART_LOCKER_ASSET_LABEL``.
+        dict: ``asset_label`` from ``SMART_LOCKER_ASSET_LABEL``, the borrow
+        limit, and the calibration due-soon window in days.
     """
-    from config.settings import asset_label
+    from config.settings import MAX_BORROWS, asset_label, calibration_warn_days
 
-    return {"asset_label": asset_label()}
+    return {
+        "asset_label": asset_label(),
+        "max_borrows": MAX_BORROWS,
+        "calibration_warn_days": calibration_warn_days(),
+    }
 
 
 @router.get("/api/health")
@@ -248,8 +268,7 @@ def require_session(request: Request) -> UserSession:
 
     A process-global session started from the Riverdi is not authorization
     for a LAN browser: bind, unbind, borrow, export, and session-end stay
-    kiosk-local. Dashboard catalog GETs stay public; dashboard mutations
-    use ``require_dashboard_admin``.
+    kiosk-local. Dashboard endpoints are public.
 
     Args:
         request: Incoming ASGI request (client address, not X-Forwarded-For).
@@ -370,32 +389,6 @@ def _end_kiosk_session(*, sse_reason: str = "explicit") -> None:
     ctx.admin_overlay_open = False
     assign_pending_tag_bind(ctx, None)
     _push_sse({"event": "session_ended", "reason": sse_reason})
-
-
-def require_dashboard_admin(request: Request) -> None:
-    """Require the dashboard admin secret header. Fail closed if unset.
-
-    The 5-tap overlay is client-only and is not authorization. An admin
-    row in SQLite is also not authorization.
-
-    Args:
-        request: Incoming ASGI request.
-
-    Raises:
-        HTTPException: 401 if the secret is unset or the header does not match.
-    """
-    expected = dashboard_admin_secret()
-    if not expected:
-        raise HTTPException(
-            status_code=401,
-            detail="Dashboard admin is not configured.",
-        )
-    provided = request.headers.get(DASHBOARD_ADMIN_HEADER) or ""
-    if len(provided) != len(expected) or not secrets.compare_digest(provided, expected):
-        raise HTTPException(
-            status_code=401,
-            detail="Dashboard admin authorization required.",
-        )
 
 
 def _clear_expired_pending() -> None:
@@ -635,55 +628,149 @@ def touch_session(user_session: UserSession = Depends(require_session)):
     return {"success": True}
 
 
+
+def _device_payload(d: Device, current_user_id: int | None = None) -> dict:
+    """Serialize one locker device for the kiosk/admin device feeds.
+
+    Args:
+        d: Device row.
+        current_user_id: Session user id; their borrows read ``"You"``.
+    """
+    borrower_name = None
+    if d.status == DeviceStatus.BORROWED and d.current_borrower_id is not None:
+        if d.current_borrower_id == current_user_id:
+            borrower_name = "You"
+        elif d.current_borrower is not None:
+            borrower_name = d.current_borrower.display_name
+    return {
+        "id": d.id,
+        "pm_number": d.pm_number,
+        "name": d.name,
+        "device_type": d.device_type,
+        "serial_number": d.serial_number,
+        "manufacturer": d.manufacturer,
+        "model": d.model,
+        "locker_slot": d.locker_slot,
+        "description": d.description,
+        "image_path": d.image_path,
+        "calibration_due": d.calibration_due.isoformat() if d.calibration_due else None,
+        **calibration_fields(d.calibration_due),
+        "status": d.status.value,
+        "borrower_name": borrower_name,
+        "has_tag": d.tag_hmac is not None,
+    }
+
+
 # --- Device Endpoints -------------------------------------------------------
+
 
 @router.get("/api/devices")
 def list_devices(
     db: Session = Depends(get_db),
     user_session: UserSession = Depends(require_session),
 ):
-    """List all devices with borrower info for the kiosk UI.
+    """List tagged locker devices with borrower info for the kiosk UI.
 
-    Returns a flat list of device dicts with status and borrower name.
-    The current user's own borrowed devices show ``"You"`` as the borrower.
+    The borrow and return grids show only units that have a sticker bound,
+    plus any unit currently out on loan so an unbind cannot strand it — a
+    registered row without a tag otherwise stays on the admin manage list
+    (``GET /api/admin/devices``) until a sticker is bound. The current
+    user's own borrowed devices show ``"You"`` as the borrower.
 
     Args:
         db: Database session (injected by ``get_db``).
         user_session: The active session (injected by ``require_session``).
 
     Returns:
-        list[dict]: One dict per device with id, name, status, borrower_name, etc.
+        list[dict]: One dict per listed device with id, name, status,
+                    borrower_name, etc.
     """
-    devices = DeviceRepository.list_all(db)
+    devices = DeviceRepository.list_kiosk_feed(db)
     current_user_id = user_session.user.id
-    result = []
+    return [_device_payload(d, current_user_id=current_user_id) for d in devices]
 
-    for d in devices:
-        borrower_name = None
-        if d.status == DeviceStatus.BORROWED and d.current_borrower_id is not None:
-            if d.current_borrower_id == current_user_id:
-                borrower_name = "You"
-            elif d.current_borrower is not None:
-                borrower_name = d.current_borrower.display_name
 
-        result.append({
-            "id": d.id,
-            "pm_number": d.pm_number,
-            "name": d.name,
-            "device_type": d.device_type,
-            "serial_number": d.serial_number,
-            "manufacturer": d.manufacturer,
-            "model": d.model,
-            "locker_slot": d.locker_slot,
-            "description": d.description,
-            "image_path": d.image_path,
-            "calibration_due": d.calibration_due.isoformat() if d.calibration_due else None,
-            "status": d.status.value,
-            "borrower_name": borrower_name,
-            "has_tag": d.tag_hmac is not None,
-        })
+@router.get("/api/admin/devices")
+def list_admin_devices(
+    db: Session = Depends(get_db),
+    user_session: UserSession = Depends(require_session),
+):
+    """Every locker unit for the admin manage list (bind, unbind, slot).
 
-    return result
+    Unlike the kiosk ``GET /api/devices`` — which feeds the borrow/return
+    grids — this feed includes rows with no sticker yet: binding one is
+    what the list is for. Same record shape plus the internal ``id`` the
+    bind-tag endpoints key on.
+
+    Args:
+        db: Database session (injected by ``get_db``).
+        user_session: The active admin session (injected by
+            ``require_session``).
+
+    Returns:
+        list[dict]: One dict per locker device, ordered by name.
+
+    Raises:
+        HTTPException: 403 if not admin.
+    """
+    if user_session.user.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Admin access required.")
+
+    return [_device_payload(d) for d in DeviceRepository.list_all(db)]
+
+
+@router.get("/api/admin/devices/registerable")
+def list_registerable_devices(
+    db: Session = Depends(get_db),
+    user_session: UserSession = Depends(require_session),
+):
+    """Excel catalog rows the kiosk Register Device screen can offer (admin).
+
+    Every source row with a non-empty equipment id that is not already a
+    locker device, sorted by name — the add-step picker filters this list.
+
+    Args:
+        db: Database session (injected by ``get_db``).
+        user_session: The active admin session (injected by
+            ``require_session``).
+
+    Returns:
+        list[dict]: ``pm_number``, ``name``, ``manufacturer``, ``model``
+            per eligible row.
+
+    Raises:
+        HTTPException: 403 if not admin, 400 if the source path is unset,
+            503 when the workbook is missing or unreadable.
+    """
+    if user_session.user.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Admin access required.")
+
+    from config.settings import SOURCE_EXCEL_PATH
+    if not SOURCE_EXCEL_PATH:
+        raise HTTPException(status_code=400, detail="Source Excel path not configured.")
+
+    try:
+        rows = read_inventory(SOURCE_EXCEL_PATH)
+    except InventoryReadError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+
+    # Match DeviceRepository.find_by_pm()'s case-insensitive fallback: catalog
+    # variations that differ only by case must not be offered as new devices.
+    registered = {
+        pm_number.strip().casefold()
+        for pm_number in db.execute(select(Device.pm_number)).scalars()
+        if pm_number
+    }
+    return [
+        {
+            "pm_number": r.pm_number,
+            "name": r.name,
+            "manufacturer": r.manufacturer,
+            "model": r.model,
+        }
+        for r in sorted(rows, key=lambda r: ((r.name or "").lower(), r.pm_number))
+        if r.pm_number and r.pm_number.strip().casefold() not in registered
+    ]
 
 
 @router.post("/api/devices/{device_id}/borrow")
@@ -708,11 +795,14 @@ def borrow_device(
     device = DeviceRepository.find_by_id(db, device_id)
     device_name = device.name if device else f"Device {device_id}"
 
-    success = LockerService.borrow_device(db, user_session, device_id)
+    outcome = LockerService.borrow_device(db, user_session, device_id)
 
-    if success:
+    if outcome:
         return {"success": True, "message": f"{device_name} borrowed."}
-    return {"success": False, "message": f"Could not borrow {device_name}."}
+    refusal = f"Could not borrow {device_name}"
+    if outcome.reason:
+        refusal += f": {outcome.reason}"
+    return {"success": False, "message": f"{refusal}."}
 
 
 @router.post("/api/devices/{device_id}/return")
@@ -768,11 +858,14 @@ def transfer_device(
     device = DeviceRepository.find_by_id(db, device_id)
     device_name = device.name if device else f"Device {device_id}"
 
-    success = LockerService.transfer_device(db, user_session, device_id)
+    outcome = LockerService.transfer_device(db, user_session, device_id)
 
-    if success:
+    if outcome:
         return {"success": True, "message": f"{device_name} transferred to you."}
-    return {"success": False, "message": f"Could not transfer {device_name}."}
+    refusal = f"Could not transfer {device_name}"
+    if outcome.reason:
+        refusal += f": {outcome.reason}"
+    return {"success": False, "message": f"{refusal}."}
 
 
 # --- Registration Endpoints -------------------------------------------------
@@ -806,11 +899,7 @@ class KioskDisplayBody(BaseModel):
 
 
 class OwnerEditBody(BaseModel):
-    """Admin-secret-gated dashboard owner change for one catalog PM.
-
-    Inventory/Locker GETs stay public. This POST requires
-    ``X-Smart-Locker-Admin``; clock 5-tap is not authorization.
-    """
+    """Dashboard owner change for one non-locker catalog PM."""
 
     pm_number: str = Field(..., min_length=1, max_length=50)
     owner: str = Field("", max_length=100)
@@ -820,6 +909,23 @@ class TagActionBody(BaseModel):
     """Dashboard 5-tap overlay: unbind or arm-bind one locker PM."""
 
     pm_number: str = Field(..., min_length=1, max_length=50)
+
+
+class UserRenameBody(BaseModel):
+    """Dashboard rename of one registered user — name only, nothing else."""
+
+    model_config = {"extra": "forbid"}
+
+    # Length is enforced after trimming in the handler.
+    display_name: str
+
+
+class UserRoleBody(BaseModel):
+    """Dashboard role change — the role string is the only updatable field."""
+
+    model_config = {"extra": "forbid"}
+
+    role: UserRole
 
 
 # Labels for GET /api/dashboard/display. Unknown ids are title-cased.
@@ -928,7 +1034,7 @@ def cancel_registration(_: None = Depends(require_loopback)):
     """Cancel a pending self-registration.
 
     Clears the pending registration state so the next card tap will not
-    trigger enrollment. Does not clear a dashboard-secret-armed device-tag
+    trigger enrollment. Does not clear a dashboard-armed device-tag
     bind. Loopback-only so a LAN client cannot cancel a kiosk or dashboard bind.
 
     Returns:
@@ -947,10 +1053,17 @@ def cancel_registration(_: None = Depends(require_loopback)):
         keep_dashboard = bind is not None and bool(
             getattr(bind, "from_dashboard", False)
         )
-        was_pending = ctx.pending_registration is not None or (
+        # A dashboard-armed enrollment window belongs to its token — the
+        # kiosk cancel path must not clear it (same protection as binds).
+        reg = ctx.pending_registration
+        keep_reg = reg is not None and bool(
+            getattr(reg, "from_dashboard", False)
+        )
+        was_pending = (reg is not None and not keep_reg) or (
             bind is not None and not keep_dashboard
         )
-        assign_pending_registration(ctx, None)
+        if not keep_reg:
+            assign_pending_registration(ctx, None)
         if not keep_dashboard:
             assign_pending_tag_bind(ctx, None)
     return {"success": True, "cancelled": was_pending}
@@ -1133,7 +1246,7 @@ def register_locker_device(
     db: Session = Depends(get_db),
     user_session: UserSession = Depends(require_session),
 ):
-    """Create a locker row from Excel catalog (PM + free slot) and arm NFC bind.
+    """Create a locker row from Excel catalog (PM + slot) and arm NFC bind.
 
     Looks up the PM in ``device-list.xlsx``, copies catalog fields, assigns the
     chosen slot, then waits for the sticker tap (same window as bind-tag).
@@ -1148,7 +1261,7 @@ def register_locker_device(
 
     Raises:
         HTTPException: 503 if not ready / share down, 403 if not admin,
-            400 if source path unset, 404 if PM unknown, 409 if PM or slot taken.
+            400 if source path unset, 404 if PM unknown, 409 if PM already registered.
     """
     if ctx_module.context is None:
         raise HTTPException(status_code=503, detail="System not ready.")
@@ -1168,7 +1281,6 @@ def register_locker_device(
         AlreadyRegistered,
         CatalogUnavailable,
         InvalidSlot,
-        SlotTaken,
         UnknownPm,
         register_locker_device as create_from_catalog,
     )
@@ -1181,7 +1293,7 @@ def register_locker_device(
         raise HTTPException(status_code=503, detail=str(e)) from e
     except UnknownPm as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
-    except (SlotTaken, AlreadyRegistered) as e:
+    except AlreadyRegistered as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
     except InvalidSlot as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
@@ -1222,7 +1334,7 @@ def set_device_slot(
     db: Session = Depends(get_db),
     user_session: UserSession = Depends(require_session),
 ):
-    """Move an existing locker device to a different free slot (admin).
+    """Move an existing locker device to a different (possibly shared) slot (admin).
 
     Args:
         device_id: Primary key of the locker device.
@@ -1234,7 +1346,7 @@ def set_device_slot(
         dict: ``{"success": True, "locker_slot": int}``.
 
     Raises:
-        HTTPException: 403 if not admin, 404 if missing, 409 if slot taken.
+        HTTPException: 403 if not admin, 404 if missing.
     """
     if user_session.user.role != UserRole.ADMIN:
         raise HTTPException(status_code=403, detail="Admin access required.")
@@ -1245,14 +1357,11 @@ def set_device_slot(
 
     from smart_locker.services.device_registration import (
         InvalidSlot,
-        SlotTaken,
         set_locker_slot,
     )
 
     try:
         set_locker_slot(db, device, body.locker_slot)
-    except SlotTaken as e:
-        raise HTTPException(status_code=409, detail=str(e)) from e
     except InvalidSlot as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
 
@@ -1610,37 +1719,47 @@ def trigger_update(
     return {"started": True, "message": "Update started. The kiosk will restart briefly."}
 
 
-@router.post("/api/admin/exit-kiosk")
-def admin_exit_kiosk(
+@router.post("/api/admin/exit-kiosk", include_in_schema=False)
+@router.post("/api/admin/stop-system")
+def admin_stop_system(
+    background_tasks: BackgroundTasks,
     _: None = Depends(require_loopback),
     user_session: UserSession = Depends(require_session),
 ):
-    """Stop the Chromium kiosk browser (admin only). The backend stays up.
+    """Stop the whole locker system (admin only): Chromium, then the service.
 
-    Chromium was started by graphical autostart; it does not come back until
-    the next login or reboot. On a Windows/dev host this returns 503.
+    The reply goes out first; a background task then SIGTERMs the kiosk
+    browser and runs ``sudo -n /usr/bin/systemctl stop smart-locker``. An
+    explicit ``systemctl stop`` stays stopped — ``Restart=always`` does not
+    bring the service back, and nothing runs until the next boot. On a
+    Windows/dev host (no systemctl) this returns 503.
+
+    ``/api/admin/exit-kiosk`` is kept as an alias so a cached older kiosk
+    page still works after an update.
 
     Args:
+        background_tasks: FastAPI post-response task runner.
         user_session: The active session (injected by ``require_session``).
 
     Returns:
-        dict: ``{"ok": True, "message": ...}`` after SIGTERM was sent.
+        dict: ``{"ok": True, "message": ...}`` — the stop then follows.
 
     Raises:
-        HTTPException: 403 if not admin; 503 if this host has no kiosk
-                       browser; 500 if the stop command failed.
+        HTTPException: 403 if not admin; 503 if systemd is absent.
     """
     if user_session.user.role != UserRole.ADMIN:
         raise HTTPException(status_code=403, detail="Admin access required.")
-    try:
-        exit_kiosk()
-    except ApplianceUnavailable as e:
-        raise HTTPException(status_code=503, detail=str(e)) from e
-    except ApplianceError as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
+    if _SYSTEMCTL is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Stop system runs on the Raspberry Pi appliance only.",
+        )
+    background_tasks.add_task(stop_system)
     _end_kiosk_session()
-    logger.info("Kiosk browser stopped by admin %s.", user_session.user.display_name)
-    return {"ok": True, "message": "Kiosk browser closed. Service is still running."}
+    logger.info(
+        "System stop requested by admin %s.", user_session.user.display_name
+    )
+    return {"ok": True, "message": "Stopping the locker system."}
 
 
 @router.post("/api/admin/shutdown")
@@ -1677,8 +1796,8 @@ def admin_shutdown(
 
 
 # --- Dashboard Endpoints ----------------------------------------------------
-# Public GETs: Inventory (Excel), Locker (SQLite), Display (no person names).
-# Mutations and users/tx lists require SMART_LOCKER_DASHBOARD_ADMIN_SECRET.
+# All dashboard endpoints are public (GETs and POSTs); NFC binds keep their
+# reader-conflict checks.
 
 @router.post("/api/kiosk/display")
 def kiosk_display_heartbeat(
@@ -1757,6 +1876,7 @@ def dashboard_inventory(db: Session = Depends(get_db)):
             "serial_number": r.serial_number,
             "location": r.location,
             "calibration_due": r.calibration_due,
+            **calibration_fields(r.calibration_due),
             "in_locker": pm_match_key(r.pm_number) in locker_keys,
         }
         for r in rows
@@ -1801,6 +1921,7 @@ def dashboard_devices(db: Session = Depends(get_db)):
             "status": d.status.value,
             "borrower_name": borrower_name,
             "calibration_due": d.calibration_due.isoformat() if d.calibration_due else None,
+            **calibration_fields(d.calibration_due),
             "description": d.description,
             "has_tag": d.tag_hmac is not None,
         })
@@ -1811,9 +1932,8 @@ def dashboard_devices(db: Session = Depends(get_db)):
 @router.get("/api/dashboard/owners")
 def dashboard_owners(
     db: Session = Depends(get_db),
-    _: None = Depends(require_dashboard_admin),
 ):
-    """Names for the owner-edit dropdown (dashboard admin secret required).
+    """Names for the owner-edit dropdown (public).
 
     Combines the in-locker token, registered users, and registrant names
     so the Inventory owner dialog can offer the same list plus free text.
@@ -1836,9 +1956,8 @@ def dashboard_owners(
 def dashboard_set_owner(
     body: OwnerEditBody,
     db: Session = Depends(get_db),
-    _: None = Depends(require_dashboard_admin),
 ):
-    """Change owner for one non-locker PM (dashboard admin secret required).
+    """Change owner for one non-locker PM (public).
 
     Writes the catalog Excel Location cell. Locker devices are refused
     (owner stays with kiosk borrow/return). Does not insert locker rows.
@@ -1851,8 +1970,8 @@ def dashboard_set_owner(
         dict: ``ok``, ``pm_number``, ``owner``, ``locker``.
 
     Raises:
-        HTTPException: 401 without secret; 400 empty PM; 404 PM not in Excel;
-                       409 locker PM; 503 share down.
+        HTTPException: 400 empty PM; 404 PM not in Excel; 409 locker PM;
+                       503 share down.
     """
     from config.settings import SOURCE_EXCEL_PATH
 
@@ -1878,15 +1997,12 @@ def dashboard_set_owner(
 def dashboard_bind_tag(
     body: TagActionBody,
     db: Session = Depends(get_db),
-    _: None = Depends(require_dashboard_admin),
 ):
     """Arm a 60s NFC bind window for one locker PM.
 
-    Requires ``X-Smart-Locker-Admin`` matching
-    ``SMART_LOCKER_DASHBOARD_ADMIN_SECRET`` (fail closed if unset). Does not
-    create a kiosk admin session. Refuses while a kiosk user is logged in or
-    a non-expired bind/registration already owns the reader. Does not drop
-    an in-progress kiosk enroll.
+    Public, but does not create a kiosk admin session. Refuses while a
+    kiosk user is logged in or a non-expired bind/registration already owns
+    the reader. Does not drop an in-progress kiosk enroll.
 
     Args:
         body: PM number of an existing locker device.
@@ -1896,8 +2012,8 @@ def dashboard_bind_tag(
         dict: ``ok``, ``pm_number``, ``name``.
 
     Raises:
-        HTTPException: 401 without secret; 503 if not ready; 409 if a session
-            or pending window is active; 404 if the PM is not a locker device.
+        HTTPException: 503 if not ready; 409 if a session or pending window
+            is active; 404 if the PM is not a locker device.
     """
     if ctx_module.context is None:
         raise HTTPException(status_code=503, detail="System not ready.")
@@ -1938,12 +2054,10 @@ def dashboard_bind_tag(
 def dashboard_unbind_tag(
     body: TagActionBody,
     db: Session = Depends(get_db),
-    _: None = Depends(require_dashboard_admin),
 ):
     """Clear the NFC sticker HMAC on one locker PM.
 
-    Requires the dashboard admin secret. Also clears an armed bind window
-    so the next tap is not re-bound.
+    Public. Also clears an armed bind window so the next tap is not re-bound.
 
     Args:
         body: PM number of an existing locker device.
@@ -1953,7 +2067,7 @@ def dashboard_unbind_tag(
         dict: ``ok``, ``pm_number``.
 
     Raises:
-        HTTPException: 401 without secret; 404 if the PM is not a locker device.
+        HTTPException: 404 if the PM is not a locker device.
     """
     pm = body.pm_number.strip()
     device = DeviceRepository.find_by_pm(db, pm)
@@ -1974,13 +2088,11 @@ def dashboard_unbind_tag(
 @router.get("/api/dashboard/transactions")
 def dashboard_transactions(
     db: Session = Depends(get_db),
-    _: None = Depends(require_dashboard_admin),
 ):
-    """Transaction history for the network dashboard (admin secret).
+    """Transaction history for the network dashboard (public).
 
     Returns the most recent 500 borrow/return transactions in reverse
-    chronological order. Requires ``X-Smart-Locker-Admin``. The 5-tap
-    overlay is not authorization.
+    chronological order.
 
     Args:
         db: Active database session (injected by ``get_db``).
@@ -2017,19 +2129,17 @@ def dashboard_transactions(
 @router.get("/api/dashboard/users")
 def dashboard_users(
     db: Session = Depends(get_db),
-    _: None = Depends(require_dashboard_admin),
 ):
-    """Registered-users list for the network dashboard (admin secret).
+    """Registered-users list for the network dashboard (public).
 
     Returns all registered users with their role and registration date.
     Sensitive fields (uid_hmac, encrypted_card_uid) are never included.
-    Requires ``X-Smart-Locker-Admin``. The 5-tap overlay is not authorization.
 
     Args:
         db: Active database session (injected by ``get_db``).
 
     Returns:
-        list[dict]: One dict per user with display name, role, active
+        list[dict]: One dict per user with id, display name, role, active
                     status, and registration timestamp.
     """
     users = db.execute(
@@ -2039,6 +2149,7 @@ def dashboard_users(
     result = []
     for u in users:
         result.append({
+            "id": u.id,
             "display_name": u.display_name,
             "role": u.role.value,
             "is_active": u.is_active,
@@ -2046,3 +2157,405 @@ def dashboard_users(
         })
 
     return result
+
+
+@router.post("/api/dashboard/users/{user_id}/name")
+def dashboard_rename_user(
+    user_id: int,
+    body: UserRenameBody,
+    db: Session = Depends(get_db),
+):
+    """Rename one registered user (public dashboard).
+
+    Only the display name changes — role, card, and active flag are never
+    touched. SQLite commits before Location write-back is scheduled so a
+    workbook outage cannot fail the rename; a borrowed unit's Location cell
+    picks up the new name on the next scheduled write.
+
+    Args:
+        user_id: Primary key of the user.
+        body: New display name (trimmed; 1..100 chars).
+        db: Active database session (injected by ``get_db``).
+
+    Returns:
+        dict: ``ok``, ``id``, ``display_name``.
+
+    Raises:
+        HTTPException: 422 empty/over-100 name; 404 unknown id; 409 duplicate
+            (case-insensitive) name held by another user.
+    """
+    name = body.display_name.strip()
+    if not name or len(name) > 100:
+        raise HTTPException(
+            status_code=422,
+            detail="Display name must be 1–100 characters.",
+        )
+
+    user = db.get(User, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    other = db.execute(
+        select(User).where(
+            func.lower(User.display_name) == name.lower(),
+            User.id != user_id,
+        )
+    ).scalars().first()
+    if other is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"The name '{name}' is already used by another user.",
+        )
+
+    user.display_name = name
+    db.flush()
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+    from smart_locker.sync.location_writeback import schedule_write_location
+
+    schedule_write_location()
+
+    # A live kiosk session caches the user row — update only the label, after
+    # commit. No logout, no privilege change.
+    ctx = ctx_module.context
+    if ctx is not None:
+        active = ctx.session_mgr.current_session
+        if active is not None and active.user.id == user_id:
+            active.user.display_name = name
+
+    logger.info("Dashboard renamed user id=%d to '%s'.", user_id, name)
+    return {"ok": True, "id": user_id, "display_name": name}
+
+
+@router.post("/api/dashboard/users/{user_id}/role")
+def dashboard_set_user_role(
+    user_id: int,
+    body: UserRoleBody,
+    db: Session = Depends(get_db),
+):
+    """Change one registered user's role (public dashboard).
+
+    Only ``role`` changes — display name, card, active flag, loans, and
+    history are never touched. Setting the role the user already has is a
+    no-op 200. Demoting the last ACTIVE admin is refused so the locker
+    always keeps someone who can open the admin panel.
+
+    Args:
+        user_id: Primary key of the user.
+        body: New role — ``"admin"`` or ``"user"``.
+        db: Active database session (injected by ``get_db``).
+
+    Returns:
+        dict: ``ok``, ``id``, ``role``.
+
+    Raises:
+        HTTPException: 422 role not admin/user; 404 unknown id; 409 last
+            active admin demotion.
+    """
+    role = body.role
+
+    # Check + commit under one process-wide lock — a concurrent remove/role
+    # request must not interleave with the last-active-admin check.
+    with _admin_user_lock:
+        user = db.get(User, user_id)
+        if user is None:
+            raise HTTPException(status_code=404, detail="User not found.")
+
+        if user.role == role:
+            return {"ok": True, "id": user_id, "role": role.value}
+
+        if (
+            user.role == UserRole.ADMIN
+            and role == UserRole.USER
+            and user.is_active
+            and not db.execute(
+                select(User).where(
+                    User.role == UserRole.ADMIN,
+                    User.is_active,
+                    User.id != user_id,
+                )
+            ).scalars().first()
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Cannot demote the last active admin.",
+            )
+
+        user.role = role
+        db.flush()
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+
+    # An active kiosk session caches the user's role — end it so stale
+    # privileges (or a stale overlay/bind arm) cannot outlive the change.
+    # A session belonging to a different user is untouched.
+    ctx = ctx_module.context
+    if ctx is not None:
+        active = ctx.session_mgr.current_session
+        if active is not None and active.user.id == user_id:
+            _end_kiosk_session(sse_reason="role_changed")
+
+    logger.info("Dashboard set role user id=%d -> %s.", user_id, role.value)
+    return {"ok": True, "id": user_id, "role": role.value}
+
+
+@router.post("/api/dashboard/users/{user_id}/remove")
+def dashboard_remove_user(
+    user_id: int,
+    db: Session = Depends(get_db),
+):
+    """Soft-remove one registered user (public dashboard).
+
+    Sets ``is_active=False`` only — card, history, and every SQL row are
+    preserved, so audit trails and loan records stay intact. Refused when the
+    user is the last active admin (someone must keep admin access) or holds a
+    borrowed unit (return first). Already-inactive is an idempotent 200.
+
+    Args:
+        user_id: Primary key of the user.
+        db: Active database session (injected by ``get_db``).
+
+    Returns:
+        dict: ``ok``, ``id``, ``removed``.
+
+    Raises:
+        HTTPException: 404 unknown id; 409 last active admin or outstanding
+            borrowed device.
+    """
+    # Check + commit under the admin lock and the borrow/remove lock. This
+    # keeps the no-outstanding-loan guard atomic with a kiosk borrow.
+    with _admin_user_lock, USER_STATE_LOCK:
+        user = db.get(User, user_id)
+        if user is None:
+            raise HTTPException(status_code=404, detail="User not found.")
+
+        if not user.is_active:
+            return {"ok": True, "id": user_id, "removed": True}
+
+        if (
+            user.role == UserRole.ADMIN
+            and not db.execute(
+                select(User).where(
+                    User.role == UserRole.ADMIN,
+                    User.is_active,
+                    User.id != user_id,
+                )
+            ).scalars().first()
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Cannot remove the last active admin.",
+            )
+
+        borrowed = db.execute(
+            select(Device).where(
+                Device.current_borrower_id == user_id,
+                Device.status == DeviceStatus.BORROWED,
+            )
+        ).scalars().first()
+        if borrowed is not None:
+            raise HTTPException(
+                status_code=409,
+                detail="Return borrowed devices first.",
+            )
+
+        user.is_active = False
+        db.flush()
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+
+    # Cut the removed user's live kiosk session; a different user's is left.
+    ctx = ctx_module.context
+    if ctx is not None:
+        active = ctx.session_mgr.current_session
+        if active is not None and active.user.id == user_id:
+            _end_kiosk_session(sse_reason="user_removed")
+
+    logger.info("Dashboard removed user id=%d.", user_id)
+    return {"ok": True, "id": user_id, "removed": True}
+
+
+class UserRegisterBody(BaseModel):
+    """Dashboard user add — name only; the card is enrolled by the tap."""
+
+    model_config = {"extra": "forbid"}
+
+    # Length is enforced after trimming in the handler.
+    display_name: str
+
+
+@router.post("/api/dashboard/users/register")
+def dashboard_arm_user_registration(
+    body: UserRegisterBody,
+    db: Session = Depends(get_db),
+):
+    """Arm a 60 s physical-card enrollment window from the dashboard.
+
+    No user row is created here — a real work card must be tapped on the
+    locker's own reader within the window. The opaque ``enrollment_id`` is
+    the public status/cancel token for exactly this window.
+
+    Args:
+        body: Display name (trimmed; 1..100 chars).
+        db: Active database session (injected by ``get_db``).
+
+    Returns:
+        dict: ``ok``, ``enrollment_id``, ``expires_in``.
+
+    Raises:
+        HTTPException: 422 invalid/duplicate-able name shape; 409 on a live
+            kiosk session or any pending NFC window; 503 context absent.
+    """
+    name = body.display_name.strip()
+    if not name or len(name) > 100:
+        raise HTTPException(
+            status_code=422,
+            detail="Display name must be 1–100 characters.",
+        )
+
+    # Case-insensitive duplicate across active AND inactive users.
+    if db.execute(
+        select(User).where(func.lower(User.display_name) == name.lower())
+    ).scalars().first() is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"The name '{name}' is already used.",
+        )
+
+    ctx = ctx_module.context
+    if ctx is None:
+        raise HTTPException(status_code=503, detail="System not ready.")
+    if ctx.session_mgr.has_active_session:
+        raise HTTPException(
+            status_code=409,
+            detail="A kiosk session is active — end it first.",
+        )
+
+    token = uuid.uuid4().hex
+    with pending_state_lock:
+        # Same gate as dashboard binds: no arming while another NFC window
+        # or an unexpired pending exists.
+        conflict = _pending_nfc_conflict()
+        if conflict is not None:
+            raise HTTPException(status_code=409, detail=conflict)
+        assign_pending_registration(
+            ctx,
+            PendingRegistration(
+                display_name=name,
+                from_dashboard=True,
+                enrollment_id=token,
+            ),
+        )
+        ctx.dashboard_enrollment_status = {
+            "enrollment_id": token,
+            "state": "pending",
+            "message": "Tap the new work card on the locker reader.",
+        }
+
+    logger.info("Dashboard-armed user registration for '%s'.", name)
+    return {
+        "ok": True,
+        "enrollment_id": token,
+        "expires_in": REGISTRATION_TIMEOUT_SECONDS,
+    }
+
+
+@router.get("/api/dashboard/users/register/{token}")
+def dashboard_registration_status(token: str):
+    """Poll a dashboard-armed enrollment window by its opaque token.
+
+    Args:
+        token: The ``enrollment_id`` returned by the arm POST.
+
+    Returns:
+        dict: ``state`` (pending/success/failed/cancelled), ``message``,
+              ``user_id`` when enrolled. An expired pending window is
+              reported as failed and cleared — only its own matching window.
+
+    Raises:
+        HTTPException: 503 context absent; 404 unknown or superseded token.
+    """
+    ctx = ctx_module.context
+    if ctx is None:
+        raise HTTPException(status_code=503, detail="System not ready.")
+
+    with pending_state_lock:
+        pending = ctx.pending_registration
+        if (
+            pending is not None
+            and pending.from_dashboard
+            and pending.enrollment_id == token
+        ):
+            if pending.is_expired:
+                assign_pending_registration(ctx, None)
+                ctx.dashboard_enrollment_status = {
+                    "enrollment_id": token,
+                    "state": "failed",
+                    "message": "Registration timed out.",
+                }
+            else:
+                return {
+                    "enrollment_id": token,
+                    "state": "pending",
+                    "message": "Tap the new work card on the locker reader.",
+                }
+        status = ctx.dashboard_enrollment_status
+        if status is None or status.get("enrollment_id") != token:
+            raise HTTPException(status_code=404, detail="Unknown enrollment token.")
+        result = dict(status)
+        return result
+
+
+@router.post("/api/dashboard/users/register/{token}/cancel")
+def dashboard_registration_cancel(token: str):
+    """Cancel a dashboard-armed enrollment window by its token.
+
+    Only clears the window that carries exactly this token — a newer window
+    or a kiosk-armed pending is never cancelled by it. A finished window
+    returns its final state (idempotent).
+
+    Args:
+        token: The ``enrollment_id`` returned by the arm POST.
+
+    Returns:
+        dict: current ``state`` of the addressed window.
+
+    Raises:
+        HTTPException: 503 context absent; 404 unknown or newer token.
+    """
+    ctx = ctx_module.context
+    if ctx is None:
+        raise HTTPException(status_code=503, detail="System not ready.")
+
+    with pending_state_lock:
+        pending = ctx.pending_registration
+        if (
+            pending is not None
+            and pending.from_dashboard
+            and pending.enrollment_id == token
+        ):
+            assign_pending_registration(ctx, None)
+            ctx.dashboard_enrollment_status = {
+                "enrollment_id": token,
+                "state": "cancelled",
+                "message": "Registration cancelled.",
+            }
+            return {
+                "enrollment_id": token,
+                "state": "cancelled",
+                "message": "Registration cancelled.",
+            }
+        status = ctx.dashboard_enrollment_status
+        if status is None or status.get("enrollment_id") != token:
+            raise HTTPException(status_code=404, detail="Unknown enrollment token.")
+        return dict(status)

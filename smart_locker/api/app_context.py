@@ -39,6 +39,11 @@ class PendingRegistration:
 
     display_name: str
     created_at: float = field(default_factory=time.monotonic)
+    # Dashboard-armed windows carry an opaque polling token so the public
+    # status/cancel endpoints can address exactly this window — and the
+    # kiosk /api/register/cancel path cannot clear them.
+    from_dashboard: bool = False
+    enrollment_id: str | None = None
 
     @property
     def is_expired(self) -> bool:
@@ -51,9 +56,9 @@ class PendingTagBind:
     """Holds state for an admin device-tag bind awaiting an NFC sticker tap.
 
     Created when an admin picks a locker device in Register Device, or when
-    dashboard staff arm a bind with the admin secret. Valid for
+    the dashboard arms a bind. Valid for
     ``REGISTRATION_TIMEOUT_SECONDS`` (60s). The next insert binds that row
-    instead of borrowing. ``from_dashboard`` marks a secret-armed window so
+    instead of borrowing. ``from_dashboard`` marks a dashboard-armed window so
     public ``POST /api/register/cancel`` cannot clear it.
     """
 
@@ -116,6 +121,10 @@ class AppContext:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._nfc_available = False
         self.pending_registration: PendingRegistration | None = None
+        # Public-safe status for the latest dashboard-armed registration:
+        # {enrollment_id, state: pending|success|failed|cancelled, message,
+        # user_id?}. Never holds a raw UID or HMAC.
+        self.dashboard_enrollment_status: dict | None = None
         self.pending_tag_bind: PendingTagBind | None = None
         # True only while the admin / Register Device overlay is on screen.
         self.admin_overlay_open: bool = False
@@ -377,7 +386,10 @@ class AppContext:
         Returns:
             None. Result is pushed to the SSE queue.
         """
-        from smart_locker.database.repositories import DeviceRepository
+        from smart_locker.database.repositories import (
+            DeviceRepository,
+            UserRepository,
+        )
         from smart_locker.security.hashing import compute_uid_hmac
         from smart_locker.security.key_manager import key_manager
         from smart_locker.services.user_service import UserService
@@ -396,63 +408,116 @@ class AppContext:
                     "event": "registration_failed",
                     "reason": "Registration timed out. Please try again.",
                 })
+                self._set_enrollment_status(pending, "failed",
+                                            "Registration timed out.")
                 return
 
             user_svc = UserService(
                 enc_key=key_manager.enc_key, hmac_key=key_manager.hmac_key
             )
 
+            user = None
+            fail_reason = None
             try:
                 with get_session() as db_session:
                     uid_hmac = compute_uid_hmac(uid, key_manager.hmac_key)
                     if DeviceRepository.find_by_tag_hmac(db_session, uid_hmac) is not None:
                         logger.warning("Registration failed: UID is already a device tag.")
-                        self.broadcast_sse({
-                            "event": "registration_failed",
-                            "reason": "This tag is already bound to a device.",
-                        })
-                        return
+                        fail_reason = "This tag is already bound to a device."
 
-                    # Check if card is already enrolled
-                    existing = self.authenticator.authenticate(db_session, uid)
-                    if existing is not None:
-                        logger.warning(
-                            "Registration failed: card already enrolled to %s.",
-                            existing.display_name,
+                    else:
+                        # Reject any already-enrolled card — a soft-removed
+                        # (inactive) card must not re-enroll either.
+                        existing = UserRepository.find_by_uid_hmac(
+                            db_session, uid_hmac
                         )
-                        self.broadcast_sse({
-                            "event": "registration_failed",
-                            "reason": "This card is already registered.",
-                        })
-                        return
-
-                    user = user_svc.enroll_user(
-                        db_session,
-                        display_name=pending.display_name,
-                        card_uid_hex=uid,
-                        role="user",
-                    )
-                    logger.info(
-                        "Self-registered user: %s (id=%d)",
-                        user.display_name,
-                        user.id,
-                    )
-                    self.broadcast_sse({
-                        "event": "registration_success",
-                        "user": {
-                            "id": user.id,
-                            "name": user.display_name,
-                            "role": user.role.value,
-                        },
-                    })
+                        if existing is not None:
+                            logger.warning(
+                                "Registration failed: card already enrolled to %s.",
+                                existing.display_name,
+                            )
+                            fail_reason = "This card is already registered."
+                        else:
+                            user = user_svc.enroll_user(
+                                db_session,
+                                display_name=pending.display_name,
+                                card_uid_hex=uid,
+                                role="user",
+                            )
             except Exception:
                 logger.exception("Registration failed for '%s'.", pending.display_name)
+                fail_reason = "Registration failed. Please try again."
+
+            # Broadcast and dashboard status land only after the session
+            # context manager has committed — a failed commit never marks
+            # success.
+            if fail_reason is not None:
                 self.broadcast_sse({
                     "event": "registration_failed",
-                    "reason": "Registration failed. Please try again.",
+                    "reason": fail_reason,
                 })
+                self._set_enrollment_status(pending, "failed", fail_reason)
+            else:
+                logger.info(
+                    "Self-registered user: %s (id=%d)",
+                    user.display_name,
+                    user.id,
+                )
+                self.broadcast_sse({
+                    "event": "registration_success",
+                    "user": {
+                        "id": user.id,
+                        "name": user.display_name,
+                        "role": user.role.value,
+                    },
+                })
+                self._set_enrollment_status(
+                    pending, "success", "Registered.", user_id=user.id
+                )
         finally:
             self._end_leftover_session()
+
+    def _set_enrollment_status(
+        self,
+        pending: PendingRegistration,
+        state: str,
+        message: str,
+        user_id: int | None = None,
+    ) -> None:
+        """Record the outcome of a dashboard-armed registration window.
+
+        Only ``from_dashboard`` pendings get a status entry, keyed by their
+        opaque ``enrollment_id`` token — a newer window or a kiosk-armed
+        pending never touches an older entry.
+
+        Args:
+            pending: The pending registration that just resolved.
+            state: ``success``, ``failed``, or ``cancelled``.
+            message: Public-safe reason text (no UID/HMAC).
+            user_id: New user id on success.
+        """
+        if not pending.from_dashboard or not pending.enrollment_id:
+            return
+        with pending_state_lock:
+            # A late callback for an old window must not overwrite the status
+            # a NEWER arm just published — a superseded write would 404 the
+            # new token's GET/poll while its pending window is still live.
+            current = self.dashboard_enrollment_status
+            if (
+                current is None
+                or current.get("enrollment_id") != pending.enrollment_id
+                or current.get("state") != "pending"
+            ):
+                return
+            status = {
+                "enrollment_id": pending.enrollment_id,
+                "state": state,
+                "message": message,
+            }
+            if user_id is not None:
+                status["user_id"] = user_id
+            self.dashboard_enrollment_status = status
+
 
     def _uid_is_work_card(self, uid: str, get_session) -> bool:
         """Whether this UID is an enrolled work card (not a device sticker).

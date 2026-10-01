@@ -2,10 +2,10 @@
   File: dashboard.html
   Description: Network dashboard. Three tabs: Inventory (live Excel),
                Locker (SQLite), Display (what the kiosk is showing).
-               Inventory and Locker GETs are public. Owner change on
-               Inventory (confirm) needs X-Smart-Locker-Admin; not for
-               locker PMs. 5-tap the header clock reveals users, logs,
-               and NFC unbind / arm-bind — it is not authorization.
+               All endpoints are public. Owner change on Inventory
+               (confirm) is not for locker PMs. Five taps on the header
+               clock (within 8s) open users, logs, and
+               NFC unbind / arm-bind.
                Locker shows Tagged / No tag.
   Project: smart_locker/frontend
   Notes: Kiosk colours (#181d24 / #009641) with a normal desktop cursor,
@@ -18,6 +18,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' rx='14' fill='%23009641'/><rect x='22' y='12' width='20' height='40' rx='3' fill='none' stroke='%23ffffff' stroke-width='4'/><circle cx='37' cy='32' r='3' fill='%23ffffff'/></svg>">
   <title>Smart Locker Dashboard</title>
   <link rel="stylesheet" href="dashboard.css">
 </head>
@@ -143,16 +144,38 @@
     </div>
   </div>
 
-  <div class="admin-secret-dialog" id="admin-secret-dialog" hidden>
-    <div class="admin-secret-card" role="dialog" aria-labelledby="admin-secret-title">
-      <h3 class="admin-secret-title" id="admin-secret-title">Admin access</h3>
-      <p class="admin-secret-hint">Enter the dashboard admin secret to open the admin panel.</p>
-      <label class="admin-secret-label" for="admin-secret-input">Secret</label>
-      <input type="password" class="search-input" id="admin-secret-input" autocomplete="off">
-      <p class="error-msg" id="admin-secret-error" style="display:none"></p>
-      <div class="admin-secret-actions">
-        <button type="button" class="admin-secret-cancel" id="admin-secret-cancel">Cancel</button>
-        <button type="button" class="admin-secret-confirm" id="admin-secret-confirm">Confirm</button>
+  <!-- Add user dialog -->
+  <div class="owner-dialog" id="user-add-dialog" hidden>
+    <div class="owner-dialog-card" role="dialog" aria-labelledby="user-add-title">
+      <h3 class="owner-dialog-title" id="user-add-title">Add user</h3>
+      <div class="user-add-step" id="user-add-name-step">
+        <label class="owner-dialog-label" for="user-add-input">Display name</label>
+        <input type="text" id="user-add-input" class="search-input" maxlength="100" autocomplete="off">
+        <p class="error-msg" id="user-add-error" style="display:none"></p>
+        <div class="owner-dialog-actions">
+          <button type="button" class="owner-cancel" id="user-add-cancel">Cancel</button>
+          <button type="button" class="owner-confirm" id="user-add-continue">Continue</button>
+        </div>
+      </div>
+      <div class="user-add-step" id="user-add-tap-step" hidden>
+        <p class="owner-dialog-label" id="user-add-wait-msg"></p>
+        <p class="error-msg" id="user-add-tap-error" style="display:none"></p>
+        <div class="owner-dialog-actions">
+          <button type="button" class="owner-cancel" id="user-add-tap-cancel">Cancel</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="owner-dialog" id="rename-dialog" hidden>
+    <div class="owner-dialog-card" role="dialog" aria-labelledby="rename-dialog-title">
+      <h3 class="owner-dialog-title" id="rename-dialog-title">Rename user</h3>
+      <label class="owner-dialog-label" for="rename-input">Name</label>
+      <input type="text" class="search-input" id="rename-input" maxlength="100" autocomplete="off">
+      <p class="error-msg" id="rename-dialog-error" style="display:none"></p>
+      <div class="owner-dialog-actions">
+        <button type="button" class="owner-cancel" id="rename-cancel">Cancel</button>
+        <button type="button" class="owner-confirm" id="rename-confirm">Confirm</button>
       </div>
     </div>
   </div>
@@ -186,6 +209,9 @@
 
       <section class="admin-section">
         <h3 class="admin-section-title">Registered Users</h3>
+        <div class="admin-users-head">
+          <button type="button" class="admin-tag-btn" id="add-user-btn">Add user</button>
+        </div>
         <div class="table-wrap">
           <table class="data-table" id="admin-users-table">
             <thead>
@@ -194,11 +220,13 @@
                 <th>Role</th>
                 <th>Active</th>
                 <th>Registered</th>
+                <th>Actions</th>
               </tr>
             </thead>
             <tbody id="admin-users-tbody"></tbody>
           </table>
         </div>
+        <p class="admin-tag-status" id="admin-users-status"></p>
       </section>
 
       <section class="admin-section">

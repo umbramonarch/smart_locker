@@ -1,6 +1,6 @@
 """
 File: test_dashboard.py
-Description: Tests for public Inventory/Locker/Display GETs, admin-secret
+Description: Tests for public Inventory/Locker/Display GETs,
              owner edit, and dashboard NFC bind/unbind.
 Project: smart_locker/tests/api
 Notes: Run with: python -m pytest tests/api/test_dashboard.py -v
@@ -19,7 +19,7 @@ from smart_locker.database.repositories import DeviceRepository, RegistrantRepos
 from smart_locker.security.hashing import compute_uid_hmac
 
 import smart_locker.api.app_context as ctx_module
-from tests.api.helpers import catalog_workbook, dashboard_admin_headers
+from tests.api.helpers import catalog_workbook
 
 class TestDashboardInventoryAndDisplay:
     """Inventory is Excel; Locker is SQLite; Display is a kiosk snapshot."""
@@ -159,12 +159,12 @@ class TestDashboardInventoryAndDisplay:
 
 
 class TestDashboardOwnerEditApi:
-    """POST /api/dashboard/owner requires the dashboard admin secret."""
+    """POST /api/dashboard/owner is public like every dashboard endpoint."""
 
-    def test_owner_change_without_secret_is_401(
+    def test_owner_change_needs_no_secret(
         self, client, tmp_path, monkeypatch
     ):
-        """Unauthenticated owner write is 401, not 200."""
+        """Header-free owner write succeeds; stale secret headers are ignored."""
         path = catalog_workbook(tmp_path, [
             ["Equipment", "Name", "Location"],
             ["PM-VAN", "Van kit", "Workshop"],
@@ -174,12 +174,12 @@ class TestDashboardOwnerEditApi:
             "/api/dashboard/owner",
             json={"pm_number": "PM-VAN", "owner": "Alex"},
         )
-        assert resp.status_code == 401
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
 
-    def test_owner_change_with_secret(
-        self, client, tmp_path, monkeypatch, dashboard_secret
-    ):
-        """Authorized owner write still does not need a kiosk work-card session."""
+    def test_owner_change_without_session(
+        self, client, tmp_path, monkeypatch):
+        """A LAN owner write needs no kiosk work-card session."""
         path = catalog_workbook(tmp_path, [
             ["Equipment", "Name", "Location"],
             ["PM-VAN", "Van kit", "Workshop"],
@@ -188,7 +188,6 @@ class TestDashboardOwnerEditApi:
         resp = client.post(
             "/api/dashboard/owner",
             json={"pm_number": "PM-VAN", "owner": "Alex"},
-            headers=dashboard_admin_headers(dashboard_secret),
         )
         assert resp.status_code == 200
         body = resp.json()
@@ -196,8 +195,7 @@ class TestDashboardOwnerEditApi:
         assert body["locker"] is False
 
     def test_non_locker_does_not_create_sqlite_row(
-        self, client, db_session, tmp_path, monkeypatch, dashboard_secret
-    ):
+        self, client, db_session, tmp_path, monkeypatch):
         """Excel-only PMs stay off the Pi after an Inventory owner edit."""
         path = catalog_workbook(tmp_path, [
             ["Equipment", "Name", "Location"],
@@ -207,14 +205,11 @@ class TestDashboardOwnerEditApi:
         client.post(
             "/api/dashboard/owner",
             json={"pm_number": "PM-VAN", "owner": "Alex"},
-            headers=dashboard_admin_headers(dashboard_secret),
         )
         assert DeviceRepository.find_by_pm(db_session, "PM-VAN") is None
 
     def test_locker_pm_is_refused(
-        self, client, test_user, test_devices, tmp_path, monkeypatch, db_session,
-        dashboard_secret,
-    ):
+        self, client, test_user, test_devices, tmp_path, monkeypatch, db_session):
         """Locker PMs cannot have owner changed from the dashboard."""
         from smart_locker.database.models import TransactionLog
         from sqlalchemy import select
@@ -228,7 +223,6 @@ class TestDashboardOwnerEditApi:
         resp = client.post(
             "/api/dashboard/owner",
             json={"pm_number": "PM-001", "owner": "Test User"},
-            headers=dashboard_admin_headers(dashboard_secret),
         )
         assert resp.status_code == 409
         db_session.expire_all()
@@ -238,24 +232,13 @@ class TestDashboardOwnerEditApi:
         logs = db_session.execute(select(TransactionLog)).scalars().all()
         assert logs == []
 
-    def test_owners_list_requires_secret(
-        self, client, test_user, db_session
-    ):
-        """GET /api/dashboard/owners is not public."""
-        RegistrantRepository.add_names(db_session, {"Bob Field"})
-        db_session.commit()
-        resp = client.get("/api/dashboard/owners")
-        assert resp.status_code == 401
-
-    def test_owners_list_with_secret(
-        self, client, test_user, db_session, dashboard_secret
-    ):
+    def test_owners_list_is_public(
+        self, client, test_user, db_session):
         """Dropdown names: registered users + registrants."""
         RegistrantRepository.add_names(db_session, {"Bob Field"})
         db_session.commit()
         resp = client.get(
             "/api/dashboard/owners",
-            headers=dashboard_admin_headers(dashboard_secret),
         )
         assert resp.status_code == 200
         names = resp.json()["names"]
@@ -263,25 +246,23 @@ class TestDashboardOwnerEditApi:
         assert "Bob Field" in names
         assert "in_locker_token" in resp.json()
 
-    def test_users_and_transactions_require_secret(self, client):
-        """Users and last-500 transactions are not public GETs."""
-        assert client.get("/api/dashboard/users").status_code == 401
-        assert client.get("/api/dashboard/transactions").status_code == 401
+    def test_users_and_transactions_are_public(self, client):
+        """Users and last-500 transactions GETs need no auth."""
+        assert client.get("/api/dashboard/users").status_code == 200
+        assert client.get("/api/dashboard/transactions").status_code == 200
 
-    def test_users_and_transactions_with_secret(
-        self, client, test_user, dashboard_secret
-    ):
-        """Authorized GET returns users without hmac/uid fields."""
+    def test_users_and_transactions_public(
+        self, client, test_user):
+        """Public GET returns users without hmac/uid fields, with stable id."""
         users = client.get(
             "/api/dashboard/users",
-            headers=dashboard_admin_headers(dashboard_secret),
         )
         assert users.status_code == 200
         row = next(u for u in users.json() if u["display_name"] == "Test User")
+        assert row["id"] == test_user.id
         assert "uid_hmac" not in row
         tx = client.get(
             "/api/dashboard/transactions",
-            headers=dashboard_admin_headers(dashboard_secret),
         )
         assert tx.status_code == 200
         assert isinstance(tx.json(), list)
@@ -300,7 +281,7 @@ class TestDashboardOwnerEditApi:
         assert "selectinload(TransactionLog.device)" in src
         assert "selectinload(TransactionLog.performed_by)" in src
 
-    def test_share_down_is_error(self, client, monkeypatch, tmp_path, dashboard_secret):
+    def test_share_down_is_error(self, client, monkeypatch, tmp_path):
         """Missing catalog Excel is 503; does not invent a locker row."""
         monkeypatch.setattr(
             "config.settings.SOURCE_EXCEL_PATH", str(tmp_path / "missing.xlsx")
@@ -308,64 +289,20 @@ class TestDashboardOwnerEditApi:
         resp = client.post(
             "/api/dashboard/owner",
             json={"pm_number": "PM-001", "owner": "Alex"},
-            headers=dashboard_admin_headers(dashboard_secret),
         )
         assert resp.status_code == 503
 
 
 class TestDashboardTagApi:
-    """Dashboard bind/unbind require the admin secret; overlay is not auth."""
+    """Public dashboard bind/unbind keep their reader-conflict checks."""
 
-    def test_bind_tag_without_secret_is_401(self, client, mock_context, test_devices):
-        """POST /api/dashboard/bind-tag is 401 when the secret is unset."""
+    def test_bind_tag_public_arms(
+        self, client, mock_context, test_devices):
+        """Header-free bind arms pending_tag_bind without a kiosk session."""
         mock_context.pending_tag_bind = None
         resp = client.post(
             "/api/dashboard/bind-tag",
             json={"pm_number": "PM-001"},
-        )
-        assert resp.status_code == 401
-        assert mock_context.pending_tag_bind is None
-
-    def test_unbind_tag_without_secret_is_401(
-        self, client, test_devices, db_session, hmac_key
-    ):
-        """POST /api/dashboard/unbind-tag is 401 when the secret is unset."""
-        DeviceRepository.bind_tag(
-            db_session,
-            test_devices[0],
-            compute_uid_hmac("AABBCCDD", hmac_key),
-        )
-        db_session.commit()
-        resp = client.post(
-            "/api/dashboard/unbind-tag",
-            json={"pm_number": "PM-001"},
-        )
-        assert resp.status_code == 401
-        db_session.expire_all()
-        assert test_devices[0].tag_hmac is not None
-
-    def test_bind_tag_wrong_secret_is_401(
-        self, client, mock_context, test_devices, dashboard_secret
-    ):
-        """Wrong header value is 401, not a successful arm."""
-        mock_context.pending_tag_bind = None
-        resp = client.post(
-            "/api/dashboard/bind-tag",
-            json={"pm_number": "PM-001"},
-            headers=dashboard_admin_headers("wrong-secret-value"),
-        )
-        assert resp.status_code == 401
-        assert mock_context.pending_tag_bind is None
-
-    def test_bind_tag_with_secret_arms(
-        self, client, mock_context, test_devices, dashboard_secret
-    ):
-        """Configured secret arms pending_tag_bind without a kiosk session."""
-        mock_context.pending_tag_bind = None
-        resp = client.post(
-            "/api/dashboard/bind-tag",
-            json={"pm_number": "PM-001"},
-            headers=dashboard_admin_headers(dashboard_secret),
         )
         assert resp.status_code == 200
         assert resp.json().get("ok") is True
@@ -374,24 +311,21 @@ class TestDashboardTagApi:
         assert mock_context.pending_tag_bind.is_expired is False
         assert mock_context.pending_tag_bind.from_dashboard is True
 
-    def test_dashboard_bind_from_lan_is_secret_not_loopback(
-        self, lan_client, mock_context, test_devices, dashboard_secret
-    ):
-        """Dashboard bind stays secret-gated for LAN staff, not loopback-only."""
+    def test_dashboard_bind_from_lan_is_public(
+        self, lan_client, mock_context, test_devices):
+        """Dashboard bind works for LAN staff without any credential."""
         mock_context.pending_tag_bind = None
         resp = lan_client.post(
             "/api/dashboard/bind-tag",
             json={"pm_number": "PM-001"},
-            headers=dashboard_admin_headers(dashboard_secret),
         )
         assert resp.status_code == 200
         assert mock_context.pending_tag_bind is not None
         assert mock_context.pending_tag_bind.from_dashboard is True
 
-    def test_unbind_tag_with_secret_clears_hmac(
-        self, client, test_devices, db_session, hmac_key, dashboard_secret
-    ):
-        """Authorized unbind clears tag_hmac; has_tag becomes False."""
+    def test_unbind_tag_clears_hmac(
+        self, client, test_devices, db_session, hmac_key):
+        """Unbind clears tag_hmac; has_tag becomes False."""
         DeviceRepository.bind_tag(
             db_session,
             test_devices[0],
@@ -401,7 +335,6 @@ class TestDashboardTagApi:
         resp = client.post(
             "/api/dashboard/unbind-tag",
             json={"pm_number": "PM-001"},
-            headers=dashboard_admin_headers(dashboard_secret),
         )
         assert resp.status_code == 200
         assert resp.json().get("ok") is True
@@ -413,8 +346,7 @@ class TestDashboardTagApi:
         assert "tag_hmac" not in cam
 
     def test_unbind_clears_pending_tag_bind(
-        self, client, mock_context, test_devices, db_session, hmac_key, dashboard_secret
-    ):
+        self, client, mock_context, test_devices, db_session, hmac_key):
         """Dashboard unbind cancels an armed bind window."""
         DeviceRepository.bind_tag(
             db_session,
@@ -426,35 +358,30 @@ class TestDashboardTagApi:
         resp = client.post(
             "/api/dashboard/unbind-tag",
             json={"pm_number": "PM-001"},
-            headers=dashboard_admin_headers(dashboard_secret),
         )
         assert resp.status_code == 200
         assert mock_context.pending_tag_bind is None
 
     def test_bind_refused_while_kiosk_session_active(
-        self, client, mock_context, test_user, test_devices, dashboard_secret
-    ):
+        self, client, mock_context, test_user, test_devices):
         """Dashboard bind must not arm while someone is logged in at the kiosk."""
         mock_context.session_mgr.start_session(test_user)
         mock_context.pending_tag_bind = None
         resp = client.post(
             "/api/dashboard/bind-tag",
             json={"pm_number": "PM-001"},
-            headers=dashboard_admin_headers(dashboard_secret),
         )
         assert resp.status_code == 409
         assert mock_context.pending_tag_bind is None
 
     def test_bind_does_not_drop_pending_registration(
-        self, client, mock_context, test_devices, dashboard_secret
-    ):
+        self, client, mock_context, test_devices):
         """Dashboard bind must not clear an in-progress kiosk enroll."""
         mock_context.pending_registration = PendingRegistration("Someone")
         mock_context.pending_tag_bind = None
         resp = client.post(
             "/api/dashboard/bind-tag",
             json={"pm_number": "PM-001"},
-            headers=dashboard_admin_headers(dashboard_secret),
         )
         assert resp.status_code == 409
         assert mock_context.pending_registration is not None
@@ -462,32 +389,27 @@ class TestDashboardTagApi:
         assert mock_context.pending_tag_bind is None
 
     def test_second_bind_rejected_while_armed(
-        self, client, mock_context, test_devices, dashboard_secret
-    ):
+        self, client, mock_context, test_devices):
         """Last-writer-wins is refused: a non-expired bind blocks a new arm."""
         mock_context.pending_tag_bind = PendingTagBind(device_id=test_devices[1].id)
         resp = client.post(
             "/api/dashboard/bind-tag",
             json={"pm_number": "PM-001"},
-            headers=dashboard_admin_headers(dashboard_secret),
         )
         assert resp.status_code == 409
         assert mock_context.pending_tag_bind.device_id == test_devices[1].id
 
     def test_unknown_pm_is_404(
-        self, client, mock_context, dashboard_secret
-    ):
+        self, client, mock_context):
         """Bind/unbind of a PM that is not a locker device is 404."""
         resp = client.post(
             "/api/dashboard/bind-tag",
             json={"pm_number": "PM-MISSING"},
-            headers=dashboard_admin_headers(dashboard_secret),
         )
         assert resp.status_code == 404
         resp = client.post(
             "/api/dashboard/unbind-tag",
             json={"pm_number": "PM-MISSING"},
-            headers=dashboard_admin_headers(dashboard_secret),
         )
         assert resp.status_code == 404
         assert mock_context.pending_tag_bind is None

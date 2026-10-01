@@ -32,10 +32,6 @@ class UnknownPm(Exception):
     """The PM number is not in the catalog spreadsheet."""
 
 
-class SlotTaken(Exception):
-    """Another locker device already occupies this slot."""
-
-
 class AlreadyRegistered(Exception):
     """This PM is already a locker device."""
 
@@ -44,23 +40,20 @@ class InvalidSlot(Exception):
     """Slot must be an integer >= 1."""
 
 
-def _require_free_slot(session: Session, locker_slot: int, ignore_id: int | None = None) -> None:
-    """Reject a non-positive or occupied slot.
+def _require_valid_slot(locker_slot: int) -> None:
+    """Reject a non-positive or out-of-range slot.
+
+    Slots are shared — several devices may sit in one cabinet slot — so this
+    only validates the 1..MAX_LOCKER_SLOT range.
 
     Args:
-        session: Active database session.
         locker_slot: Requested cabinet number.
-        ignore_id: Device id allowed to keep this slot (reassign to same slot).
 
     Raises:
         InvalidSlot: locker_slot is not in 1..MAX_LOCKER_SLOT.
-        SlotTaken: another device occupies the slot.
     """
     if not isinstance(locker_slot, int) or locker_slot < 1 or locker_slot > MAX_LOCKER_SLOT:
         raise InvalidSlot(f"Slot must be between 1 and {MAX_LOCKER_SLOT}.")
-    occupant = DeviceRepository.find_by_slot(session, locker_slot)
-    if occupant is not None and occupant.id != ignore_id:
-        raise SlotTaken(f"Slot {locker_slot} is already used by {occupant.pm_number}.")
 
 
 def register_locker_device(
@@ -75,7 +68,7 @@ def register_locker_device(
         session: Active database session.
         source_path: Path to ``device-list.xlsx``.
         pm_number: Equipment number to look up.
-        locker_slot: Physical cabinet slot (unique, >= 1).
+        locker_slot: Physical cabinet slot (>= 1; slots may be shared).
 
     Returns:
         The new Device row (AVAILABLE, no tag yet).
@@ -84,8 +77,7 @@ def register_locker_device(
         CatalogUnavailable: Workbook missing, locked, or unreadable.
         UnknownPm: PM not in the sheet.
         AlreadyRegistered: PM already in SQLite.
-        InvalidSlot: Slot is not >= 1.
-        SlotTaken: Slot occupied.
+        InvalidSlot: Slot is not in 1..MAX_LOCKER_SLOT.
     """
     pm = (pm_number or "").strip()
     if not pm:
@@ -95,7 +87,7 @@ def register_locker_device(
     if existing is not None:
         raise AlreadyRegistered(f"{pm} is already in the locker.")
 
-    _require_free_slot(session, locker_slot)
+    _require_valid_slot(locker_slot)
 
     try:
         catalog = lookup_catalog_by_pm(source_path, pm)
@@ -125,7 +117,13 @@ def register_locker_device(
         )
     except IntegrityError as e:
         session.rollback()
-        raise SlotTaken(f"Slot {locker_slot} is already used.") from e
+        # The only remaining unique keys on devices are pm_number, serial,
+        # and tag_hmac — a duplicate PM race reports as already registered,
+        # anything else surfaces as-is rather than masquerading as a slot
+        # conflict (slots are shared and carry no constraint).
+        if DeviceRepository.find_by_pm(session, pm) is not None:
+            raise AlreadyRegistered(f"{pm} is already in the locker.") from e
+        raise
 
     if catalog.model:
         for sib in DeviceRepository.find_by_model(session, catalog.model):
@@ -141,7 +139,7 @@ def register_locker_device(
 
 
 def set_locker_slot(session: Session, device: Device, locker_slot: int) -> Device:
-    """Move an existing locker device to a different free slot.
+    """Move an existing locker device to a different (possibly shared) slot.
 
     Args:
         session: Active database session.
@@ -152,15 +150,10 @@ def set_locker_slot(session: Session, device: Device, locker_slot: int) -> Devic
         The same Device row.
 
     Raises:
-        InvalidSlot: Slot is not >= 1.
-        SlotTaken: Slot occupied by another device.
+        InvalidSlot: Slot is not in 1..MAX_LOCKER_SLOT.
     """
-    _require_free_slot(session, locker_slot, ignore_id=device.id)
-    try:
-        DeviceRepository.set_locker_slot(session, device, locker_slot)
-        session.flush()
-    except IntegrityError as e:
-        session.rollback()
-        raise SlotTaken(f"Slot {locker_slot} is already used.") from e
+    _require_valid_slot(locker_slot)
+    DeviceRepository.set_locker_slot(session, device, locker_slot)
+    session.flush()
     logger.info("Moved %s (pm=%s) to slot %s.", device.name, device.pm_number, locker_slot)
     return device

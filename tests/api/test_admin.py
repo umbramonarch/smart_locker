@@ -1,7 +1,7 @@
 """
 File: test_admin.py
 Description: Tests for kiosk admin overlay, device-tag bind/unbind, sync,
-             update, Exit kiosk, and Shut down.
+             update, Stop system, and Shut down.
 Project: smart_locker/tests/api
 Notes: Run with: python -m pytest tests/api/test_admin.py -v
 """
@@ -21,7 +21,7 @@ from smart_locker.security.hashing import compute_uid_hmac
 import smart_locker.api.app_context as ctx_module
 
 class TestDeviceTagBindApi:
-    """Auth gates for bind/unbind, has_tag on the kiosk list, duplicate names."""
+    """Auth gates for bind/unbind, has_tag on the manage list, duplicate names."""
 
     def test_bind_tag_requires_session(self, client, mock_context, test_devices):
         """POST /api/admin/devices/{id}/bind-tag returns 401 without a session."""
@@ -97,7 +97,11 @@ class TestDeviceTagBindApi:
         assert resp.json()["success"] is True
         db_session.expire_all()
         assert test_devices[0].tag_hmac is None
-        listed = client.get("/api/devices").json()
+        # The untagged unit leaves the kiosk grids but stays on the
+        # admin manage list — binding a new sticker is done from there.
+        kiosk = client.get("/api/devices").json()
+        assert "Camera" not in {d["name"] for d in kiosk}
+        listed = client.get("/api/admin/devices").json()
         cam = next(d for d in listed if d["name"] == "Camera")
         assert cam["has_tag"] is False
         assert "tag_hmac" not in cam
@@ -206,8 +210,58 @@ class TestAdminOverlaySession:
         assert mock_context.pending_tag_bind.device_id == 1
         assert mock_context.pending_tag_bind.from_dashboard is True
 
+    def test_admin_devices_requires_session(self, client, mock_context):
+        """GET /api/admin/devices returns 401 without a session."""
+        resp = client.get("/api/admin/devices")
+        assert resp.status_code == 401
+
+    def test_admin_devices_rejects_non_admin(
+        self, client, mock_context, test_user
+    ):
+        """GET /api/admin/devices returns 403 for a normal user."""
+        mock_context.session_mgr.start_session(test_user)
+        resp = client.get("/api/admin/devices")
+        assert resp.status_code == 403
+
+    def test_admin_devices_lists_untagged_units(
+        self, client, mock_context, admin_user, test_devices, db_session
+    ):
+        """A cabinet unit with no sticker stays on the manage list."""
+        DeviceRepository.create(
+            db_session,
+            name="Fresh Unit",
+            device_type="Tool",
+            pm_number="PM-NEW",
+            locker_slot=9,
+        )
+        db_session.commit()
+        mock_context.session_mgr.start_session(admin_user)
+        resp = client.get("/api/admin/devices")
+        assert resp.status_code == 200
+        by_name = {d["name"]: d for d in resp.json()}
+        assert by_name["Fresh Unit"]["has_tag"] is False
+        assert "tag_hmac" not in by_name["Fresh Unit"]
+        assert by_name["Camera"]["has_tag"] is True
+
+    def test_borrowed_unit_survives_unbind_on_kiosk_feed(
+        self, client, mock_context, admin_user, test_user, test_devices, db_session
+    ):
+        """Unbinding a borrowed unit must not strand it off the return list."""
+        DeviceRepository.borrow(db_session, test_devices[0], test_user.id)
+        DeviceRepository.bind_tag(db_session, test_devices[0], "borrowed-hmac")
+        db_session.commit()
+        mock_context.session_mgr.start_session(admin_user)
+        resp = client.post(
+            f"/api/admin/devices/{test_devices[0].id}/unbind-tag"
+        )
+        assert resp.status_code == 200
+        kiosk = client.get("/api/devices").json()
+        cam = next(d for d in kiosk if d["name"] == "Camera")
+        assert cam["status"] == "borrowed"
+        assert cam["has_tag"] is False
+
     def test_list_devices_duplicate_name_distinct_pm(
-        self, client, mock_context, test_user, db_session
+        self, client, mock_context, admin_user, db_session
     ):
         """Same name, different PM — both rows in the bind-list payload."""
         DeviceRepository.create(
@@ -225,8 +279,8 @@ class TestAdminOverlaySession:
             locker_slot=2,
         )
         db_session.commit()
-        mock_context.session_mgr.start_session(test_user)
-        resp = client.get("/api/devices")
+        mock_context.session_mgr.start_session(admin_user)
+        resp = client.get("/api/admin/devices")
         assert resp.status_code == 200
         rows = [d for d in resp.json() if d["name"] == "Fluke 87V"]
         assert len(rows) == 2
@@ -278,7 +332,7 @@ class TestAdminOverlaySession:
 class TestAdminSyncAndUpdateEndpoints:
     """Auth-gate tests for the sync-preview, sync-status, and software-update
     admin endpoints. Kiosk mutations are loopback + session + admin role.
-    Dashboard catalog GETs stay public; dashboard mutations use the admin secret.
+    Dashboard endpoints are public.
     """
 
     def test_sync_preview_requires_session(self, client, mock_context):
@@ -376,50 +430,57 @@ class TestAdminSyncAndUpdateEndpoints:
         resp = lan_client.post("/api/admin/update")
         assert resp.status_code == 403
 
-    def test_exit_kiosk_requires_session(self, client, mock_context):
-        resp = client.post("/api/admin/exit-kiosk")
+    def test_stop_system_requires_session(self, client, mock_context):
+        resp = client.post("/api/admin/stop-system")
         assert resp.status_code == 401
 
-    def test_exit_kiosk_rejects_non_admin(self, client, mock_context, test_user):
+    def test_stop_system_rejects_non_admin(self, client, mock_context, test_user):
         mock_context.session_mgr.start_session(test_user)
-        resp = client.post("/api/admin/exit-kiosk")
+        resp = client.post("/api/admin/stop-system")
         assert resp.status_code == 403
 
-    def test_exit_kiosk_unavailable_off_pi(self, client, mock_context, admin_user, monkeypatch):
-        """Dev/Windows hosts must not try to kill a browser — 503, not a hang."""
+    def test_stop_system_unavailable_off_pi(self, client, mock_context, admin_user, monkeypatch):
+        """Dev/Windows hosts have no systemctl — 503, not a hang."""
         import smart_locker.api.routes as routes_module
-        from smart_locker.services.appliance import ApplianceUnavailable
 
-        def _boom():
-            raise ApplianceUnavailable(
-                "Kiosk exit runs on the Raspberry Pi appliance only."
-            )
-
-        monkeypatch.setattr(routes_module, "exit_kiosk", _boom)
+        monkeypatch.setattr(routes_module, "_SYSTEMCTL", None)
         mock_context.session_mgr.start_session(admin_user)
-        resp = client.post("/api/admin/exit-kiosk")
+        resp = client.post("/api/admin/stop-system")
         assert resp.status_code == 503
 
-    def test_exit_kiosk_accepts_admin(self, client, mock_context, admin_user, monkeypatch):
+    def test_stop_system_accepts_admin(self, client, mock_context, admin_user, monkeypatch):
         import smart_locker.api.routes as routes_module
 
-        monkeypatch.setattr(routes_module, "exit_kiosk", lambda: None)
+        monkeypatch.setattr(routes_module, "_SYSTEMCTL", "/usr/bin/systemctl")
+        monkeypatch.setattr(routes_module, "stop_system", lambda: None)
         mock_context.session_mgr.start_session(admin_user)
-        resp = client.post("/api/admin/exit-kiosk")
+        resp = client.post("/api/admin/stop-system")
         assert resp.status_code == 200
         assert resp.json().get("ok") is True
         assert not mock_context.session_mgr.has_active_session
         assert mock_context.admin_overlay_open is False
 
-    def test_exit_kiosk_refuses_lan(
-        self, lan_client, mock_context, admin_user, monkeypatch
-    ):
-        """LAN cannot stop Chromium even with a live admin session."""
+    def test_exit_kiosk_alias_stops_system(self, client, mock_context, admin_user, monkeypatch):
+        """The old exit-kiosk URL is an alias so cached kiosk pages still work."""
         import smart_locker.api.routes as routes_module
 
-        monkeypatch.setattr(routes_module, "exit_kiosk", lambda: None)
+        monkeypatch.setattr(routes_module, "_SYSTEMCTL", "/usr/bin/systemctl")
+        monkeypatch.setattr(routes_module, "stop_system", lambda: None)
         mock_context.session_mgr.start_session(admin_user)
-        resp = lan_client.post("/api/admin/exit-kiosk")
+        resp = client.post("/api/admin/exit-kiosk")
+        assert resp.status_code == 200
+        assert resp.json().get("ok") is True
+
+    def test_stop_system_refuses_lan(
+        self, lan_client, mock_context, admin_user, monkeypatch
+    ):
+        """LAN cannot stop the system even with a live admin session."""
+        import smart_locker.api.routes as routes_module
+
+        monkeypatch.setattr(routes_module, "_SYSTEMCTL", "/usr/bin/systemctl")
+        monkeypatch.setattr(routes_module, "stop_system", lambda: None)
+        mock_context.session_mgr.start_session(admin_user)
+        resp = lan_client.post("/api/admin/stop-system")
         assert resp.status_code == 403
 
     def test_shutdown_requires_session(self, client, mock_context):

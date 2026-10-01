@@ -50,6 +50,9 @@ table at the end.
 - [ ] After login, main menu is scan-first. **Locker** opens the in/out availability overlay; cards and device detail show the **PM number**; screen-pick **Confirm Borrow** still works for untagged units.
 - [ ] Locker overlay scroll is smooth; screen transitions do not drop frames.
 - [ ] Touch targets respond on the first tap; no ghost/double taps.
+- [ ] Focus each kiosk text field (register search, admin name,
+      bind search, add-person name) → the on-screen keyboard opens; **Done**
+      submits/closes it, and the keyboard closes when an overlay opens on top.
 - [ ] If any jank is seen even in lite mode, note it — that is a real-hardware-only finding.
 
 ## 5. locker share & source import
@@ -69,10 +72,11 @@ table at the end.
 - [ ] Auto-export of `smart_locker_data.xlsx` is off unless `SMART_LOCKER_EXCEL_AUTO_EXPORT=1`.
       Admin **Export Excel** still downloads a snapshot.
 - [ ] Software update from USB `locker-updates/` (`python -m scripts.copy_update` on Windows): admin **Software Update** overlay, or SSH `sudo bash deploy/install/update.sh`. Do not overlay the stick onto `/home/locker/smart_locker` in the file manager.
-- [ ] Admin **Register Device**: Add from Excel (PM in the sheet + free slot) creates the locker row and waits for the sticker; unknown PM / share down does not create a row. Existing rows Bind / **Replace tag** / Unbind / Slot still work. **Sync Source** updates catalog only (does not add locker devices).
-- [ ] Admin **Exit kiosk** (confirm) closes Chromium; `smart-locker` stays `active`; dashboard on `:8000` still answers. Chromium does not return until login/reboot.
+- [ ] Admin **Register Device**: Add from Excel (PM in the sheet + slot; an occupied slot is fine) creates the locker row and waits for the sticker; unknown PM / share down does not create a row. Existing rows Bind / **Replace tag** / Unbind / Slot still work. **Sync Source** updates catalog only (does not add locker devices).
+- [ ] Chromium starts without a browser keyring/password prompt (`--password-store=basic` in `start-kiosk.sh`).
+- [ ] Admin **Stop system** (confirm) closes Chromium, then stops `smart-locker` (`systemctl status smart-locker` → `inactive`, still `enabled`). Dashboard on `:8000` stops answering; the Pi stays powered on. The next boot starts the service and kiosk normally.
 - [ ] Admin **Shut down** (confirm) powers the Pi off. After the first update of this feature, if the button errors, SSH `sudo bash deploy/install/apply-sudoers.sh` once.
-- [ ] From another PC, open `http://<pi>:8000/dashboard`. **Inventory** lists the full Excel catalog (share down → error on that tab only). Owner click works for PMs that are **not** in the locker; locker PMs are not editable. **Locker** lists SQLite locker devices (Tagged / No tag; no owner edit). **Display** follows the kiosk screen (idle / main menu / locker / return / admin) and shows the signed-in user. Tap the dashboard clock 5× within 3 s: users, logs, Unbind / Replace tag. Cursor and scroll work; the page is kiosk colours, not a second kiosk. If `SMART_LOCKER_PUBLIC_URL` and `SMART_LOCKER_DASHBOARD_SHARE_PATH` are set, `dashboard.url` on the share opens the live page.
+- [ ] From another PC, open `http://<pi>:8000/dashboard`. **Inventory** lists the full Excel catalog (share down → error on that tab only). Owner click works for PMs that are **not** in the locker; locker PMs are not editable. **Locker** lists SQLite locker devices (Tagged / No tag; no owner edit). **Display** follows the kiosk screen (idle / main menu / locker / return / admin) and shows the signed-in user. Tap the dashboard clock 5× within 8 s: users (Rename a name; the kiosk borrower label and a borrowed unit's Excel Location follow), logs, Unbind / Replace tag. Cursor and scroll work; the page is kiosk colours, not a second kiosk. If `SMART_LOCKER_PUBLIC_URL` and `SMART_LOCKER_DASHBOARD_SHARE_PATH` are set, `dashboard.url` on the share opens the live page.
 
 ## 6. Sign-off
 

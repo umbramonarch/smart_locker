@@ -138,6 +138,19 @@ def in_locker_token() -> str:
     return (os.getenv("SMART_LOCKER_IN_LOCKER_TOKEN") or "Locker").strip() or "Locker"
 
 
+def calibration_warn_days() -> int:
+    """Days before the calibration date that the due-soon badge appears.
+
+    Borrow is refused on the due date itself regardless of this window.
+    Read on each call so tests can setenv.
+
+    Returns:
+        ``SMART_LOCKER_CALIBRATION_WARN_DAYS`` clamped at 0, or 14.
+    """
+    return _env_int("SMART_LOCKER_CALIBRATION_WARN_DAYS", 14, minimum=0)
+
+
+
 def id_header_extras() -> list[str]:
     """Extra Excel header aliases for the join key.
 
@@ -174,18 +187,3 @@ PHOTO_SERVE_DIR = BASE_DIR / "smart_locker" / "frontend" / "images"
 # Environment variable names for the two cryptographic keys (actual keys loaded by key_manager)
 ENC_KEY_ENV_VAR = "SMART_LOCKER_ENC_KEY"
 HMAC_KEY_ENV_VAR = "SMART_LOCKER_HMAC_KEY"
-
-# Header LAN browsers send for dashboard mutations (bind/unbind, later owner).
-DASHBOARD_ADMIN_HEADER = "X-Smart-Locker-Admin"
-
-
-def dashboard_admin_secret() -> str:
-    """Shared secret for dashboard admin mutations.
-
-    Read on each call so tests can setenv. Empty means fail closed: mutating
-    dashboard routes must 401 rather than treating an admin SQLite row as auth.
-
-    Returns:
-        Stripped ``SMART_LOCKER_DASHBOARD_ADMIN_SECRET``, or ``""``.
-    """
-    return (os.getenv("SMART_LOCKER_DASHBOARD_ADMIN_SECRET") or "").strip()

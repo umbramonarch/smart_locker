@@ -2,13 +2,12 @@
  * @fileoverview Public dashboard: Inventory (Excel), Locker (SQLite), and
  *               Display (kiosk snapshot). Sort, search, status filter, and
  *               polling. Owner change is Inventory only (not locker PMs).
- *               5-tap the header clock for users, logs, and NFC unbind /
- *               arm-bind. No login. No remote control of the kiosk.
+ *               The 5-tap on the header clock opens
+ *               users, logs, and NFC unbind / arm-bind. No login. No remote
+ *               control of the kiosk.
  * @project smart_locker/frontend
  * @description Tabs switch locally. Inventory errors (share down) leave
  *              the Locker tab usable. Asset-label text comes from /api/config.
- *              Dashboard 5-tap is not authorization; bind/unbind send
- *              X-Smart-Locker-Admin from a prompted secret.
  */
 
 /* ── State ────────────────────────────────────────────────────────────────── */
@@ -60,152 +59,23 @@ let txData = [];
 
 const adminTaps = [];
 const ADMIN_TAP_COUNT = 5;
-const ADMIN_TAP_WINDOW = 3000;
-
-/** sessionStorage key for the dashboard admin secret (header value). */
-const ADMIN_SECRET_KEY = 'smartLockerAdminSecret';
-/** Header name matching config.settings.DASHBOARD_ADMIN_HEADER. */
-const ADMIN_HEADER = 'X-Smart-Locker-Admin';
+const ADMIN_TAP_WINDOW = 8000;
 
 
 /**
- * Headers for dashboard admin POSTs. Secret comes from sessionStorage.
+ * Headers for dashboard POSTs — JSON body only; the dashboard is public.
  *
  * @returns {Object<string, string>} Fetch headers including Content-Type.
  */
-function dashboardAdminHeaders() {
-  const headers = { 'Content-Type': 'application/json' };
-  const secret = sessionStorage.getItem(ADMIN_SECRET_KEY) || '';
-  if (secret) headers[ADMIN_HEADER] = secret;
-  return headers;
+function dashboardJsonHeaders() {
+  return { 'Content-Type': 'application/json' };
 }
 
 
-/** Promise resolve/reject callbacks for the active admin-secret modal. */
-let adminSecretResolve = null;
-
-
-/** Message shown when the secret cannot be checked against the API. */
-const ADMIN_SECRET_UNAVAILABLE_MSG =
-  'Could not verify the admin secret right now. Try again.';
-
-
-/**
- * Show the styled admin-secret modal.
- *
- * @param {string} [message] - Optional error text to display on open.
- */
-function openAdminSecretDialog(message) {
-  const dialog = document.getElementById('admin-secret-dialog');
-  const input = document.getElementById('admin-secret-input');
-  const err = document.getElementById('admin-secret-error');
-  if (err) {
-    err.textContent = message || '';
-    err.style.display = message ? '' : 'none';
-  }
-  if (input) input.value = '';
-  if (dialog) dialog.hidden = false;
-  if (input) input.focus();
-}
-
-
-/**
- * Hide the admin-secret modal.
- */
-function closeAdminSecretDialog() {
-  const dialog = document.getElementById('admin-secret-dialog');
-  if (dialog) dialog.hidden = true;
-}
-
-
-/**
- * Resolve the pending admin-secret promise with the given value.
- * @param {string} value - Secret string, or empty if cancelled.
- */
-function resolveAdminSecret(value) {
-  if (adminSecretResolve) {
-    adminSecretResolve(value);
-    adminSecretResolve = null;
-  }
-  closeAdminSecretDialog();
-}
-
-
-/**
- * Check a secret against the admin API.
- *
- * @param {string} secret - Secret to send in the admin header.
- * @returns {Promise<string>} 'ok', 'invalid' on 401, or 'unavailable'.
- */
-async function validateAdminSecret(secret) {
-  const headers = { 'Content-Type': 'application/json' };
-  headers[ADMIN_HEADER] = secret;
-  let res = null;
-  try {
-    res = await fetch('/api/dashboard/users', { headers });
-  } catch (_) {
-    return 'unavailable';
-  }
-  if (!res) return 'unavailable';
-  if (res.ok) return 'ok';
-  if (res.status === 401 || res.status === 403) return 'invalid';
-  return 'unavailable';
-}
-
-
-/**
- * Validate the typed admin secret before entering admin mode.
- * On success store it and resolve; otherwise show an error and stay open.
- */
-async function submitAdminSecret() {
-  const input = document.getElementById('admin-secret-input');
-  const err = document.getElementById('admin-secret-error');
-  const secret = input ? input.value.trim() : '';
-  if (!secret) {
-    if (err) {
-      err.textContent = 'Enter the admin secret.';
-      err.style.display = '';
-    }
-    if (input) input.focus();
-    return;
-  }
-
-  const result = await validateAdminSecret(secret);
-  if (result === 'ok') {
-    sessionStorage.setItem(ADMIN_SECRET_KEY, secret);
-    resolveAdminSecret(secret);
-    return;
-  }
-  if (err) {
-    err.textContent = result === 'invalid'
-      ? 'Incorrect admin secret.'
-      : ADMIN_SECRET_UNAVAILABLE_MSG;
-    err.style.display = '';
-  }
-  if (input) input.focus();
-}
-
-
-/**
- * Prompt for the dashboard admin secret using the styled modal.
- * A stored secret is re-validated, and cleared if the API rejects it.
- *
- * @returns {Promise<string>} Secret string, or empty string if cancelled.
- */
-async function ensureDashboardAdminSecret() {
-  const stored = sessionStorage.getItem(ADMIN_SECRET_KEY) || '';
-  let message = '';
-  if (stored) {
-    const result = await validateAdminSecret(stored);
-    if (result === 'ok') return stored;
-    if (result === 'invalid') sessionStorage.removeItem(ADMIN_SECRET_KEY);
-    else message = ADMIN_SECRET_UNAVAILABLE_MSG;
-  }
-  openAdminSecretDialog(message);
-  return new Promise((resolve) => {
-    adminSecretResolve = resolve;
-  });
-}
+/** User id currently open in the rename dialog, or null. */
+let renameUserId = null;
+/** True while a rename POST is in flight — Enter/click must not resend. */
+let renameInFlight = false;
 
 
 /**
@@ -324,13 +194,10 @@ async function _fetchTablesWork() {
 
 /**
  * Load dropdown names (registered users + registrants + in-locker token).
- * Requires the dashboard admin secret header.
  */
 async function fetchOwners() {
   try {
-    const res = await fetch('/api/dashboard/owners', {
-      headers: dashboardAdminHeaders(),
-    });
+    const res = await fetch('/api/dashboard/owners');
     if (!res.ok) return;
     const data = await res.json();
     ownerNames = Array.isArray(data.names) ? data.names : [];
@@ -492,7 +359,7 @@ function renderInventory() {
       <td>${esc(d.model)}</td>
       <td>${esc(d.serial_number)}</td>
       <td>${d.in_locker ? esc(d.location) : ownerCell(d.pm_number, d.location)}</td>
-      <td>${esc(d.calibration_due)}</td>
+      <td>${calCell(d)}</td>
     </tr>
   `).join('');
 }
@@ -538,9 +405,24 @@ function renderDevices() {
       <td><span class="status-badge ${d.status}">${d.status}</span></td>
       <td>${esc(d.borrower_name ?? '')}</td>
       <td>${d.has_tag ? 'Tagged' : 'No tag'}</td>
-      <td>${esc(d.calibration_due ?? '')}</td>
+      <td>${calCell(d)}</td>
     </tr>
   `).join('');
+}
+
+
+/**
+ * Calibration cell: the ISO date, wrapped in a badge while the state is
+ * due_soon/due/overdue ('ok' and dateless rows stay plain).
+ *
+ * @param {Object} d - Inventory or Locker row (calibration_* fields).
+ * @returns {string} HTML for the cell.
+ */
+function calCell(d) {
+  const state = d.calibration_state;
+  const date = esc(d.calibration_due ?? '');
+  if (!date || !state || state === 'ok') return date;
+  return `<span class="cal-badge ${esc(state)}">${date}</span>`;
 }
 
 
@@ -630,20 +512,15 @@ async function confirmOwnerEdit() {
   try {
     const res = await fetch('/api/dashboard/owner', {
       method: 'POST',
-      headers: dashboardAdminHeaders(),
+      headers: dashboardJsonHeaders(),
       body: JSON.stringify({ pm_number: pm, owner }),
     });
     if (!res.ok) {
       let detail = 'Could not change owner.';
-      if (res.status === 401) {
-        sessionStorage.removeItem(ADMIN_SECRET_KEY);
-        detail = 'Admin authorization failed. Tap the clock 5 times to enter the secret.';
-      } else {
-        try {
-          const body = await res.json();
-          if (body && body.detail) detail = String(body.detail);
-        } catch (_) { /* keep default */ }
-      }
+      try {
+        const body = await res.json();
+        if (body && body.detail) detail = String(body.detail);
+      } catch (_) { /* keep default */ }
       if (err) {
         err.textContent = detail;
         err.style.display = '';
@@ -678,7 +555,7 @@ function tickClock() {
 
 
 /**
- * Record a tap on the header clock. Five taps within 3s opens admin.
+ * Record a tap on the header clock. Five taps within 8s opens admin.
  */
 async function checkAdminTapSequence() {
   const now = Date.now();
@@ -696,12 +573,10 @@ async function checkAdminTapSequence() {
 
 
 /**
- * Show the 5-tap overlay and load users, logs, and locker tags.
- * The admin secret is validated first; the overlay only opens on success.
+ * Show the overlay and load users, logs, and locker tags.
+ * Opened by the 5-tap clock shortcut.
  */
 async function openAdminOverlay() {
-  const secret = await ensureDashboardAdminSecret();
-  if (!secret) return;
   const overlay = document.getElementById('admin-overlay');
   if (overlay) overlay.hidden = false;
   const status = document.getElementById('admin-tag-status');
@@ -724,10 +599,9 @@ function closeAdminOverlay() {
  * Does not re-copy Inventory Excel (the overlay does not show that table).
  */
 async function fetchAdminTables() {
-  const headers = dashboardAdminHeaders();
   const [usersRes, txRes, devicesRes] = await Promise.all([
-    fetch('/api/dashboard/users', { headers }).catch(() => null),
-    fetch('/api/dashboard/transactions', { headers }).catch(() => null),
+    fetch('/api/dashboard/users').catch(() => null),
+    fetch('/api/dashboard/transactions').catch(() => null),
     fetch('/api/dashboard/devices').catch(() => null),
   ]);
   try {
@@ -738,14 +612,6 @@ async function fetchAdminTables() {
   try {
     txData = txRes && txRes.ok ? await txRes.json() : [];
   } catch (_) {
-    txData = [];
-  }
-  if ((usersRes && usersRes.status === 401) || (txRes && txRes.status === 401)) {
-    sessionStorage.removeItem(ADMIN_SECRET_KEY);
-    const status = document.getElementById('admin-tag-status');
-    if (status) status.textContent =
-      'Dashboard admin authorization failed. Check the secret.';
-    usersData = [];
     txData = [];
   }
   try {
@@ -761,12 +627,22 @@ async function fetchAdminTables() {
 function renderAdminOverlay() {
   const usersBody = document.getElementById('admin-users-tbody');
   if (usersBody) {
-    usersBody.innerHTML = usersData.map(u => `
+    usersBody.innerHTML = usersData.filter(u => u.is_active).map(u => `
       <tr>
         <td>${esc(u.display_name)}</td>
-        <td>${esc(u.role)}</td>
+        <td>
+          <select class="user-role-select" data-role-id="${u.id}">
+            <option value="user"${u.role === 'user' ? ' selected' : ''}>user</option>
+            <option value="admin"${u.role === 'admin' ? ' selected' : ''}>admin</option>
+          </select>
+        </td>
         <td>${u.is_active ? 'Yes' : 'No'}</td>
         <td>${esc(u.registered_at)}</td>
+        <td>
+          <button type="button" class="admin-tag-btn" data-rename-id="${u.id}" data-rename-name="${esc(u.display_name)}">Rename</button>
+          <button type="button" class="admin-tag-btn" data-role-save-id="${u.id}">Save</button>
+          <button type="button" class="admin-tag-btn" data-remove-id="${u.id}" data-remove-name="${esc(u.display_name)}">Remove</button>
+        </td>
       </tr>
     `).join('');
   }
@@ -820,14 +696,9 @@ async function armBind(pm) {
   try {
     const res = await fetch('/api/dashboard/bind-tag', {
       method: 'POST',
-      headers: dashboardAdminHeaders(),
+      headers: dashboardJsonHeaders(),
       body: JSON.stringify({ pm_number: pm }),
     });
-    if (res.status === 401) {
-      sessionStorage.removeItem(ADMIN_SECRET_KEY);
-      if (status) status.textContent = 'Admin authorization failed. Tap the clock 5 times to enter the secret.';
-      return;
-    }
     let detail = 'Could not arm bind.';
     try {
       const body = await res.json();
@@ -854,20 +725,15 @@ async function unbindTag(pm) {
   try {
     const res = await fetch('/api/dashboard/unbind-tag', {
       method: 'POST',
-      headers: dashboardAdminHeaders(),
+      headers: dashboardJsonHeaders(),
       body: JSON.stringify({ pm_number: pm }),
     });
     if (!res.ok) {
       let detail = 'Could not unbind.';
-      if (res.status === 401) {
-        sessionStorage.removeItem(ADMIN_SECRET_KEY);
-        detail = 'Admin authorization failed. Tap the clock 5 times to enter the secret.';
-      } else {
-        try {
-          const body = await res.json();
-          if (body && body.detail) detail = String(body.detail);
-        } catch (_) { /* keep default */ }
-      }
+      try {
+        const body = await res.json();
+        if (body && body.detail) detail = String(body.detail);
+      } catch (_) { /* keep default */ }
       if (status) status.textContent = detail;
       return;
     }
@@ -876,6 +742,363 @@ async function unbindTag(pm) {
     renderDevices();
   } catch (_) {
     if (status) status.textContent = 'Could not unbind.';
+  }
+}
+
+
+/**
+ * Persist a role change for one user. The select shows the persisted role;
+ * on failure it snaps back and the error stays readable next to the table.
+ * @param {number} userId
+ * @param {HTMLSelectElement} select
+ * @param {HTMLButtonElement} btn
+ */
+async function saveUserRole(userId, select, btn) {
+  const status = document.getElementById('admin-users-status');
+  const persisted = usersData.find(u => u.id === userId)?.role;
+  if (persisted === select.value) return;  // no change chosen — nothing to do
+  const u = usersData.find(x => x.id === userId);
+  if (!window.confirm(`Set role of ${u ? u.display_name : 'user'} to "${select.value}"?`)) {
+    if (persisted) select.value = persisted;
+    return;
+  }
+  if (status) status.textContent = '';
+  select.disabled = true;
+  btn.disabled = true;
+  try {
+    const res = await fetch(`/api/dashboard/users/${userId}/role`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ role: select.value }),
+    });
+    if (!res.ok) {
+      let detail = 'Could not change role.';
+      try {
+        const body = await res.json();
+        if (body && body.detail) detail = String(body.detail);
+      } catch (_) { /* keep default */ }
+      if (persisted) select.value = persisted;
+      if (status) status.textContent = detail;
+      return;
+    }
+    if (status) status.textContent = 'Role updated.';
+    await fetchAdminTables();
+  } catch (_) {
+    if (persisted) select.value = persisted;
+    if (status) status.textContent = 'Could not change role.';
+  } finally {
+    select.disabled = false;
+    btn.disabled = false;
+  }
+}
+
+/**
+ * Open the rename dialog for one registered user.
+ *
+ * @param {number} id - User id.
+ * @param {string} current - Current display name to prefill.
+ */
+function openRenameDialog(id, current) {
+  renameUserId = id;
+  const dialog = document.getElementById('rename-dialog');
+  const input = document.getElementById('rename-input');
+  const err = document.getElementById('rename-dialog-error');
+  if (input) input.value = current || '';
+  if (err) {
+    err.textContent = '';
+    err.style.display = 'none';
+  }
+  if (dialog) dialog.hidden = false;
+  if (input) {
+    input.focus();
+    input.select();
+  }
+}
+
+
+/**
+ * Hide the rename dialog without writing.
+ */
+function closeRenameDialog() {
+  renameUserId = null;
+  const dialog = document.getElementById('rename-dialog');
+  if (dialog) dialog.hidden = true;
+}
+
+
+/**
+ * Confirm the rename and POST it. Errors stay visible; the typed value is
+ * kept so a retry does not retype.
+ */
+async function confirmRename() {
+  const input = document.getElementById('rename-input');
+  const err = document.getElementById('rename-dialog-error');
+  const btn = document.getElementById('rename-confirm');
+  // Capture the target id now: cancel/close mid-request must not write the
+  // response to whatever the dialog later opens for.
+  const userId = renameUserId;
+  if (userId == null || !input || renameInFlight) return;
+  const name = input.value.trim();
+  renameInFlight = true;
+  if (btn) btn.disabled = true;
+  if (err) {
+    err.textContent = '';
+    err.style.display = 'none';
+  }
+  try {
+    const res = await fetch(`/api/dashboard/users/${userId}/name`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ display_name: name }),
+    });
+    if (!res.ok) {
+      let detail = 'Could not rename.';
+      try {
+        const body = await res.json();
+        if (body && body.detail) detail = String(body.detail);
+      } catch (_) { /* keep default */ }
+      if (err) {
+        err.textContent = detail;
+        err.style.display = '';
+      }
+      return;
+    }
+    closeRenameDialog();
+    await Promise.all([fetchAdminTables(), fetchTables(), fetchOwners()]);
+  } catch (_) {
+    if (err) {
+      err.textContent = 'Could not rename.';
+      err.style.display = '';
+    }
+  } finally {
+    renameInFlight = false;
+    if (btn) btn.disabled = false;
+  }
+}
+
+
+/**
+ * Soft-remove a user after explicit confirmation. Failures keep the row.
+ * @param {number} userId
+ * @param {string} name
+ * @param {HTMLButtonElement} btn
+ */
+async function removeUser(userId, name, btn) {
+  const status = document.getElementById('admin-users-status');
+  if (!window.confirm(`Disable access for ${name}? Loan history is kept.`)) return;
+  if (status) status.textContent = '';
+  btn.disabled = true;
+  try {
+    const res = await fetch(`/api/dashboard/users/${userId}/remove`, { method: 'POST' });
+    if (!res.ok) {
+      let detail = 'Could not remove user.';
+      try {
+        const body = await res.json();
+        if (body && body.detail) detail = String(body.detail);
+      } catch (_) { /* keep default */ }
+      if (status) status.textContent = detail;
+      return;
+    }
+    if (status) status.textContent = `${name} removed.`;
+    await fetchAdminTables();
+  } catch (_) {
+    if (status) status.textContent = 'Could not remove user.';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+
+/* ── Add user (name → physical card tap) ────────────────────────────── */
+
+/** Opaque token of the enrollment window this dialog instance armed. */
+let addEnrollmentToken = null;
+/** Poll timer for the enrollment status endpoint. */
+let addPollTimer = null;
+/** Seconds left on the armed window (drives the visible countdown). */
+let addCountdown = 0;
+/** Monotonic guard so a stale poll/cancel cannot clobber a newer window. */
+let addDialogGen = 0;
+
+function openUserAddDialog() {
+  const dialog = document.getElementById('user-add-dialog');
+  // A prior in-flight arm was cancelled: its gen is stale and its finally
+  // skips the re-enable — reset the shared controls on every open.
+  document.getElementById('user-add-continue').disabled = false;
+  document.getElementById('user-add-input').value = '';
+  document.getElementById('user-add-error').style.display = 'none';
+  document.getElementById('user-add-tap-error').style.display = 'none';
+  document.getElementById('user-add-name-step').hidden = false;
+  document.getElementById('user-add-tap-step').hidden = true;
+  addDialogGen += 1;
+  clearTimeout(addPollTimer);
+  if (dialog) {
+    dialog.hidden = false;
+    document.getElementById('user-add-input').focus();
+  }
+}
+
+function closeUserAddDialog() {
+  addDialogGen += 1;
+  clearTimeout(addPollTimer);
+  addEnrollmentToken = null;
+  const dialog = document.getElementById('user-add-dialog');
+  if (dialog) dialog.hidden = true;
+}
+
+/**
+ * Arm the enrollment window for the typed name, then switch to the
+ * wait-for-card step.
+ */
+async function startUserEnroll() {
+  const input = document.getElementById('user-add-input');
+  const err = document.getElementById('user-add-error');
+  const btn = document.getElementById('user-add-continue');
+  const name = (input.value || '').trim();
+  if (!name) {
+    err.textContent = 'Enter a name.';
+    err.style.display = '';
+    return;
+  }
+  if (btn.disabled) return;   // arm already in flight — single submit
+  const gen = ++addDialogGen;
+  btn.disabled = true;
+  err.style.display = 'none';
+  try {
+    const res = await fetch('/api/dashboard/users/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ display_name: name }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (gen !== addDialogGen) {
+      // Dialog was cancelled while the arm POST was in flight — the server
+      // may still have created the window. Cancel it by token so the NFC
+      // reader is not orphaned, then leave UI untouched.
+      if (res.ok && data.enrollment_id) {
+        fetch(`/api/dashboard/users/register/${data.enrollment_id}/cancel`,
+              { method: 'POST' }).catch(() => {});
+      }
+      return;
+    }
+    if (!res.ok) {
+      err.textContent = typeof data.detail === 'string'
+        ? data.detail : 'Could not start enrollment.';
+      err.style.display = '';
+      return;
+    }
+    addEnrollmentToken = data.enrollment_id;
+    const deadlineEnd = Date.now() + (data.expires_in || 60) * 1000;
+    addCountdown = data.expires_in || 60;
+    document.getElementById('user-add-wait-msg').textContent =
+      'Tap the new work card on the locker reader within '
+      + addCountdown + 's.';
+    document.getElementById('user-add-name-step').hidden = true;
+    document.getElementById('user-add-tap-step').hidden = false;
+    pollEnrollment(gen, deadlineEnd);
+  } catch (_) {
+    if (gen === addDialogGen) {
+      err.textContent = 'Could not reach the server.';
+      err.style.display = '';
+    }
+  } finally {
+    if (gen === addDialogGen) btn.disabled = false;
+  }
+}
+
+/**
+ * Poll the token status endpoint until success/failed/cancelled/timeout.
+ * Sequential setTimeout (no overlapping ticks); every await is followed by
+ * a gen/token re-check so a stale callback can never clear a newer dialog's
+ * timer or touch its DOM.
+ * @param {number} gen - dialog generation; a stale gen stops polling.
+ * @param {number} deadlineEnd - absolute ms when the window expires.
+ */
+function pollEnrollment(gen, deadlineEnd) {
+  clearTimeout(addPollTimer);
+  addPollTimer = setTimeout(async () => {
+    if (gen !== addDialogGen || !addEnrollmentToken) return;
+    const token = addEnrollmentToken;
+
+    const remaining = deadlineEnd - Date.now();
+    if (remaining <= 0) {
+      // Window expired without a tap — report once, release the server-side
+      // window best-effort, then leave the name step for a retry.
+      if (gen === addDialogGen && token === addEnrollmentToken) {
+        addEnrollmentToken = null;
+        fetch(`/api/dashboard/users/register/${token}/cancel`,
+              { method: 'POST' }).catch(() => {});
+        backToNameStep(gen, 'Registration timed out. Check the card and retry.');
+      }
+      return;
+    }
+
+    const wait = document.getElementById('user-add-wait-msg');
+    if (wait) {
+      wait.textContent =
+        'Tap the new work card on the locker reader within '
+        + Math.ceil(remaining / 1000) + 's.';
+    }
+
+    // A hung request cannot block the deadline: abort each poll after
+    // min(5s, remaining) and re-check gen/token after every await.
+    const ctrl = new AbortController();
+    const abortTimer = setTimeout(
+      () => ctrl.abort(), Math.min(5000, remaining));
+    let data = null, status404 = false;
+    try {
+      const res = await fetch(
+        `/api/dashboard/users/register/${token}`,
+        { signal: ctrl.signal });
+      if (res.status === 404) status404 = true;
+      else if (res.ok) data = await res.json();
+    } catch (_) { /* abort/network — transient until deadline */ }
+    clearTimeout(abortTimer);
+
+    if (gen !== addDialogGen || token !== addEnrollmentToken) return;
+
+    if (status404) {
+      // Window gone — a newer or cleared token owns it. Terminal.
+      addEnrollmentToken = null;
+      backToNameStep(gen, 'Registration window unavailable. Please retry.');
+      return;
+    }
+    if (data === null) {
+      pollEnrollment(gen, deadlineEnd);   // retry until deadline
+      return;
+    }
+    if (data.state === 'success') {
+      closeUserAddDialog();
+      await fetchAdminTables();
+      return;
+    }
+    if (data.state === 'failed' || data.state === 'cancelled') {
+      addEnrollmentToken = null;
+      backToNameStep(gen, data.message || 'Enrollment failed.');
+      return;
+    }
+    // still pending
+    pollEnrollment(gen, deadlineEnd);
+  }, 1000);
+}
+
+/** Return the Add-user dialog to its name step with a readable error. */
+function backToNameStep(gen, message) {
+  if (gen !== addDialogGen) return;
+  document.getElementById('user-add-name-step').hidden = false;
+  document.getElementById('user-add-tap-step').hidden = true;
+  const err = document.getElementById('user-add-error');
+  err.textContent = message;
+  err.style.display = '';
+}
+
+/** Cancel the armed window on this dialog's token, then close. */
+async function cancelUserEnroll() {
+  const token = addEnrollmentToken;
+  closeUserAddDialog();
+  if (token) {
+    await fetch(`/api/dashboard/users/register/${token}/cancel`,
+                { method: 'POST' }).catch(() => {});
   }
 }
 
@@ -926,6 +1149,17 @@ function initEvents() {
     if (bindBtn) armBind(bindBtn.dataset.bindPm || '');
     const unbindBtn = e.target.closest('[data-unbind-pm]');
     if (unbindBtn) unbindTag(unbindBtn.dataset.unbindPm || '');
+    const renameBtn = e.target.closest('[data-rename-id]');
+    if (renameBtn) openRenameDialog(Number(renameBtn.dataset.renameId), renameBtn.dataset.renameName || '');
+    const roleBtn = e.target.closest('[data-role-save-id]');
+    if (roleBtn) {
+      const uid = Number(roleBtn.dataset.roleSaveId);
+      const sel = adminOverlay.querySelector(`select[data-role-id="${uid}"]`);
+      if (sel) saveUserRole(uid, sel, roleBtn);
+    }
+    const removeBtn = e.target.closest('[data-remove-id]');
+    if (removeBtn) removeUser(Number(removeBtn.dataset.removeId),
+                              removeBtn.dataset.removeName || 'user', removeBtn);
   });
 
   const cancel = document.getElementById('owner-cancel');
@@ -959,23 +1193,38 @@ function initEvents() {
     });
   }
 
-  const secretCancel = document.getElementById('admin-secret-cancel');
-  if (secretCancel) secretCancel.addEventListener('click', () => resolveAdminSecret(''));
-
-  const secretConfirm = document.getElementById('admin-secret-confirm');
-  if (secretConfirm) secretConfirm.addEventListener('click', submitAdminSecret);
-
-  const secretInput = document.getElementById('admin-secret-input');
-  if (secretInput) {
-    secretInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') submitAdminSecret();
+  const addUserBtn = document.getElementById('add-user-btn');
+  if (addUserBtn) addUserBtn.addEventListener('click', openUserAddDialog);
+  const userAddCancel = document.getElementById('user-add-cancel');
+  if (userAddCancel) userAddCancel.addEventListener('click', closeUserAddDialog);
+  const userAddContinue = document.getElementById('user-add-continue');
+  if (userAddContinue) userAddContinue.addEventListener('click', startUserEnroll);
+  const userAddTapCancel = document.getElementById('user-add-tap-cancel');
+  if (userAddTapCancel) userAddTapCancel.addEventListener('click', cancelUserEnroll);
+  const userAddDialog = document.getElementById('user-add-dialog');
+  if (userAddDialog) {
+    userAddDialog.addEventListener('click', (e) => {
+      if (e.target === userAddDialog) cancelUserEnroll();
     });
   }
 
-  const secretDialog = document.getElementById('admin-secret-dialog');
-  if (secretDialog) {
-    secretDialog.addEventListener('click', (e) => {
-      if (e.target === secretDialog) resolveAdminSecret('');
+  const renameCancel = document.getElementById('rename-cancel');
+  if (renameCancel) renameCancel.addEventListener('click', closeRenameDialog);
+
+  const renameConfirm = document.getElementById('rename-confirm');
+  if (renameConfirm) renameConfirm.addEventListener('click', () => confirmRename());
+
+  const renameInput = document.getElementById('rename-input');
+  if (renameInput) {
+    renameInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') confirmRename();
+    });
+  }
+
+  const renameDialog = document.getElementById('rename-dialog');
+  if (renameDialog) {
+    renameDialog.addEventListener('click', (e) => {
+      if (e.target === renameDialog) closeRenameDialog();
     });
   }
 }

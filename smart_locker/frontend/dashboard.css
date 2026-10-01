@@ -6,8 +6,8 @@
  * Project: smart_locker/frontend
  * Notes: Tabs for Inventory / Locker / Display. Status badges stay
  *        colour-coded. Inventory owner edit (non-locker PMs) uses a
- *        confirm dialog. 5-tap header clock opens users / logs / NFC
- *        unbind and arm-bind. Responsive down to ~600px.
+ *        confirm dialog. The 5-tap header clock opens
+ *        users / logs / NFC unbind and arm-bind. Responsive down to ~600px.
  */
 
 /* --- Reset & base -------------------------------------------------------- */
@@ -385,6 +385,25 @@ body {
   color: var(--status-maintenance);
 }
 
+/* Calibration state badges on the date cell (Inventory and Locker) */
+.cal-badge {
+  display: inline-block;
+  padding: 0.2rem 0.55rem;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.cal-badge.due_soon {
+  background: var(--status-borrowed-bg);
+  color: var(--status-borrowed);
+}
+.cal-badge.due,
+.cal-badge.overdue {
+  background: rgba(248, 113, 113, 0.16);
+  color: #f87171;
+}
+
 /* --- Display tab --------------------------------------------------------- */
 .display-card {
   padding: 2rem 1.5rem 2.25rem;
@@ -533,89 +552,6 @@ body {
   cursor: not-allowed;
 }
 
-/* --- Admin secret dialog ------------------------------------------------- */
-.admin-secret-dialog {
-  position: fixed;
-  inset: 0;
-  z-index: 50;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(0, 0, 0, 0.55);
-  padding: 1.5rem;
-}
-
-.admin-secret-dialog[hidden] {
-  display: none;
-}
-
-.admin-secret-card {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 1.25rem 1.4rem 1.1rem;
-  width: min(24rem, 100%);
-}
-
-.admin-secret-title {
-  font-family: var(--font-heading);
-  font-size: 1.15rem;
-  font-weight: 700;
-}
-
-.admin-secret-hint {
-  color: var(--text-muted);
-  font-size: 0.85rem;
-  margin: 0.25rem 0 1rem;
-}
-
-.admin-secret-label {
-  display: block;
-  font-size: 0.75rem;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--text-muted);
-  margin-bottom: 0.35rem;
-}
-
-.admin-secret-card .search-input {
-  width: 100%;
-  min-width: 0;
-}
-
-.admin-secret-card .error-msg {
-  text-align: left;
-  padding: 0.6rem 0 0;
-}
-
-.admin-secret-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 0.5rem;
-  margin-top: 1rem;
-}
-
-.admin-secret-cancel,
-.admin-secret-confirm {
-  font-family: var(--font-body);
-  font-size: 0.85rem;
-  font-weight: 600;
-  padding: 0.45rem 0.9rem;
-  border-radius: 4px;
-  cursor: pointer;
-  border: 1px solid var(--border);
-}
-
-.admin-secret-cancel {
-  background: var(--surface-2);
-  color: var(--text-muted);
-}
-
-.admin-secret-confirm {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #fff;
-}
 
 /* --- 5-tap admin overlay ------------------------------------------------- */
 .admin-overlay {
@@ -747,3 +683,8 @@ body {
     display: block !important;
   }
 }
+
+/* Dialogs sit above the users overlay. */
+#rename-dialog, #user-add-dialog { z-index: 50; }
+.admin-users-head { margin: 0 0 0.5rem; }
+.user-role-select { font-family: var(--font-body); font-size: 0.85rem; padding: 0.25rem 0.5rem; border-radius: 4px; border: 1px solid var(--border); background: var(--surface-2); color: var(--text); }

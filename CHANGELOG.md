@@ -8,9 +8,16 @@ Work on `main` after the `v0.2.0` tag. Merging to `main` is not a release; the n
 
 ### Added
 
+- Calibration gate: on the due date and after, a unit cannot start a new loan — borrow and handover are refused and the refusal says why; return always works. Before the due date the kiosk card and dashboard cells show a due-soon badge (`SMART_LOCKER_CALIBRATION_WARN_DAYS`, default 14). Device feeds carry `calibration_state`/`calibration_days_left`.
+- Locker slots are shared: several devices may sit in the same slot, and an occupied slot stays selectable on the Register Device / change-slot pickers. Existing databases keep their rows — `scripts/migrate_db.py` rebuilds the old unique slot index as non-unique.
+- On-screen keyboard on the kiosk for text fields (register search, admin name, bind search). `keyboard.js`; kiosk inputs use `inputmode="none"`.
+- Admin **Stop system** closes Chromium then stops `smart-locker` via sudoers (`systemctl stop`), leaving the Pi powered on. `/api/admin/exit-kiosk` is kept as an alias for cached pages.
+
 ### Fixed
 
 ### Changed
+
+- Dashboard is fully public: the `SMART_LOCKER_DASHBOARD_ADMIN_SECRET` / `X-Smart-Locker-Admin` header is removed. Every `/api/dashboard/*` endpoint (catalog GETs, owner POST, bind/unbind, user rename, users/transactions/owners GETs) answers without a secret; bind/unbind keep their reader-conflict and kiosk-session checks. A 5-tap clock gesture (8 s window) opens the overlay; each user row has a **Rename** action (`POST /api/dashboard/users/{id}/name`, name only) plus a role `select` + **Save** per row (`POST /api/dashboard/users/{id}/role`, `admin`/`user`; last active admin demotion is 409, and an actual change ends that user's active kiosk session). A per-row **Remove** soft-disables a user (`POST /api/dashboard/users/{id}/remove` — keeps rows/history; 409 on last active admin or outstanding borrowed units) and **Add user** arms a 60 s physical-card enrollment window (`POST /api/dashboard/users/register` + token status/cancel). Renames update kiosk borrower labels and the borrowed unit's Excel Location on the next write-back.
 
 - Dashboard share launcher now writes only `dashboard.url`; the generated `dashboard.html` redirect is removed because the Windows shortcut is enough to open the live page.
 - Pi **Software Update** is only `python -m scripts.copy_update` → gitignored `locker-updates/` on a USB stick (or already at `$APP_DIR/locker-updates`). `update.sh` copies USB `locker-updates` into `$APP_DIR/locker-updates`, then stop / backup / rsync-preserve / pip / migrate / health / rollback. Missing wheels are warned at copy time; pip failure on the Pi rolls back. The signed `pack_release` tarball + HMAC sidecar and CIFS `SMART_LOCKER_UPDATE_DIR` drop are removed.

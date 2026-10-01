@@ -117,6 +117,8 @@ def test_devices(db_session):
             locker_slot=i,
             description=f"Test {name}",
         )
+        # Kiosk borrow/return grids list only units that carry a sticker.
+        DeviceRepository.bind_tag(db_session, d, f"tag-hmac-{i:03d}")
         if status == DeviceStatus.MAINTENANCE:
             d.status = DeviceStatus.MAINTENANCE
             db_session.flush()
@@ -161,10 +163,3 @@ def lan_client(_db_setup, mock_context, db_session):
     app = FastAPI()
     app.include_router(router)
     return TestClient(app, client=("192.0.2.10", 50000))
-
-
-@pytest.fixture()
-def dashboard_secret(monkeypatch):
-    """Configured dashboard admin secret for authorized mutation tests."""
-    monkeypatch.setenv("SMART_LOCKER_DASHBOARD_ADMIN_SECRET", "test-dashboard-secret")
-    return "test-dashboard-secret"

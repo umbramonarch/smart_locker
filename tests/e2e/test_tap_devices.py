@@ -27,6 +27,9 @@ TAG_UNATTENDED = "0A20000004"
 TAG_HANDOVER = "0A20000005"
 TAG_OVERLAY = "0A20000006"
 TAG_MAINTENANCE = "0A20000007"
+TAG_CAL_DUE = "0A20000008"
+TAG_HANDOVER_CAL = "0A20000009"
+TAG_HANDOVER_LIMIT = "0A2000000A"
 
 
 def _login(h, card_uid: str) -> dict:
@@ -271,8 +274,8 @@ def test_session_tap_on_maintenance_tag_reports_borrow_failure(e2e):
 
     payload = h.wait_event("device_action")
     assert payload["success"] is False
-    assert payload["action"] == "borrow"
-    assert payload["message"] == "Could not borrow In Repair."
+    assert payload["action"] == "refused"
+    assert payload["message"] == "Could not borrow In Repair: in maintenance."
     assert payload["device_id"] == device_id
     assert payload["locker_slot"] == 27
 
@@ -283,3 +286,173 @@ def test_session_tap_on_maintenance_tag_reports_borrow_failure(e2e):
 
     # The failed action leaves the kiosk session open.
     assert h.client.get("/api/session").json()["active"] is True
+
+
+def test_session_tap_on_cal_due_tag_reports_borrow_failure(e2e):
+    """Calibration due today blocks the loan: refused device_action, name why."""
+    from datetime import date
+
+    h = e2e()
+    add_user(h, CARD_USER, display_name="Borrower C")
+    device_id = add_device(
+        h, name="Old Meter", pm_number="PM-9008", locker_slot=28,
+        tag_uid=TAG_CAL_DUE, calibration_due=date.today(),
+    )
+
+    _login(h, CARD_USER)
+    h.tap(TAG_CAL_DUE)
+
+    payload = h.wait_event("device_action")
+    assert payload["success"] is False
+    assert payload["action"] == "refused"
+    assert payload["message"] == (
+        "Could not borrow Old Meter: calibration due today."
+    )
+    assert payload["device_id"] == device_id
+
+    device = get_device(h, device_id)
+    assert device.status == DeviceStatus.AVAILABLE
+    assert _device_txns(h, device_id) == []
+
+    # The refused borrow leaves the kiosk session open for the next try.
+    assert h.client.get("/api/session").json()["active"] is True
+
+
+def test_handover_prompt_suppressed_for_overdue_device(e2e):
+    """B taps A's overdue unit: refused device_action, no handover prompt."""
+    from datetime import date, timedelta
+
+    h = e2e()
+    user_a = add_user(h, CARD_A, display_name="User A")
+    add_user(h, CARD_B, display_name="User B")
+    due = date.today() - timedelta(days=1)
+    device_id = add_device(
+        h, name="Overdue Meter", pm_number="PM-9009", locker_slot=29,
+        tag_uid=TAG_HANDOVER_CAL, calibration_due=due,
+    )
+    _mark_borrowed(h, device_id, user_a)
+
+    _login(h, CARD_B)
+    h.tap(TAG_HANDOVER_CAL)
+
+    payload = h.wait_event("device_action")
+    assert payload["success"] is False
+    assert payload["action"] == "refused"
+    assert payload["message"] == (
+        f"Could not transfer Overdue Meter: "
+        f"calibration overdue (due {due.isoformat()})."
+    )
+    assert payload["device_id"] == device_id
+    assert payload["device_name"] == "Overdue Meter"
+    assert payload["locker_slot"] == 29
+    h.assert_no_event("handover_requested", within=1.0)
+
+    # The refused handover changed nothing: A still holds the unit.
+    device = get_device(h, device_id)
+    assert device.status == DeviceStatus.BORROWED
+    assert device.current_borrower_id == user_a
+    assert _device_txns(h, device_id) == []
+    assert h.client.get("/api/session").json()["active"] is True
+
+
+def test_handover_prompt_suppressed_at_borrow_limit(e2e):
+    """Receiver already at MAX_BORROWS: refused device_action, no prompt."""
+    from config.settings import MAX_BORROWS
+
+    h = e2e()
+    user_a = add_user(h, CARD_A, display_name="User A")
+    user_b = add_user(h, CARD_B, display_name="User B")
+    for i in range(MAX_BORROWS):
+        held_id = add_device(
+            h, name=f"B-Unit-{i}", pm_number=f"PM-91{i:02d}",
+            locker_slot=40 + i,
+        )
+        _mark_borrowed(h, held_id, user_b)
+    device_id = add_device(
+        h, name="Handover Target", pm_number="PM-9105", locker_slot=45,
+        tag_uid=TAG_HANDOVER_LIMIT,
+    )
+    _mark_borrowed(h, device_id, user_a)
+
+    _login(h, CARD_B)
+    h.tap(TAG_HANDOVER_LIMIT)
+
+    payload = h.wait_event("device_action")
+    assert payload["success"] is False
+    assert payload["action"] == "refused"
+    assert payload["message"] == (
+        f"Could not transfer Handover Target: "
+        f"borrow limit reached ({MAX_BORROWS}/{MAX_BORROWS})."
+    )
+    assert payload["device_id"] == device_id
+    h.assert_no_event("handover_requested", within=1.0)
+
+    # The refused handover changed nothing: A still holds the unit.
+    device = get_device(h, device_id)
+    assert device.status == DeviceStatus.BORROWED
+    assert device.current_borrower_id == user_a
+    assert _device_txns(h, device_id) == []
+    assert h.client.get("/api/session").json()["active"] is True
+
+
+def test_shared_slot_devices_borrow_independently(e2e):
+    """Two tagged devices in one slot: borrowing one leaves the other free."""
+    h = e2e()
+    user_id = add_user(h, CARD_USER, display_name="Sharer")
+    first_id = add_device(
+        h, name="Shared A", pm_number="PM-9201", locker_slot=12,
+        tag_uid=TAG_AVAILABLE,
+    )
+    second_id = add_device(
+        h, name="Shared B", pm_number="PM-9202", locker_slot=12,
+        tag_uid="0A2000000B",
+    )
+
+    _login(h, CARD_USER)
+    h.tap(TAG_AVAILABLE)
+
+    payload = h.wait_event("device_action")
+    assert payload["success"] is True
+    assert payload["action"] == "borrow"
+    assert payload["locker_slot"] == 12
+
+    first = get_device(h, first_id)
+    second = get_device(h, second_id)
+    assert first.status == DeviceStatus.BORROWED
+    assert first.current_borrower_id == user_id
+    # The slot-mate is untouched.
+    assert second.status == DeviceStatus.AVAILABLE
+    assert second.current_borrower_id is None
+
+    # The dashboard Locker feed lists both rows in the shared slot.
+    rows = h.client.get("/api/dashboard/devices").json()
+    pair = [d for d in rows if d["locker_slot"] == 12]
+    assert {d["pm_number"] for d in pair} == {"PM-9201", "PM-9202"}
+    by_pm = {d["pm_number"]: d for d in pair}
+    assert by_pm["PM-9201"]["status"] == "borrowed"
+    assert by_pm["PM-9202"]["status"] == "available"
+
+
+def test_idle_tap_on_overdue_borrowed_tag_returns_unattended(e2e):
+    """A due/overdue unit cannot start a loan, but an idle sticker tap still
+    returns it — returns are never blocked by the calibration gate."""
+    from datetime import date, timedelta
+    h = e2e()
+    user_id = add_user(h, CARD_USER, display_name="Overdue Holder")
+    device_id = add_device(
+        h, name="Stale Scope", pm_number="PM-9301", locker_slot=21,
+        tag_uid=TAG_UNATTENDED,
+        calibration_due=date.today() - timedelta(days=5),
+    )
+    _mark_borrowed(h, device_id, user_id)
+
+    # Idle kiosk, no work card: the borrowed sticker returns unattended.
+    h.tap(TAG_UNATTENDED)
+    payload = h.wait_event("device_action")
+    assert payload["success"] is True
+    assert payload["action"] == "return"
+
+    device = get_device(h, device_id)
+    assert device.status == DeviceStatus.AVAILABLE
+    assert device.current_borrower_id is None
+    assert _device_txns(h, device_id)[0]["type"] == TransactionType.RETURN

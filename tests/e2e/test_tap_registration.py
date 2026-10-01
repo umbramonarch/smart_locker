@@ -37,8 +37,6 @@ DASH_STICKER_UID = "04EE00000008"   # sticker bound via the dashboard bind
 BORROWED_TAG_UID = "04EE00000009"   # sticker on a BORROWED device
 UNKNOWN_UID = "04EEDDCCBBAA"        # no user or device row
 
-DASHBOARD_HEADER = "X-Smart-Locker-Admin"
-DASHBOARD_SECRET = "s3cret"
 
 
 def _add_registrant(h, name: str) -> None:
@@ -56,11 +54,10 @@ def _start_admin_session(h) -> None:
 
 
 def _arm_dashboard_bind(h, pm_number: str) -> None:
-    """Arm a 60s bind window via the dashboard admin-secret endpoint."""
+    """Arm a 60s bind window via the public dashboard endpoint."""
     r = h.client.post(
         "/api/dashboard/bind-tag",
         json={"pm_number": pm_number},
-        headers={DASHBOARD_HEADER: DASHBOARD_SECRET},
     )
     assert r.status_code == 200, f"dashboard/bind-tag failed: {r.status_code} {r.text}"
 
@@ -283,7 +280,6 @@ def test_admin_bind_tag_tap_binds_sticker(e2e):
 def test_work_card_login_during_armed_bind_clears_window(e2e, monkeypatch):
     """With no session, a work card tapped during an armed bind passes the
     intercept, logs in, and auth_success clears the bind window."""
-    monkeypatch.setenv("SMART_LOCKER_DASHBOARD_ADMIN_SECRET", DASHBOARD_SECRET)
     h = e2e()
     user_id = add_user(h, WORK_UID, display_name="Bind Login User")
     device_id = add_device(h, name="Bind Target", pm_number="PM-B2", locker_slot=3)
@@ -334,7 +330,6 @@ def test_borrowed_tag_during_armed_bind_returns_and_keeps_window(
 ):
     """A borrowed-device sticker tapped during an armed bind performs an
     unattended return; device_action does not clear the bind window."""
-    monkeypatch.setenv("SMART_LOCKER_DASHBOARD_ADMIN_SECRET", DASHBOARD_SECRET)
     h = e2e()
     borrower_id = add_user(h, WORK_UID, display_name="Borrower")
     target_id = add_device(h, name="Bind Target", pm_number="PM-B4", locker_slot=5)
@@ -376,14 +371,10 @@ def test_dashboard_bind_survives_register_cancel_and_completes(
 ):
     """A from_dashboard bind cannot be cleared by the public cancel endpoint
     and completes normally on the sticker tap."""
-    monkeypatch.setenv("SMART_LOCKER_DASHBOARD_ADMIN_SECRET", DASHBOARD_SECRET)
     h = e2e()
     device_id = add_device(h, name="Dash Cam", pm_number="PM-D1", locker_slot=7)
 
-    # Without the secret header the endpoint fails closed.
-    r = h.client.post("/api/dashboard/bind-tag", json={"pm_number": "PM-D1"})
-    assert r.status_code == 401
-
+    # The endpoint is public — no header, no secret.
     _arm_dashboard_bind(h, "PM-D1")
     bind = h.ctx.pending_tag_bind
     assert bind is not None

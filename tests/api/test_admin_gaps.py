@@ -211,22 +211,20 @@ class TestSetDeviceSlotGaps:
         )
         assert resp.status_code == 404
 
-    def test_set_slot_conflict_is_409(
+    def test_set_slot_shared_is_allowed(
         self, client, mock_context, admin_user, test_devices, db_session
     ):
-        """A slot already held by another device is 409 and changes nothing."""
+        """A slot already held by another device is allowed — slots are shared."""
         mock_context.session_mgr.start_session(admin_user)
-        # Commit fixture rows first: the 409 path rolls back the shared
-        # StaticPool connection, which would discard uncommitted fixtures.
         db_session.commit()
         occupied = test_devices[1].locker_slot  # Drone sits in slot 2
         resp = client.post(
             f"/api/admin/devices/{test_devices[0].id}/slot",
             json={"locker_slot": occupied},
         )
-        assert resp.status_code == 409
+        assert resp.status_code == 200
         db_session.expire_all()
-        assert test_devices[0].locker_slot == 1
+        assert test_devices[0].locker_slot == occupied
         assert test_devices[1].locker_slot == occupied
 
 
