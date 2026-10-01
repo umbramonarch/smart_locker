@@ -3205,7 +3205,7 @@ document.getElementById('register-next-btn-admin').addEventListener('click', () 
   submitRegistrationName();
 });
 
-// Admin panel — secret clock tap zone (5× tap within 3s)
+// Admin panel — secret clock tap zone (5× tap within 8s)
 document.querySelector('.clock').addEventListener('click', e => {
   e.stopPropagation();
   checkAdminTapSequence();

@@ -200,6 +200,9 @@ body::after {
   pointer-events: auto;
   cursor: default;
   padding: 0.5rem;
+  user-select: none;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
 }
 .clock-time {
   font-family: var(--font-display);
