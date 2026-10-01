@@ -631,17 +631,21 @@ function renderAdminOverlay() {
       <tr>
         <td>${esc(u.display_name)}</td>
         <td>
-          <select class="user-role-select" data-role-id="${u.id}">
-            <option value="user"${u.role === 'user' ? ' selected' : ''}>user</option>
-            <option value="admin"${u.role === 'admin' ? ' selected' : ''}>admin</option>
-          </select>
+          <div class="user-role-controls">
+            <select class="user-role-select" data-role-id="${u.id}">
+              <option value="user"${u.role === 'user' ? ' selected' : ''}>user</option>
+              <option value="admin"${u.role === 'admin' ? ' selected' : ''}>admin</option>
+            </select>
+            <button type="button" class="admin-tag-btn" data-role-save-id="${u.id}">Save</button>
+          </div>
         </td>
         <td>${u.is_active ? 'Yes' : 'No'}</td>
         <td>${esc(u.registered_at)}</td>
         <td>
-          <button type="button" class="admin-tag-btn" data-rename-id="${u.id}" data-rename-name="${esc(u.display_name)}">Rename</button>
-          <button type="button" class="admin-tag-btn" data-role-save-id="${u.id}">Save</button>
-          <button type="button" class="admin-tag-btn" data-remove-id="${u.id}" data-remove-name="${esc(u.display_name)}">Remove</button>
+          <div class="admin-user-actions">
+            <button type="button" class="admin-tag-btn" data-rename-id="${u.id}" data-rename-name="${esc(u.display_name)}">Rename</button>
+            <button type="button" class="admin-tag-btn admin-user-remove" data-remove-id="${u.id}" data-remove-name="${esc(u.display_name)}">Remove</button>
+          </div>
         </td>
       </tr>
     `).join('');

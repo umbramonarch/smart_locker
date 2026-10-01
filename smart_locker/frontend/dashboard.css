@@ -688,3 +688,31 @@ body {
 #rename-dialog, #user-add-dialog { z-index: 50; }
 .admin-users-head { margin: 0 0 0.5rem; }
 .user-role-select { font-family: var(--font-body); font-size: 0.85rem; padding: 0.25rem 0.5rem; border-radius: 4px; border: 1px solid var(--border); background: var(--surface-2); color: var(--text); }
+
+.user-role-controls,
+.admin-user-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  white-space: nowrap;
+}
+
+.user-role-controls .admin-tag-btn,
+.admin-user-actions .admin-tag-btn {
+  margin-right: 0;
+}
+
+.admin-user-actions .admin-tag-btn {
+  min-width: 4.75rem;
+}
+
+.admin-user-remove {
+  border-color: rgba(239, 112, 112, 0.55);
+  color: #f3a1a1;
+}
+
+.admin-user-remove:hover {
+  border-color: #ef7070;
+  background: rgba(239, 112, 112, 0.1);
+  color: #ffc1c1;
+}
